@@ -167,6 +167,9 @@ std::shared_ptr<memory_exporter::InMemorySpanData> startTelemetryForCloseTest() 
     config.enabled = true;
     config.role    = "test";
     config.tp_rank = 0;
+    // Short BSP tick: with the 5000ms default equal to the shutdown deadline,
+    // one lost worker wakeup burns the whole budget and flakes the test.
+    config.schedule_delay_ms = 200;
     EXPECT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
     return span_data;
 }

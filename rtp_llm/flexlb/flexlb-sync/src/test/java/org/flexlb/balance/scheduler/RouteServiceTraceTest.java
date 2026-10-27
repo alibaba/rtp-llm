@@ -57,8 +57,8 @@ class RouteServiceTraceTest {
             RequestScheduler scheduler = mock(RequestScheduler.class);
             CompletableFuture<Response> pending = new CompletableFuture<>();
             when(scheduler.submit(any())).thenReturn(pending);
-            RouteService service = new RouteService(scheduler,
-                    mock(RecentCacheKeyTraceReporter.class));
+            RouteService service =
+                    new RouteService(scheduler, mock(RecentCacheKeyTraceReporter.class));
             BalanceContext ctx = new BalanceContext(config);
             Request request = new Request();
             request.setRequestId(700L);
@@ -80,8 +80,7 @@ class RouteServiceTraceTest {
     void missingBatchInputStillRejectsWithoutDirectFallback() {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         RequestScheduler scheduler = mock(RequestScheduler.class);
-        RouteService service = new RouteService(scheduler,
-                mock(RecentCacheKeyTraceReporter.class));
+        RouteService service = new RouteService(scheduler, mock(RecentCacheKeyTraceReporter.class));
         BalanceContext ctx = new BalanceContext(config);
         Request request = new Request();
         request.setRequestId(701L);

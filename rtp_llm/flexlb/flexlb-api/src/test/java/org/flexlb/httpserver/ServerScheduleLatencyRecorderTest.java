@@ -56,10 +56,15 @@ class ServerScheduleLatencyRecorderTest {
 
         Map<String, Object> snapshot = recorder.snapshot();
         assertEquals(2L, snapshot.get("completion_count"));
-        for (String stage : new String[]{"server_total_ms", "grpc_queue_ms", "route_submit_ms", "batch_wait_ms"}) {
+        for (String stage :
+                new String[] {
+                    "server_total_ms", "grpc_queue_ms", "route_submit_ms", "batch_wait_ms"
+                }) {
             assertEquals(2L, ((Map<?, ?>) snapshot.get(stage)).get("count"), stage);
         }
-        assertEquals(30L, ((Map<?, ?>) snapshot.get("server_total_ms")).get("max"),
+        assertEquals(
+                30L,
+                ((Map<?, ?>) snapshot.get("server_total_ms")).get("max"),
                 "the slower terminal-first response must remain in the full latency distribution");
         assertLatency(snapshot, "dispatch_ack_ms", 3L);
         assertLatency(snapshot, "ack_response_ms", 2L);
@@ -80,7 +85,7 @@ class ServerScheduleLatencyRecorderTest {
         assertLatency(snapshot, "server_total_ms", 15L);
         assertLatency(snapshot, "grpc_queue_ms", 2L);
         assertLatency(snapshot, "route_submit_ms", 3L);
-        for (String stage : new String[]{"batch_wait_ms", "dispatch_ack_ms", "ack_response_ms"}) {
+        for (String stage : new String[] {"batch_wait_ms", "dispatch_ack_ms", "ack_response_ms"}) {
             assertEquals(0L, ((Map<?, ?>) snapshot.get(stage)).get("count"), stage);
         }
     }
@@ -141,7 +146,8 @@ class ServerScheduleLatencyRecorderTest {
         recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(50)), end);
         recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)), end);
 
-        assertEquals(" batch_wait_p95_prio40_ms=5 batch_wait_p95_prio50_ms=10",
+        assertEquals(
+                " batch_wait_p95_prio40_ms=5 batch_wait_p95_prio50_ms=10",
                 recorder.batchWaitPriorityLogSuffix());
     }
 
@@ -164,7 +170,7 @@ class ServerScheduleLatencyRecorderTest {
     void preservesExactPercentilesAcrossBucketBoundariesAndOverflow() {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = TimeUnit.MINUTES.toNanos(10);
-        for (long latencyMs : new long[]{0, 8191, 8192, 8193, 119999, 120000, 120001, 240000}) {
+        for (long latencyMs : new long[] {0, 8191, 8192, 8193, 119999, 120000, 120001, 240000}) {
             recorder.recordCompletion(contextWithBatchWait(end, latencyMs, metadata(40)), end);
         }
 
@@ -188,12 +194,16 @@ class ServerScheduleLatencyRecorderTest {
         try {
             List<Future<?>> tasks = new ArrayList<>();
             for (int thread = 0; thread < 4; thread++) {
-                tasks.add(executor.submit(() -> {
-                    for (int sample = 0; sample < 2000; sample++) {
-                        recorder.recordCompletion(
-                                contextWithBatchWait(end, 8191 + sample % 2, metadata(40)), end);
-                    }
-                }));
+                tasks.add(
+                        executor.submit(
+                                () -> {
+                                    for (int sample = 0; sample < 2000; sample++) {
+                                        recorder.recordCompletion(
+                                                contextWithBatchWait(
+                                                        end, 8191 + sample % 2, metadata(40)),
+                                                end);
+                                    }
+                                }));
             }
             for (Future<?> task : tasks) {
                 task.get(10, TimeUnit.SECONDS);
@@ -216,9 +226,7 @@ class ServerScheduleLatencyRecorderTest {
     }
 
     private static BalanceContext contextWithBatchWait(
-            long end,
-            long batchWaitMs,
-            SchedulingMetadata metadata) {
+            long end, long batchWaitMs, SchedulingMetadata metadata) {
         BalanceContext context = new BalanceContext(org.flexlb.mock.TestFlexlbConfigs.create());
         context.setGrpcEntryNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 10));
         context.setServiceStartNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 8));
@@ -229,13 +237,11 @@ class ServerScheduleLatencyRecorderTest {
         return context;
     }
 
-    private static void assertPriorityBucket(Map<?, ?> byPriority, int priority,
-                                             long expectedCount, long expectedP50) {
+    private static void assertPriorityBucket(
+            Map<?, ?> byPriority, int priority, long expectedCount, long expectedP50) {
         Map<?, ?> bucket = (Map<?, ?>) byPriority.get(priority);
-        assertEquals(expectedCount, bucket.get("count"),
-                "count mismatch for priority " + priority);
-        assertEquals(expectedP50, bucket.get("p50"),
-                "p50 mismatch for priority " + priority);
+        assertEquals(expectedCount, bucket.get("count"), "count mismatch for priority " + priority);
+        assertEquals(expectedP50, bucket.get("p50"), "p50 mismatch for priority " + priority);
         assertTrue(bucket.containsKey("p95"));
         assertTrue(bucket.containsKey("p99"));
         assertTrue(bucket.containsKey("mean"));

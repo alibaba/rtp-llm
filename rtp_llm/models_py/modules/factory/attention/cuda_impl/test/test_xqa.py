@@ -1,4 +1,5 @@
 import logging
+import os
 import unittest
 from typing import List
 from unittest.mock import patch
@@ -6,6 +7,13 @@ from unittest.mock import patch
 import pytest
 
 pytestmark = [pytest.mark.gpu(type="H20")]
+
+# DeepJIT derives its on-disk kernel cache from $HOME and asserts when it is
+# empty ("HOME environment variable must not be empty", cache/disk.hpp). Some
+# CI test actions run without HOME, which flaked the decode cases; give the
+# process a writable fallback before any rtp-kernel/JIT import runs.
+if not os.environ.get("HOME"):
+    os.environ["HOME"] = os.environ.get("TEST_TMPDIR") or "/tmp"
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference

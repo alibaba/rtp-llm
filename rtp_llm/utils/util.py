@@ -360,6 +360,11 @@ def wait_sever_done(
     logging.info(
         f"等待pid[{server_process.pid}]启动中...\n端口 {port}, health path {health_check_path}"
     )
+    # Heartbeat so a long engine-start phase (e.g. a multi-hundred-GB checkpoint
+    # cold-read, during which the port stays connection-refused and every poll
+    # only logs at DEBUG) still shows progress in the console log.
+    heartbeat_interval = 60
+    last_heartbeat = start_time
     while True:
         try:
             # 使用 HTTP health check 检查服务是否准备就绪
@@ -381,6 +386,14 @@ def wait_sever_done(
 
         # 等待一段时间后重试
         time.sleep(retry_interval)
+
+        now = time.time()
+        if now - last_heartbeat >= heartbeat_interval:
+            last_heartbeat = now
+            logging.info(
+                f"端口 {port} 等待pid[{server_process.pid}]启动中: "
+                f"elapsed={now - start_time:.0f}s / timeout={timeout}s"
+            )
 
         rc = server_process.poll()
         if not psutil.pid_exists(server_process.pid) or rc is not None:

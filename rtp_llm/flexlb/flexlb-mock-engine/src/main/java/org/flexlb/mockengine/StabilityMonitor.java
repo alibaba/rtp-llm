@@ -49,24 +49,26 @@ public final class StabilityMonitor {
             DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(3);
 
-    private StabilityMonitor() {
-    }
+    private StabilityMonitor() {}
 
     public static void main(String[] args) throws Exception {
         Config config = Config.parse();
 
-        HttpClient httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(2))
-                .build();
+        HttpClient httpClient =
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 
         Path outputPath = Path.of(config.outputDir).resolve("monitor.jsonl");
         Files.createDirectories(outputPath.toAbsolutePath().getParent());
 
         AtomicBoolean running = new AtomicBoolean(true);
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            running.set(false);
-            System.err.println("[monitor] shutdown signal received");
-        }, "stability-monitor-shutdown"));
+        Runtime.getRuntime()
+                .addShutdownHook(
+                        new Thread(
+                                () -> {
+                                    running.set(false);
+                                    System.err.println("[monitor] shutdown signal received");
+                                },
+                                "stability-monitor-shutdown"));
 
         // Per-engine leak tracking: port -> [lastCompleted, lastChangeEpochMs]
         Map<Integer, long[]> leakState = new HashMap<>();
@@ -78,9 +80,13 @@ public final class StabilityMonitor {
 
         try (var writer = Files.newBufferedWriter(outputPath)) {
             System.err.println("[monitor] writing to " + outputPath);
-            System.err.printf("[monitor] flexlb=%s mock=%s:%d interval=%ds grace=%ds%n",
-                    config.flexlbHttpAddr, config.mockControlHost,
-                    config.mockControlPort, config.pollIntervalS, config.leakGraceS);
+            System.err.printf(
+                    "[monitor] flexlb=%s mock=%s:%d interval=%ds grace=%ds%n",
+                    config.flexlbHttpAddr,
+                    config.mockControlHost,
+                    config.mockControlPort,
+                    config.pollIntervalS,
+                    config.leakGraceS);
 
             while (running.get()) {
                 long pollStart = System.currentTimeMillis();
@@ -93,8 +99,9 @@ public final class StabilityMonitor {
                 List<MockEngineData> engines = pollMockSnapshot(httpClient, config);
                 if (engines == null) {
                     if (!mockWarningLogged) {
-                        System.err.println("[monitor] WARNING: mock engine /snapshot not available, "
-                                + "skipping mock polling");
+                        System.err.println(
+                                "[monitor] WARNING: mock engine /snapshot not available, "
+                                        + "skipping mock polling");
                         mockWarningLogged = true;
                     }
                 } else if (mockWarningLogged) {
@@ -134,8 +141,10 @@ public final class StabilityMonitor {
                         mockTotalInflight += engineInflight;
 
                         // Per-engine leak detection: completed unchanged while inflight > 0
-                        long[] state = leakState.computeIfAbsent(
-                                engine.port(), k -> new long[]{engine.completed(), pollStart});
+                        long[] state =
+                                leakState.computeIfAbsent(
+                                        engine.port(),
+                                        k -> new long[] {engine.completed(), pollStart});
                         boolean engineLeak = false;
                         if (engineInflight > 0) {
                             if (engine.completed() != state[0]) {
@@ -144,9 +153,12 @@ public final class StabilityMonitor {
                             } else if (pollStart - state[1] >= leakGraceMs) {
                                 engineLeak = true;
                                 globalLeak = true;
-                                System.err.printf("[monitor] WARN: leak on engine port=%d "
+                                System.err.printf(
+                                        "[monitor] WARN: leak on engine port=%d "
                                                 + "inflight=%d completed=%d (no completion for %dms)%n",
-                                        engine.port(), engineInflight, engine.completed(),
+                                        engine.port(),
+                                        engineInflight,
+                                        engine.completed(),
                                         pollStart - state[1]);
                             }
                         } else {
@@ -226,7 +238,8 @@ public final class StabilityMonitor {
     }
 
     private static List<MockEngineData> pollMockSnapshot(HttpClient client, Config config) {
-        String url = "http://" + config.mockControlHost + ":" + config.mockControlPort + "/snapshot";
+        String url =
+                "http://" + config.mockControlHost + ":" + config.mockControlPort + "/snapshot";
         String body = httpGet(client, url);
         if (body == null) {
             return null;
@@ -246,13 +259,14 @@ public final class StabilityMonitor {
             }
             List<MockEngineData> engines = new ArrayList<>(enginesNode.size());
             for (JsonNode e : enginesNode) {
-                int port = e.has("port") ? e.get("port").asInt()
-                        : e.path("grpc_port").asInt(0);
+                int port = e.has("port") ? e.get("port").asInt() : e.path("grpc_port").asInt(0);
                 int running = e.path("running").asInt(0);
                 long accepted = e.path("accepted").asLong(0);
                 long completed = e.path("completed").asLong(0);
-                int inflight = e.has("inflight") ? e.get("inflight").asInt()
-                        : (int) Math.max(0, accepted - completed);
+                int inflight =
+                        e.has("inflight")
+                                ? e.get("inflight").asInt()
+                                : (int) Math.max(0, accepted - completed);
                 engines.add(new MockEngineData(port, running, accepted, completed, inflight));
             }
             return engines;
@@ -264,12 +278,14 @@ public final class StabilityMonitor {
 
     private static String httpGet(HttpClient client, String url) {
         try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(HTTP_TIMEOUT)
-                    .GET()
-                    .build();
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpRequest request =
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(url))
+                            .timeout(HTTP_TIMEOUT)
+                            .GET()
+                            .build();
+            HttpResponse<String> response =
+                    client.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
                 return null;
             }
@@ -284,13 +300,11 @@ public final class StabilityMonitor {
 
     // ---- Inner types ----
 
-    private record InflightData(int schedulerInflight, List<Integer> prefillInflight,
-                                List<Integer> decodeInflight) {
-    }
+    private record InflightData(
+            int schedulerInflight, List<Integer> prefillInflight, List<Integer> decodeInflight) {}
 
-    private record MockEngineData(int port, int running, long accepted, long completed,
-                                  int inflight) {
-    }
+    private record MockEngineData(
+            int port, int running, long accepted, long completed, int inflight) {}
 
     private static final class Config {
         private String flexlbHttpAddr;

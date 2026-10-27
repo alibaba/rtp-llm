@@ -23,27 +23,27 @@ public class EngineStatusConverter {
 
     /** Convert one protobuf response directly into the immutable status boundary. */
     public static StatusObservation convertToStatusObservation(
-            WorkerStatus owner,
-            EngineRpcService.WorkerStatusPB workerStatusPB) {
-        Map<String, TaskObservation> runningTasks = convertTasks(
-                workerStatusPB.getRunningTaskInfoList());
-        Map<String, TaskObservation> finishedTasks = convertTasks(
-                workerStatusPB.getFinishedTaskListList());
-        EngineObservation engine = new EngineObservation(
-                RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB),
-                (long) workerStatusPB.getAvailableConcurrency(),
-                workerStatusPB.getAvailableKvCache(),
-                workerStatusPB.getTotalKvCache(),
-                runningTasks,
-                workerStatusPB.getStepLatencyMs(),
-                workerStatusPB.getIterateCount(),
-                workerStatusPB.getDpSize(),
-                workerStatusPB.getTpSize(),
-                workerStatusPB.getDpRank(),
-                workerStatusPB.getMaxSeqLen(),
-                workerStatusPB.getMaxBatchTokensSize(),
-                workerStatusPB.getRunningQueryLen(),
-                workerStatusPB.getWaitingQueryLen());
+            WorkerStatus owner, EngineRpcService.WorkerStatusPB workerStatusPB) {
+        Map<String, TaskObservation> runningTasks =
+                convertTasks(workerStatusPB.getRunningTaskInfoList());
+        Map<String, TaskObservation> finishedTasks =
+                convertTasks(workerStatusPB.getFinishedTaskListList());
+        EngineObservation engine =
+                new EngineObservation(
+                        RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB),
+                        (long) workerStatusPB.getAvailableConcurrency(),
+                        workerStatusPB.getAvailableKvCache(),
+                        workerStatusPB.getTotalKvCache(),
+                        runningTasks,
+                        workerStatusPB.getStepLatencyMs(),
+                        workerStatusPB.getIterateCount(),
+                        workerStatusPB.getDpSize(),
+                        workerStatusPB.getTpSize(),
+                        workerStatusPB.getDpRank(),
+                        workerStatusPB.getMaxSeqLen(),
+                        workerStatusPB.getMaxBatchTokensSize(),
+                        workerStatusPB.getRunningQueryLen(),
+                        workerStatusPB.getWaitingQueryLen());
         return owner.bindStatusObservation(
                 engine,
                 workerStatusPB.getAlive(),
@@ -79,36 +79,34 @@ public class EngineStatusConverter {
         if (taskInfoPBList == null || taskInfoPBList.isEmpty()) {
             return Map.of();
         }
-        Map<String, TaskObservation> tasks = new HashMap<>(
-                taskInfoPBList.size());
+        Map<String, TaskObservation> tasks = new HashMap<>(taskInfoPBList.size());
 
         for (EngineRpcService.TaskInfoPB task : taskInfoPBList) {
-            long errorCode = task.hasErrorInfo()
-                    ? task.getErrorInfo().getErrorCode() : 0L;
-            String errorMessage = errorCode == 0L
-                    ? null : task.getErrorInfo().getErrorMessage();
-            TaskObservation observation = new TaskObservation(
-                    task.getRequestId(),
-                    task.getPrefixLength(),
-                    0L,
-                    task.getInputLength(),
-                    task.getWaitingTimeMs(),
-                    task.getIterateCount(),
-                    task.getEndTimeMs(),
-                    task.getDpRank(),
-                    errorCode,
-                    errorMessage,
-                    task.getBatchId(),
-                    resolvePhase(task),
-                    task.getExecutionTimeMs(),
-                    switch (task.getPriorityPreemptionProgress()) {
-                        case PRIORITY_PREEMPTION_CANCELING ->
-                                PriorityPreemptionProgress.CANCELING;
-                        case PRIORITY_PREEMPTION_CANCELED ->
-                                PriorityPreemptionProgress.CANCELED;
-                        case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
-                                PriorityPreemptionProgress.NONE;
-                    });
+            long errorCode = task.hasErrorInfo() ? task.getErrorInfo().getErrorCode() : 0L;
+            String errorMessage = errorCode == 0L ? null : task.getErrorInfo().getErrorMessage();
+            TaskObservation observation =
+                    new TaskObservation(
+                            task.getRequestId(),
+                            task.getPrefixLength(),
+                            0L,
+                            task.getInputLength(),
+                            task.getWaitingTimeMs(),
+                            task.getIterateCount(),
+                            task.getEndTimeMs(),
+                            task.getDpRank(),
+                            errorCode,
+                            errorMessage,
+                            task.getBatchId(),
+                            resolvePhase(task),
+                            task.getExecutionTimeMs(),
+                            switch (task.getPriorityPreemptionProgress()) {
+                                case PRIORITY_PREEMPTION_CANCELING ->
+                                        PriorityPreemptionProgress.CANCELING;
+                                case PRIORITY_PREEMPTION_CANCELED ->
+                                        PriorityPreemptionProgress.CANCELED;
+                                case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
+                                        PriorityPreemptionProgress.NONE;
+                            });
             tasks.put(String.valueOf(task.getRequestId()), observation);
         }
         return Map.copyOf(tasks);

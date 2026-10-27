@@ -6,13 +6,13 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.sync.schedule.ExpirationCleaner;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.schedule.ExpirationCleaner;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -51,20 +51,20 @@ class GrpcWorkerStatusCheckRunnerTest {
     @Test
     void should_callGrpcServiceAndVerifyInteraction_when_runnerExecutes() {
         WorkerStatus status = discover(RoleType.PREFILL);
-        respond(response(RoleType.PREFILL, 100L, true).toBuilder()
-                .setAvailableConcurrency(10)
-                .setRunningQueryLen(5)
-                .setWaitingQueryLen(3)
-                .setStepLatencyMs(100)
-                .setIterateCount(20)
-                .setDpSize(2)
-                .setTpSize(4)
-                .build());
+        respond(
+                response(RoleType.PREFILL, 100L, true).toBuilder()
+                        .setAvailableConcurrency(10)
+                        .setRunningQueryLen(5)
+                        .setWaitingQueryLen(3)
+                        .setStepLatencyMs(100)
+                        .setIterateCount(20)
+                        .setDpSize(2)
+                        .setTpSize(4)
+                        .build());
 
         poll(status);
 
-        verify(grpc).getWorkerStatusAsync(
-                "127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
+        verify(grpc).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
     }
 
     @Test
@@ -73,18 +73,22 @@ class GrpcWorkerStatusCheckRunnerTest {
         respond(response(RoleType.PREFILL, 100L, true));
         poll(status);
         WorkerStatus.CommittedWorkerStatus committed = status.committedWorkerStatus();
-        EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123L)
-                .setInputLength(100)
-                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
-                .setIsWaiting(true)
-                .build();
-        respond(response(RoleType.PREFILL, 100L, true).toBuilder()
-                .addRunningTaskInfo(task).build());
+        EngineRpcService.TaskInfoPB task =
+                EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(123L)
+                        .setInputLength(100)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
+                        .setIsWaiting(true)
+                        .build();
+        respond(
+                response(RoleType.PREFILL, 100L, true).toBuilder()
+                        .addRunningTaskInfo(task)
+                        .build());
 
         poll(status);
 
-        assertTrue(status.committedEngineObservation().runningTaskList().isEmpty(),
+        assertTrue(
+                status.committedEngineObservation().runningTaskList().isEmpty(),
                 "same-version heartbeat must not replace the committed task list");
         assertSame(committed, status.committedWorkerStatus());
     }
@@ -93,8 +97,8 @@ class GrpcWorkerStatusCheckRunnerTest {
     void should_ignore_status_callback_from_expired_generation() {
         WorkerStatus expired = status(RoleType.VIT);
         WorkerStatus current = discover(RoleType.VIT);
-        WorkerEndpoint currentEndpoint = RunnerTestSupport.publishEndpoint(
-                registry, RoleType.VIT, ADDRESS, current);
+        WorkerEndpoint currentEndpoint =
+                RunnerTestSupport.publishEndpoint(registry, RoleType.VIT, ADDRESS, current);
         respond(response(RoleType.VIT, 100L, true));
 
         poll(expired);
@@ -122,9 +126,11 @@ class GrpcWorkerStatusCheckRunnerTest {
         pollThreeTimes(status);
 
         assertRetired(status);
-        verify(reporter, times(3)).reportStatusCheckerFail(
-                "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
-                RoleType.PREFILL);
+        verify(reporter, times(3))
+                .reportStatusCheckerFail(
+                        "test-model",
+                        BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
+                        RoleType.PREFILL);
     }
 
     @Test
@@ -156,9 +162,9 @@ class GrpcWorkerStatusCheckRunnerTest {
         pollThreeTimes(status);
 
         assertRetired(status);
-        verify(reporter, times(3)).reportStatusCheckerFail(
-                "test-model", BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
-                RoleType.VIT);
+        verify(reporter, times(3))
+                .reportStatusCheckerFail(
+                        "test-model", BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, RoleType.VIT);
     }
 
     @Test
@@ -168,8 +174,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         pollWithPolicy(status, 20L, 1000L, true);
 
-        verify(grpc).getWorkerStatusAsync(
-                "127.0.0.1", 8081, -1L, 1000L, RoleType.VIT);
+        verify(grpc).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 1000L, RoleType.VIT);
     }
 
     @Test
@@ -179,8 +184,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         pollWithPolicy(status, 5000L, 1000L, true);
 
-        verify(grpc).getWorkerStatusAsync(
-                "127.0.0.1", 8081, -1L, 5000L, RoleType.VIT);
+        verify(grpc).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 5000L, RoleType.VIT);
     }
 
     @Test
@@ -197,10 +201,12 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertSame(endpoint, registry.get(RoleType.VIT, ADDRESS));
         assertTrue(directory.isCurrentStatus(RoleType.VIT, ADDRESS, status));
         assertEquals(lastSuccess, status.pollHealth().lastSuccessfulPollUs());
-        verify(reporter, times(3)).reportStatusCheckerFail(
-                "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, RoleType.VIT);
-        verify(reporter, times(3)).reportStatusCheckerFail(
-                anyString(), any(BalanceStatusEnum.class), any(RoleType.class));
+        verify(reporter, times(3))
+                .reportStatusCheckerFail(
+                        "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, RoleType.VIT);
+        verify(reporter, times(3))
+                .reportStatusCheckerFail(
+                        anyString(), any(BalanceStatusEnum.class), any(RoleType.class));
     }
 
     @Test
@@ -237,14 +243,27 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertEquals(lastSuccess, status.pollHealth().lastSuccessfulPollUs());
     }
 
-    private void pollWithPolicy(WorkerStatus status, long globalTimeoutMs,
-                                long vitTimeoutMs, boolean retainVitAlive) {
+    private void pollWithPolicy(
+            WorkerStatus status, long globalTimeoutMs, long vitTimeoutMs, boolean retainVitAlive) {
         WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
         assertNotNull(lease);
         new GrpcWorkerStatusRunner(
-                "test-model", ADDRESS, "test-site", status.getRole(), "test-group",
-                status, lease, directory, reporter, grpc, globalTimeoutMs,
-                cache, Runnable::run, vitTimeoutMs, retainVitAlive).run();
+                        "test-model",
+                        ADDRESS,
+                        "test-site",
+                        status.getRole(),
+                        "test-group",
+                        status,
+                        lease,
+                        directory,
+                        reporter,
+                        grpc,
+                        globalTimeoutMs,
+                        cache,
+                        Runnable::run,
+                        vitTimeoutMs,
+                        retainVitAlive)
+                .run();
     }
 
     private void pollThreeTimes(WorkerStatus status) {
@@ -259,8 +278,19 @@ class GrpcWorkerStatusCheckRunnerTest {
         WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
         assertNotNull(lease);
         new GrpcWorkerStatusRunner(
-                "test-model", ADDRESS, "test-site", status.getRole(), "test-group",
-                status, lease, directory, reporter, grpc, 20L, cache, Runnable::run)
+                        "test-model",
+                        ADDRESS,
+                        "test-site",
+                        status.getRole(),
+                        "test-group",
+                        status,
+                        lease,
+                        directory,
+                        reporter,
+                        grpc,
+                        20L,
+                        cache,
+                        Runnable::run)
                 .run();
     }
 
@@ -288,14 +318,12 @@ class GrpcWorkerStatusCheckRunnerTest {
     }
 
     private void fail(Throwable failure) {
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.failedFuture(failure));
     }
 
     private void respond(EngineRpcService.WorkerStatusPB response) {
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
     }
 

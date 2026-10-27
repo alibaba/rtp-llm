@@ -15,8 +15,8 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Logger;
 import org.flexlb.service.VitCacheSelector;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -33,8 +33,7 @@ public class DefaultRouter {
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
-    @Autowired
-    private VitCacheSelector vitCacheSelector;
+    @Autowired private VitCacheSelector vitCacheSelector;
 
     @Autowired
     public DefaultRouter(
@@ -43,47 +42,56 @@ public class DefaultRouter {
             RandomStrategy vitSelector,
             ConfigService configService,
             ModelMetaConfig modelMetaConfig) {
-        this.prefillSelector = Objects.requireNonNull(
-                prefillSelector, "prefillSelector");
-        this.decodeSelector = Objects.requireNonNull(
-                decodeSelector, "decodeSelector");
-        this.vitSelector = Objects.requireNonNull(
-                vitSelector, "vitSelector");
-        this.configService = Objects.requireNonNull(
-                configService, "configService");
-        this.requiredRoles = List.copyOf(
-                Objects.requireNonNull(
-                        modelMetaConfig, "modelMetaConfig").requiredRoles());
+        this.prefillSelector = Objects.requireNonNull(prefillSelector, "prefillSelector");
+        this.decodeSelector = Objects.requireNonNull(decodeSelector, "decodeSelector");
+        this.vitSelector = Objects.requireNonNull(vitSelector, "vitSelector");
+        this.configService = Objects.requireNonNull(configService, "configService");
+        this.requiredRoles =
+                List.copyOf(
+                        Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
         return select(context, resolvePolicyGroup(context));
     }
 
-    public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context, String policyGroup) {
+    public PlacementResult<RouteAdmission, PlacementKey> select(
+            BalanceContext context, String policyGroup) {
         Response validationFailure = validateRequest(context);
-        if (validationFailure != null) { return PlacementResult.rejected(validationFailure); }
+        if (validationFailure != null) {
+            return PlacementResult.rejected(validationFailure);
+        }
         DecodeBinding decodeAdmission = DecodeBinding.capture(context);
-        try (PinnedRouting routing = selectAll(context, requiredRoles, policyGroup, decodeAdmission)) {
+        try (PinnedRouting routing =
+                selectAll(context, requiredRoles, policyGroup, decodeAdmission)) {
             if (routing.blocker() != null) {
-                return PlacementResult.blocked(routing.blocker(), routing.failure(), routing.diagnostics);
+                return PlacementResult.blocked(
+                        routing.blocker(), routing.failure(), routing.diagnostics);
             }
             if (routing.failure() != null) {
                 return PlacementResult.rejected(routing.failure(), routing.diagnostics);
             }
-            return PlacementResult.success(RouteAdmission.prepare(context, routing.selections(),
-                    buildSuccessResponse(routing.serverStatuses()), decodeAdmission));
+            return PlacementResult.success(
+                    RouteAdmission.prepare(
+                            context,
+                            routing.selections(),
+                            buildSuccessResponse(routing.serverStatuses()),
+                            decodeAdmission));
         }
     }
 
     public Response routeVit(BalanceContext context) {
         Response invalid = validateRequest(context);
-        if (invalid != null) { return invalid; }
+        if (invalid != null) {
+            return invalid;
+        }
         if (!requiredRoles.contains(RoleType.VIT) || vitCacheSelector == null) {
             return Response.error(StrategyErrorType.NO_VIT_WORKER);
         }
         ServerStatus vit = vitCacheSelector.select(context, resolvePolicyGroup(context));
-        if (vit.isSuccess()) { return buildSuccessResponse(List.of(vit)); }
+        if (vit.isSuccess()) {
+            return buildSuccessResponse(List.of(vit));
+        }
         Response failure = new Response();
         failure.setSuccess(false);
         failure.setCode(vit.getCode());
@@ -92,8 +100,11 @@ public class DefaultRouter {
     }
 
     public boolean selectedVitIsValid(BalanceContext context) {
-        if (context.getRequest() == null || context.getRequest().getSelectedVit() == null) { return true; }
-        return vitCacheSelector != null && requiredRoles.contains(RoleType.VIT)
+        if (context.getRequest() == null || context.getRequest().getSelectedVit() == null) {
+            return true;
+        }
+        return vitCacheSelector != null
+                && requiredRoles.contains(RoleType.VIT)
                 && vitCacheSelector.validate(context, resolvePolicyGroup(context)).isSuccess();
     }
 
@@ -105,8 +116,11 @@ public class DefaultRouter {
         return null;
     }
 
-    private PinnedRouting selectAll(BalanceContext context, List<RoleType> roles, String policyGroup,
-                                   DecodeBinding decodeAdmission) {
+    private PinnedRouting selectAll(
+            BalanceContext context,
+            List<RoleType> roles,
+            String policyGroup,
+            DecodeBinding decodeAdmission) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         String group = policyGroup;
         if (StringUtils.isNotBlank(policyGroup)) {
@@ -120,23 +134,34 @@ public class DefaultRouter {
         try {
             if (context.getRequest().getSelectedVit() != null) {
                 if (vitCacheSelector == null) {
-                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                    return new PinnedRouting(
+                            selected,
+                            null,
+                            Response.error(StrategyErrorType.VIT_ROUTE_STALE),
+                            null);
                 }
                 SelectedRole vit = vitCacheSelector.selectPinned(context, policyGroup);
                 if (vit == null) {
-                    return new PinnedRouting(selected, null, Response.error(StrategyErrorType.VIT_ROUTE_STALE), null);
+                    return new PinnedRouting(
+                            selected,
+                            null,
+                            Response.error(StrategyErrorType.VIT_ROUTE_STALE),
+                            null);
                 }
                 selected.add(vit);
                 group = vit.serverStatus().getGroup();
             }
             for (RoleType role : roles) {
-                if (role == RoleType.VIT && context.getRequest().getSelectedVit() != null) { continue; }
+                if (role == RoleType.VIT && context.getRequest().getSelectedVit() != null) {
+                    continue;
+                }
                 PlacementResult<SelectedRole, RoleType> result =
                         selectRole(context, role, group, decodeAdmission);
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
-                            role.getCode(), context.getRequestId());
+                            role.getCode(),
+                            context.getRequestId());
                     if (result.status() == PlacementResult.Status.REJECTED) {
                         return new PinnedRouting(
                                 selected, null, result.failure(), result.diagnostics());
@@ -145,10 +170,11 @@ public class DefaultRouter {
                         return new PinnedRouting(
                                 selected,
                                 new PlacementKey(result.blocker(), group),
-                                result.failure(), result.diagnostics());
+                                result.failure(),
+                                result.diagnostics());
                     }
-                    throw new IllegalStateException("unexpected selector result: "
-                            + result.status());
+                    throw new IllegalStateException(
+                            "unexpected selector result: " + result.status());
                 }
                 SelectedRole selection = result.value();
                 try {
@@ -172,13 +198,15 @@ public class DefaultRouter {
         if (context == null || context.getRequest() == null) {
             return null;
         }
-        FlexlbConfig config = context.getConfig() != null
-                ? context.getConfig()
-                : configService.loadBalanceConfig();
+        FlexlbConfig config =
+                context.getConfig() != null
+                        ? context.getConfig()
+                        : configService.loadBalanceConfig();
         if (config == null || config.getRouter().getGroupSelector() == null) {
             return null;
         }
-        return config.getRouter().getGroupSelector()
+        return config.getRouter()
+                .getGroupSelector()
                 .resolveTargetGroup(context.getRequest())
                 .orElse(null);
     }
@@ -186,21 +214,18 @@ public class DefaultRouter {
     private PlacementResult<SelectedRole, RoleType> selectRole(
             BalanceContext context, RoleType role, String group, DecodeBinding decodeAdmission) {
         return switch (role) {
-            case PREFILL, PDFUSION ->
-                    prefillSelector.select(context, role, group);
+            case PREFILL, PDFUSION -> prefillSelector.select(context, role, group);
             case DECODE -> decodeSelector.select(decodeAdmission, group);
-            case VIT -> selectedOrBlocked(
-                    vitSelector.select(context, role, group), role);
-            case FRONTEND -> throw new IllegalArgumentException(
-                    "Endpoint selection is not supported for FRONTEND");
+            case VIT -> selectedOrBlocked(vitSelector.select(context, role, group), role);
+            case FRONTEND ->
+                    throw new IllegalArgumentException(
+                            "Endpoint selection is not supported for FRONTEND");
         };
     }
 
     private static PlacementResult<SelectedRole, RoleType> selectedOrBlocked(
             SelectedRole selected, RoleType role) {
-        return selected == null
-                ? PlacementResult.blocked(role)
-                : PlacementResult.success(selected);
+        return selected == null ? PlacementResult.blocked(role) : PlacementResult.success(selected);
     }
 
     private static List<ServerStatus> serverStatuses(List<SelectedRole> selections) {
@@ -212,8 +237,7 @@ public class DefaultRouter {
     }
 
     private static Throwable closeSelections(
-            List<SelectedRole> selections,
-            Throwable primaryFailure) {
+            List<SelectedRole> selections, Throwable primaryFailure) {
         Throwable failure = primaryFailure;
         for (int index = selections.size() - 1; index >= 0; index--) {
             failure = closeSelection(selections.get(index), failure);
@@ -221,9 +245,7 @@ public class DefaultRouter {
         return failure;
     }
 
-    private static Throwable closeSelection(
-            SelectedRole selection,
-            Throwable primaryFailure) {
+    private static Throwable closeSelection(SelectedRole selection, Throwable primaryFailure) {
         try {
             selection.close();
         } catch (Throwable closeFailure) {
@@ -232,9 +254,7 @@ public class DefaultRouter {
         return primaryFailure;
     }
 
-    private static Throwable appendFailure(
-            Throwable primaryFailure,
-            Throwable cleanupFailure) {
+    private static Throwable appendFailure(Throwable primaryFailure, Throwable cleanupFailure) {
         if (primaryFailure == null) {
             return cleanupFailure;
         }
@@ -251,12 +271,10 @@ public class DefaultRouter {
         if (failure instanceof Error error) {
             throw error;
         }
-        return new IllegalStateException(
-                "route selection cleanup failed", failure);
+        return new IllegalStateException("route selection cleanup failed", failure);
     }
 
-    private static Response buildSuccessResponse(
-            List<ServerStatus> statuses) {
+    private static Response buildSuccessResponse(List<ServerStatus> statuses) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(statuses);
@@ -272,7 +290,8 @@ public class DefaultRouter {
         private PinnedRouting(
                 List<SelectedRole> selections,
                 PlacementKey blocker,
-                Response failure, Map<String, Object> diagnostics) {
+                Response failure,
+                Map<String, Object> diagnostics) {
             this.selections = selections;
             this.blocker = blocker;
             this.failure = failure;
@@ -303,5 +322,4 @@ public class DefaultRouter {
             }
         }
     }
-
 }

@@ -997,6 +997,13 @@ grpc::Status PrefillBatchRpcServer::EnqueueGroup(grpc::ServerContext* /*context*
                                                  const EnqueueGroupRequestPB* request,
                                                  EnqueueBatchResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (request_logger_) {
+        for (const auto& item : request->requests()) {
+            if (item.has_input()) {
+                request_logger_->log(item.input());
+            }
+        }
+    }
     response->set_batch_id(request->batch_id());
     if (stopping_.load()) {
         for (const auto& item : request->requests()) {

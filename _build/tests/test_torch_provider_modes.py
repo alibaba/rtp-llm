@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INTERNAL_ROOT = PROJECT_ROOT / "internal_source"
 TARGETS = ("torch_api", "torch", "torch_libs")
 EXTERNAL_ARCHIVES = {
+    "@rtp_llm//:using_ppu": "@torch_2.11_py312_ppu",
     "@rtp_llm//:using_rocm": "@torch_rocm",
     "@rtp_llm//:using_arm": "@torch_2.3_py310_cpu_aarch64",
     "@rtp_llm//:using_cuda13_arm": "@torch_2.11_py310_cuda-aarch64",
@@ -30,7 +31,6 @@ EXTERNAL_ARCHIVES = {
 }
 INTERNAL_ARCHIVES = {
     **EXTERNAL_ARCHIVES,
-    "@rtp_llm//internal_source/RTP_LLM-PPU:use_ppu": "@torch_2.9_py310_ppu",
     "@rtp_llm//:using_cuda12_arm": "@torch_2.9_py310_cuda-aarch64",
 }
 
@@ -180,7 +180,27 @@ class TorchProviderModeTest(TestCase):
                     self.assertRegex(
                         ast.literal_eval(args["sha256"]), r"^[0-9a-f]{64}$"
                     )
-                    self.assertTrue(ast.literal_eval(args["urls"]))
+                    url_globals = {}
+                    host_file = root / "deps/oss_host.bzl"
+                    if host_file.exists():
+                        for node in ast.parse(host_file.read_text()).body:
+                            if isinstance(node, ast.Assign) and isinstance(
+                                node.value, ast.Constant
+                            ):
+                                for target in node.targets:
+                                    if isinstance(target, ast.Name):
+                                        url_globals[target.id] = ast.literal_eval(
+                                            node.value
+                                        )
+                    urls = eval(
+                        compile(ast.Expression(args["urls"]), "archive_urls", "eval"),
+                        {"__builtins__": {}},
+                        url_globals,
+                    )
+                    self.assertTrue(urls)
+                    self.assertTrue(
+                        all(url.startswith(("http://", "https://")) for url in urls)
+                    )
                     label = ast.literal_eval(args["build_file"].args[0])
                     template = PROJECT_ROOT / label.removeprefix("@rtp_llm//").replace(
                         ":", "/"
@@ -311,11 +331,19 @@ class TorchProviderModeTest(TestCase):
             (root / "github-opensource").mkdir()
             (root / "internal_source/ci").mkdir(parents=True)
             (root / "internal_source/ci/before_script.sh").write_text(":\n")
+            for helper in ("collect_bazel_build_artifacts.py", "collect_vipsrv_dns.py"):
+                (root / "internal_source/ci" / helper).write_bytes(
+                    (INTERNAL_ROOT / "ci" / helper).read_bytes()
+                )
             binaries = root / "bin"
             binaries.mkdir()
             (binaries / "bazelisk").write_text(
                 "#!/usr/bin/env python3\nimport json,os,sys\n"
                 "with open(os.environ['COMMAND_LOG'],'a') as f: f.write(json.dumps({'argv':sys.argv[1:],'mode':os.environ.get('RTP_TORCH_PROVIDER')})+'\\n')\n"
+                "from pathlib import Path\n"
+                "for arg in sys.argv:\n"
+                "    if arg.startswith('--build_event_json_file='):\n"
+                "        Path(arg.split('=',1)[1]).write_text(json.dumps({'started': {'uuid': 'fixture'}})+'\\n'+json.dumps({'finished': {'exitCode': {'code': 0}, 'overallSuccess': True}})+'\\n')\n"
             )
             (binaries / "dig").write_text("#!/bin/sh\necho 127.0.0.1\n")
             for path in binaries.iterdir():

@@ -35,8 +35,14 @@ class EngineGrpcClientBatchDeliveryTest {
     void setUp() {
         executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
         eventLoop = new NioEventLoopGroup(1);
-        client = new EngineGrpcClient(mock(CustomNameResolver.class), executor, eventLoop,
-                mock(GrpcReporter.class), 20, 5000L);
+        client =
+                new EngineGrpcClient(
+                        mock(CustomNameResolver.class),
+                        executor,
+                        eventLoop,
+                        mock(GrpcReporter.class),
+                        20,
+                        5000L);
     }
 
     @AfterEach
@@ -68,15 +74,24 @@ class EngineGrpcClientBatchDeliveryTest {
     @Test
     void unavailableAfterServerReceivesRequestRemainsAmbiguousAndIsNotReplayed() throws Exception {
         AtomicInteger received = new AtomicInteger();
-        server = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
-                .addService(new RpcServiceGrpc.RpcServiceImplBase() {
-                    @Override
-                    public void enqueueBatch(EngineRpcService.EnqueueBatchRequestPB request,
-                                             StreamObserver<EngineRpcService.EnqueueBatchResponsePB> observer) {
-                        received.incrementAndGet();
-                        observer.onError(Status.UNAVAILABLE.withDescription("ACK lost").asRuntimeException());
-                    }
-                }).build().start();
+        server =
+                NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                        .addService(
+                                new RpcServiceGrpc.RpcServiceImplBase() {
+                                    @Override
+                                    public void enqueueBatch(
+                                            EngineRpcService.EnqueueBatchRequestPB request,
+                                            StreamObserver<EngineRpcService.EnqueueBatchResponsePB>
+                                                    observer) {
+                                        received.incrementAndGet();
+                                        observer.onError(
+                                                Status.UNAVAILABLE
+                                                        .withDescription("ACK lost")
+                                                        .asRuntimeException());
+                                    }
+                                })
+                        .build()
+                        .start();
 
         Throwable failure = enqueueFailure(server.getPort(), 5000);
 
@@ -88,14 +103,20 @@ class EngineGrpcClientBatchDeliveryTest {
     @Test
     void deadlineAfterServerReceivesRequestRemainsAmbiguousAndIsNotReplayed() throws Exception {
         AtomicInteger received = new AtomicInteger();
-        server = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
-                .addService(new RpcServiceGrpc.RpcServiceImplBase() {
-                    @Override
-                    public void enqueueBatch(EngineRpcService.EnqueueBatchRequestPB request,
-                                             StreamObserver<EngineRpcService.EnqueueBatchResponsePB> observer) {
-                        received.incrementAndGet();
-                    }
-                }).build().start();
+        server =
+                NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                        .addService(
+                                new RpcServiceGrpc.RpcServiceImplBase() {
+                                    @Override
+                                    public void enqueueBatch(
+                                            EngineRpcService.EnqueueBatchRequestPB request,
+                                            StreamObserver<EngineRpcService.EnqueueBatchResponsePB>
+                                                    observer) {
+                                        received.incrementAndGet();
+                                    }
+                                })
+                        .build()
+                        .start();
 
         Throwable failure = enqueueFailure(server.getPort(), 1000);
 
@@ -105,10 +126,18 @@ class EngineGrpcClientBatchDeliveryTest {
     }
 
     private Throwable enqueueFailure(int port, long deadlineMs) {
-        ExecutionException failure = assertThrows(ExecutionException.class, () ->
-                client.batchEnqueueAsync("127.0.0.1", port,
-                        EngineRpcService.EnqueueBatchRequestPB.newBuilder().setBatchId(1).build(), deadlineMs)
-                        .get(10, TimeUnit.SECONDS));
+        ExecutionException failure =
+                assertThrows(
+                        ExecutionException.class,
+                        () ->
+                                client.batchEnqueueAsync(
+                                                "127.0.0.1",
+                                                port,
+                                                EngineRpcService.EnqueueBatchRequestPB.newBuilder()
+                                                        .setBatchId(1)
+                                                        .build(),
+                                                deadlineMs)
+                                        .get(10, TimeUnit.SECONDS));
         return failure.getCause();
     }
 }

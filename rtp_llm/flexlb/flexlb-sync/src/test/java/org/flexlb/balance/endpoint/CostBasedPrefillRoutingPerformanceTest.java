@@ -81,8 +81,8 @@ class CostBasedPrefillRoutingPerformanceTest {
         int threadCount = Math.min(16, Math.max(4, availableProcessors));
         long defaultMinimumQps = Math.min(20_000L, Math.max(2_000L, availableProcessors * 1_000L));
         long minimumQps = Long.getLong("flexlb.perf.min-routing-qps", defaultMinimumQps);
-        double maximumP99Ms = Double.parseDouble(
-                System.getProperty("flexlb.perf.max-routing-p99-ms", "20"));
+        double maximumP99Ms =
+                Double.parseDouble(System.getProperty("flexlb.perf.max-routing-p99-ms", "20"));
 
         CostBasedPrefillStrategy strategy = createStrategy();
         assertEquals(ENGINE_COUNT, endpointRegistry.getEndpointCount(RoleType.PREFILL));
@@ -102,12 +102,18 @@ class CostBasedPrefillRoutingPerformanceTest {
                     threadCount, median.operations(), median.qps(), median.p50Ms(), median.p99Ms());
 
             assertEquals(0, totalFailures, "all routing decisions must succeed");
-            assertTrue(median.qps() >= minimumQps,
-                    () -> String.format("routing throughput %.1f QPS is below regression floor %d QPS",
-                            median.qps(), minimumQps));
-            assertTrue(median.p99Ms() <= maximumP99Ms,
-                    () -> String.format("routing P99 %.3f ms exceeds regression ceiling %.3f ms",
-                            median.p99Ms(), maximumP99Ms));
+            assertTrue(
+                    median.qps() >= minimumQps,
+                    () ->
+                            String.format(
+                                    "routing throughput %.1f QPS is below regression floor %d QPS",
+                                    median.qps(), minimumQps));
+            assertTrue(
+                    median.p99Ms() <= maximumP99Ms,
+                    () ->
+                            String.format(
+                                    "routing P99 %.3f ms exceeds regression ceiling %.3f ms",
+                                    median.p99Ms(), maximumP99Ms));
         } finally {
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
@@ -119,19 +125,27 @@ class CostBasedPrefillRoutingPerformanceTest {
 
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
-        BatchSchedulerReporter reporter = Mockito.mock(
-                BatchSchedulerReporter.class, withSettings().stubOnly());
+        BatchSchedulerReporter reporter =
+                Mockito.mock(BatchSchedulerReporter.class, withSettings().stubOnly());
         // Exercise the real batch projection, but never dispatch: this original
         // benchmark measures selection over idle workers, without enqueuing.
-        BatchDeliveryStrategy delivery = new BatchDeliveryStrategy(
-                () -> { throw new AssertionError("selection must not submit a batch"); },
-                () -> { throw new AssertionError("selection must not allocate a batch"); },
-                Mockito.mock(RequestRegistry.class, withSettings().stubOnly()),
-                Mockito.mock(DeliveryMetrics.class, withSettings().stubOnly()));
-        endpointRegistry = new EndpointRegistry(
-                configService,
-                Mockito.mock(EndpointEventProjector.class, withSettings().stubOnly()),
-                reporter, delivery, new PlacementAvailability());
+        BatchDeliveryStrategy delivery =
+                new BatchDeliveryStrategy(
+                        () -> {
+                            throw new AssertionError("selection must not submit a batch");
+                        },
+                        () -> {
+                            throw new AssertionError("selection must not allocate a batch");
+                        },
+                        Mockito.mock(RequestRegistry.class, withSettings().stubOnly()),
+                        Mockito.mock(DeliveryMetrics.class, withSettings().stubOnly()));
+        endpointRegistry =
+                new EndpointRegistry(
+                        configService,
+                        Mockito.mock(EndpointEventProjector.class, withSettings().stubOnly()),
+                        reporter,
+                        delivery,
+                        new PlacementAvailability());
 
         for (int index = 0; index < ENGINE_COUNT; index++) {
             WorkerStatus status = workerStatus(61_000 + index);
@@ -146,19 +160,19 @@ class CostBasedPrefillRoutingPerformanceTest {
             response.setCacheStatus(cache);
             response.setAvailableKvCacheTokens(1_000_000L);
             EndpointTestSupport.publishEndpoint(
-                    endpointRegistry, RoleType.PREFILL,
-                    status.getIpPort(), status, response);
+                    endpointRegistry, RoleType.PREFILL, status.getIpPort(), status, response);
         }
         EngineHealthReporter healthReporter =
                 Mockito.mock(EngineHealthReporter.class, withSettings().stubOnly());
         return new CostBasedPrefillStrategy(
                 new WorkerDirectory(endpointRegistry),
-                new EmptyCacheAwareService(), healthReporter);
+                new EmptyCacheAwareService(),
+                healthReporter);
     }
 
-    private RoundResult runRound(CostBasedPrefillStrategy strategy,
-                                 ExecutorService executor,
-                                 int threadCount) throws Exception {
+    private RoundResult runRound(
+            CostBasedPrefillStrategy strategy, ExecutorService executor, int threadCount)
+            throws Exception {
         CountDownLatch ready = new CountDownLatch(threadCount);
         CountDownLatch start = new CountDownLatch(1);
         AtomicInteger failures = new AtomicInteger();
@@ -166,25 +180,31 @@ class CostBasedPrefillRoutingPerformanceTest {
 
         for (int threadIndex = 0; threadIndex < threadCount; threadIndex++) {
             final long requestId = threadIndex + 1L;
-            futures.add(executor.submit(() -> {
-                BalanceContext context = context(requestId);
-                for (int operation = 0; operation < WARMUP_OPERATIONS_PER_THREAD; operation++) {
-                    selectAndRelease(strategy, context);
-                }
-                ready.countDown();
-                start.await();
+            futures.add(
+                    executor.submit(
+                            () -> {
+                                BalanceContext context = context(requestId);
+                                for (int operation = 0;
+                                        operation < WARMUP_OPERATIONS_PER_THREAD;
+                                        operation++) {
+                                    selectAndRelease(strategy, context);
+                                }
+                                ready.countDown();
+                                start.await();
 
-                long[] latencies = new long[OPERATIONS_PER_THREAD];
-                for (int operation = 0; operation < OPERATIONS_PER_THREAD; operation++) {
-                    long operationStart = System.nanoTime();
-                    boolean success = selectAndRelease(strategy, context);
-                    latencies[operation] = System.nanoTime() - operationStart;
-                    if (!success) {
-                        failures.incrementAndGet();
-                    }
-                }
-                return latencies;
-            }));
+                                long[] latencies = new long[OPERATIONS_PER_THREAD];
+                                for (int operation = 0;
+                                        operation < OPERATIONS_PER_THREAD;
+                                        operation++) {
+                                    long operationStart = System.nanoTime();
+                                    boolean success = selectAndRelease(strategy, context);
+                                    latencies[operation] = System.nanoTime() - operationStart;
+                                    if (!success) {
+                                        failures.incrementAndGet();
+                                    }
+                                }
+                                return latencies;
+                            }));
         }
 
         assertTrue(ready.await(10, TimeUnit.SECONDS), "routing workers did not finish warmup");
@@ -229,8 +249,7 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private static WorkerStatus workerStatus(int port) {
         return WorkerStatus.createDiscovered(
-                RoleType.PREFILL, "performance-regression",
-                "127.0.0.1", port, port + 1, null);
+                RoleType.PREFILL, "performance-regression", "127.0.0.1", port, port + 1, null);
     }
 
     private static BalanceContext context(long requestId) {
@@ -241,20 +260,19 @@ class CostBasedPrefillRoutingPerformanceTest {
         request.setBlockCacheKeys(List.of(1L, 2L, 3L, 4L));
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(
-                request.getPriority(), System.currentTimeMillis() + 50_000L));
+        context.setSchedulingMetadata(
+                SchedulingMetadata.explicit(
+                        request.getPriority(), System.currentTimeMillis() + 50_000L));
         return context;
     }
 
-    private record RoundResult(int operations, int failures, double qps,
-                               double p50Ms, double p99Ms) {
-    }
+    private record RoundResult(
+            int operations, int failures, double qps, double p50Ms, double p99Ms) {}
 
     private static final class EmptyCacheAwareService implements CacheAwareService {
         @Override
-        public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
-                                                        RoleType roleType,
-                                                        List<String> candidateEngineIpPorts) {
+        public Map<String, Integer> findMatchingEngines(
+                List<Long> blockCacheKeys, RoleType roleType, List<String> candidateEngineIpPorts) {
             return Map.of();
         }
 

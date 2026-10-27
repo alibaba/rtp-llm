@@ -7,7 +7,6 @@ import java.util.Map;
 
 @Getter
 public enum StrategyErrorType {
-
     CONNECT_FAILED(8202, false),
     CONNECT_TIMEOUT(8203, false),
 
@@ -104,8 +103,7 @@ public enum StrategyErrorType {
         }
         String safeDetail = detail == null ? errorMsg : detail;
         String escaped = safeDetail.replace("\\", "\\\\").replace("\"", "\\\"");
-        return "{\"status_name\":\"" + statusName
-                + "\",\"detail\":\"" + escaped + "\"}";
+        return "{\"status_name\":\"" + statusName + "\",\"detail\":\"" + escaped + "\"}";
     }
 
     /**
@@ -120,8 +118,9 @@ public enum StrategyErrorType {
 
     public boolean acceptsAdmissionRejectReason(AdmissionRejectReason reason) {
         return switch (this) {
-            case PRIORITY_ADMISSION_REJECTED -> reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                    || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+            case PRIORITY_ADMISSION_REJECTED ->
+                    reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                            || reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD;
             case RESOURCE_EXHAUSTED -> reason == AdmissionRejectReason.RESOURCE_EXHAUSTED;
             default -> reason == AdmissionRejectReason.UNSPECIFIED;
         };

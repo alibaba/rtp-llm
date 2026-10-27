@@ -342,7 +342,18 @@ def _shell_env_assignments(env: Dict[str, str]) -> str:
     return " ".join(parts)
 
 
-def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = None) -> str:
+def bootstrap_python_command() -> str:
+    """Choose the image interpreter before a task venv exists."""
+    return (
+        "_rtp_bootstrap_python=/opt/conda310/bin/python; "
+        "if [ -d /usr/local/PPU_SDK ]; then "
+        "_rtp_bootstrap_python=/opt/conda312/bin/python; fi; "
+    )
+
+
+def build_remote_setup_command(
+    rootdir: Path, *, setup_env: Optional[dict] = None
+) -> str:
     """Return shell prefix executed before remote pytest command.
 
     Calls prepare_venv.py which handles:
@@ -419,9 +430,11 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         # /usr/lib64 → ImportError on aiter dlopen. Append gcc-toolset-12
         # + /opt/rocm + /opt/amdgpu paths for symmetry with .bazelrc; ld
         # silently skips non-existent dirs so safe on other workers.
+        "_rtp_runtime_python_lib=/opt/conda310/lib; "
+        "if [ -d /usr/local/PPU_SDK ]; then _rtp_runtime_python_lib=/opt/conda312/lib; fi; "
         "export LD_LIBRARY_PATH="
         '"$PWD/.pytest_cache/remote_inputs/ppu_runtime:$PWD/rtp_llm/libs:'
-        "/opt/conda310/lib:/opt/rh/gcc-toolset-12/root/usr/lib64:"
+        "${_rtp_runtime_python_lib}:/opt/rh/gcc-toolset-12/root/usr/lib64:"
         "/opt/rocm/lib:/opt/amdgpu/lib64:"
         '/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"; '
         # Diagnostic — appears in remote_stdout.log so we can verify the
@@ -467,6 +480,7 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         "fi; "
         'echo "[remote_setup] disk after eviction: $(df -h /home/admin 2>/dev/null | tail -1)"; '
         + gpu_diag
+        + bootstrap_python_command()
         + 'echo ">>>PHASE:pip_install_start $(date +%s)"; '
         "mkdir -p logs; "
         "if [ -f internal_source/ci/prepare_rocm_deps.sh ]; then "
@@ -477,7 +491,7 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         # The installer upgrades the inherited descriptor only when repair is
         # needed. Eviction and another installer cannot delete an in-use venv.
         f"  _rtp_venv_lock=$(env -u LD_LIBRARY_PATH {prepare_env_prefix}"
-        "/opt/conda310/bin/python internal_source/ci/prepare_venv.py --print-lock-path) || exit $?; "
+        '"$_rtp_bootstrap_python" internal_source/ci/prepare_venv.py --print-lock-path) || exit $?; '
         '  mkdir -p "$(dirname "$_rtp_venv_lock")" || exit $?; '
         '  exec 9>"$_rtp_venv_lock"; flock -s 9 || exit $?; '
         "  export RTP_LLM_VENV_LOCK_FD=9; "
@@ -486,16 +500,16 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         # cannot use Conda's OpenSSL (EVP_KDF_ctrl / OPENSSL_1_1_1b). Keep the
         # test runtime library path in the parent shell, not the installer.
         f"  env -u LD_LIBRARY_PATH {prepare_env_prefix}"
-        "/opt/conda310/bin/python internal_source/ci/prepare_venv.py "
+        '"$_rtp_bootstrap_python" internal_source/ci/prepare_venv.py '
         ">logs/prepare_venv.out 2>logs/prepare_venv.err & PV_PID=$!; "
-        "  (while kill -0 \"$PV_PID\" 2>/dev/null; do "
+        '  (while kill -0 "$PV_PID" 2>/dev/null; do '
         '    if [ -n "${RTP_REMOTE_HEARTBEAT_FILE:-}" ]; then '
-        '      printf \'%s %s\\n\' "$(date +%s)" pip_install_active '
+        "      printf '%s %s\\n' \"$(date +%s)\" pip_install_active "
         '        >> "$RTP_REMOTE_HEARTBEAT_FILE" 2>/dev/null || true; '
         "    fi; sleep 5; done) & PV_HB_PID=$!; "
         '  wait "$PV_PID"; PV_RC=$?; wait "$PV_HB_PID" 2>/dev/null || true; '
         "  unset RTP_LLM_VENV_LOCK_FD; "
-        '  OUT=$(cat logs/prepare_venv.out); '
+        "  OUT=$(cat logs/prepare_venv.out); "
         '  if [ "$PV_RC" -ne 0 ]; then '
         "    cat logs/prepare_venv.err >&2; "
         '    echo ">>>PHASE:pip_install_failed $(date +%s) rc=$PV_RC"; '
@@ -527,7 +541,7 @@ def build_remote_setup_command(rootdir: Path, *, setup_env: Optional[dict] = Non
         "  python -m _build.rocm_jit & RJ_PID=$!; "
         '  (while kill -0 "$RJ_PID" 2>/dev/null; do '
         '    if [ -n "${RTP_REMOTE_HEARTBEAT_FILE:-}" ]; then '
-        '      printf \'%s %s\\n\' "$(date +%s)" rocm_jit_active '
+        "      printf '%s %s\\n' \"$(date +%s)\" rocm_jit_active "
         '        >> "$RTP_REMOTE_HEARTBEAT_FILE" 2>/dev/null || true; '
         "    fi; sleep 5; done) & RJ_HB_PID=$!; "
         '  wait "$RJ_PID"; RJ_RC=$?; wait "$RJ_HB_PID" 2>/dev/null || true; '
@@ -1101,10 +1115,7 @@ def resolve_ci_profile_remote_env(
 def resolve_gpu_type_remote_env(rootdir: Path, gpu_type: str) -> Dict[str, str]:
     """Return shared and profile-specific remote env for a GPU type."""
     pytest_ci = (
-        _load_pyproject(rootdir)
-        .get("tool", {})
-        .get("rtp_llm", {})
-        .get("pytest_ci", {})
+        _load_pyproject(rootdir).get("tool", {}).get("rtp_llm", {}).get("pytest_ci", {})
     )
     gpu_env = pytest_ci.get("gpu_env", {}).get(gpu_type, {})
     merged: Dict[str, str] = (
@@ -1114,7 +1125,10 @@ def resolve_gpu_type_remote_env(rootdir: Path, gpu_type: str) -> Dict[str, str]:
     )
     profiles = pytest_ci.get("profiles", {})
     for profile in profiles.values():
-        if not isinstance(profile, dict) or str(profile.get("gpu_type", "")) != gpu_type:
+        if (
+            not isinstance(profile, dict)
+            or str(profile.get("gpu_type", "")) != gpu_type
+        ):
             continue
         remote_env = profile.get("remote_env", {})
         if isinstance(remote_env, dict):

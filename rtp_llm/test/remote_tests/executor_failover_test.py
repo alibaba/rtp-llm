@@ -1393,7 +1393,7 @@ def test_remote_setup_exports_profile_env(tmp_path):
 
     assert "export RTP_BAZEL_CONFIG=--config=custom;" in command
     assert (
-        "RTP_BAZEL_CONFIG=--config=custom /opt/conda310/bin/python "
+        'RTP_BAZEL_CONFIG=--config=custom "$_rtp_bootstrap_python" '
         "internal_source/ci/prepare_venv.py"
     ) in command
 
@@ -1444,7 +1444,7 @@ def test_dependency_install_does_not_inherit_runtime_libraries(profile_library_p
     invocation = command.split("export RTP_LLM_RUNTIME_LD_LIBRARY_PATH=", 1)[1]
     invocation = invocation.split("; ", 1)[1].split(">logs/prepare_venv.out", 1)[0]
     args = shlex.split(invocation)
-    python_index = args.index("/opt/conda310/bin/python")
+    python_index = args.index("$_rtp_bootstrap_python")
     # Run an environment probe in place of the installer, with the exact
     # generated env/assignment arguments used by the remote worker.
     args[python_index:] = [
@@ -2272,3 +2272,44 @@ def test_failover_executor_does_not_close_concurrent_actions(monkeypatch):
         "grpc://10.0.0.1:50052",
         "grpc://10.0.0.1:50052",
     ]
+
+
+@pytest.mark.parametrize("ppu", [False, True])
+def test_bootstrap_interpreter_follows_worker_sdk(tmp_path, ppu):
+    sdk = tmp_path / "PPU_SDK"
+    if ppu:
+        sdk.mkdir()
+    command = remote_exec_rtp.bootstrap_python_command().replace(
+        "/usr/local/PPU_SDK", shlex.quote(str(sdk))
+    )
+    result = subprocess.run(
+        ["bash", "-c", command + 'printf "%s" "$_rtp_bootstrap_python"'],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout == (
+        "/opt/conda312/bin/python" if ppu else "/opt/conda310/bin/python"
+    )
+
+
+def test_remote_setup_and_supervisor_share_worker_interpreter(tmp_path):
+    setup = remote_exec_rtp.build_remote_setup_command(tmp_path)
+    selection = remote_exec_rtp.bootstrap_python_command()
+    assert selection in setup
+    assert (
+        setup.count('"$_rtp_bootstrap_python" internal_source/ci/prepare_venv.py') == 2
+    )
+    assert "_rtp_runtime_python_lib=/opt/conda312/lib" in setup
+    subprocess.run(["bash", "-n", "-c", setup + " true"], check=True)
+    instance = object.__new__(remote_plugin.RemoteREAPIPlugin)
+    instance.timeout_policy = SimpleNamespace(
+        supervisor_timeout_seconds=30, heartbeat_stall_seconds=10
+    )
+    command = instance._supervised_command("true", "ppu-bootstrap-contract")
+    assert selection in command[-1]
+    assert (
+        '"$_rtp_bootstrap_python" rtp_llm/test/remote_tests/action_supervisor.py'
+        in command[-1]
+    )
+    subprocess.run(["bash", "-n", "-c", command[-1]], check=True)

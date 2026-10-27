@@ -36,14 +36,22 @@ class CostBasedPrefillStrategyBlockerTest {
                 for (AdmissionRejectReason second : AdmissionRejectReason.values()) {
                     var directory = mock(WorkerDirectory.class);
                     var cache = mock(CacheAwareService.class);
-                    var strategy = new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class));
-                    var outside = rejectedEndpoint(role, "other", AdmissionRejectReason.UNSPECIFIED);
+                    var strategy =
+                            new CostBasedPrefillStrategy(
+                                    directory, cache, mock(EngineHealthReporter.class));
+                    var outside =
+                            rejectedEndpoint(role, "other", AdmissionRejectReason.UNSPECIFIED);
                     var firstEndpoint = rejectedEndpoint(role, "target", first);
                     var secondEndpoint = rejectedEndpoint(role, "target", second);
-                    when(directory.prefillRoutingSnapshot(role)).thenReturn(List.of(
-                            new EndpointRegistry.PrefillRoutingEntry("first", firstEndpoint),
-                            new EndpointRegistry.PrefillRoutingEntry("outside", outside),
-                            new EndpointRegistry.PrefillRoutingEntry("second", secondEndpoint)));
+                    when(directory.prefillRoutingSnapshot(role))
+                            .thenReturn(
+                                    List.of(
+                                            new EndpointRegistry.PrefillRoutingEntry(
+                                                    "first", firstEndpoint),
+                                            new EndpointRegistry.PrefillRoutingEntry(
+                                                    "outside", outside),
+                                            new EndpointRegistry.PrefillRoutingEntry(
+                                                    "second", secondEndpoint)));
                     var context = new BalanceContext(new FlexlbConfig());
                     var request = new Request();
                     request.setRequestId(1L);
@@ -54,11 +62,20 @@ class CostBasedPrefillStrategyBlockerTest {
                     var result = strategy.select(context, role, "target");
                     var failure = result.failure();
 
-                    // Missing provenance dominates; mixed known blockers are capacity, not arbitrary priority.
-                    int expectedCode = first == AdmissionRejectReason.UNSPECIFIED
-                            || second == AdmissionRejectReason.UNSPECIFIED ? 8432
-                            : first != second || first == AdmissionRejectReason.RESOURCE_EXHAUSTED ? 8431 : 8430;
-                    assertEquals(expectedCode, failure.getCode(), role + " " + first + " " + second);
+                    // Missing provenance dominates; mixed known blockers are capacity, not
+                    // arbitrary priority.
+                    int expectedCode =
+                            first == AdmissionRejectReason.UNSPECIFIED
+                                            || second == AdmissionRejectReason.UNSPECIFIED
+                                    ? 8432
+                                    : first != second
+                                                    || first
+                                                            == AdmissionRejectReason
+                                                                    .RESOURCE_EXHAUSTED
+                                            ? 8431
+                                            : 8430;
+                    assertEquals(
+                            expectedCode, failure.getCode(), role + " " + first + " " + second);
                     assertEquals(2, result.diagnostics().get("workers"));
                     verify(directory).prefillRoutingSnapshot(role);
                     verify(outside, never()).admissionRejectReason(anyInt());
@@ -68,23 +85,24 @@ class CostBasedPrefillStrategyBlockerTest {
         }
     }
 
-    private static PrefillEndpoint rejectedEndpoint(RoleType role, String group, AdmissionRejectReason reason) {
+    private static PrefillEndpoint rejectedEndpoint(
+            RoleType role, String group, AdmissionRejectReason reason) {
         var endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getStatus()).thenReturn(
-                WorkerStatus.createDiscovered(role, group, "worker", 8080, 8090, "test"));
+        when(endpoint.getStatus())
+                .thenReturn(
+                        WorkerStatus.createDiscovered(role, group, "worker", 8080, 8090, "test"));
         when(endpoint.admissionRejectReason(50)).thenReturn(reason);
         return endpoint;
     }
 
     @Test
     void everyRegisteredEndpointMustProveTheSameBlocker() {
-        assertNull(CostBasedPrefillStrategy.provenPoolWideBlocker(
-                Map.of(RoleType.DECODE, 3), 4));
-        assertNull(CostBasedPrefillStrategy.provenPoolWideBlocker(
-                Map.of(RoleType.DECODE, 2, RoleType.PREFILL, 2), 4));
+        assertNull(CostBasedPrefillStrategy.provenPoolWideBlocker(Map.of(RoleType.DECODE, 3), 4));
+        assertNull(
+                CostBasedPrefillStrategy.provenPoolWideBlocker(
+                        Map.of(RoleType.DECODE, 2, RoleType.PREFILL, 2), 4));
         assertEquals(
                 RoleType.DECODE,
-                CostBasedPrefillStrategy.provenPoolWideBlocker(
-                        Map.of(RoleType.DECODE, 4), 4));
+                CostBasedPrefillStrategy.provenPoolWideBlocker(Map.of(RoleType.DECODE, 4), 4));
     }
 }

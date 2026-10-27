@@ -38,6 +38,10 @@ def h20_oss_suites():
                 envs = [],
                 gpu_type = ["H20_CU13"],
             ),
+            # Cold start (--warm_up 0) plus DeepEP init can exceed the default
+            # 5s KV load deadline (load_cache_timeout_ms); the first PD request
+            # then fails with CACHE_STORE_LOAD_BUFFER_TIMEOUT. Use the same 120s
+            # deadline as next_pd instead of hiding the cold start via warm-up.
             smoke_test(
                 name = "mla_cp_pd",
                 task_info = "data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
@@ -46,8 +50,8 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
-                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0",
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0",
                 },
                 gpu_type = ["H20_CU13"],
             ),
@@ -59,15 +63,16 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 0 --use_all_gather 1 --moe_strategy fp8_per_block_pure_cp --cp_rotate_method ALL_GATHER",
-                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather 0",
+                    "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 0 --use_all_gather 1 --moe_strategy fp8_per_block_pure_cp --cp_rotate_method ALL_GATHER",
+                    "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather 0",
                 },
                 gpu_type = ["H20_CU13"],
             ),
+            # The m1 request has 69 GLM-4.7-Flash tokens, so this runs two prefill chunks.
             smoke_test(
                 name = "mla_glm4_moe_lite",
                 task_info = "data/model/glm4_moe_lite/q_r_h20.json",
-                smoke_args = "--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
+                smoke_args = "--warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
                 gpu_type = ["H20_CU13"],
             ),
         ],
@@ -109,24 +114,21 @@ def h20_oss_suites():
                 smoke_args = "--quantization W4A8_INT4_PER_CHANNEL_COMPRESSED --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
                 gpu_type = ["H20_CU13"],
             ),
-            smoke_test(
-                name = "moe_deepep_continuous_dp2",
-                task_info = "data/model/qwen3_moe/q_r_30b_py.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --dp_size 2",
-                gpu_type = ["H20_CU13"],
-            ),
-            smoke_test(
-                name = "moe_deepep_ll_tp2",
-                task_info = "data/model/qwen3_moe/q_r_30b_py_tp2_ll.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1 --tp_size 2 --world_size 2",
-                gpu_type = ["H20_CU13"],
-            ),
-            smoke_test(
-                name = "moe_deepep_normal_tp2",
-                task_info = "data/model/qwen3_moe/q_r_30b_py_tp2.json",
-                smoke_args = "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --tp_size 2 --world_size 2",
-                gpu_type = ["H20_CU13"],
-            ),
+# REMOVED: moe_deepep_continuous_dp2 (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
+# REMOVED: moe_deepep_ll_tp2 (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
+# REMOVED: moe_deepep_normal_tp2 (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
             smoke_test(
                 name = "moe_headwise",
                 task_info = "data/model/qwen3_moe/q_r_30b_py_headwise.json",
@@ -148,8 +150,8 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER",
-                    "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP",
+                    "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER",
+                    "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP",
                 },
                 gpu_type = ["H20_CU13"],
             ),
@@ -223,7 +225,8 @@ def h20_oss_suites():
             smoke_test(
                 name = "dense_fp8pb_dynamic",
                 task_info = "data/model/qwen3/q_r_h20.json",
-                smoke_args = "--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                # The existing 497-token prompt exercises eight 64-token prefill chunks.
+                smoke_args = "--disable_flashinfer_native 1 --quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(
@@ -262,7 +265,7 @@ def h20_oss_suites():
             smoke_test(
                 name = "qwen35_grammar_concurrent_no_mtp",
                 task_info = "data/model/qwen35/q_r_mtp_grammar.json",
-                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --think_mode 0 --load_method scratch --concurrency_limit 8",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --warm_up 0 --think_mode 0 --concurrency_limit 8",
                 envs = ["NCCL_DISABLE_ABORT=1", "NCCL_DEBUG=INFO", "LOG_LEVEL=INFO", "PYTHONUNBUFFERED=TRUE"],
                 gpu_type = ["H20_CU13"],
                 concurrency_test = True,
@@ -272,8 +275,8 @@ def h20_oss_suites():
                 name = "qwen35_grammar_pd_mtp_reasoning",
                 task_info = "data/model/qwen35/q_r_mtp_grammar_reasoning.json",
                 smoke_args = {
-                    "prefill": "--act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --load_method scratch",
-                    "decode": "--load_cache_timeout_ms 120000 --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1 --load_method scratch",
+                    "prefill": "--act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1",
+                    "decode": "--load_cache_timeout_ms 120000 --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 1 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --think_mode 1",
                 },
                 gpu_type = ["H20_CU13"],
                 envs = {
@@ -300,6 +303,9 @@ def h20_oss_suites():
                 smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --reuse_cache 1",
                 gpu_type = ["H20_CU13"],
             ),
+            # Sentinel: the only H20 smoke case that still exercises the DeepEP
+            # low-latency dispatch end-to-end (with MTP + CUDA graph on top),
+            # so an EP dispatch/combine regression is caught while standing.
             smoke_test(
                 name = "next_mtp_cudagraph_deepep",
                 task_info = "data/model/qwen3_next/q_r_next_fp8_tp2_mtp_cudagraph.json",
@@ -328,13 +334,11 @@ def h20_oss_suites():
                 smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --kernel_seq_size_per_block 128",
                 gpu_type = ["H20_CU13"],
             ),
-            smoke_test(
-                name = "next_cudagraph_deepep",
-                task_info = "data/model/qwen3_next/q_r_next_cuda_graph.json",
-                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --max_seq_len 128 --use_deepep_moe 1 --use_deepep_low_latency 1 --enable_cuda_graph 1 --warm_up 0  --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --tp_size 2",
-                envs = [],
-                gpu_type = ["H20_CU13"],
-            ),
+# REMOVED: next_cudagraph_deepep (DeepEP-dedicated H20 smoke)
+# Reason: DeepEP dispatch is covered by the unit tests instead of a standing
+# smoke case: //rtp_llm/models_py/distributed/test:deepep_test (normal /
+# low-latency / expert alignment on 2xH20) plus the DeepEP auto-configuration
+# matrix in rtp_llm/test/auto_configure_deepep_test.py.
             smoke_test(
                 name = "next_long_reuse_memcache",
                 task_info = "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_memory.json",
@@ -394,8 +398,8 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
-                    "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
                 gpu_type = ["H20_CU13"],
             ),
@@ -422,13 +426,13 @@ def h20_oss_suites():
             smoke_test(
                 name = "next_dash_basic",
                 task_info = "data/model/qwen3_next/dash_basic.json",
-                smoke_args = "--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2",
                 gpu_type = ["H20_CU13"],
             ),
             smoke_test(
                 name = "next_dash_structural_tag_think",
                 task_info = "data/model/qwen3_next/dash_structural_tag_think.json",
-                smoke_args = "--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --think_mode 1",
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --think_mode 1",
                 gpu_type = ["H20_CU13"],
             ),
         ],
@@ -505,7 +509,8 @@ def h20_oss_suites():
             smoke_test(
                 name = "eagle_mtp_tp2",
                 task_info = "data/model/qwen2_14b/q_r_mtp.json",
-                smoke_args = "--max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 --reserver_runtime_mem_mb 21954 --tp_size 2",
+                # 320 leaves room for the existing 155-token prompt and 100-token generation.
+                smoke_args = "--max_seq_len 320 --seq_size_per_block 64 --prefill_chunk_size 64 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --reserver_runtime_mem_mb 21954 --tp_size 2",
                 gpu_type = ["H20_CU13"],
             ),
             # Request tier flags remain accepted; deployments select DEVICE or HOST.
@@ -642,8 +647,8 @@ def h20_oss_suites():
                 name = "qwen35_moe_vl_fp8",
                 task_info = "data/model/qwen35/q_r_35b_moe_vl_fp8.json",
                 smoke_args = {
-                    "prefill": "--use_local 1 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
-                    "decode": "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                    "prefill": "--use_local 1 --load_cache_timeout_ms 120000 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
+                    "decode": "--use_local 1 --load_cache_timeout_ms 120000 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
                 envs = {
                     # Pin the FP8 per-token-group quant to the legacy kernel: the

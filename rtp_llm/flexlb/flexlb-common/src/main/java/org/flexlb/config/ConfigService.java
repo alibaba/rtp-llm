@@ -19,16 +19,17 @@ public class ConfigService {
 
     static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
 
-    private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()
-            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
-            .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
-            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
-            .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
-            .build();
+    private static final ObjectMapper STRICT_MAPPER =
+            JsonMapper.builder()
+                    .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .enable(DeserializationFeature.FAIL_ON_IGNORED_PROPERTIES)
+                    .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
+                    .enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS)
+                    .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
+                    .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
+                    .build();
 
     private final FlexlbConfig flexlbConfig;
 
@@ -42,8 +43,8 @@ public class ConfigService {
 
     ConfigService(String document) {
         if (document == null || document.isBlank()) {
-            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
-                    "is required; configure requestLifecycle.request.timeoutMs");
+            throw new ConfigValidationException(
+                    FLEXLB_CONFIG_ENV, "is required; configure requestLifecycle.request.timeoutMs");
         }
         this.flexlbConfig = parse(document);
         FlexlbConfigValidator.validate(flexlbConfig);
@@ -51,11 +52,17 @@ public class ConfigService {
     }
 
     private static String configDocument(Map<String, String> environment) {
-        for (String name : new String[]{"VIT_SYNC_REQUEST_TIMEOUT_MS",
-                "VIT_RETAIN_ALIVE_ON_TIMEOUT", "VIT_WORKER_TIMEOUT_US"}) {
+        for (String name :
+                new String[] {
+                    "VIT_SYNC_REQUEST_TIMEOUT_MS",
+                    "VIT_RETAIN_ALIVE_ON_TIMEOUT",
+                    "VIT_WORKER_TIMEOUT_US"
+                }) {
             if (environment.containsKey(name)) {
-                throw new ConfigValidationException("environment",
-                        "Removed legacy environment variable: " + name
+                throw new ConfigValidationException(
+                        "environment",
+                        "Removed legacy environment variable: "
+                                + name
                                 + "; configure workerRegistry.health in FLEXLB_CONFIG");
             }
         }
@@ -67,15 +74,14 @@ public class ConfigService {
             JsonNode tree = STRICT_MAPPER.readTree(document);
             rejectJsonNull(tree, "$");
             FlexlbConfigValidator.validateDocumentShape(tree);
-            FlexlbConfig config = STRICT_MAPPER.treeToValue(
-                    tree, FlexlbConfig.class);
+            FlexlbConfig config = STRICT_MAPPER.treeToValue(tree, FlexlbConfig.class);
             FlexlbConfigValidator.validate(config);
             return config;
         } catch (ConfigValidationException error) {
             throw error;
         } catch (Exception error) {
-            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
-                    "Invalid FLEXLB_CONFIG JSON: " + error.getMessage(), error);
+            throw new ConfigValidationException(
+                    FLEXLB_CONFIG_ENV, "Invalid FLEXLB_CONFIG JSON: " + error.getMessage(), error);
         }
     }
 
@@ -94,8 +100,8 @@ public class ConfigService {
 
     private static void rejectJsonNull(JsonNode node, String path) {
         if (node == null || node.isNull()) {
-            throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
-                    "JSON null is not allowed at " + path);
+            throw new ConfigValidationException(
+                    FLEXLB_CONFIG_ENV, "JSON null is not allowed at " + path);
         }
         if (node.isObject()) {
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
@@ -112,17 +118,25 @@ public class ConfigService {
 
     private static void logEffectiveConfig(FlexlbConfig config) {
         String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
-        String ordering = config.isDirect() ? "N/A"
-                : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
-        String decision = config.isDirect() ? "N/A"
-                : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
+        String ordering =
+                config.isDirect() ? "N/A" : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
+        String decision =
+                config.isDirect()
+                        ? "N/A"
+                        : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
         String dispatcher = config.getDispatcher().typeName();
-        log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
+        log.info(
+                "FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
                         + "dispatcher={}, prefillSelection=BEST_ONLY, "
                         + "decodeCostExpression={}, groupRules={}",
-                config.getSchemaVersion(), scheduler, ordering, decision, dispatcher,
+                config.getSchemaVersion(),
+                scheduler,
+                ordering,
+                decision,
+                dispatcher,
                 config.getRouter().getRoles().getDecode().getCostEstimator().getExpression(),
-                config.getRouter().getGroupSelector() == null ? 0
+                config.getRouter().getGroupSelector() == null
+                        ? 0
                         : config.getRouter().getGroupSelector().getRules().size());
     }
 }

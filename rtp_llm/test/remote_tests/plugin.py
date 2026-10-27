@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import logging
+import math
 import os
 import re
 import shlex
@@ -19,12 +19,14 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple
 import pytest
 
 from rtp_llm.test.ci_profile_plugin import validate_ci_profile_count
+from rtp_llm.test.smoke_framework.runs_plugin import repeat_execution
 
 from .endpoint_info import extract_remote_worker_ip
 from .junit_merge import count_report_integrity_errors
 from .remote_exec_rtp import (
     GPURequest,
     RemoteRuntimeConfig,
+    bootstrap_python_command,
     build_runtime_config,
     collect_remote_files,
     collect_session_files,
@@ -38,7 +40,6 @@ from .remote_exec_rtp import (
     should_dispatch_item_remotely,
 )
 from .remote_timeout_policy import RemoteTimeoutPolicy, select_remote_timeout_policy
-from rtp_llm.test.smoke_framework.runs_plugin import repeat_execution
 
 if TYPE_CHECKING:
     from .cas_client import CASClient, UploadProgress
@@ -62,6 +63,7 @@ _GPU_COUNT_TIERS = [1, 2, 3, 4, 8]
 
 _PHASE_LINE_RE = re.compile(r"^>>>PHASE:\S+\s+\d+\s*$")
 _NODEID_PROPERTY = "nodeid"
+
 
 def _per_test_nodeid(item, rootdir: Path) -> str:
     from .remote_exec_rtp import _safe_rel_to_rootdir
@@ -752,7 +754,8 @@ class RemoteREAPIPlugin:
         supervised = (
             f"export RTP_REMOTE_SESSION_ID={shlex.quote(session_id)}; "
             f"export RTP_REMOTE_HEARTBEAT_FILE={shlex.quote(heartbeat_file)}; "
-            "/opt/conda310/bin/python rtp_llm/test/remote_tests/action_supervisor.py "
+            + bootstrap_python_command()
+            + '"$_rtp_bootstrap_python" rtp_llm/test/remote_tests/action_supervisor.py '
             f"--timeout {self.timeout_policy.supervisor_timeout_seconds} "
             f"--heartbeat-file {shlex.quote(heartbeat_file)} "
             f"--heartbeat-timeout {self.timeout_policy.heartbeat_stall_seconds} "
@@ -843,7 +846,8 @@ class RemoteREAPIPlugin:
         replica = repeat_execution(item)
         replica_export = (
             f"export RTP_REMOTE_TEST_REPLICA={shlex.quote(replica.action_identity)}; "
-            if replica is not None else ""
+            if replica is not None
+            else ""
         )
         gpu_req = resolve_item_gpu_request(item)
         gpu_count = str(gpu_req.gpu_count)
@@ -1440,18 +1444,25 @@ class RemoteREAPIPlugin:
                 stdout, worker_nodeid
             )
             cases = list(ET.fromstring(xml).iter("testcase"))
-            wasxfail = next((
-                prop.get("value", "")
-                for case in cases
-                for prop in case.findall("./properties/property")
-                if prop.get("name") == "rtp_remote_wasxfail"
-            ), None)
+            wasxfail = next(
+                (
+                    prop.get("value", "")
+                    for case in cases
+                    for prop in case.findall("./properties/property")
+                    if prop.get("name") == "rtp_remote_wasxfail"
+                ),
+                None,
+            )
             if wasxfail is None:
-                wasxfail = next((
-                    node.get("message", "")
-                    for case in cases for node in case.findall("skipped")
-                    if node.get("type") == "pytest.xfail"
-                ), None)
+                wasxfail = next(
+                    (
+                        node.get("message", "")
+                        for case in cases
+                        for node in case.findall("skipped")
+                        if node.get("type") == "pytest.xfail"
+                    ),
+                    None,
+                )
             report_dir = self.rootdir / "bazel-testlogs" / "pytest" / "remote_junit"
             report_dir.mkdir(parents=True, exist_ok=True)
             key = hashlib.sha256(item.nodeid.encode()).hexdigest()
@@ -1817,8 +1828,8 @@ class RemoteREAPIPlugin:
     def _replay_cached_outputs(self) -> None:
         if not self._collect_outputs or not self._session_cached_entries:
             return
-        from .output_collector import OUTPUTS_ARCHIVE, download_and_extract
         from .executor import ExecutionResult
+        from .output_collector import OUTPUTS_ARCHIVE, download_and_extract
 
         seen_archives = set()
         seen_streams = set()
@@ -1960,9 +1971,13 @@ class RemoteREAPIPlugin:
             reported_execution_tests = merged_tests - integrity_errors
             log.info(
                 "Remote report instances: executed=%d synthetic_integrity_errors=%d physical=%d",
-                reported_execution_tests, integrity_errors, merged_tests,
+                reported_execution_tests,
+                integrity_errors,
+                merged_tests,
             )
-            _, merged_failures, merged_errors, merged_skipped, _ = _count_junit(merged_root)
+            _, merged_failures, merged_errors, merged_skipped, _ = _count_junit(
+                merged_root
+            )
             merged_nodeids = [
                 nodeid
                 for testcase in merged_root.iter("testcase")
@@ -2006,16 +2021,23 @@ class RemoteREAPIPlugin:
             and reported_execution_tests > 0
             and replayed_cached > 0
         ):
-            log.info("Remote pytest selected no fresh tests; validating replayed cache evidence")
+            log.info(
+                "Remote pytest selected no fresh tests; validating replayed cache evidence"
+            )
             exit_code = 0
 
         profile_error = _validate_session_profile_result(
-            self.config, self.ci_profile, tests=reported_execution_tests,
-            skipped=merged_skipped, nodeids=merged_nodeids,
+            self.config,
+            self.ci_profile,
+            tests=reported_execution_tests,
+            skipped=merged_skipped,
+            nodeids=merged_nodeids,
         )
         profile_error = profile_error or worker_report_error
         if not merged_xml or reported_execution_tests <= 0:
-            profile_error = profile_error or "Missing or empty remote JUnit execution report"
+            profile_error = (
+                profile_error or "Missing or empty remote JUnit execution report"
+            )
         if profile_error:
             log.error("Remote session profile validation failed: %s", profile_error)
             if tw:
@@ -2287,13 +2309,17 @@ class RemoteREAPIPlugin:
                 if not isinstance(isolated_env, dict) or any(
                     path not in isolated_paths
                     or not isinstance(values, dict)
-                    or any(not isinstance(key, str)
-                           or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None
-                           or not isinstance(value, str)
-                           for key, value in values.items())
+                    or any(
+                        not isinstance(key, str)
+                        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None
+                        or not isinstance(value, str)
+                        for key, value in values.items()
+                    )
                     for path, values in isolated_env.items()
                 ):
-                    raise ValueError("invalid isolated_env: expected selected paths and string environment values")
+                    raise ValueError(
+                        "invalid isolated_env: expected selected paths and string environment values"
+                    )
                 if isinstance(isolated_paths, list) and all(
                     isinstance(path, str) for path in isolated_paths
                 ):
@@ -2434,7 +2460,9 @@ class RemoteREAPIPlugin:
                 shlex.quote(f"{key}={value}")
                 for key, value in profile_isolated_env.get(isolated_path, {}).items()
             )
-            isolated_env_prefix = f"env {isolated_env_args} " if isolated_env_args else ""
+            isolated_env_prefix = (
+                f"env {isolated_env_args} " if isolated_env_args else ""
+            )
             isolated_output = f"bazel-testlogs/pytest/test_isolated_{index}.xml"
             empty_guard = "" if require_isolated_tests else "[ $ec -ne 5 ] && "
             lines.append(

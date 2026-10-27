@@ -53,6 +53,35 @@ inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapp
     return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(config, tag, seq_len) : seq_len;
 }
 
+RequiredPositions chunkCachePositions(const MallocInfo& malloc_info, const GroupBase& group) {
+    RequiredPositions positions;
+    const int         seq_len = malloc_info.incrSeqLen();
+    const auto        count   = group.chunkCacheBlockCount(seq_len,
+                                                  malloc_info.max_chunk_tokens,
+                                                  malloc_info.reuse_cache,
+                                                  malloc_info.complete_token_ids->getReserveStep());
+    if (count > 0) {
+        const size_t slots = (static_cast<size_t>(seq_len) + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
+        for (size_t pos = slots - count; pos < slots; ++pos) {
+            positions.insert(pos);
+        }
+    }
+    return positions;
+}
+
+RequiredPositions chunkRequiredPositions(const MallocInfo&             malloc_info,
+                                         const SingleTypeCacheManager& group,
+                                         const RequiredPositions&      base_positions = {}) {
+    auto        required_positions = base_positions;
+    const auto& blocks = malloc_info.batch_kv_cache_resource->blocks(0, group.tag());
+    for (const size_t pos : chunkCachePositions(malloc_info, group.config())) {
+        if (!malloc_info.reuse_cache || pos >= blocks.size() || isNullBlockIdx(blocks[pos])) {
+            required_positions.insert(pos);
+        }
+    }
+    return required_positions;
+}
+
 void appendPoolSummary(std::ostringstream&          os,
                        bool&                        has_any,
                        int                          group_id,
@@ -652,6 +681,17 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
 
     const int seq_len        = malloc_info.complete_token_ids->seqLength();
     const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
+    for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
+        const auto& tag              = config_.groupTags()[static_cast<size_t>(group_id)];
+        const auto& group            = *kv_cache_groups_[static_cast<size_t>(group_id)];
+        const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, common_seq_len);
+        const auto  common_slots     = static_cast<size_t>(group.needBlocksNum(group_common_seq, 0));
+        for (const size_t pos : chunkRequiredPositions(malloc_info, group)) {
+            if (pos < common_slots) {
+                prepared.required_positions[static_cast<size_t>(group_id)].insert(pos);
+            }
+        }
+    }
     prepared.materialize_status =
         evaluatePreparedInitCapacity(malloc_info, reserveBlocksNum(), prepared, context != nullptr);
     if (prepared.materialize_status != MallocStatus::NONE) {
@@ -763,8 +803,13 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
-            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
+            const auto  required_positions = chunkCachePositions(malloc_info, config_.group(tag));
+            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(block_ids,
+                                                                         group_seq_len,
+                                                                         malloc_info.reuse_cache,
+                                                                         reserve_step,
+                                                                         &filled_positions,
+                                                                         required_positions)) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = group_id;
@@ -1425,7 +1470,6 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
     const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
     const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
     const int   reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
 
@@ -1436,8 +1480,13 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
         const auto  group            = kv_cache_groups_[static_cast<size_t>(group_id)];
         const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
         const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
-        const auto  need             = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
+        const auto  required_positions = chunkRequiredPositions(malloc_info, *group);
+        const auto  need               = group->getNeedBlocks(group_common_seq,
+                                                              group_seq_len,
+                                                              malloc_info.complete_token_ids->getReserveStep(),
+                                                              reuse_blocks_len,
+                                                              reuse_enabled,
+                                                              required_positions);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }
@@ -2020,8 +2069,6 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
     const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
     const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
-    const bool  reuse_enabled      = malloc_info.reuse_cache;
 
     size_t total_reservable_blocks = 0;
     {
@@ -2044,13 +2091,15 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
         const int    group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_common_seq_len);
         const int    group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_seq_len);
         const int    group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, tag);
-        const auto&  group_required_positions =
+        const auto& base_required_positions =
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
-        const auto   need           = kv_cache_groups_[group_index]->getNeedBlocks(group_common_seq,
+        const auto group_required_positions =
+            chunkRequiredPositions(malloc_info, *kv_cache_groups_[group_index], base_required_positions);
+        const auto need = kv_cache_groups_[group_index]->getNeedBlocks(group_common_seq,
                                                                        group_seq_len,
-                                                                       reserve_step,
+                                                                       malloc_info.complete_token_ids->getReserveStep(),
                                                                        group_reuse_blocks_len,
-                                                                       reuse_enabled,
+                                                                       malloc_info.reuse_cache,
                                                                        group_required_positions);
         const int    need_blocks    = need.common_blocks + batch_size * need.extra_blocks;
         const size_t planned_blocks = static_cast<size_t>(std::max(need_blocks, 0));

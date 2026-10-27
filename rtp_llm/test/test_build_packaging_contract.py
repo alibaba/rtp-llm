@@ -81,6 +81,47 @@ def _load_setup_module():
 
 
 class BuildPackagingContractTest(TestCase):
+    def test_ppu_native_install_matches_main_sdk_and_ml_pins(self):
+        from packaging.specifiers import SpecifierSet
+
+        setup_module = _load_setup_module()
+        with patch.object(setup_module, "detect_build_config", return_value="ppu"):
+            requirements = {
+                Requirement(s).name: Requirement(s)
+                for s in setup_module.get_all_dependencies()
+            }
+        for name, version in {
+            "transformers": "4.57.1",
+            "sentence-transformers": "2.7.0",
+            "huggingface-hub": "0.36.2",
+            "pyarrow": "17.0.0",
+            "grpcio-tools": "1.62.0",
+            "tilelang": "0.1.13",
+            "apache-tvm-ffi": "0.1.12",
+            "torch-c-dlpack-ext": "0.1.5",
+        }.items():
+            self.assertEqual(str(requirements[name].specifier), "==" + version)
+        self.assertNotIn("xgrammar", requirements)
+        self.assertNotIn("decord", requirements)
+        self.assertIn("cp312-cp312", requirements["torch"].url)
+        self.assertIn("75.0", requirements["setuptools"].specifier)
+        self.assertNotIn("70.3.0", requirements["setuptools"].specifier)
+        with (PROJECT_ROOT / "pyproject.toml").open("rb") as source:
+            supported = SpecifierSet(tomllib.load(source)["project"]["requires-python"])
+        self.assertIn("3.12", supported)
+        self.assertNotIn("3.13", supported)
+
+    def test_ppu_exclusions_do_not_remove_cuda_dependencies(self):
+        setup_module = _load_setup_module()
+        with patch.object(setup_module, "detect_build_config", return_value="cuda13"):
+            requirements = {
+                Requirement(s).name: Requirement(s)
+                for s in setup_module.get_all_dependencies()
+            }
+        self.assertEqual(str(requirements["transformers"].specifier), "==5.2.0")
+        self.assertIn("xgrammar", requirements)
+        self.assertIn("decord", requirements)
+
     def test_native_test_command_preserves_multiple_cpp_targets(self):
         setup_module = _load_setup_module()
         command = setup_module.BazelTest(Distribution())
@@ -213,7 +254,22 @@ class BuildPackagingContractTest(TestCase):
                 )
         exec(
             compile(
-                ast.Module(body=[requirement_function], type_ignores=[]),
+                ast.Module(
+                    body=[
+                        node
+                        for node in module.body
+                        if (
+                            isinstance(node, ast.Assign)
+                            and any(
+                                isinstance(target, ast.Name)
+                                and target.id == "_PPU_LOCK_SKIPPED"
+                                for target in node.targets
+                            )
+                        )
+                        or node is requirement_function
+                    ],
+                    type_ignores=[],
+                ),
                 "arch_select.bzl",
                 "exec",
             ),
@@ -1106,7 +1162,23 @@ class BuildPackagingContractTest(TestCase):
                     if Requirement(req).name.replace("_", "-") == "deep-gemm"
                 ]
                 self.assertEqual(len(pins), 1)
-                self.assertEqual(pins[0].url, expected_deepgemm)
+                owner_expected = expected_deepgemm
+                if owner == "internal":
+                    owner_lock = (
+                        overlay.parent / "deps/requirements_lock_torch_gpu_cuda13.txt"
+                    ).read_text()
+                    owner_pin = re.search(
+                        r"^deep-gemm @ (\S+) \\\n\s+--hash=sha256:([0-9a-f]{64})",
+                        owner_lock,
+                        re.MULTILINE,
+                    )
+                    self.assertIsNotNone(owner_pin)
+                    owner_expected = (
+                        re.sub(r"^http://", "https://", owner_pin[1])
+                        + "#sha256="
+                        + owner_pin[2]
+                    )
+                self.assertEqual(pins[0].url, owner_expected)
                 self.assertTrue(pins[0].url.startswith("https://"))
         # CUDA13 Native metadata must consume the same hash-pinned artifact as
         # main's real Bazel dependency owner, retaining public-wheel HTTPS.

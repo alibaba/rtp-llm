@@ -58,7 +58,10 @@ class NormalComparerGraphStatusTest(unittest.TestCase):
             with self.subTest(actual_count=actual_count):
                 self._assert_compare_failed(
                     expected,
-                    {"response": "same output", "aux_info": {"iter_count": actual_count}},
+                    {
+                        "response": "same output",
+                        "aux_info": {"iter_count": actual_count},
+                    },
                     "iter_count",
                 )
 
@@ -264,7 +267,9 @@ class NormalComparerPromptScoringTest(unittest.TestCase):
             self.assertEqual(scoring[field], expected)
 
     def test_full_prompt_arrays_match_golden_heads(self):
-        self.comparer.compare_result(self._parse(self.payload), self._parse(self.payload))
+        self.comparer.compare_result(
+            self._parse(self.payload), self._parse(self.payload)
+        )
         actual = copy.deepcopy(self.payload)
         scoring = actual["prompt_logprobs"]
         scoring["topk_token_ids"] = scoring.pop("topk_token_ids_head")
@@ -290,7 +295,9 @@ class NormalComparerPromptScoringTest(unittest.TestCase):
             invalid.append((field, actual))
         for field, actual in invalid:
             with self.subTest(field=field), self.assertRaises(SmokeException) as raised:
-                self.comparer.compare_result(self._parse(self.payload), self._parse(actual))
+                self.comparer.compare_result(
+                    self._parse(self.payload), self._parse(actual)
+                )
             self.assertEqual(raised.exception.error_status, QueryStatus.COMPARE_FAILED)
             self.assertIn("prompt_logits", raised.exception.message)
 
@@ -311,8 +318,20 @@ class NormalComparerIncrementalResponseTest(unittest.TestCase):
             with self.subTest(response=response):
                 with self.assertRaises(SmokeException) as raised:
                     self.comparer.curl_response_to_json(self.query, response)
-                self.assertEqual(raised.exception.error_status, QueryStatus.VISIT_FAILED)
-                self.assertIn("Streaming response chunks are empty", raised.exception.message)
+                self.assertEqual(
+                    raised.exception.error_status, QueryStatus.VISIT_FAILED
+                )
+                self.assertIn(
+                    "stream ended before the final record, last payload:",
+                    raised.exception.message,
+                )
+
+    def test_single_error_payload_preserves_original_failure(self):
+        payload = b'data:{"error_code":8205,"message":"Socket closed"}'
+        with self.assertRaises(SmokeException) as raised:
+            self.comparer.curl_response_to_json(self.query, [payload])
+        self.assertEqual(raised.exception.error_status, QueryStatus.VISIT_FAILED)
+        self.assertIn(payload.decode("utf-8"), raised.exception.message)
 
     def test_incremental_chunks_keep_response_and_final_metadata(self):
         chunks = [
@@ -323,7 +342,11 @@ class NormalComparerIncrementalResponseTest(unittest.TestCase):
         response.append(b"data: [DONE]")
         self.assertEqual(
             self.comparer.curl_response_to_json(self.query, response),
-            {"response": "firstsecond", "aux_info": {"iter_count": 2}, "finished": True},
+            {
+                "response": "firstsecond",
+                "aux_info": {"iter_count": 2},
+                "finished": True,
+            },
         )
 
 

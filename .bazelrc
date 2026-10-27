@@ -378,6 +378,10 @@ build:arm --copt=-Wno-array-parameter # boringssl
 # remote_kv_cache
 build:remote_kv_cache --define=use_remote_kv_cache=true
 
+# rdma: no platform config enables this — default OFF everywhere; only the
+# internal overlay builds select the RDMA impls behind this flag.
+build:rdma --define=use_rdma=true
+
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE --copt -DEXCLUDE_SM_100=1 --copt -DEXCLUDE_SM_120=1
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 
@@ -426,6 +430,43 @@ test:rocm --test_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin
 
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
+
+# internal source overrides (only loaded when internal_source symlink exists)
+
+# PPU SDK 2.1 / CUDA 13. Source the SDK envsetup.sh before invoking Bazel.
+build:ppu --copt -DENABLE_DEEP_EP=1
+build:ppu --copt -DUSE_ACCL_EP=0
+build:ppu --config=cuda
+build:ppu --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.9"
+build:ppu --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.9"
+build:ppu --copt="-DENABLE_FP8=1"
+build:ppu --define=using_cuda12_9=false
+build:ppu --copt -w # too many warning by ppu compiler
+build:ppu --copt="-DUSE_PPU=1"
+build:ppu --copt="-DUSE_AIU=1"
+build:ppu --action_env TF_CUDA_VERSION="13.0"
+build:ppu --host_action_env TF_CUDA_VERSION="13.0"
+build:ppu --repo_env=TF_CUDA_VERSION=13.0
+build:ppu --copt="-DFMHA_SUPPORT_SPLIT=1"
+build:ppu --define=use_ppu=true
+build:ppu --copt="-DENABLE_TRITON=1"
+build:ppu --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+build:ppu --define=enable_triton=true
+build:ppu --define=NVSHMEM_DIR=/usr/local/PPU_SDK/sailSHMEM
+build:ppu --action_env CUDA_HOME="/usr/local/PPU_SDK/CUDA_SDK/"
+build:ppu --action_env CUDA_PATH="/usr/local/PPU_SDK/CUDA_SDK/"
+build:ppu --action_env PPU_SDK="/usr/local/PPU_SDK/"
+build:ppu --python_top=//:python312_ppu
+build:ppu --repo_env=PYTHON_BIN_PATH="/opt/conda312/bin/python3"
+build:ppu --action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
+build:ppu --host_action_env PYTHON_BIN_PATH="/opt/conda312/bin/python3"
+build:ppu --action_env LD_LIBRARY_PATH="/opt/conda312/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
+test:ppu --test_env PPU_HOME="/usr/local/PPU_SDK/"
+test:ppu --test_env PIP_INDEX_URL="https://artlab.alibaba-inc.com/1/PYPI/simple/"
+# ppu-smi must stay on PATH: triton picks its PPU backend in is_ppu_device()
+# via shutil.which("ppu-smi"); without it tests compile CUDA cubins for PPU KMD.
+test:ppu --test_env PATH="/opt/conda312/bin:/usr/local/PPU_SDK/ppu-smi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+test:ppu --test_env LD_LIBRARY_PATH="/opt/conda312/lib/:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
 
 # internal source overrides (only loaded in the internal monorepo checkout)
 try-import %workspace%/../internal_source/.internal_bazelrc

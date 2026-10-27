@@ -31,7 +31,9 @@ long_live_port_locks = []
 
 
 def _resolve_server_python(current_env: Dict[str, str]) -> str:
-    server_python = current_env.get("RTP_SERVER_PYTHON", sys.executable)
+    server_python = current_env.get(
+        "RTP_SERVER_PYTHON", current_env.get("RTP_PYTHON_BIN", sys.executable)
+    )
 
     if server_python != sys.executable and sys.prefix != sys.base_prefix:
         venv_site_packages = [
@@ -41,9 +43,7 @@ def _resolve_server_python(current_env: Dict[str, str]) -> str:
         ]
         python_path = current_env.get("PYTHONPATH", "")
         current_env["PYTHONPATH"] = os.pathsep.join(
-            path
-            for path in (python_path, *venv_site_packages)
-            if path
+            path for path in (python_path, *venv_site_packages) if path
         )
         logging.info(
             "Appended native venv site-packages for server Python: %s",
@@ -570,7 +570,9 @@ class MagaServerManager(object):
                         total += 1
                     content = "".join(tail)
                     if total > max_lines:
-                        content = f"... ({total - max_lines} lines truncated)\n" + content
+                        content = (
+                            f"... ({total - max_lines} lines truncated)\n" + content
+                        )
                 elif max_chars > 0:
                     content = ""
                     total_chars = 0
@@ -578,12 +580,18 @@ class MagaServerManager(object):
                         total_chars += len(chunk)
                         content = (content + chunk)[-max_chars:]
                     if total_chars > max_chars:
-                        content = f"... ({total_chars - max_chars} chars truncated)\n" + content
+                        content = (
+                            f"... ({total_chars - max_chars} chars truncated)\n"
+                            + content
+                        )
                     return content
                 else:
                     content = stream.read()
             if max_chars > 0 and len(content) > max_chars:
-                content = f"... ({len(content) - max_chars} chars truncated)\n" + content[-max_chars:]
+                content = (
+                    f"... ({len(content) - max_chars} chars truncated)\n"
+                    + content[-max_chars:]
+                )
             return content
         except Exception as error:
             logging.warning("Failed to read log file %s: %s", self._log_file, error)

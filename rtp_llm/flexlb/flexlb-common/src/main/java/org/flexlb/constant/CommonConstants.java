@@ -17,5 +17,4 @@ public class CommonConstants {
      * Port offset between HTTP port and gRPC port = HTTP port + GRPC_PORT_OFFSET
      */
     public static final int GRPC_PORT_OFFSET = 1;
-
 }

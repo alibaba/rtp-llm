@@ -17,6 +17,7 @@ import shutil
 import site
 import subprocess
 import sys
+import time
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
@@ -94,10 +95,17 @@ def _native_install_key(source_path):
 
 
 def _cache_key(package_name, version, source_path):
+    # The interpreter ABI is part of the build identity too: a host can serve
+    # jobs running different Python versions from the same pip variant (the
+    # 2026-10-23 ppu312 pool swap ran cp312 jobs alongside the cp310 bazel
+    # lane), and a cached copy materialized under one interpreter breaks the
+    # other (cp312-abi3 tvm_ffi core.abi3.so references Py_Version, undefined
+    # on 3.10). Key on it so each interpreter stages its own copy.
+    py_tag = "cp%d%d" % sys.version_info[:2]
     variant = _build_variant(source_path)
     if variant is None:
         variant = "native-" + _native_install_key(source_path)
-    return "%s_python-%s__%s" % (package_name, version, variant)
+    return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
 
 
 def copy_package_with_lock(package_name, cache_dir):
@@ -159,7 +167,9 @@ def copy_package_with_lock(package_name, cache_dir):
                 # Native wheels can contain links into their original venv.
                 # A persistent copy must remain usable after that venv is pruned.
                 preserve_links = _build_variant(source_path) is not None
-                shutil.copytree(source_path, target_package_path, symlinks=preserve_links)
+                shutil.copytree(
+                    source_path, target_package_path, symlinks=preserve_links
+                )
             else:
                 shutil.copy2(source_path, target_package_path)
 
@@ -175,7 +185,8 @@ def copy_package_with_lock(package_name, cache_dir):
                             f"[Package Copy] Copying {libs_dir_name} directory..."
                         )
                         shutil.copytree(
-                            libs_source, libs_target,
+                            libs_source,
+                            libs_target,
                             symlinks=_build_variant(source_path) is not None,
                         )
 
@@ -318,43 +329,65 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     ``cached_ops/tmp/<op_name>.lock``; eviction takes that same lock and re-judges
     staleness only inside it, so it cannot delete an op directory that a concurrent
     compile or load is using or has just refreshed.
+
+    The lock wait is deliberately near-non-blocking: a stale op left behind only
+    costs its consumer one rebuild, while blocking behind a long compile here
+    silently stalls test startup (observed as a 664s pre-test gap).
     """
+    started = time.monotonic()
     stale_candidates = []
-    for root, _dirs, files in os.walk(workspace, followlinks=False):
-        op_dir = Path(root)
-        # FlashInfer layout only: cached_ops/<op_name>/build.ninja (never trust an
-        # unrelated build.ninja deeper in the tree).
-        if op_dir.parent.name != "cached_ops" or "build.ninja" not in files:
-            continue
-        if _flashinfer_op_is_stale(op_dir):
-            stale_candidates.append(op_dir)
+    # FlashInfer layout only: cached_ops/<op_name>/build.ninja. Scan that one
+    # directory directly instead of walking the workspace tree: the workspace
+    # root must never be treated as enumerable (a HOME-sized root once dragged
+    # the whole FUSE-mounted model library into this scan).
+    cached_ops_root = workspace / "cached_ops"
+    if cached_ops_root.is_dir():
+        for op_dir in sorted(cached_ops_root.iterdir()):
+            if (op_dir / "build.ninja").is_file() and _flashinfer_op_is_stale(op_dir):
+                stale_candidates.append(op_dir)
+    logging.info(
+        f"[Package Setup] FlashInfer eviction scan found "
+        f"{len(stale_candidates)} stale candidate(s) under {workspace}"
+    )
+    evicted = 0
+    skipped = 0
     for op_dir in sorted(stale_candidates):
         lock_dir = op_dir.parent / "tmp"
         try:
             lock_dir.mkdir(parents=True, exist_ok=True)
-            lock = FileLock(str(lock_dir / f"{op_dir.name}.lock"), timeout=300)
+            lock = FileLock(str(lock_dir / f"{op_dir.name}.lock"), timeout=3)
             with lock:
                 # Re-read the rules under the op's own lock: a compile that ran
                 # since the first pass may have replaced the stale rules already.
                 if _flashinfer_op_is_stale(op_dir):
                     shutil.rmtree(op_dir, ignore_errors=True)
+                    evicted += 1
                     logging.info(
                         f"[Package Setup] Evicted stale FlashInfer cache op: {op_dir}"
                     )
         except Timeout:
             # Somebody else owns the op (likely recompiling it); leave it alone.
+            skipped += 1
             logging.info(f"[Package Setup] Skipped eviction of {op_dir}: lock busy")
+    logging.info(
+        f"[Package Setup] FlashInfer eviction done in "
+        f"{time.monotonic() - started:.1f}s: evicted={evicted} skipped={skipped} "
+        f"of {len(stale_candidates)} candidate(s)"
+    )
 
 
 def setup_jit_cache(cache_dir=None, packages=None):
+    logging.info("[Package Setup] setup_jit_cache starting")
     bootstrap_remote_jit_dir()
     # Ordinary Native environments need an installation-specific initial workspace.
     # Keep this an automatic default so the runtime manager can still scope it;
     # an explicitly supplied FLASHINFER_WORKSPACE_BASE retains main's opt-out.
-    flashinfer_default_base = Path.home()
+    flashinfer_default_base = Path.home() / ".cache" / "flashinfer"
     flashinfer_fallback_name = "flashinfer"
     if not (os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")):
-        flashinfer_fallback_name = "flashinfer-native-" + _native_install_key(sys.prefix)
+        flashinfer_fallback_name = "flashinfer-native-" + _native_install_key(
+            sys.prefix
+        )
         flashinfer_default_base = (
             Path.home() / ".cache" / "rtp-native-jit" / _native_install_key(sys.prefix)
         )
@@ -362,7 +395,6 @@ def setup_jit_cache(cache_dir=None, packages=None):
         "FLASHINFER_WORKSPACE_BASE",
         flashinfer_default_base,
         flashinfer_fallback_name,
-        cache_subpath=(".cache", "flashinfer"),
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
     cache_env.configure_writable_cache_env(

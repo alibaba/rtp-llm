@@ -30,8 +30,7 @@ class RandomStrategyTest {
     @BeforeEach
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig())
-                .thenReturn(new FlexlbConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         endpoints = StrategyTestSupport.endpointRegistry(configService);
         strategy = new RandomStrategy(new WorkerDirectory(endpoints));
     }
@@ -43,7 +42,8 @@ class RandomStrategyTest {
 
     @Test
     void rejectsNonVitSelection() {
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> strategy.select(context(1L), RoleType.PREFILL, null));
     }
 
@@ -56,8 +56,7 @@ class RandomStrategyTest {
     void returnsPinnedVitMetadata() {
         registerVit("127.0.0.3", 8080, "group-a");
 
-        try (SelectedRole selected = strategy.select(
-                context(3L), RoleType.VIT, "group-a")) {
+        try (SelectedRole selected = strategy.select(context(3L), RoleType.VIT, "group-a")) {
             assertNotNull(selected);
             assertEquals(RoleType.VIT, selected.serverStatus().getRole());
             assertEquals(3L, selected.serverStatus().getRequestId());
@@ -71,8 +70,7 @@ class RandomStrategyTest {
     @Test
     void skipsOtherGroups() {
         registerVit("127.0.0.4", 8080, "group-a");
-        assertNull(strategy.select(
-                context(4L), RoleType.VIT, "group-b"));
+        assertNull(strategy.select(context(4L), RoleType.VIT, "group-b"));
     }
 
     @Test
@@ -83,26 +81,26 @@ class RandomStrategyTest {
         Map<String, Integer> counts = new HashMap<>();
 
         for (int request = 0; request < 3_000; request++) {
-            try (SelectedRole selected = strategy.select(
-                    context(10_000L + request), RoleType.VIT, null)) {
+            try (SelectedRole selected =
+                    strategy.select(context(10_000L + request), RoleType.VIT, null)) {
                 assertNotNull(selected);
-                counts.merge(
-                        selected.serverStatus().getServerIp(), 1, Integer::sum);
+                counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
             }
         }
 
         assertEquals(3, counts.size());
-        counts.forEach((worker, count) -> assertTrue(
-                count > 750 && count < 1_250,
-                worker + " was selected " + count + " times"));
+        counts.forEach(
+                (worker, count) ->
+                        assertTrue(
+                                count > 750 && count < 1_250,
+                                worker + " was selected " + count + " times"));
     }
 
     private void registerVit(String ip, int port, String group) {
-        WorkerStatus status = StrategyTestSupport.workerStatus(
-                RoleType.VIT, group, ip, port, port + 1,
-                true, 0L, 0L);
-        StrategyTestSupport.publishEndpoint(endpoints,
-                RoleType.VIT, ip + ":" + port, status);
+        WorkerStatus status =
+                StrategyTestSupport.workerStatus(
+                        RoleType.VIT, group, ip, port, port + 1, true, 0L, 0L);
+        StrategyTestSupport.publishEndpoint(endpoints, RoleType.VIT, ip + ":" + port, status);
     }
 
     private static BalanceContext context(long requestId) {

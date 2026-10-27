@@ -30,8 +30,8 @@ from setuptools import Extension
 from setuptools import setup as setuptools_setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
-from setuptools.command.sdist import sdist
 from setuptools.command.egg_info import FileList
+from setuptools.command.sdist import sdist
 
 # Force line-buffered stdout so prints appear in real-time in CI (no TTY)
 if hasattr(sys.stdout, "reconfigure"):
@@ -226,7 +226,7 @@ def check_build_prerequisites() -> None:
         major = int(sv.split(".")[0])
         if major < 75:
             errors.append(
-                f"setuptools >= 64.0 required (found {sv}). "
+                f"setuptools >= 75.0 required (found {sv}). "
                 "Fix: uv pip install --compile-bytecode 'setuptools>=75.0,<82'"
             )
         elif major >= 82:
@@ -742,7 +742,12 @@ _CUDA_PY_WRAPPER_TEST_BAZEL_STAGED_OUTPUTS = [
     (
         _STAGED_OUTPUT_TEST,
         "//rtp_llm/cpp/models/context_parallel/test:th_context_parallel_py_wrapper_test",
-        (("libth_context_parallel_py_wrapper_test.so", "test/libth_context_parallel_py_wrapper_test.so"),),
+        (
+            (
+                "libth_context_parallel_py_wrapper_test.so",
+                "test/libth_context_parallel_py_wrapper_test.so",
+            ),
+        ),
     ),
     (
         _STAGED_OUTPUT_TEST,
@@ -752,7 +757,12 @@ _CUDA_PY_WRAPPER_TEST_BAZEL_STAGED_OUTPUTS = [
     (
         _STAGED_OUTPUT_TEST,
         "//rtp_llm/cpp/cache/test:cache_config_creator_py_test",
-        (("libcache_config_creator_py_test.so", "test/libcache_config_creator_py_test.so"),),
+        (
+            (
+                "libcache_config_creator_py_test.so",
+                "test/libcache_config_creator_py_test.so",
+            ),
+        ),
     ),
 ]
 
@@ -889,7 +899,11 @@ def _selected_bazel_staged_outputs(build_config: str, bazel_args: list = None) -
         # The CUDA 13 CRC32 binding links nvcomp from a pinned Bazel wheel.
         # Stage that exact runtime next to the engine's $ORIGIN libraries.
         staged_outputs.append(
-            (_STAGED_OUTPUT_RUNTIME, "//3rdparty/nvcomp:nvcomp_runtime", ("libnvcomp.so.5",))
+            (
+                _STAGED_OUTPUT_RUNTIME,
+                "//3rdparty/nvcomp:nvcomp_runtime",
+                ("libnvcomp.so.5",),
+            )
         )
     include_remote_kvcm = _include_remote_kvcm_runtime_outputs(bazel_args)
     if include_remote_kvcm:
@@ -1298,11 +1312,15 @@ def copy_staged_outputs_to_build_lib(
             ):
                 continue
             relative = Path("rtp_llm") / (
-                Path(relative) if kind == _STAGED_OUTPUT_PYTHON else Path("libs") / relative
+                Path(relative)
+                if kind == _STAGED_OUTPUT_PYTHON
+                else Path("libs") / relative
             )
             source = project_root / relative
             if not source.is_file():
-                raise RuntimeError(f"Missing staged wheel output for {target}: {source}")
+                raise RuntimeError(
+                    f"Missing staged wheel output for {target}: {source}"
+                )
             files.append((source, build_lib / relative))
 
     # build_py may have copied an older build's libraries before build_ext ran.
@@ -1780,6 +1798,16 @@ def get_all_dependencies() -> list:
 
     # Get package names from platform deps to check for conflicts
     platform_packages = set()
+    internal_overlay = _find_overlay("internal_source/pyproject_internal.toml")
+    if internal_overlay:
+        with open(internal_overlay, "rb") as source:
+            settings = _load_toml().load(source).get("tool", {}).get("rtp-llm", {})
+        excluded = settings.get("base_dependencies_exclude", {}).get(
+            detect_build_config(), []
+        )
+        platform_packages.update(
+            name.lower().replace("-", "_").replace(".", "_") for name in excluded
+        )
     for dep in platform_deps:
         # Extract package name (before @ or version specifier)
         if "@" in dep:

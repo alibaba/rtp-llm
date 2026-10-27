@@ -26,25 +26,24 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class WorkerAddressServiceTest {
 
-    @Mock
-    private EngineHealthReporter engineHealthReporter;
+    @Mock private EngineHealthReporter engineHealthReporter;
 
-    @Mock
-    private ModelMetaConfig modelMetaConfig;
+    @Mock private ModelMetaConfig modelMetaConfig;
 
-    @Mock
-    private ServiceDiscovery serviceDiscovery;
+    @Mock private ServiceDiscovery serviceDiscovery;
 
-    @Mock
-    private ConfigService configService;
+    @Mock private ConfigService configService;
 
     private WorkerAddressService workerAddressService;
 
     @BeforeEach
     void setUp() {
-        Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
-        workerAddressService = new WorkerAddressService(engineHealthReporter, modelMetaConfig,
-                serviceDiscovery, configService);
+        Mockito.lenient()
+                .when(configService.loadBalanceConfig())
+                .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        workerAddressService =
+                new WorkerAddressService(
+                        engineHealthReporter, modelMetaConfig, serviceDiscovery, configService);
     }
 
     @AfterEach
@@ -60,8 +59,8 @@ class WorkerAddressServiceTest {
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
         when(serviceDiscovery.getHosts(address)).thenReturn(List.of());
 
-        List<WorkerHost> actualHosts = workerAddressService.getEngineWorkerList(
-                modelName, RoleType.PREFILL);
+        List<WorkerHost> actualHosts =
+                workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL);
 
         Assertions.assertTrue(actualHosts.isEmpty());
         Mockito.verify(serviceDiscovery).getHosts(address);
@@ -76,8 +75,8 @@ class WorkerAddressServiceTest {
         when(serviceDiscovery.getHosts(anyString()))
                 .thenThrow(new IllegalStateException("discovery unavailable"));
 
-        List<WorkerHost> actualHosts = workerAddressService.getEngineWorkerList(
-                modelName, RoleType.PREFILL);
+        List<WorkerHost> actualHosts =
+                workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL);
 
         Assertions.assertTrue(actualHosts.isEmpty());
     }
@@ -86,13 +85,14 @@ class WorkerAddressServiceTest {
     void discoveredWorkersAreConvertedThroughThePublicBoundary() {
         String modelName = "TestModel";
         String address = "TestAddress";
-        List<WorkerHost> expectedHosts = List.of(new WorkerHost("127.0.0.1", 8080, 8081, 8082, "site1", "group1"));
+        List<WorkerHost> expectedHosts =
+                List.of(new WorkerHost("127.0.0.1", 8080, 8081, 8082, "site1", "group1"));
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
         when(serviceDiscovery.getHosts(anyString())).thenReturn(expectedHosts);
 
-        List<WorkerHost> actualHosts = workerAddressService.getEngineWorkerList(
-                modelName, RoleType.PREFILL);
+        List<WorkerHost> actualHosts =
+                workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL);
 
         Assertions.assertFalse(actualHosts.isEmpty());
     }

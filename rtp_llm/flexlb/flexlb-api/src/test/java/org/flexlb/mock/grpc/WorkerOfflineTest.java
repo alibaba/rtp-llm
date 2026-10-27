@@ -61,26 +61,30 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
         int existingBatches = getPrefillEndpoint().getInflightBatchCount();
 
-        mockPrefillWorker.setBehavior(mockPrefillWorker.getBehavior().toBuilder()
-                .enqueueDelayMs(10_000).build());
+        mockPrefillWorker.setBehavior(
+                mockPrefillWorker.getBehavior().toBuilder().enqueueDelayMs(10_000).build());
         CompletableFuture<Response> future2 = submitRequest(20002);
         long receivedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (mockPrefillWorker.getEnqueueCount() < 2 && System.nanoTime() < receivedDeadline) {
             Thread.sleep(10);
         }
-        assertEquals(2, mockPrefillWorker.getEnqueueCount(),
+        assertEquals(
+                2,
+                mockPrefillWorker.getEnqueueCount(),
                 "Worker must receive the request before shutdown makes its ACK ambiguous");
         mockPrefillWorker.stop();
-        assertThrows(TimeoutException.class,
-                () -> future2.get(2, TimeUnit.SECONDS));
-        assertFalse(future2.isDone(),
+        assertThrows(TimeoutException.class, () -> future2.get(2, TimeUnit.SECONDS));
+        assertFalse(
+                future2.isDone(),
                 "offline post-send ambiguity must wait for authoritative Engine status");
 
         // 6. The uncertain request remains charged; releasing it here could double-admit.
         assertTrue(getPrefillEndpoint().getInflightBatchCount() >= existingBatches + 1);
 
         // 7. Verify: decode worker never received any enqueue request (PD-separated)
-        assertEquals(0, mockDecodeWorker.getEnqueueCount(),
+        assertEquals(
+                0,
+                mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any request");
     }
 
@@ -108,9 +112,13 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
             Thread.sleep(10);
         }
         assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
-        assertEquals(1, mockPrefillWorker.getEnqueueCount(), "Unsent request must never reach the worker");
+        assertEquals(
+                1,
+                mockPrefillWorker.getEnqueueCount(),
+                "Unsent request must never reach the worker");
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
     }
+
     @Timeout(20)
     void workerOffline_uncertainDispatchExpiresWithoutAuthoritativeStatus() throws Exception {
         config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);

@@ -82,8 +82,7 @@ class DynamicEngineScaleTest {
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(63200);
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
@@ -181,7 +180,8 @@ class DynamicEngineScaleTest {
         assertTrue(removed.has("running_at_removal"), "response must report running_at_removal");
         assertTrue(removed.has("waiting_at_removal"), "response must report waiting_at_removal");
         // Default mode is graceful: an idle engine drains instantly.
-        assertEquals("graceful", removed.path("mode").asText(), "remove must default to graceful drain");
+        assertEquals(
+                "graceful", removed.path("mode").asText(), "remove must default to graceful drain");
         assertTrue(removed.path("drained").asBoolean(), "an idle engine must drain cleanly");
 
         // Port no longer accepts connections (server listener closed).
@@ -189,17 +189,20 @@ class DynamicEngineScaleTest {
 
         // No residue in the services map or the server map.
         assertFalse(services.containsKey(victimPort), "services map still holds removed port");
-        assertFalse(serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
+        assertFalse(
+                serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
 
         // Discovery file no longer lists the removed engine.
         JsonNode root = readDiscoveryFile();
-        assertEquals(List.of("127.0.0.1:" + (basePort - 1)),
+        assertEquals(
+                List.of("127.0.0.1:" + (basePort - 1)),
                 hostList(root, "mock.prefill.hosts.address"));
         assertEquals(List.of(), hostList(root, "mock.decode.hosts.address"));
 
         // /snapshot has no residue either.
         for (JsonNode engine : getJson("/snapshot").path("engines")) {
-            assertFalse(("127.0.0.1:" + victimPort).equals(engine.path("grpc_addr").asText()),
+            assertFalse(
+                    ("127.0.0.1:" + victimPort).equals(engine.path("grpc_addr").asText()),
                     "removed engine still visible in /snapshot");
         }
     }
@@ -213,14 +216,17 @@ class DynamicEngineScaleTest {
         StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
         services.get(port).generateStreamCall(input(6001, 10), collector);
 
-        awaitCondition(() -> services.get(port).getRunningCount() >= 1, 2_000,
+        awaitCondition(
+                () -> services.get(port).getRunningCount() >= 1,
+                2_000,
                 "decode request should be running before remove");
 
         long t0 = System.nanoTime();
         JsonNode removed = postOk("/remove_engine", "{\"port\":" + port + "}");
         long blockedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
 
-        assertTrue(removed.path("running_at_removal").asInt() >= 1,
+        assertTrue(
+                removed.path("running_at_removal").asInt() >= 1,
                 "running_at_removal should report the in-flight request, got "
                         + removed.path("running_at_removal"));
         // CONTRACT (user ruling 2026-09): a planned scale-in must not fail any
@@ -228,14 +234,19 @@ class DynamicEngineScaleTest {
         // finishes (~2s here) instead of cutting its stream, and the stream
         // itself completes normally (no transport error).
         assertEquals("graceful", removed.path("mode").asText());
-        assertTrue(removed.path("drained").asBoolean(),
+        assertTrue(
+                removed.path("drained").asBoolean(),
                 "a 2s request must drain within the 60s default bound");
-        assertTrue(blockedMs >= 1_500,
+        assertTrue(
+                blockedMs >= 1_500,
                 "graceful remove must await the in-flight request, blocked only "
-                        + blockedMs + "ms");
-        assertTrue(collector.done.await(5, TimeUnit.SECONDS),
+                        + blockedMs
+                        + "ms");
+        assertTrue(
+                collector.done.await(5, TimeUnit.SECONDS),
                 "in-flight stream did not reach its terminal state");
-        assertNull(collector.error,
+        assertNull(
+                collector.error,
                 "graceful removal must not fail the in-flight request: " + collector.error);
         awaitPortRefused(port);
     }
@@ -250,24 +261,29 @@ class DynamicEngineScaleTest {
         StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
         services.get(port).generateStreamCall(input(6002, 10), collector);
 
-        awaitCondition(() -> services.get(port).getRunningCount() >= 1, 2_000,
+        awaitCondition(
+                () -> services.get(port).getRunningCount() >= 1,
+                2_000,
                 "decode request should be running before remove");
 
         long t0 = System.nanoTime();
-        JsonNode removed = postOk("/remove_engine",
-                "{\"port\":" + port + ", \"mode\":\"abrupt\"}");
+        JsonNode removed = postOk("/remove_engine", "{\"port\":" + port + ", \"mode\":\"abrupt\"}");
         long blockedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
 
         assertEquals("abrupt", removed.path("mode").asText());
         assertFalse(removed.path("drained").asBoolean(), "abrupt mode never reports drained");
-        assertTrue(blockedMs < 1_000,
+        assertTrue(
+                blockedMs < 1_000,
                 "abrupt removal must not wait for the in-flight request, blocked "
-                        + blockedMs + "ms");
-        assertTrue(removed.path("running_at_removal").asInt() >= 1,
+                        + blockedMs
+                        + "ms");
+        assertTrue(
+                removed.path("running_at_removal").asInt() >= 1,
                 "abrupt removal still reports the in-flight counters");
         // The victim stream dies (transport error) — the documented abrupt
         // fallout the master-side failure machinery is exercised with.
-        assertTrue(collector.done.await(5, TimeUnit.SECONDS),
+        assertTrue(
+                collector.done.await(5, TimeUnit.SECONDS),
                 "abrupt teardown must terminate the in-flight stream");
         awaitPortRefused(port);
         assertFalse(services.containsKey(port), "services map still holds removed port");
@@ -283,15 +299,19 @@ class DynamicEngineScaleTest {
         StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
         services.get(port).generateStreamCall(input(6003, 10), collector);
 
-        awaitCondition(() -> services.get(port).getRunningCount() >= 1, 2_000,
+        awaitCondition(
+                () -> services.get(port).getRunningCount() >= 1,
+                2_000,
                 "decode request should be running before remove");
 
-        JsonNode removed = postOk("/remove_engine",
-                "{\"port\":" + port + ", \"drain_timeout_ms\": 300}");
+        JsonNode removed =
+                postOk("/remove_engine", "{\"port\":" + port + ", \"drain_timeout_ms\": 300}");
         assertEquals("graceful", removed.path("mode").asText());
-        assertFalse(removed.path("drained").asBoolean(),
+        assertFalse(
+                removed.path("drained").asBoolean(),
                 "a request outliving the bound must not report drained");
-        assertTrue(removed.path("drain_ms").asLong() >= 250,
+        assertTrue(
+                removed.path("drain_ms").asLong() >= 250,
                 "drain_ms should reflect the bounded wait, got "
                         + removed.path("drain_ms").asLong());
         awaitPortRefused(port);
@@ -310,10 +330,12 @@ class DynamicEngineScaleTest {
         List<Future<HttpResponse<String>>> outcomes = new ArrayList<>();
         try {
             for (int i = 0; i < 2; i++) {
-                outcomes.add(pool.submit(() -> {
-                    startGate.await();
-                    return post("/remove_engine", "{\"port\":" + victimPort + "}");
-                }));
+                outcomes.add(
+                        pool.submit(
+                                () -> {
+                                    startGate.await();
+                                    return post("/remove_engine", "{\"port\":" + victimPort + "}");
+                                }));
             }
             startGate.countDown();
             int successfulRemovals = 0;
@@ -331,7 +353,8 @@ class DynamicEngineScaleTest {
                     assertEquals(victimPort, removed.path("port").asInt());
                 } else {
                     assertEquals(404, response.statusCode(), response.body());
-                    assertEquals("engine not found for port " + victimPort,
+                    assertEquals(
+                            "engine not found for port " + victimPort,
                             removed.path("error").asText());
                 }
             }
@@ -341,7 +364,8 @@ class DynamicEngineScaleTest {
         }
         awaitPortRefused(victimPort);
         assertFalse(services.containsKey(victimPort), "services map still holds removed port");
-        assertFalse(serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
+        assertFalse(
+                serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
         // The bootstrap decode-0 is STILL hosted — only the dynamic victim is
         // gone.  The file must equal the live services map, role by role
         // (covers "no victim residue" without hard-coding the bootstrap set).
@@ -363,14 +387,15 @@ class DynamicEngineScaleTest {
 
         StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
         services.get(victimPort).generateStreamCall(input(6004, 10), collector);
-        awaitCondition(() -> services.get(victimPort).getRunningCount() >= 1, 2_000,
+        awaitCondition(
+                () -> services.get(victimPort).getRunningCount() >= 1,
+                2_000,
                 "decode request should be running before remove");
 
         ExecutorService pool = Executors.newSingleThreadExecutor();
         Future<JsonNode> removal;
         try {
-            removal = pool.submit(() ->
-                    postOk("/remove_engine", "{\"port\":" + victimPort + "}"));
+            removal = pool.submit(() -> postOk("/remove_engine", "{\"port\":" + victimPort + "}"));
             // Wait until the drain is provably in progress: the discovery file
             // loses the victim immediately (phase 1) while the request (~1.5s)
             // is still running.  (The lambda body wraps readDiscoveryFile's
@@ -379,15 +404,16 @@ class DynamicEngineScaleTest {
             awaitCondition(
                     () -> {
                         try {
-                            return !hostList(readDiscoveryFile(),
-                                            "mock.decode.hosts.address")
+                            return !hostList(readDiscoveryFile(), "mock.decode.hosts.address")
                                     .contains("127.0.0.1:" + victimHttpPort);
                         } catch (IOException e) {
                             return false;
                         }
                     },
-                    2_000, "victim must leave the discovery file when the drain starts");
-            assertTrue(services.containsKey(victimPort),
+                    2_000,
+                    "victim must leave the discovery file when the drain starts");
+            assertTrue(
+                    services.containsKey(victimPort),
                     "a draining engine stays hosted until the teardown");
 
             // Concurrent add mid-drain: its file rewrite must not resurrect
@@ -395,14 +421,17 @@ class DynamicEngineScaleTest {
             JsonNode added = postOk("/add_engine", "{\"role\":\"prefill\"}");
             int addedHttpPort = added.path("port").asInt() - 1;
             List<String> prefillHosts = hostList(readDiscoveryFile(), "mock.prefill.hosts.address");
-            assertTrue(prefillHosts.contains("127.0.0.1:" + addedHttpPort),
+            assertTrue(
+                    prefillHosts.contains("127.0.0.1:" + addedHttpPort),
                     "concurrent add must appear in the discovery file mid-drain: " + prefillHosts);
-            assertFalse(hostList(readDiscoveryFile(), "mock.decode.hosts.address")
+            assertFalse(
+                    hostList(readDiscoveryFile(), "mock.decode.hosts.address")
                             .contains("127.0.0.1:" + victimHttpPort),
                     "concurrent add must not resurrect the draining engine");
 
             JsonNode removed = removal.get(30, TimeUnit.SECONDS);
-            assertTrue(removed.path("drained").asBoolean(),
+            assertTrue(
+                    removed.path("drained").asBoolean(),
                     "the 1.5s request must finish inside the drain bound");
         } finally {
             pool.shutdownNow();
@@ -426,14 +455,15 @@ class DynamicEngineScaleTest {
         JavaMockEngineCluster.FastRpcService prefill = services.get(prefillPort);
         assertNotNull(prefill, "added prefill engine must be in the services map");
 
-        EngineRpcService.EnqueueBatchResponsePB ack = enqueue(prefill,
-                batch(31, slot(0, input(101, 100), input(102, 200))));
+        EngineRpcService.EnqueueBatchResponsePB ack =
+                enqueue(prefill, batch(31, slot(0, input(101, 100), input(102, 200))));
         assertEquals(2, ack.getSuccessesCount());
 
-        EngineRpcService.WorkerStatusPB finished = awaitStatus(prefill,
-                status -> status.getFinishedTaskListCount() == 2, 2_000);
-        assertTrue(finished.getFinishedTaskListList().stream()
-                .allMatch(task -> task.getExecutionTimeMs() == 10));
+        EngineRpcService.WorkerStatusPB finished =
+                awaitStatus(prefill, status -> status.getFinishedTaskListCount() == 2, 2_000);
+        assertTrue(
+                finished.getFinishedTaskListList().stream()
+                        .allMatch(task -> task.getExecutionTimeMs() == 10));
 
         // Decode leg: dynamically added decode engine runs generateStreamCall
         // end-to-end (decode queue scheduling → completion → streamed output).
@@ -444,7 +474,8 @@ class DynamicEngineScaleTest {
 
         StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
         decode.generateStreamCall(input(201, 10), collector);
-        assertTrue(collector.done.await(10, TimeUnit.SECONDS),
+        assertTrue(
+                collector.done.await(10, TimeUnit.SECONDS),
                 "generateStreamCall on the added decode engine did not complete");
         assertNull(collector.error, "generateStreamCall failed: " + collector.error);
         assertEquals(1, collector.values.size(), "expected exactly one streamed output frame");
@@ -466,27 +497,42 @@ class DynamicEngineScaleTest {
         try {
             for (int i = 0; i < 12; i++) {
                 final boolean prefill = i % 2 == 0;
-                outcomes.add(pool.submit(() -> post("/add_engine",
-                        "{\"role\":\"" + (prefill ? "prefill" : "decode") + "\"}").statusCode()));
+                outcomes.add(
+                        pool.submit(
+                                () ->
+                                        post(
+                                                        "/add_engine",
+                                                        "{\"role\":\""
+                                                                + (prefill ? "prefill" : "decode")
+                                                                + "\"}")
+                                                .statusCode()));
             }
             for (int i = 0; i < 12; i++) {
-                outcomes.add(pool.submit(() -> {
-                    List<Integer> candidates = services.keySet().stream()
-                            .filter(p -> !bootstrapPorts.contains(p)).toList();
-                    if (candidates.isEmpty()) {
-                        return 0; // nothing to remove this round — fine
-                    }
-                    int victim = candidates.get(
-                            ThreadLocalRandom.current().nextInt(candidates.size()));
-                    return post("/remove_engine", "{\"port\":" + victim + "}").statusCode();
-                }));
+                outcomes.add(
+                        pool.submit(
+                                () -> {
+                                    List<Integer> candidates =
+                                            services.keySet().stream()
+                                                    .filter(p -> !bootstrapPorts.contains(p))
+                                                    .toList();
+                                    if (candidates.isEmpty()) {
+                                        return 0; // nothing to remove this round — fine
+                                    }
+                                    int victim =
+                                            candidates.get(
+                                                    ThreadLocalRandom.current()
+                                                            .nextInt(candidates.size()));
+                                    return post("/remove_engine", "{\"port\":" + victim + "}")
+                                            .statusCode();
+                                }));
             }
             for (Future<Integer> outcome : outcomes) {
                 // Every mutation either succeeded or cleanly failed with a
                 // documented status (409 conflict / 404 victim gone); both leave
                 // the file consistent. Anything else fails here.
                 int code = outcome.get(60, TimeUnit.SECONDS);
-                assertTrue(code == 200 || code == 404 || code == 409 || code == 500,
+                assertTrue(
+                        code == 200 || code == 404 || code == 409 || code == 500,
                         "unexpected status " + code + " from concurrent mutation");
             }
         } finally {
@@ -496,15 +542,18 @@ class DynamicEngineScaleTest {
         // The file must parse completely (no torn write window) and its entry
         // set must equal the live services map, role by role.
         JsonNode root = readDiscoveryFile();
-        assertEquals(expectedAddresses("PREFILL"),
+        assertEquals(
+                expectedAddresses("PREFILL"),
                 hostList(root, "mock.prefill.hosts.address"),
                 "discovery file diverged from services map (prefill)");
-        assertEquals(expectedAddresses("DECODE"),
+        assertEquals(
+                expectedAddresses("DECODE"),
                 hostList(root, "mock.decode.hosts.address"),
                 "discovery file diverged from services map (decode)");
         // And no temporary files are left behind.
         try (var files = Files.list(tempDir)) {
-            assertTrue(files.noneMatch(p -> p.getFileName().toString().endsWith(".tmp")),
+            assertTrue(
+                    files.noneMatch(p -> p.getFileName().toString().endsWith(".tmp")),
                     "leftover .tmp discovery file after concurrent rewrites");
         }
     }
@@ -513,14 +562,18 @@ class DynamicEngineScaleTest {
     void addEngineRejectsBadRoleConflictingPortAndUnknownEngine() throws Exception {
         int basePort = startCluster(model("10", 1.0), 1, 1);
 
-        assertEquals(400, post("/add_engine", "{\"role\":\"worker\"}").statusCode(),
+        assertEquals(
+                400,
+                post("/add_engine", "{\"role\":\"worker\"}").statusCode(),
                 "unknown role must be rejected");
-        assertEquals(400, post("/add_engine", "{}").statusCode(),
-                "missing role must be rejected");
-        assertEquals(409, post("/add_engine", "{\"role\":\"decode\",\"port\":" + basePort + "}")
-                        .statusCode(),
+        assertEquals(400, post("/add_engine", "{}").statusCode(), "missing role must be rejected");
+        assertEquals(
+                409,
+                post("/add_engine", "{\"role\":\"decode\",\"port\":" + basePort + "}").statusCode(),
                 "port already in use must be rejected");
-        assertEquals(404, post("/remove_engine", "{\"port\":59999}").statusCode(),
+        assertEquals(
+                404,
+                post("/remove_engine", "{\"port\":59999}").statusCode(),
                 "removing an unknown engine must 404");
     }
 
@@ -573,11 +626,14 @@ class DynamicEngineScaleTest {
     private int startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
         int basePort = allocatePortBlock();
-        scheduler = Executors.newScheduledThreadPool(4, r -> {
-            Thread thread = new Thread(r, "scale-test-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        r -> {
+                            Thread thread = new Thread(r, "scale-test-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         bossGroup = new NioEventLoopGroup(1);
         workerGroup = new NioEventLoopGroup(4);
         services = new ConcurrentHashMap<>();
@@ -592,24 +648,62 @@ class DynamicEngineScaleTest {
         config.uniqueEngineIps = false;
 
         for (int i = 0; i < nPrefill; i++) {
-            JavaMockEngineCluster.startEngine(config, model, serversByPort, bossGroup,
-                    workerGroup, services, scheduler, stats, "prefill", "prefill-" + i,
-                    basePort + i, i);
+            JavaMockEngineCluster.startEngine(
+                    config,
+                    model,
+                    serversByPort,
+                    bossGroup,
+                    workerGroup,
+                    services,
+                    scheduler,
+                    stats,
+                    "prefill",
+                    "prefill-" + i,
+                    basePort + i,
+                    i);
         }
         for (int i = 0; i < nDecode; i++) {
-            JavaMockEngineCluster.startEngine(config, model, serversByPort, bossGroup,
-                    workerGroup, services, scheduler, stats, "decode", "decode-" + i,
-                    basePort + nPrefill + i, nPrefill + i);
+            JavaMockEngineCluster.startEngine(
+                    config,
+                    model,
+                    serversByPort,
+                    bossGroup,
+                    workerGroup,
+                    services,
+                    scheduler,
+                    stats,
+                    "decode",
+                    "decode-" + i,
+                    basePort + nPrefill + i,
+                    nPrefill + i);
         }
 
         discoveryFile = tempDir.resolve("discovery-" + System.nanoTime() + ".json");
-        discoveryFileStore = new DiscoveryFileStore(discoveryFile.toString(),
-                config.prefillDomain, config.decodeDomain);
+        discoveryFileStore =
+                new DiscoveryFileStore(
+                        discoveryFile.toString(), config.prefillDomain, config.decodeDomain);
         discoveryFileStore.rewrite(services);
-        engineManager = new DynamicEngineManager(config, model, services, serversByPort,
-                bossGroup, workerGroup, scheduler, stats, discoveryFileStore, null);
-        controlServer = new MockControlServer(services, serversByPort, bossGroup, workerGroup,
-                "127.0.0.1", 0, engineManager);
+        engineManager =
+                new DynamicEngineManager(
+                        config,
+                        model,
+                        services,
+                        serversByPort,
+                        bossGroup,
+                        workerGroup,
+                        scheduler,
+                        stats,
+                        discoveryFileStore,
+                        null);
+        controlServer =
+                new MockControlServer(
+                        services,
+                        serversByPort,
+                        bossGroup,
+                        workerGroup,
+                        "127.0.0.1",
+                        0,
+                        engineManager);
         controlServer.start();
         return basePort;
     }
@@ -625,17 +719,27 @@ class DynamicEngineScaleTest {
     }
 
     private HttpResponse<String> post(String path, String body) throws Exception {
-        return HTTP_CLIENT.send(HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build(), HttpResponse.BodyHandlers.ofString());
+        return HTTP_CLIENT.send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
     }
 
     private JsonNode getJson(String path) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
-                .GET().build(), HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response =
+                HTTP_CLIENT.send(
+                        HttpRequest.newBuilder()
+                                .uri(
+                                        URI.create(
+                                                "http://127.0.0.1:"
+                                                        + controlServer.getPort()
+                                                        + path))
+                                .GET()
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(), "GET " + path + " failed");
         return MAPPER.readTree(response.body());
     }
@@ -646,15 +750,15 @@ class DynamicEngineScaleTest {
 
     /** Real gRPC round-trip against the engine on {@code port}. */
     private EngineRpcService.WorkerStatusPB grpcWorkerStatus(int port) {
-        ManagedChannel channel = ManagedChannelBuilder.forAddress("127.0.0.1", port)
-                .usePlaintext()
-                .build();
+        ManagedChannel channel =
+                ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
         try {
             return RpcServiceGrpc.newBlockingStub(channel)
                     .withDeadlineAfter(5, TimeUnit.SECONDS)
-                    .getWorkerStatus(EngineRpcService.StatusVersionPB.newBuilder()
-                            .setLatestFinishedVersion(0)
-                            .build());
+                    .getWorkerStatus(
+                            EngineRpcService.StatusVersionPB.newBuilder()
+                                    .setLatestFinishedVersion(0)
+                                    .build());
         } finally {
             channel.shutdownNow();
         }
@@ -718,12 +822,21 @@ class DynamicEngineScaleTest {
     private MockPerformanceModel model(String formula, double decodeStepMs) throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0,
-                        "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
+        MAPPER.writeValue(
+                performance.toFile(),
+                Map.of(
+                        "block_size",
+                        1024,
+                        "sleep_scale",
+                        1.0,
+                        "prefill",
+                        Map.of("scale", 1.0),
+                        "decode",
+                        Map.of(
+                                "scale",
+                                1.0,
+                                "step_ms_by_batch",
+                                List.of(List.of(1, decodeStepMs)))));
         // Local intake: MockPerformanceModel reads the prefill expression from the
         // FLEXLB_CONFIG env (FormulaEstimatorConfig), not the upstream
         // PREFILL_TIME_FORMULA env — use the shared test helper.
@@ -732,11 +845,13 @@ class DynamicEngineScaleTest {
     }
 
     private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(1)
+                                        .build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -748,9 +863,10 @@ class DynamicEngineScaleTest {
         EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
                 EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
         for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
+            slot.addRequests(
+                    EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
+                            .setInput(input)
+                            .build());
         }
         return slot.build();
     }
@@ -771,17 +887,20 @@ class DynamicEngineScaleTest {
 
     private static EngineRpcService.WorkerStatusPB status(
             JavaMockEngineCluster.FastRpcService service) {
-        return unary(observer -> service.getWorkerStatus(
-                EngineRpcService.StatusVersionPB.newBuilder()
-                        .setLatestFinishedVersion(0)
-                        .build(),
-                observer));
+        return unary(
+                observer ->
+                        service.getWorkerStatus(
+                                EngineRpcService.StatusVersionPB.newBuilder()
+                                        .setLatestFinishedVersion(0)
+                                        .build(),
+                                observer));
     }
 
     private static EngineRpcService.WorkerStatusPB awaitStatus(
             JavaMockEngineCluster.FastRpcService service,
             Predicate<EngineRpcService.WorkerStatusPB> predicate,
-            long timeoutMs) throws InterruptedException {
+            long timeoutMs)
+            throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         EngineRpcService.WorkerStatusPB last = null;
         while (System.nanoTime() < deadline) {
@@ -798,21 +917,21 @@ class DynamicEngineScaleTest {
     private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
         AtomicReference<T> response = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
+        invocation.accept(
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(T value) {
+                        response.set(value);
+                    }
 
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-            }
+                    @Override
+                    public void onError(Throwable throwable) {
+                        error.set(throwable);
+                    }
 
-            @Override
-            public void onCompleted() {
-            }
-        });
+                    @Override
+                    public void onCompleted() {}
+                });
         if (error.get() != null) {
             throw new AssertionError(error.get());
         }

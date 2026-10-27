@@ -402,6 +402,7 @@ class FIFOSchedulerConfig:
     max_context_batch_size: int
     max_inited_kv_cache_streams: int
     pdfusion_scheduler_mode: str
+    prefill_chunk_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1499,7 +1500,8 @@ class QuantMethod:
     GptQ: typing.ClassVar[QuantMethod]  # value = <QuantMethod.GptQ: 2>
     ModelOptFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.ModelOptFP4: 10>
     QuarkMXFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.QuarkMXFP4: 11>
-    None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
+    # Runtime keyword member: QuantMethod.__members__["None"].
+    # None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
     OmniQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.OmniQuant: 5>
     PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
     SmoothQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.SmoothQuant: 4>

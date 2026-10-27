@@ -67,8 +67,7 @@ class ComprehensiveFaultInjectionTest {
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(62900);
     private static final long TOTAL_KV_TOKENS = 6_291_456L;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
@@ -127,7 +126,9 @@ class ComprehensiveFaultInjectionTest {
 
         try {
             // Inject enqueue_error via HTTP
-            httpPost(controlServer.getPort(), "/inject",
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
                     "{\"port\":" + prefillPort + ",\"type\":\"enqueue_error\",\"enabled\":true}");
             assertTrue(prefill.getFaultConfig().isFailOnEnqueue());
 
@@ -135,32 +136,38 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 1; i <= 5; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
-                assertEquals(0, response.getSuccessesCount(),
+                assertEquals(
+                        0,
+                        response.getSuccessesCount(),
                         "request " + i + " should have 0 successes under enqueue_error");
-                assertEquals(1, response.getErrorsCount(),
+                assertEquals(
+                        1,
+                        response.getErrorsCount(),
                         "request " + i + " should have 1 error under enqueue_error");
             }
 
             // Clear injection
-            httpPost(controlServer.getPort(), "/clear_inject",
-                    "{\"port\":" + prefillPort + "}");
+            httpPost(controlServer.getPort(), "/clear_inject", "{\"port\":" + prefillPort + "}");
             assertFalse(prefill.getFaultConfig().isFailOnEnqueue());
 
             // Enqueue 5 more — all should succeed
             for (int i = 6; i <= 10; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
-                assertEquals(1, response.getSuccessesCount(),
+                assertEquals(
+                        1,
+                        response.getSuccessesCount(),
                         "request " + i + " should succeed after clearing enqueue_error");
-                assertEquals(0, response.getErrorsCount(),
+                assertEquals(
+                        0,
+                        response.getErrorsCount(),
                         "request " + i + " should have 0 errors after clearing");
             }
 
             // Verify no leak
             awaitAllInflightZero(5_000);
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
+                assertFalse(service.isLeakDetected(), "no leak on port " + service.getGrpcPort());
             }
         } finally {
             cleanupCluster();
@@ -179,39 +186,44 @@ class ComprehensiveFaultInjectionTest {
 
         try {
             // Inject generate_error via HTTP
-            httpPost(controlServer.getPort(), "/inject",
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
                     "{\"port\":" + prefillPort + ",\"type\":\"generate_error\",\"enabled\":true}");
             assertTrue(prefillServices.get(0).getFaultConfig().isGenerateError());
 
             // Call generateStreamCall 5 times — all should return error
             for (int i = 1; i <= 5; i++) {
-                GenerateResult result = generateStream(
-                        prefillServices.get(0), input(i, 10), 3_000);
-                assertTrue(result.completed(), "generateStreamCall " + i + " should complete (onError)");
+                GenerateResult result = generateStream(prefillServices.get(0), input(i, 10), 3_000);
+                assertTrue(
+                        result.completed(),
+                        "generateStreamCall " + i + " should complete (onError)");
                 assertNotNull(result.error(), "generateStreamCall " + i + " should have error");
-                assertTrue(result.error().getMessage().contains("generate_error"),
-                        "error message should contain 'generate_error', got: " + result.error().getMessage());
+                assertTrue(
+                        result.error().getMessage().contains("generate_error"),
+                        "error message should contain 'generate_error', got: "
+                                + result.error().getMessage());
             }
 
             // Clear injection
-            httpPost(controlServer.getPort(), "/clear_inject",
-                    "{\"port\":" + prefillPort + "}");
+            httpPost(controlServer.getPort(), "/clear_inject", "{\"port\":" + prefillPort + "}");
             assertFalse(prefillServices.get(0).getFaultConfig().isGenerateError());
 
             // Call generateStreamCall 5 more times — all should succeed
             for (int i = 6; i <= 10; i++) {
-                GenerateResult result = generateStream(
-                        prefillServices.get(0), input(i, 10), 5_000);
-                assertTrue(result.completed(), "generateStreamCall " + i + " should complete after clear");
-                assertNotNull(result.response(), "generateStreamCall " + i + " should have response");
+                GenerateResult result = generateStream(prefillServices.get(0), input(i, 10), 5_000);
+                assertTrue(
+                        result.completed(),
+                        "generateStreamCall " + i + " should complete after clear");
+                assertNotNull(
+                        result.response(), "generateStreamCall " + i + " should have response");
                 assertEquals(i, result.response().getRequestId());
             }
 
             // Verify no leak
             awaitAllInflightZero(5_000);
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
+                assertFalse(service.isLeakDetected(), "no leak on port " + service.getGrpcPort());
             }
         } finally {
             cleanupCluster();
@@ -230,40 +242,47 @@ class ComprehensiveFaultInjectionTest {
 
         try {
             // Inject no_respond via HTTP
-            httpPost(controlServer.getPort(), "/inject",
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
                     "{\"port\":" + prefillPort + ",\"type\":\"no_respond\",\"enabled\":true}");
             assertTrue(prefillServices.get(0).getFaultConfig().isNoRespond());
 
             // Call generateStreamCall 3 times — all should time out (no response within 2s)
             for (int i = 1; i <= 3; i++) {
                 long start = System.nanoTime();
-                GenerateResult result = generateStream(
-                        prefillServices.get(0), input(i, 10), 2_000);
+                GenerateResult result = generateStream(prefillServices.get(0), input(i, 10), 2_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertFalse(result.completed(),
+                assertFalse(
+                        result.completed(),
                         "generateStreamCall " + i + " should time out under no_respond");
-                assertTrue(elapsedMs >= 1_500,
-                        "generateStreamCall " + i + " should wait ~2s before timeout, got " + elapsedMs + "ms");
+                assertTrue(
+                        elapsedMs >= 1_500,
+                        "generateStreamCall "
+                                + i
+                                + " should wait ~2s before timeout, got "
+                                + elapsedMs
+                                + "ms");
             }
 
             // Clear injection
-            httpPost(controlServer.getPort(), "/clear_inject",
-                    "{\"port\":" + prefillPort + "}");
+            httpPost(controlServer.getPort(), "/clear_inject", "{\"port\":" + prefillPort + "}");
             assertFalse(prefillServices.get(0).getFaultConfig().isNoRespond());
 
             // Call generateStreamCall 3 more times — all should succeed
             for (int i = 4; i <= 6; i++) {
-                GenerateResult result = generateStream(
-                        prefillServices.get(0), input(i, 10), 5_000);
-                assertTrue(result.completed(), "generateStreamCall " + i + " should complete after clear");
-                assertNotNull(result.response(), "generateStreamCall " + i + " should have response");
+                GenerateResult result = generateStream(prefillServices.get(0), input(i, 10), 5_000);
+                assertTrue(
+                        result.completed(),
+                        "generateStreamCall " + i + " should complete after clear");
+                assertNotNull(
+                        result.response(), "generateStreamCall " + i + " should have response");
             }
 
             // Verify no leak
             awaitAllInflightZero(5_000);
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
+                assertFalse(service.isLeakDetected(), "no leak on port " + service.getGrpcPort());
             }
         } finally {
             cleanupCluster();
@@ -284,16 +303,21 @@ class ComprehensiveFaultInjectionTest {
         try {
             // Verify baseline: available == total
             EngineRpcService.WorkerStatusPB before = workerStatus(prefill, 0);
-            assertEquals(TOTAL_KV_TOKENS, before.getAvailableKvCache(),
+            assertEquals(
+                    TOTAL_KV_TOKENS,
+                    before.getAvailableKvCache(),
                     "baseline available KV should equal total");
-            double beforeRatio = 1.0 - (double) before.getAvailableKvCache() / before.getTotalKvCache();
+            double beforeRatio =
+                    1.0 - (double) before.getAvailableKvCache() / before.getTotalKvCache();
             assertEquals(0.0, beforeRatio, 0.001, "baseline KV ratio should be ~0");
 
             // Set KV pressure via HTTP — absolute active_kv_tokens semantics,
             // 4M tokens for >0.5 ratio (50000 as suggested in the task spec is
             // insufficient for >0.5 with total=6,291,456)
             long pressureTokens = 4_000_000L;
-            httpPost(controlServer.getPort(), "/set_kv_pressure",
+            httpPost(
+                    controlServer.getPort(),
+                    "/set_kv_pressure",
                     "{\"port\":" + prefillPort + ",\"active_kv_tokens\":" + pressureTokens + "}");
             assertEquals(pressureTokens, prefill.getFaultConfig().getKvPressureTokens());
 
@@ -301,20 +325,31 @@ class ComprehensiveFaultInjectionTest {
             EngineRpcService.WorkerStatusPB after = workerStatus(prefill, 0);
             long usedKv = after.getTotalKvCache() - after.getAvailableKvCache();
             double ratio = (double) usedKv / after.getTotalKvCache();
-            assertTrue(ratio > 0.5,
-                    "KV pressure should make used ratio > 0.5, got " + ratio
-                            + " (used=" + usedKv + ", total=" + after.getTotalKvCache() + ")");
-            assertTrue(after.getAvailableKvCache() < after.getTotalKvCache(),
+            assertTrue(
+                    ratio > 0.5,
+                    "KV pressure should make used ratio > 0.5, got "
+                            + ratio
+                            + " (used="
+                            + usedKv
+                            + ", total="
+                            + after.getTotalKvCache()
+                            + ")");
+            assertTrue(
+                    after.getAvailableKvCache() < after.getTotalKvCache(),
                     "available KV should be less than total under pressure");
 
             // Clear KV pressure (absolute zero)
-            httpPost(controlServer.getPort(), "/set_kv_pressure",
+            httpPost(
+                    controlServer.getPort(),
+                    "/set_kv_pressure",
                     "{\"port\":" + prefillPort + ",\"active_kv_tokens\":0}");
             assertEquals(0, prefill.getFaultConfig().getKvPressureTokens());
 
             // Verify recovery
             EngineRpcService.WorkerStatusPB recovered = workerStatus(prefill, 0);
-            assertEquals(TOTAL_KV_TOKENS, recovered.getAvailableKvCache(),
+            assertEquals(
+                    TOTAL_KV_TOKENS,
+                    recovered.getAvailableKvCache(),
                     "available KV should return to total after clearing pressure");
         } finally {
             cleanupCluster();
@@ -335,7 +370,9 @@ class ComprehensiveFaultInjectionTest {
 
         try {
             // Set queue depth limit to 2 via HTTP
-            httpPost(controlServer.getPort(), "/set_queue_depth",
+            httpPost(
+                    controlServer.getPort(),
+                    "/set_queue_depth",
                     "{\"port\":" + prefillPort + ",\"depth\":2}");
             assertEquals(2, prefill.getFaultConfig().getQueueDepthLimit());
 
@@ -353,13 +390,14 @@ class ComprehensiveFaultInjectionTest {
             }
 
             // Verify: at most 2 accepted, 3 rejected
-            assertTrue(accepted <= 2,
-                    "at most 2 requests should be accepted, got " + accepted);
-            assertEquals(3, rejected,
-                    "3 requests should be rejected by queue depth, got " + rejected);
+            assertTrue(accepted <= 2, "at most 2 requests should be accepted, got " + accepted);
+            assertEquals(
+                    3, rejected, "3 requests should be rejected by queue depth, got " + rejected);
 
             // Clear queue depth limit
-            httpPost(controlServer.getPort(), "/set_queue_depth",
+            httpPost(
+                    controlServer.getPort(),
+                    "/set_queue_depth",
                     "{\"port\":" + prefillPort + ",\"depth\":0}");
             assertEquals(0, prefill.getFaultConfig().getQueueDepthLimit());
 
@@ -369,13 +407,14 @@ class ComprehensiveFaultInjectionTest {
             // Enqueue after clearing — should succeed
             EngineRpcService.EnqueueBatchResponsePB response =
                     enqueue(prefill, batch(2999, slot(0, input(99, 10))));
-            assertEquals(1, response.getSuccessesCount(),
+            assertEquals(
+                    1,
+                    response.getSuccessesCount(),
                     "enqueue should succeed after clearing queue depth limit");
 
             awaitAllInflightZero(10_000);
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
+                assertFalse(service.isLeakDetected(), "no leak on port " + service.getGrpcPort());
             }
         } finally {
             cleanupCluster();
@@ -396,8 +435,12 @@ class ComprehensiveFaultInjectionTest {
 
         try {
             // Inject crash_after with n=3 via HTTP
-            httpPost(controlServer.getPort(), "/inject",
-                    "{\"port\":" + prefillPort + ",\"type\":\"crash_after\",\"enabled\":true,\"n\":3}");
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
+                    "{\"port\":"
+                            + prefillPort
+                            + ",\"type\":\"crash_after\",\"enabled\":true,\"n\":3}");
             assertEquals(3, prefill.getFaultConfig().getCrashAfterNRequests());
 
             // Enqueue requests one at a time
@@ -413,36 +456,38 @@ class ComprehensiveFaultInjectionTest {
                     emptyAfter++;
                 }
                 if (i == 3) {
-                    assertTrue(prefill.isStopped(),
+                    assertTrue(
+                            prefill.isStopped(),
                             "engine should be stopped after 3rd request (crash_after n=3)");
                 }
             }
 
             // First 2 succeed, 3rd triggers crash (empty response), 4-10 are stopped (empty)
-            assertEquals(2, succeeded,
-                    "2 requests should succeed before crash, got " + succeeded);
-            assertEquals(8, emptyAfter,
+            assertEquals(2, succeeded, "2 requests should succeed before crash, got " + succeeded);
+            assertEquals(
+                    8,
+                    emptyAfter,
                     "8 requests should get empty response after crash, got " + emptyAfter);
             assertTrue(prefill.isStopped(), "engine should be stopped after crash");
 
             // Restart via /start_engine — this now auto-clears fault config
             // and resets enqueueCount, so no /clear_inject needed
-            httpPost(controlServer.getPort(), "/start_engine",
-                    "{\"port\":" + prefillPort + "}");
+            httpPost(controlServer.getPort(), "/start_engine", "{\"port\":" + prefillPort + "}");
             assertFalse(prefill.isStopped(), "engine should be running after /start_engine");
-            assertEquals(0, prefill.getFaultConfig().getCrashAfterNRequests(),
+            assertEquals(
+                    0,
+                    prefill.getFaultConfig().getCrashAfterNRequests(),
                     "start_engine should have cleared crash_after fault config");
 
             // Verify recovery — enqueue should succeed
             EngineRpcService.EnqueueBatchResponsePB response =
                     enqueue(prefill, batch(3999, slot(0, input(99, 10))));
-            assertEquals(1, response.getSuccessesCount(),
-                    "enqueue should succeed after engine restart");
+            assertEquals(
+                    1, response.getSuccessesCount(), "enqueue should succeed after engine restart");
 
             awaitAllInflightZero(5_000);
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
+                assertFalse(service.isLeakDetected(), "no leak on port " + service.getGrpcPort());
             }
         } finally {
             cleanupCluster();
@@ -464,8 +509,14 @@ class ComprehensiveFaultInjectionTest {
         try {
             // Set enqueue delay via HTTP /inject
             long delayMs = 100;
-            httpPost(controlServer.getPort(), "/inject",
-                    "{\"port\":" + prefillPort + ",\"type\":\"enqueue_delay\",\"enabled\":true,\"delay_ms\":" + delayMs + "}");
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
+                    "{\"port\":"
+                            + prefillPort
+                            + ",\"type\":\"enqueue_delay\",\"enabled\":true,\"delay_ms\":"
+                            + delayMs
+                            + "}");
             assertEquals(delayMs, prefill.getFaultConfig().getEnqueueDelayMs());
 
             // Enqueue 5 requests — each should take at least delayMs
@@ -474,15 +525,23 @@ class ComprehensiveFaultInjectionTest {
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertEquals(1, response.getSuccessesCount(),
+                assertEquals(
+                        1,
+                        response.getSuccessesCount(),
                         "request " + i + " should succeed despite delay");
-                assertTrue(elapsedMs >= delayMs,
-                        "request " + i + " should take >= " + delayMs + "ms, got " + elapsedMs + "ms");
+                assertTrue(
+                        elapsedMs >= delayMs,
+                        "request "
+                                + i
+                                + " should take >= "
+                                + delayMs
+                                + "ms, got "
+                                + elapsedMs
+                                + "ms");
             }
 
             // Clear injection via HTTP /clear_inject
-            httpPost(controlServer.getPort(), "/clear_inject",
-                    "{\"port\":" + prefillPort + "}");
+            httpPost(controlServer.getPort(), "/clear_inject", "{\"port\":" + prefillPort + "}");
             assertEquals(0, prefill.getFaultConfig().getEnqueueDelayMs());
 
             // Enqueue 5 more — should be fast (no delay)
@@ -491,16 +550,22 @@ class ComprehensiveFaultInjectionTest {
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertEquals(1, response.getSuccessesCount(),
+                assertEquals(
+                        1,
+                        response.getSuccessesCount(),
                         "request " + i + " should succeed after clearing delay");
-                assertTrue(elapsedMs < delayMs,
-                        "request " + i + " should be fast after clearing delay, got " + elapsedMs + "ms");
+                assertTrue(
+                        elapsedMs < delayMs,
+                        "request "
+                                + i
+                                + " should be fast after clearing delay, got "
+                                + elapsedMs
+                                + "ms");
             }
 
             awaitAllInflightZero(5_000);
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
+                assertFalse(service.isLeakDetected(), "no leak on port " + service.getGrpcPort());
             }
         } finally {
             cleanupCluster();
@@ -524,48 +589,61 @@ class ComprehensiveFaultInjectionTest {
         try {
             // Set generate delay via HTTP /inject
             long delayMs = 200;
-            httpPost(controlServer.getPort(), "/inject",
-                    "{\"port\":" + prefillPort + ",\"type\":\"generate_delay\",\"enabled\":true,\"delay_ms\":" + delayMs + "}");
+            httpPost(
+                    controlServer.getPort(),
+                    "/inject",
+                    "{\"port\":"
+                            + prefillPort
+                            + ",\"type\":\"generate_delay\",\"enabled\":true,\"delay_ms\":"
+                            + delayMs
+                            + "}");
             assertEquals(delayMs, prefill.getFaultConfig().getGenerateDelayMs());
 
             // Call generateStreamCall 5 times — each should take at least delayMs
             for (int i = 1; i <= 5; i++) {
                 long start = System.nanoTime();
-                GenerateResult result = generateStream(
-                        prefill, input(i, 10), 5_000);
+                GenerateResult result = generateStream(prefill, input(i, 10), 5_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertTrue(result.completed(),
-                        "generateStreamCall " + i + " should complete");
-                assertNotNull(result.response(),
-                        "generateStreamCall " + i + " should have response");
-                assertTrue(elapsedMs >= delayMs * 0.8,
-                        "generateStreamCall " + i + " should take >= ~" + delayMs
-                                + "ms, got " + elapsedMs + "ms");
+                assertTrue(result.completed(), "generateStreamCall " + i + " should complete");
+                assertNotNull(
+                        result.response(), "generateStreamCall " + i + " should have response");
+                assertTrue(
+                        elapsedMs >= delayMs * 0.8,
+                        "generateStreamCall "
+                                + i
+                                + " should take >= ~"
+                                + delayMs
+                                + "ms, got "
+                                + elapsedMs
+                                + "ms");
             }
 
             // Clear generate delay via HTTP /clear_inject
-            httpPost(controlServer.getPort(), "/clear_inject",
-                    "{\"port\":" + prefillPort + "}");
+            httpPost(controlServer.getPort(), "/clear_inject", "{\"port\":" + prefillPort + "}");
             assertEquals(0, prefill.getFaultConfig().getGenerateDelayMs());
 
             // Call generateStreamCall 5 more times — should be fast
             for (int i = 6; i <= 10; i++) {
                 long start = System.nanoTime();
-                GenerateResult result = generateStream(
-                        prefill, input(i, 10), 5_000);
+                GenerateResult result = generateStream(prefill, input(i, 10), 5_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                assertTrue(result.completed(),
+                assertTrue(
+                        result.completed(),
                         "generateStreamCall " + i + " should complete after clearing");
-                assertNotNull(result.response(),
-                        "generateStreamCall " + i + " should have response");
-                assertTrue(elapsedMs < delayMs,
-                        "generateStreamCall " + i + " should be fast after clearing, got " + elapsedMs + "ms");
+                assertNotNull(
+                        result.response(), "generateStreamCall " + i + " should have response");
+                assertTrue(
+                        elapsedMs < delayMs,
+                        "generateStreamCall "
+                                + i
+                                + " should be fast after clearing, got "
+                                + elapsedMs
+                                + "ms");
             }
 
             awaitAllInflightZero(5_000);
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                assertFalse(service.isLeakDetected(),
-                        "no leak on port " + service.getGrpcPort());
+                assertFalse(service.isLeakDetected(), "no leak on port " + service.getGrpcPort());
             }
         } finally {
             cleanupCluster();
@@ -610,11 +688,14 @@ class ComprehensiveFaultInjectionTest {
     private int startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
         int basePort = allocatePortBlock(nPrefill + nDecode);
-        scheduler = Executors.newScheduledThreadPool(8, r -> {
-            Thread t = new Thread(r, "mock-engine-scheduler");
-            t.setDaemon(true);
-            return t;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        8,
+                        r -> {
+                            Thread t = new Thread(r, "mock-engine-scheduler");
+                            t.setDaemon(true);
+                            return t;
+                        });
         services = new ConcurrentHashMap<>();
         prefillServices = new ArrayList<>();
         decodeServices = new ArrayList<>();
@@ -624,24 +705,38 @@ class ComprehensiveFaultInjectionTest {
             // Pool sized ceil(TOTAL_KV_TOKENS / spb) = 6144 blocks so the
             // engine's available capacity equals the reported TOTAL_KV_TOKENS
             // exactly (capacity model v2: available = min(total, blocks x spb)).
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 6_144,
-                    new JavaMockEngineCluster.ClusterStats());
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "prefill",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            6_144,
+                            new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             prefillServices.add(service);
         }
         for (int i = 0; i < nDecode; i++) {
             int port = basePort + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 6_144,
-                    new JavaMockEngineCluster.ClusterStats());
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "decode",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            6_144,
+                            new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             decodeServices.add(service);
         }
 
-        controlServer = new MockControlServer(services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
+        controlServer =
+                new MockControlServer(
+                        services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
         controlServer.start();
         return basePort;
     }
@@ -653,11 +748,14 @@ class ComprehensiveFaultInjectionTest {
     private int startClusterWithGrpc(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
         int basePort = allocatePortBlock(nPrefill + nDecode);
-        scheduler = Executors.newScheduledThreadPool(8, r -> {
-            Thread t = new Thread(r, "mock-engine-scheduler");
-            t.setDaemon(true);
-            return t;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        8,
+                        r -> {
+                            Thread t = new Thread(r, "mock-engine-scheduler");
+                            t.setDaemon(true);
+                            return t;
+                        });
         bossGroup = new NioEventLoopGroup(1);
         workerGroup = new NioEventLoopGroup(8);
         services = new ConcurrentHashMap<>();
@@ -668,44 +766,60 @@ class ComprehensiveFaultInjectionTest {
         for (int i = 0; i < nPrefill; i++) {
             int port = basePort + i;
             // Same 6144-block pool as startCluster (see comment there).
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 6_144,
-                    new JavaMockEngineCluster.ClusterStats());
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "prefill",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            6_144,
+                            new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             prefillServices.add(service);
-            Server server = NettyServerBuilder.forPort(port)
-                    .bossEventLoopGroup(bossGroup)
-                    .workerEventLoopGroup(workerGroup)
-                    .channelType(NioServerSocketChannel.class)
-                    .directExecutor()
-                    .maxInboundMessageSize(16 * 1024 * 1024)
-                    .addService(service)
-                    .build()
-                    .start();
+            Server server =
+                    NettyServerBuilder.forPort(port)
+                            .bossEventLoopGroup(bossGroup)
+                            .workerEventLoopGroup(workerGroup)
+                            .channelType(NioServerSocketChannel.class)
+                            .directExecutor()
+                            .maxInboundMessageSize(16 * 1024 * 1024)
+                            .addService(service)
+                            .build()
+                            .start();
             serversByPort.put(port, server);
         }
         for (int i = 0; i < nDecode; i++) {
             int port = basePort + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 6_144,
-                    new JavaMockEngineCluster.ClusterStats());
+            JavaMockEngineCluster.FastRpcService service =
+                    new JavaMockEngineCluster.FastRpcService(
+                            "decode",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                            port,
+                            services,
+                            scheduler,
+                            model,
+                            6_144,
+                            new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             decodeServices.add(service);
-            Server server = NettyServerBuilder.forPort(port)
-                    .bossEventLoopGroup(bossGroup)
-                    .workerEventLoopGroup(workerGroup)
-                    .channelType(NioServerSocketChannel.class)
-                    .directExecutor()
-                    .maxInboundMessageSize(16 * 1024 * 1024)
-                    .addService(service)
-                    .build()
-                    .start();
+            Server server =
+                    NettyServerBuilder.forPort(port)
+                            .bossEventLoopGroup(bossGroup)
+                            .workerEventLoopGroup(workerGroup)
+                            .channelType(NioServerSocketChannel.class)
+                            .directExecutor()
+                            .maxInboundMessageSize(16 * 1024 * 1024)
+                            .addService(service)
+                            .build()
+                            .start();
             serversByPort.put(port, server);
         }
 
-        controlServer = new MockControlServer(services, serversByPort, bossGroup, workerGroup, "127.0.0.1", 0);
+        controlServer =
+                new MockControlServer(
+                        services, serversByPort, bossGroup, workerGroup, "127.0.0.1", 0);
         controlServer.start();
         return basePort;
     }
@@ -765,8 +879,11 @@ class ComprehensiveFaultInjectionTest {
         }
         StringBuilder sb = new StringBuilder("inflight not zero: ");
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            sb.append("port=").append(service.getGrpcPort())
-                    .append(" inflight=").append(service.getInflightCount()).append(" ");
+            sb.append("port=")
+                    .append(service.getGrpcPort())
+                    .append(" inflight=")
+                    .append(service.getInflightCount())
+                    .append(" ");
         }
         fail(sb.toString());
     }
@@ -799,27 +916,30 @@ class ComprehensiveFaultInjectionTest {
     private static GenerateResult generateStream(
             JavaMockEngineCluster.FastRpcService service,
             EngineRpcService.GenerateInputPB request,
-            long timeoutMs) throws InterruptedException {
+            long timeoutMs)
+            throws InterruptedException {
         AtomicReference<EngineRpcService.GenerateOutputsPB> response = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch latch = new CountDownLatch(1);
-        service.generateStreamCall(request, new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.GenerateOutputsPB value) {
-                response.set(value);
-            }
+        service.generateStreamCall(
+                request,
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(EngineRpcService.GenerateOutputsPB value) {
+                        response.set(value);
+                    }
 
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
+                    @Override
+                    public void onError(Throwable throwable) {
+                        error.set(throwable);
+                        latch.countDown();
+                    }
 
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
+                    @Override
+                    public void onCompleted() {
+                        latch.countDown();
+                    }
+                });
         boolean completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS);
         return new GenerateResult(completed, response.get(), error.get());
     }
@@ -828,8 +948,6 @@ class ComprehensiveFaultInjectionTest {
     //  Result record for generateStreamCall
     // ════════════════════════════════════════════════════════════════
 
-    record GenerateResult(boolean completed,
-                          EngineRpcService.GenerateOutputsPB response,
-                          Throwable error) {
-    }
+    record GenerateResult(
+            boolean completed, EngineRpcService.GenerateOutputsPB response, Throwable error) {}
 }

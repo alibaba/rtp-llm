@@ -47,6 +47,8 @@ struct GptModelInputs {
     // scheduling redesign no longer populates it (stays undefined).
     torch::Tensor lm_output_lengths;        // [total_batch_size]
     torch::Tensor prefix_lengths;           // [context_batch_size]
+    // First token of this request's FULL cache-store write; zero on its first chunk.
+    torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
     torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
@@ -108,6 +110,9 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
+    // Logging-only full prefill sequences, including cached prefixes; aligned with request_id.
+    std::optional<std::vector<torch::Tensor>> all_input_token_ids;
+    std::optional<std::vector<bool>>          request_is_multimodal;
 
 public:
     std::string debugString(bool force = false) const;

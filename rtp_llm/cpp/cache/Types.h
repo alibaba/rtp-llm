@@ -73,6 +73,9 @@ struct MallocInfo {
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
 
+    // Initial chunk admission reserves fixed sparse banks for this maximum grant.
+    int max_chunk_tokens = 0;
+
     int incrSeqLen() const;
 };
 

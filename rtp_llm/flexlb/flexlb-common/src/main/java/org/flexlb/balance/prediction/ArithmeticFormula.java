@@ -17,17 +17,24 @@ public final class ArithmeticFormula {
 
     // Bounded reuse also avoids one generated class per equal-model endpoint.
     private static final int MAX_COMPILED_FORMULAS = 128;
-    private static final Map<Node, Compiled> COMPILED = new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
+    private static final Map<Node, Compiled> COMPILED =
+            new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
 
     private final Compiled compiled;
 
-    private record Compiled(Executable full, ArithmeticFormulaCompiler.Incremental incremental) { }
+    private record Compiled(Executable full, ArithmeticFormulaCompiler.Incremental incremental) {}
+
     private final Set<String> referencedVariables;
 
     private ArithmeticFormula(Node root, Set<String> referencedVariables) {
         synchronized (COMPILED) {
-            this.compiled = COMPILED.computeIfAbsent(root, node -> new Compiled(
-                    ArithmeticFormulaCompiler.compile(node), ArithmeticFormulaCompiler.compileIncremental(node)));
+            this.compiled =
+                    COMPILED.computeIfAbsent(
+                            root,
+                            node ->
+                                    new Compiled(
+                                            ArithmeticFormulaCompiler.compile(node),
+                                            ArithmeticFormulaCompiler.compileIncremental(node)));
             if (COMPILED.size() > MAX_COMPILED_FORMULAS) {
                 COMPILED.remove(COMPILED.keySet().iterator().next());
             }
@@ -46,13 +53,17 @@ public final class ArithmeticFormula {
      *
      * @throws IllegalArgumentException for malformed expressions, unknown names, or invalid variable indices.
      */
-    public static ArithmeticFormula parse(String expression, Map<String, Integer> variables,
-                                          Set<String> aggregateExcludedVariables, boolean allowAggregates) {
+    public static ArithmeticFormula parse(
+            String expression,
+            Map<String, Integer> variables,
+            Set<String> aggregateExcludedVariables,
+            boolean allowAggregates) {
         if (expression == null) {
             throw new IllegalArgumentException("Formula expression is required");
         }
-        ArithmeticFormulaParser parser = new ArithmeticFormulaParser(
-                expression, variables, aggregateExcludedVariables, allowAggregates);
+        ArithmeticFormulaParser parser =
+                new ArithmeticFormulaParser(
+                        expression, variables, aggregateExcludedVariables, allowAggregates);
         return new ArithmeticFormula(parser.parse(), parser.referencedVariables());
     }
 
@@ -90,7 +101,8 @@ public final class ArithmeticFormula {
         }
 
         public double evaluate(double[] batchVars) {
-            if (!nonempty) throw new IllegalStateException("Append an item before evaluating a batch");
+            if (!nonempty)
+                throw new IllegalStateException("Append an item before evaluating a batch");
             return program.evaluate(batchVars, sums);
         }
     }

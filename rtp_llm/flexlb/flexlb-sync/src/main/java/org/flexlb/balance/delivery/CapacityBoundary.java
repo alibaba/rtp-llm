@@ -24,8 +24,7 @@ public record CapacityBoundary(
         boolean failed = status == Status.FAILED;
         if (unavailable != (availability != null)
                 || failed != (cause != null)
-                || (!unavailable
-                        && (availability != null || projectionSemantics != null))) {
+                || (!unavailable && (availability != null || projectionSemantics != null))) {
             throw new IllegalArgumentException(
                     "capacity boundary status requires its exact payload");
         }
@@ -34,23 +33,25 @@ public record CapacityBoundary(
     public static CapacityBoundary unavailable(
             Availability availability,
             RouteProjection.AdmissionBlockSemantics projectionSemantics) {
-        return new CapacityBoundary(Status.UNAVAILABLE,
+        return new CapacityBoundary(
+                Status.UNAVAILABLE,
                 Objects.requireNonNull(availability, "availability"),
-                Objects.requireNonNull(projectionSemantics,
-                        "projectionSemantics"),
+                Objects.requireNonNull(projectionSemantics, "projectionSemantics"),
                 null);
     }
 
     /** Park delivery without restricting publication into the worker queue. */
     public static CapacityBoundary deliveryUnavailable(Availability availability) {
-        return new CapacityBoundary(Status.UNAVAILABLE,
+        return new CapacityBoundary(
+                Status.UNAVAILABLE,
                 Objects.requireNonNull(availability, "availability"),
-                null, null);
+                null,
+                null);
     }
 
     public static CapacityBoundary failed(Throwable cause) {
-        return new CapacityBoundary(Status.FAILED, null, null,
-                Objects.requireNonNull(cause, "cause"));
+        return new CapacityBoundary(
+                Status.FAILED, null, null, Objects.requireNonNull(cause, "cause"));
     }
 
     public boolean unavailable() {
@@ -91,8 +92,7 @@ public record CapacityBoundary(
         }
 
         public static <T> Attempt<T> rejected(CapacityBoundary boundary) {
-            return new Attempt<>(null,
-                    Objects.requireNonNull(boundary, "boundary"));
+            return new Attempt<>(null, Objects.requireNonNull(boundary, "boundary"));
         }
 
         public boolean accepted() {

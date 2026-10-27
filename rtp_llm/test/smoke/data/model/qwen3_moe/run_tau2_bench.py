@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import sys
-import urllib.error
+import time
 import urllib.request
 
 
@@ -121,6 +121,9 @@ DEFAULT_AGENT_MAX_TOKENS = 1024     # 压住 agent 啰嗦,让多轮对话累积�
 DEFAULT_USER_MAX_TOKENS = 2048
 DEFAULT_SUBSETS = ["airline", "retail", "telecom"]
 DEFAULT_WORK_DIR = "./tau2_bench_results"
+# 预检 /v1/models 的有界重试窗口:首个探测在负载高时可能超时,不能直接终止整个 bench。
+DEFAULT_PREFLIGHT_ATTEMPTS = 6
+DEFAULT_PREFLIGHT_RETRY_INTERVAL_S = 5.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,21 +147,48 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _fetch_models(
+    api_base: str,
+    attempts: int = DEFAULT_PREFLIGHT_ATTEMPTS,
+    retry_interval_s: float = DEFAULT_PREFLIGHT_RETRY_INTERVAL_S,
+) -> dict:
+    """GET ``{api_base}/models`` with a bounded retry window.
+
+    ``/health`` can be green while this endpoint is still slow under load
+    (observed on a loaded worker: one 5s timeout aborted the whole bench run
+    before any task executed), so retry before giving up.
+    """
+    attempts = max(1, int(attempts))
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(
+                f"{api_base}/models", headers={"Authorization": "Bearer EMPTY"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read())
+        except (OSError, json.JSONDecodeError) as e:
+            # urllib.error.URLError and TimeoutError are OSError subclasses.
+            last_error = e
+            if attempt < attempts:
+                print(
+                    f"[WARN] {api_base}/models 第 {attempt}/{attempts} 次探测失败: {e};"
+                    f" {retry_interval_s:.0f}s 后重试"
+                )
+                time.sleep(retry_interval_s)
+    print(f"[ERR] {api_base}/models 不通(已重试 {attempts} 次): {last_error}")
+    print("      检查服务是否启动,以及 IP/port 是否正确。")
+    sys.exit(1)
+
+
 def preflight(api_base: str, model: str) -> None:
     """连通性 + 模型名 + 依赖 三合一预检,失败尽量早。"""
     print(f"=== 预检 ===")
     print(f"Server:       {api_base}")
     print(f"Model:        {model}")
 
-    # 1) /v1/models 通不通
-    try:
-        req = urllib.request.Request(f"{api_base}/models", headers={"Authorization": "Bearer EMPTY"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-        print(f"[ERR] {api_base}/models 不通: {e}")
-        print("      检查服务是否启动,以及 IP/port 是否正确。")
-        sys.exit(1)
+    # 1) /v1/models 通不通(有界重试,避免首次探测超时直接终止整个 bench)
+    data = _fetch_models(api_base)
 
     # 2) 模型名存在
     ids = [m.get("id") for m in data.get("data", [])]

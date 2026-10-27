@@ -29,9 +29,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         return Disabled.INSTANCE;
     }
 
-    static PrefillActiveIndex ordered(
-            int initialCapacity,
-            Comparator<ScheduledRequest> ordering) {
+    static PrefillActiveIndex ordered(int initialCapacity, Comparator<ScheduledRequest> ordering) {
         return new Ordered(initialCapacity, ordering);
     }
 
@@ -68,7 +66,9 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
 
         public List<ScheduledRequest> items() {
             List<ScheduledRequest> result = items;
-            if (result != null) { return result; }
+            if (result != null) {
+                return result;
+            }
             synchronized (itemsLock) {
                 if (items == null) {
                     List<ScheduledRequest> requests = new ArrayList<>(entries.size());
@@ -117,10 +117,15 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
             }
             synchronized (this) {
                 if (projectedItem == null) {
-                    projectedItem = new GroupPlanner.Item(
-                            request.requestId(), request.priority(), request.enqueueSeq(),
-                            request.enqueuedAtMs(), request.expiresAtMs(), request.seqLen(),
-                            request.hitCache());
+                    projectedItem =
+                            new GroupPlanner.Item(
+                                    request.requestId(),
+                                    request.priority(),
+                                    request.enqueueSeq(),
+                                    request.enqueuedAtMs(),
+                                    request.expiresAtMs(),
+                                    request.seqLen(),
+                                    request.hitCache());
                 }
                 return projectedItem;
             }
@@ -130,8 +135,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
     final class Disabled implements PrefillActiveIndex {
         private static final Disabled INSTANCE = new Disabled();
 
-        private Disabled() {
-        }
+        private Disabled() {}
 
         @Override
         public boolean add(ScheduledRequest item) {
@@ -165,11 +169,12 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
 
         @Override
-        public int size(int priority) { return 0; }
+        public int size(int priority) {
+            return 0;
+        }
 
         @Override
-        public void clear() {
-        }
+        public void clear() {}
 
         @Override
         public Capture capture() {
@@ -193,11 +198,15 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         private Ordered(int initialCapacity, Comparator<ScheduledRequest> ordering) {
             Objects.requireNonNull(ordering, "ordering");
             identities = new IdentityHashMap<>(initialCapacity);
-            queue = new TreeSet<>((left, right) -> {
-                int compared = ordering.compare(left.request, right.request);
-                // Preserve distinct identities even with an equal scheduling key.
-                return compared != 0 ? compared : Long.compare(left.sequence, right.sequence);
-            });
+            queue =
+                    new TreeSet<>(
+                            (left, right) -> {
+                                int compared = ordering.compare(left.request, right.request);
+                                // Preserve distinct identities even with an equal scheduling key.
+                                return compared != 0
+                                        ? compared
+                                        : Long.compare(left.sequence, right.sequence);
+                            });
         }
 
         @Override
@@ -248,7 +257,9 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
 
         @Override
-        public int size(int priority) { return priorityCounts[priority]; }
+        public int size(int priority) {
+            return priorityCounts[priority];
+        }
 
         @Override
         public void clear() {

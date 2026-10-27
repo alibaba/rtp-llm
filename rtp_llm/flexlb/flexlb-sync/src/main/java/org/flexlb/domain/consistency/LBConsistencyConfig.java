@@ -26,5 +26,4 @@ public class LBConsistencyConfig {
         private String zkHost;
         private int zkTimeoutMs;
     }
-
 }

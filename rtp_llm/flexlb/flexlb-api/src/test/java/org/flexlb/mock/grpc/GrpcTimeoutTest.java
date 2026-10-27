@@ -5,8 +5,6 @@ import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.GrpcEngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.scheduler.RequestState;
-import org.flexlb.config.DispatcherConfig;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
@@ -21,7 +19,6 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -80,13 +77,14 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
     @Override
     protected MockWorkerBehavior createPrefillBehavior() {
         return MockWorkerBehavior.builder()
-                .enqueueDelayMs(3000)  // 3s: far exceeds the 500ms deadline
+                .enqueueDelayMs(3000) // 3s: far exceeds the 500ms deadline
                 .build();
     }
 
     @Override
-    protected long enqueueTimeoutMillis() { return 500L; }
-
+    protected long enqueueTimeoutMillis() {
+        return 500L;
+    }
 
     @Test
     @Timeout(15)
@@ -96,12 +94,12 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
 
         // 2. A post-send timeout is ambiguous: no terminal response may be published
         // until an authoritative Engine status settles ownership.
-        assertThrows(TimeoutException.class,
-                () -> future.get(1, TimeUnit.SECONDS));
+        assertThrows(TimeoutException.class, () -> future.get(1, TimeUnit.SECONDS));
         assertFalse(future.isDone(), "lost ACK must retain the Engine ownership fence");
 
         // 3. Verify: mock prefill received the EnqueueBatch call (recorded before sleep)
-        assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
+        assertTrue(
+                mockPrefillWorker.getEnqueueCount() >= 1,
                 "Prefill worker should have received at least 1 EnqueueBatch call");
         assertFalse(mockPrefillWorker.getRpcService().isCancelled(10001L));
         assertTrue(ownsRequestGeneration(10001L));
@@ -110,7 +108,9 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
 
         // 5. Verify: decode worker never received any request (PD-separated)
-        assertEquals(0, mockDecodeWorker.getEnqueueCount(),
+        assertEquals(
+                0,
+                mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any request");
 
         // 6. Recover: change behavior to normal delay
@@ -122,7 +122,6 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         Response response2 = future2.get(5, TimeUnit.SECONDS);
         assertTrue(response2.isSuccess(), "Subsequent request should succeed after recovery");
         assertFalse(future.isDone(), "recovery traffic cannot settle the earlier lost ACK");
-
     }
 
     @Test
@@ -133,28 +132,30 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
 
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch times out");
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
-        assertEquals(RequestState.Phase.TIMED_OUT,
-                scheduler.getRequestState(10001L, 0).state());
+        assertEquals(RequestState.Phase.TIMED_OUT, scheduler.getRequestState(10001L, 0).state());
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1);
-        assertTrue(mockPrefillWorker.getRpcService().isCancelled(10001L),
+        assertTrue(
+                mockPrefillWorker.getRpcService().isCancelled(10001L),
                 "The engine must fence late enqueue before timeout cleanup");
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
-        assertTrue(submitRequest(10002).get(5, TimeUnit.SECONDS).isSuccess(),
+        assertTrue(
+                submitRequest(10002).get(5, TimeUnit.SECONDS).isSuccess(),
                 "Subsequent request should succeed after recovery");
     }
+
     @Timeout(15)
     void grpcTimeout_requestExpiresWithoutEngineEvidenceAndRecovers() throws Exception {
         config.getRequestLifecycle().getRequest().setTimeoutMs(1_800L);
         CompletableFuture<Response> future = submitRequest(10001);
 
         // The RPC expires before the request lease: uncertainty remains pending briefly.
-        assertThrows(TimeoutException.class,
-                () -> future.get(750, TimeUnit.MILLISECONDS));
+        assertThrows(TimeoutException.class, () -> future.get(750, TimeUnit.MILLISECONDS));
         assertFalse(future.isDone());
-        assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
+        assertTrue(
+                mockPrefillWorker.getEnqueueCount() >= 1,
                 "the worker records EnqueueBatch before delaying its ACK");
         assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
         assertEquals(1, getPrefillEndpoint().getLocallyOwnedRequestCount());

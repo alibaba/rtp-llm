@@ -4,21 +4,18 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import inspect
 import json
 import logging
 import os
 import struct
 import sys
 import time
-import inspect
 from hashlib import sha1
 from typing import Any, List, Optional, Tuple, Union
 
 import grpc
 from pydantic import BaseModel
-from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
-from rtp_llm.test.smoke.normal_comparer import AuxInfo, NormalComparer
-from rtp_llm.test.smoke.utils import no_compare, save_response
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import ServerConfig
@@ -30,7 +27,17 @@ from rtp_llm.dash_sc import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-
+from rtp_llm.test.smoke.base_comparer import _asserts_cold_cache
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
+from rtp_llm.test.smoke.dash_error_policy import (
+    DASH_MAX_ATTEMPTS,
+    DASH_RETRY_BUDGET_S,
+    DASH_RETRY_INTERVAL_S,
+    DASH_TRANSIENT_STATUS_CODES,
+    should_retry_transient,
+)
+from rtp_llm.test.smoke.normal_comparer import AuxInfo, NormalComparer
+from rtp_llm.test.smoke.utils import no_compare, save_response
 
 DASH_SC_GRPC_ENDPOINT = "/__dash_sc_grpc__"
 PROMPT_MODE_RAW = "raw"
@@ -171,9 +178,7 @@ def _encode_prompt_for_smoke(
         else [{"role": "user", "content": prompt}]
     )
     _attach_tools_to_system_message(messages, tools)
-    thinking_mode = _resolve_dsv4_thinking_mode(
-        dsv4_thinking_mode, enable_thinking
-    )
+    thinking_mode = _resolve_dsv4_thinking_mode(dsv4_thinking_mode, enable_thinking)
     rendered_prompt = _load_dsv4_encoding_module(ckpt_path).encode_messages(
         messages,
         thinking_mode=thinking_mode,
@@ -181,6 +186,10 @@ def _encode_prompt_for_smoke(
         add_default_bos_token=True,
     )
     return _tokenizer_encode_to_int_list(tokenizer, rendered_prompt)
+
+
+# Default per-attempt stream timeout; a query may override it.
+DASH_SC_GRPC_TIMEOUT_SECONDS = 600.0
 
 
 class DashScGrpcQueryInfo(BaseModel):
@@ -354,7 +363,9 @@ def _parse_infer_chunk(
                 generated = list(struct.unpack("<%di" % n, raw))
         elif out.name == "finish_reason":
             finish = decode_finish_reason(out, raw)
-        elif out.name == "prompt_token_num" and out.datatype == "INT32" and len(raw) >= 4:
+        elif (
+            out.name == "prompt_token_num" and out.datatype == "INT32" and len(raw) >= 4
+        ):
             prompt_token_num = struct.unpack("<i", raw[:4])[0]
         elif (
             out.name == "prompt_cached_token_num"
@@ -605,11 +616,17 @@ class DashScGrpcComparer(NormalComparer):
         expected_output_ids = expect.generated_ids
         if expected_output_ids is None:
             expected_output_ids = expect.output_ids
-        if expected_output_ids is not None and expected_output_ids != actual.generated_ids:
+        if (
+            expected_output_ids is not None
+            and expected_output_ids != actual.generated_ids
+        ):
             diffs.append(
                 f"output_ids:\n    expect: {expected_output_ids}\n    actual: {actual.generated_ids}"
             )
-        if expect.reasoning_ids is not None and expect.reasoning_ids != actual.reasoning_ids:
+        if (
+            expect.reasoning_ids is not None
+            and expect.reasoning_ids != actual.reasoning_ids
+        ):
             diffs.append(
                 f"reasoning_ids:\n    expect: {expect.reasoning_ids}\n    actual: {actual.reasoning_ids}"
             )
@@ -627,7 +644,9 @@ class DashScGrpcComparer(NormalComparer):
             )
         for text in expect.response_contains or []:
             if text not in actual.response:
-                diffs.append(f"response missing substring {text!r}: {actual.response!r}")
+                diffs.append(
+                    f"response missing substring {text!r}: {actual.response!r}"
+                )
         for text in expect.content_contains or []:
             if text not in actual.content:
                 diffs.append(f"content missing substring {text!r}: {actual.content!r}")
@@ -704,11 +723,17 @@ class DashScGrpcComparer(NormalComparer):
                 diffs.append("aux_info missing")
             else:
                 self._compare_aux_info(expect.aux_info, actual.aux_info, diffs)
-        if expect.finish_reason is not None and actual.finish_reason != expect.finish_reason:
+        if (
+            expect.finish_reason is not None
+            and actual.finish_reason != expect.finish_reason
+        ):
             diffs.append(
                 f"finish_reason: expect {expect.finish_reason}, actual {actual.finish_reason}"
             )
-        if expect.min_content_chars is not None and len(actual.content) < expect.min_content_chars:
+        if (
+            expect.min_content_chars is not None
+            and len(actual.content) < expect.min_content_chars
+        ):
             diffs.append(
                 f"content length {len(actual.content)} < min_content_chars {expect.min_content_chars}"
             )
@@ -744,7 +769,10 @@ class DashScGrpcComparer(NormalComparer):
                     diffs.append(
                         f"content JSON is not an object: {type(parsed_json).__name__}"
                     )
-                if expect.expected_json is not None and parsed_json != expect.expected_json:
+                if (
+                    expect.expected_json is not None
+                    and parsed_json != expect.expected_json
+                ):
                     diffs.append(
                         "content JSON not equal:\n"
                         f"    expect: {expect.expected_json}\n"
@@ -752,7 +780,9 @@ class DashScGrpcComparer(NormalComparer):
                     )
                 if isinstance(parsed_json, dict) and expect.required_json_keys:
                     missing_keys = [
-                        key for key in expect.required_json_keys if key not in parsed_json
+                        key
+                        for key in expect.required_json_keys
+                        if key not in parsed_json
                     ]
                     if missing_keys:
                         diffs.append(
@@ -765,6 +795,148 @@ class DashScGrpcComparer(NormalComparer):
                 "\n".join(diffs)
                 + f"\nactual generated tail: {actual.generated_ids[-32:]}",
             )
+
+    def _infer_with_transient_retry(
+        self,
+        query_info: DashScGrpcQueryInfo,
+        request: Any,
+        expected: DashScGrpcExpected,
+        grpc_addr: str,
+    ) -> Tuple[dict[str, Any], int]:
+        """Run the stream, retrying engine-side transient rejections.
+
+        Same engine and same transient rejections as the plain Dash channel
+        (see smoke.dash_error_policy). A golden that asserts an error, or a
+        cold-cache golden whose first attempt already published blocks into the
+        reuse cache, must not be retried.
+        """
+        expects_error = (
+            expected.expected_error_message_contains is not None
+            or expected.expected_status_code is not None
+        )
+        retryable = not expects_error and not _asserts_cold_cache(self.qr_info)
+        if not retryable and not expects_error:
+            logging.info(
+                "dash_sc transient-retry disabled: golden asserts a cold prefix cache"
+            )
+        attempts = 0
+        deadline = time.monotonic() + DASH_RETRY_BUDGET_S
+        outcome: dict[str, Any] = {}
+        while True:
+            attempts += 1
+            outcome = self._infer_once(
+                query_info, request, expected, grpc_addr, deadline=deadline
+            )
+            status_code = _response_status_code(outcome["parameters"])
+            if not should_retry_transient(
+                retryable=(
+                    retryable
+                    and outcome["error_message"] is not None
+                    # Any visible token makes the response observable to the
+                    # caller; retrying would re-run an already-delivered turn
+                    # (the Dash channel applies the same veto).
+                    and not outcome["accumulated"]
+                ),
+                status_code=status_code,
+                attempts=attempts,
+                deadline=deadline,
+            ):
+                break
+            logging.warning(
+                "dash_sc transient error on attempt %d/%d: status_code=%s "
+                "status_message=%s; retrying in %.0fs",
+                attempts,
+                DASH_MAX_ATTEMPTS,
+                status_code,
+                outcome["parameters"].get("status_message"),
+                DASH_RETRY_INTERVAL_S,
+            )
+            time.sleep(DASH_RETRY_INTERVAL_S)
+        if attempts > 1:
+            logging.warning(
+                "dash_sc transient-retry finished after %d/%d attempts "
+                "(status_code=%s status_message=%s)",
+                attempts,
+                DASH_MAX_ATTEMPTS,
+                _response_status_code(outcome["parameters"]),
+                outcome["parameters"].get("status_message"),
+            )
+        return outcome, attempts
+
+    def _infer_once(
+        self,
+        query_info: DashScGrpcQueryInfo,
+        request: Any,
+        expected: DashScGrpcExpected,
+        grpc_addr: str,
+        deadline: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """One DashSc-channel stream attempt (no retry, no comparison)."""
+        accumulated: List[int] = []
+        response_parameters: dict[str, Any] = {}
+        last_prompt_token_num: Optional[int] = None
+        last_prompt_cached: Optional[int] = None
+        last_finish_reason: Optional[int] = None
+        error_message: Optional[str] = None
+
+        configured_timeout = (
+            query_info.grpc_timeout_seconds or DASH_SC_GRPC_TIMEOUT_SECONDS
+        )
+        if deadline is not None:
+            # Never let one attempt outlive the retry budget: a stalled stream
+            # would otherwise block the loop far past DASH_RETRY_BUDGET_S.
+            configured_timeout = min(
+                configured_timeout, max(1.0, deadline - time.monotonic())
+            )
+        channel = grpc.insecure_channel(
+            grpc_addr, options=dash_sc_grpc_client_channel_options()
+        )
+        try:
+            stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+
+            def _req_iter():
+                yield request
+
+            response_iter = stub.ModelStreamInfer(
+                _req_iter(), timeout=configured_timeout
+            )
+            for resp in response_iter:
+                if resp.error_message:
+                    error_message = resp.error_message
+                    break
+                if not resp.HasField("infer_response"):
+                    continue
+                chunk_ids, chunk_finish, ptn, ptcn = _parse_infer_chunk(
+                    resp.infer_response
+                )
+                response_parameters.update(_parse_infer_parameters(resp.infer_response))
+                status_message = response_parameters.get("status_message")
+                status_code = _response_status_code(response_parameters)
+                if status_message or (status_code is not None and status_code >= 400):
+                    error_message = str(status_message or status_code)
+                    break
+                if chunk_ids:
+                    accumulated.extend(chunk_ids)
+                if chunk_finish is not None:
+                    last_finish_reason = chunk_finish
+                if ptn is not None:
+                    last_prompt_token_num = ptn
+                if ptcn is not None:
+                    last_prompt_cached = ptcn
+                if query_info.stop_when_requirements_met and self._requirements_met(
+                    expected, accumulated
+                ):
+                    break
+        finally:
+            channel.close()
+        return {
+            "accumulated": accumulated,
+            "parameters": response_parameters,
+            "error_message": error_message,
+            "prompt_token_num": last_prompt_token_num,
+            "prompt_cached": last_prompt_cached,
+            "finish_reason": last_finish_reason,
+        }
 
     def run(self) -> None:
         query_info = self.format_query(self.qr_info["query"])
@@ -824,55 +996,16 @@ class DashScGrpcComparer(NormalComparer):
         logging.info("DashScGrpcComparer grpc_addr=%s", grpc_addr)
 
         expected = self.format_result(self.qr_info["result"])
-        accumulated: List[int] = []
-        response_parameters: dict[str, Any] = {}
-        last_prompt_token_num: Optional[int] = None
-        last_prompt_cached: Optional[int] = None
-        last_finish_reason: Optional[int] = None
-        error_message: Optional[str] = None
-
-        channel = grpc.insecure_channel(
-            grpc_addr, options=dash_sc_grpc_client_channel_options()
+        outcome, attempts = self._infer_with_transient_retry(
+            query_info, request, expected, grpc_addr
         )
-        try:
-            stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
-
-            def _req_iter():
-                yield request
-
-            response_iter = stub.ModelStreamInfer(
-                _req_iter(), timeout=query_info.grpc_timeout_seconds
-            )
-            for resp in response_iter:
-                if resp.error_message:
-                    error_message = resp.error_message
-                    break
-                if not resp.HasField("infer_response"):
-                    continue
-                chunk_ids, chunk_finish, ptn, ptcn = _parse_infer_chunk(
-                    resp.infer_response
-                )
-                response_parameters.update(_parse_infer_parameters(resp.infer_response))
-                status_message = response_parameters.get("status_message")
-                status_code = _response_status_code(response_parameters)
-                if status_message or (status_code is not None and status_code >= 400):
-                    error_message = str(status_message or status_code)
-                    break
-                if chunk_ids:
-                    accumulated.extend(chunk_ids)
-                if chunk_finish is not None:
-                    last_finish_reason = chunk_finish
-                if ptn is not None:
-                    last_prompt_token_num = ptn
-                if ptcn is not None:
-                    last_prompt_cached = ptcn
-                if (
-                    query_info.stop_when_requirements_met
-                    and self._requirements_met(expected, accumulated)
-                ):
-                    break
-        finally:
-            channel.close()
+        status_code = _response_status_code(outcome["parameters"])
+        accumulated: List[int] = outcome["accumulated"]
+        response_parameters: dict[str, Any] = outcome["parameters"]
+        error_message: Optional[str] = outcome["error_message"]
+        last_prompt_token_num: Optional[int] = outcome["prompt_token_num"]
+        last_prompt_cached: Optional[int] = outcome["prompt_cached"]
+        last_finish_reason: Optional[int] = outcome["finish_reason"]
 
         if error_message:
             if expected.expected_error_message_contains is not None:
@@ -892,9 +1025,20 @@ class DashScGrpcComparer(NormalComparer):
                 if not diffs:
                     return
                 raise SmokeException(QueryStatus.COMPARE_FAILED, "\n".join(diffs))
+            spec_bits = []
+            if status_code is not None:
+                spec_bits.append(f"status_code={status_code}")
+            if response_parameters.get("status_name"):
+                spec_bits.append(f"status_name={response_parameters['status_name']}")
+            if response_parameters.get("status_message"):
+                spec_bits.append(
+                    f"status_message={response_parameters['status_message']}"
+                )
+            detail = ", ".join(spec_bits) if spec_bits else "no status spec"
             raise SmokeException(
                 QueryStatus.VISIT_FAILED,
-                f"dash_sc_grpc error: {error_message}",
+                f"dash_sc_grpc error after {attempts} attempt(s) "
+                f"({detail}): {error_message}",
             )
         if expected.expected_error_message_contains is not None:
             raise SmokeException(
@@ -908,8 +1052,8 @@ class DashScGrpcComparer(NormalComparer):
                 input_len=last_prompt_token_num,
                 reuse_len=last_prompt_cached,
             )
-        reasoning_ids, content_ids, reasoning_content, content = self._decode_dashscope_parts(
-            accumulated, response_parameters
+        reasoning_ids, content_ids, reasoning_content, content = (
+            self._decode_dashscope_parts(accumulated, response_parameters)
         )
         actual_result = DashScGrpcResponse(
             response=self._decode(accumulated),

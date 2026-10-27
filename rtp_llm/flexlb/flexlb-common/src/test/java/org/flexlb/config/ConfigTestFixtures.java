@@ -7,7 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 /** Explicit workload values for configuration contract tests. */
 final class ConfigTestFixtures {
     private static final ObjectMapper JSON = new ObjectMapper();
-    static final String REQUIRED = """
+    static final String REQUIRED =
+            """
             {
               "schemaVersion": 3,
               "requestLifecycle": {
@@ -32,15 +33,18 @@ final class ConfigTestFixtures {
     }
 
     private static void merge(ObjectNode target, ObjectNode patch) {
-        patch.fields().forEachRemaining(entry -> {
-            JsonNode existing = target.get(entry.getKey());
-            if (existing instanceof ObjectNode object && entry.getValue() instanceof ObjectNode update) {
-                merge(object, update);
-            } else {
-                target.set(entry.getKey(), entry.getValue());
-            }
-        });
+        patch.fields()
+                .forEachRemaining(
+                        entry -> {
+                            JsonNode existing = target.get(entry.getKey());
+                            if (existing instanceof ObjectNode object
+                                    && entry.getValue() instanceof ObjectNode update) {
+                                merge(object, update);
+                            } else {
+                                target.set(entry.getKey(), entry.getValue());
+                            }
+                        });
     }
 
-    private ConfigTestFixtures() { }
+    private ConfigTestFixtures() {}
 }

@@ -37,16 +37,21 @@ final class MockEngineTestCluster implements AutoCloseable {
             int prefillCount,
             int decodeCount,
             int schedulerThreads,
-            boolean startControlServer) throws IOException {
-        scheduler = Executors.newScheduledThreadPool(schedulerThreads, runnable -> {
-            Thread thread = new Thread(runnable, "mock-engine-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+            boolean startControlServer)
+            throws IOException {
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        schedulerThreads,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "mock-engine-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         addEngines(model, basePort, prefillCount, decodeCount);
         if (startControlServer) {
-            controlServer = new MockControlServer(
-                    services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
+            controlServer =
+                    new MockControlServer(
+                            services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
             controlServer.start();
         }
     }
@@ -62,7 +67,8 @@ final class MockEngineTestCluster implements AutoCloseable {
             int basePort,
             int prefillCount,
             int decodeCount,
-            int schedulerThreads) throws IOException {
+            int schedulerThreads)
+            throws IOException {
         return new MockEngineTestCluster(
                 model, basePort, prefillCount, decodeCount, schedulerThreads, true);
     }
@@ -78,7 +84,8 @@ final class MockEngineTestCluster implements AutoCloseable {
             int basePort,
             int prefillCount,
             int decodeCount,
-            int schedulerThreads) throws IOException {
+            int schedulerThreads)
+            throws IOException {
         return new MockEngineTestCluster(
                 model, basePort, prefillCount, decodeCount, schedulerThreads, false);
     }
@@ -86,18 +93,20 @@ final class MockEngineTestCluster implements AutoCloseable {
     private void addEngines(
             MockPerformanceModel model, int basePort, int prefillCount, int decodeCount) {
         for (int i = 0; i < prefillCount; i++) {
-            prefills.add(addEngine(
-                    model,
-                    basePort + i,
-                    "prefill",
-                    EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL));
+            prefills.add(
+                    addEngine(
+                            model,
+                            basePort + i,
+                            "prefill",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL));
         }
         for (int i = 0; i < decodeCount; i++) {
-            decodes.add(addEngine(
-                    model,
-                    basePort + prefillCount + i,
-                    "decode",
-                    EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE));
+            decodes.add(
+                    addEngine(
+                            model,
+                            basePort + prefillCount + i,
+                            "decode",
+                            EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE));
         }
     }
 
@@ -187,28 +196,41 @@ final class MockEngineTestCluster implements AutoCloseable {
     }
 
     void awaitCompleted(int expected, long timeoutMs) throws InterruptedException {
-        await(() -> totalCompleted() >= expected, timeoutMs,
+        await(
+                () -> totalCompleted() >= expected,
+                timeoutMs,
                 () -> "expected " + expected + " completions, got " + totalCompleted());
     }
 
-    void awaitInflight(
-            JavaMockEngineCluster.FastRpcService service, int minimum, long timeoutMs)
+    void awaitInflight(JavaMockEngineCluster.FastRpcService service, int minimum, long timeoutMs)
             throws InterruptedException {
-        await(() -> service.getInflightCount() >= minimum, timeoutMs,
-                () -> "inflight never reached " + minimum + " on port "
-                        + service.getGrpcPort() + ", got " + service.getInflightCount());
+        await(
+                () -> service.getInflightCount() >= minimum,
+                timeoutMs,
+                () ->
+                        "inflight never reached "
+                                + minimum
+                                + " on port "
+                                + service.getGrpcPort()
+                                + ", got "
+                                + service.getInflightCount());
     }
 
     void awaitNoInflight(JavaMockEngineCluster.FastRpcService service, long timeoutMs)
             throws InterruptedException {
-        await(() -> service.getInflightCount() == 0, timeoutMs,
+        await(
+                () -> service.getInflightCount() == 0,
+                timeoutMs,
                 () -> "inflight never reached zero on port " + service.getGrpcPort());
     }
 
     void awaitAllInflightZero(long timeoutMs) throws InterruptedException {
-        await(() -> services.values().stream()
-                        .allMatch(service -> service.getInflightCount() == 0),
-                timeoutMs, this::inflightSummary);
+        await(
+                () ->
+                        services.values().stream()
+                                .allMatch(service -> service.getInflightCount() == 0),
+                timeoutMs,
+                this::inflightSummary);
     }
 
     void assertAllInflightZero() {
@@ -220,7 +242,8 @@ final class MockEngineTestCluster implements AutoCloseable {
     private static void await(
             BooleanSupplier condition,
             long timeoutMs,
-            java.util.function.Supplier<String> timeoutMessage) throws InterruptedException {
+            java.util.function.Supplier<String> timeoutMessage)
+            throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
             if (condition.getAsBoolean()) {
@@ -233,12 +256,15 @@ final class MockEngineTestCluster implements AutoCloseable {
 
     private String inflightSummary() {
         StringBuilder result = new StringBuilder("inflight not zero:");
-        services.values().forEach(service -> result.append(" port=")
-                .append(service.getGrpcPort())
-                .append(" inflight=")
-                .append(service.getInflightCount())
-                .append(" running=")
-                .append(service.getRunningCount()));
+        services.values()
+                .forEach(
+                        service ->
+                                result.append(" port=")
+                                        .append(service.getGrpcPort())
+                                        .append(" inflight=")
+                                        .append(service.getInflightCount())
+                                        .append(" running=")
+                                        .append(service.getRunningCount()));
         return result.toString();
     }
 

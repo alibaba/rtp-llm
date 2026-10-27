@@ -134,8 +134,43 @@ config_setting(
 )
 
 config_setting(
+    name = "using_ppu_cuda",
+    define_values = {
+        "use_ppu": "true",
+        "using_cuda": "true",
+    },
+)
+
+config_setting(
     name = "using_remote_kv_cache",
     define_values = {"use_remote_kv_cache": "true"},
+)
+
+# accl is permanently closed; do NOT add any fetch rule (http_archive/rpm) for
+# accl in public deps/ — RDMA impls are only buildable with the internal overlay.
+config_setting(
+    name = "using_rdma",
+    define_values = {"use_rdma": "true"},
+)
+
+# RDMA ON + arm: the accl link set differs on arm (tnet is x86-only, accl is
+# built with -DDISABLE_TNET there). Each is a strict specialization of
+# using_rdma, so selects carrying these keys alongside using_rdma stay
+# unambiguous (Bazel picks the stricter match), mirroring using_cuda13_arm.
+config_setting(
+    name = "using_rdma_arm",
+    define_values = {
+        "use_rdma": "true",
+        "using_arm": "true",
+    },
+)
+
+config_setting(
+    name = "using_rdma_cuda12_arm",
+    define_values = {
+        "use_rdma": "true",
+        "using_cuda12_arm": "true",
+    },
 )
 
 cc_binary(
@@ -248,6 +283,22 @@ py_runtime(
     interpreter_path = "/opt/conda310/bin/python",
     python_version = "PY3",
     stub_shebang = "#!/opt/conda310/bin/python",
+    visibility = ["//visibility:public"],
+)
+
+py_runtime(
+    name = "python312",
+    interpreter_path = "/usr/local/bin/python3",
+    python_version = "PY3",
+    stub_shebang = "#!/usr/local/bin/python3",
+    visibility = ["//visibility:public"],
+)
+
+py_runtime(
+    name = "python312_ppu",
+    interpreter_path = "/opt/conda312/bin/python",
+    python_version = "PY3",
+    stub_shebang = "#!/opt/conda312/bin/python",
     visibility = ["//visibility:public"],
 )
 
