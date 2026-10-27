@@ -1,5 +1,7 @@
 package org.flexlb.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.RoutingConfig;
@@ -10,15 +12,20 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheDirectory.Candidate;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /** Least-inflight-media routing, optionally preceded by cache affinity. */
 @Component
@@ -28,8 +35,15 @@ public class VitCacheSelector {
     private static final int MAX_PENDING = 100_000;
     private final VitCacheDirectory directory;
     private final WorkerDirectory workers;
-    private final LinkedHashMap<String, Placement> pending = new LinkedHashMap<>();
-    private long pendingPrunedAt;
+    private final Cache<String, Placement> pending = Caffeine.newBuilder()
+            .maximumSize(MAX_PENDING)
+            .expireAfterWrite(MAX_PENDING_TTL_MS, TimeUnit.MILLISECONDS)
+            .build();
+    private final ScheduledExecutorService maintenance = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "vit-placement-cleanup");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private record Placement(WorkerStatus worker, String instance, long expiry) {
         boolean matches(Candidate candidate, long now) {
@@ -58,7 +72,34 @@ public class VitCacheSelector {
         this.workers = workers;
     }
 
-    public synchronized ServerStatus select(BalanceContext ctx, String group) {
+    @PostConstruct
+    public void start() {
+        maintenance.scheduleWithFixedDelay(() -> {
+            try {
+                prunePending();
+            } catch (RuntimeException error) {
+                Logger.warn("ViT placement cleanup failed: {}", error.toString());
+            }
+        }, 5, 5, TimeUnit.SECONDS);
+    }
+
+    @PreDestroy
+    public void stop() {
+        maintenance.shutdownNow();
+    }
+
+    void prunePending() {
+        if (pending.estimatedSize() == 0) {
+            return;
+        }
+        Map<String, Candidate> candidates = directory.candidates(null, List.of());
+        long now = System.currentTimeMillis();
+        pending.asMap().entrySet().removeIf(entry ->
+                !entry.getValue().matches(candidates.get(entry.getValue().worker().getIpPort()), now));
+        pending.cleanUp();
+    }
+
+    public ServerStatus select(BalanceContext ctx, String group) {
         RoutingConfig.VitConfig config = ctx.getConfig() == null
                 ? new RoutingConfig.VitConfig() : ctx.getConfig().getRouter().getRoles().getVit();
         boolean affinity = config.isCacheAffinityEnabled();
@@ -68,14 +109,53 @@ public class VitCacheSelector {
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
+        if (!affinity) {
+            return selectLeastInflight(ctx, group, config);
+        }
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
-        Map<String, Candidate> candidates = directory.candidates(group, affinity ? keys : List.of());
+        Map<String, Candidate> candidates = directory.candidates(group, keys);
+        // A cold key's placement is published atomically with its selection.
+        synchronized (pending) {
+            return selectAffinity(ctx, group, config, keys, candidates);
+        }
+    }
+
+    private ServerStatus selectLeastInflight(
+            BalanceContext ctx, String group, RoutingConfig.VitConfig config) {
+        WorkerStatus selected = null;
+        String address = null;
+        long bestLoad = Long.MAX_VALUE;
+        int ties = 0;
+        long nowNanos = System.nanoTime();
+        for (var entry : workers.vitRoutingSnapshot()) {
+            WorkerStatus worker = entry.endpoint().getStatus();
+            if (group != null && !Objects.equals(group, worker.getGroup())) {
+                continue;
+            }
+            long load = load(worker, nowNanos, config);
+            if (load < bestLoad) {
+                bestLoad = load;
+                ties = 0;
+            }
+            if (load == bestLoad && ThreadLocalRandom.current().nextInt(++ties) == 0) {
+                selected = worker;
+                address = entry.address();
+            }
+        }
+        return checkedStatus(selected, address, ctx.getRequestId(), group);
+    }
+
+    private static long load(WorkerStatus worker, long nowNanos, RoutingConfig.VitConfig config) {
+        WorkerStatus.VitLoad sample = worker.vitLoad();
+        return sample != null && nowNanos - sample.receivedNanos()
+                <= TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs())
+                ? sample.inflightInputs() : Long.MAX_VALUE;
+    }
+
+    private ServerStatus selectAffinity(BalanceContext ctx, String group,
+            RoutingConfig.VitConfig config, List<String> keys, Map<String, Candidate> candidates) {
         long now = System.currentTimeMillis();
         long nowNanos = System.nanoTime();
-        if (now - pendingPrunedAt >= 5000) {
-            pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getIpPort()), now));
-            pendingPrunedAt = now;
-        }
         List<Candidate> best = new ArrayList<>();
         MatchScore bestScore = null;
         long bestLoad = Long.MAX_VALUE;
@@ -84,19 +164,15 @@ public class VitCacheSelector {
                 continue;
             }
             int pendingHits = 0;
-            for (String key : affinity ? keys : List.<String>of()) {
-                Placement placement = pending.get(key);
+            for (String key : keys) {
+                Placement placement = pending.getIfPresent(key);
                 if (placement != null && placement.matches(candidate, now)) {
                     pendingHits++;
                 }
             }
-            MatchScore score = affinity
-                    ? new MatchScore(candidate.hashHits(), candidate.embeddingHits(), candidate.gpuHits(), pendingHits)
-                    : new MatchScore(0, 0, 0, 0);
-            WorkerStatus.VitLoad sample = candidate.worker().vitLoad();
-            long load = sample != null && nowNanos - sample.receivedNanos()
-                    <= java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs())
-                    ? sample.inflightInputs() : Long.MAX_VALUE;
+            MatchScore score = new MatchScore(
+                    candidate.hashHits(), candidate.embeddingHits(), candidate.gpuHits(), pendingHits);
+            long load = load(candidate.worker(), nowNanos, config);
             int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
             if (comparison == 0) { comparison = Long.compare(bestLoad, load); }
             if (comparison > 0) {
@@ -112,18 +188,32 @@ public class VitCacheSelector {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
+        ServerStatus result = checkedStatus(selected.worker(), selected.worker().getIpPort(), ctx.getRequestId(), group);
+        if (!result.isSuccess()) {
+            return result;
+        }
         long timeout = ctx.getRequest().getGenerateTimeout();
         long ttl = timeout <= 0 ? MIN_PENDING_TTL_MS
                 : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
-        for (String key : affinity ? keys : List.<String>of()) {
+        for (String key : keys) {
             if (!selected.hashKeys().contains(key)) {
                 pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
             }
         }
-        while (pending.size() > MAX_PENDING) {
-            pending.remove(pending.keySet().iterator().next());
+        return result;
+    }
+
+    private ServerStatus checkedStatus(WorkerStatus selected, String address, long requestId, String group) {
+        if (selected == null) {
+            return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        return status(selected.worker(), ctx.getRequestId());
+        try (var pin = workers.captureEndpoint(RoleType.VIT, address)) {
+            if (pin == null || pin.endpoint().getStatus() != selected
+                    || (group != null && !Objects.equals(group, selected.getGroup()))) {
+                return errorStatus(StrategyErrorType.NO_VIT_WORKER);
+            }
+            return status(selected, requestId);
+        }
     }
 
     /**
@@ -131,7 +221,7 @@ public class VitCacheSelector {
      * current endpoint generation. Address equality alone cannot identify a worker
      * after replacement; generation zero is not a wildcard.
      */
-    public synchronized ServerStatus validate(BalanceContext ctx, String group) {
+    public ServerStatus validate(BalanceContext ctx, String group) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
@@ -151,7 +241,7 @@ public class VitCacheSelector {
     }
 
     /** Holds the selected endpoint generation through the admission handoff. */
-    public synchronized SelectedRole selectPinned(BalanceContext ctx, String group) {
+    public SelectedRole selectPinned(BalanceContext ctx, String group) {
         ServerStatus result = ctx.getRequest().getSelectedVit() == null ? select(ctx, group) : validate(ctx, group);
         if (!result.isSuccess()) {
             return null;

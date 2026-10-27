@@ -325,6 +325,11 @@ public final class WorkerDirectory {
         return endpointRegistry.prefillRoutingSnapshot(role);
     }
 
+    /** Immutable, non-owning ViT generations for routing. */
+    public List<EndpointRegistry.VitRoutingEntry> vitRoutingSnapshot() {
+        return endpointRegistry.vitRoutingSnapshot();
+    }
+
     /** Capture one exact currently published endpoint generation by address. */
     public WorkerEndpoint.GenerationPin captureEndpoint(
             RoleType role, String ipPort) {

@@ -33,8 +33,7 @@ public class VitCacheDirectory {
     private final WorkerDirectory workers;
     private final EngineGrpcClient grpc;
     private final LBStatusConsistencyService consistency;
-    private final Map<String, Snapshot> snapshots = new HashMap<>();
-    private final Map<String, Set<String>> owners = new HashMap<>();
+    private volatile Map<String, Snapshot> snapshots = Map.of();
     private final Map<String, Long> attempts = new HashMap<>();
     private final ScheduledExecutorService sync = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "vit-cache-sync");
@@ -119,12 +118,10 @@ public class VitCacheDirectory {
             return false;
         }
         String address = worker.getIpPort();
-        removeSnapshot(address);
-        snapshots.put(address, new Snapshot(worker, response.getWorkerInstance(), keys,
+        Map<String, Snapshot> updated = new HashMap<>(snapshots);
+        updated.put(address, new Snapshot(worker, response.getWorkerInstance(), keys,
                 gpuKeys, cpuKeys, System.currentTimeMillis()));
-        for (String key : keys) {
-            owners.computeIfAbsent(key, ignored -> new HashSet<>()).add(address);
-        }
+        snapshots = Map.copyOf(updated);
         return true;
     }
 
@@ -133,41 +130,25 @@ public class VitCacheDirectory {
                 && keys.stream().noneMatch(k -> k == null || k.isEmpty() || k.length() > 4096));
     }
 
-    private void removeSnapshot(String address) {
-        Snapshot old = snapshots.remove(address);
-        if (old == null) {
-            return;
-        }
-        for (String key : old.keys()) {
-            Set<String> locations = owners.get(key);
-            locations.remove(address);
-            if (locations.isEmpty()) {
-                owners.remove(key);
-            }
-        }
-    }
-
     private void prune(Map<String, WorkerStatus> live, long now) {
-        for (var entry : new ArrayList<>(snapshots.entrySet())) {
+        Map<String, Snapshot> updated = new HashMap<>(snapshots);
+        for (var entry : snapshots.entrySet()) {
             WorkerStatus worker = live.get(entry.getKey());
             if (worker == null || !isRoutable(worker) || worker != entry.getValue().worker()) {
-                removeSnapshot(entry.getKey());
+                updated.remove(entry.getKey());
                 attempts.remove(entry.getKey());
             } else if (now - entry.getValue().time() > 2 * SYNC_INTERVAL_MS) {
-                removeSnapshot(entry.getKey());
+                updated.remove(entry.getKey());
             }
         }
+        snapshots = Map.copyOf(updated);
         attempts.keySet().removeIf(address -> !live.containsKey(address) || !isRoutable(live.get(address)));
     }
 
     private Map<String, WorkerStatus> liveWorkers() {
-        var statuses = workers.statusSnapshot(RoleType.VIT);
         Map<String, WorkerStatus> live = new HashMap<>();
-        for (String address : workers.endpointAddressSnapshot(RoleType.VIT)) {
-            WorkerStatus status = statuses.get(address);
-            if (status != null) {
-                live.put(address, status);
-            }
+        for (var entry : workers.vitRoutingSnapshot()) {
+            live.put(entry.address(), entry.endpoint().getStatus());
         }
         return live;
     }
@@ -180,21 +161,27 @@ public class VitCacheDirectory {
     }
 
     /** Cache matches share immutable key sets from one directory view. */
-    public synchronized Map<String, Candidate> candidates(String group, List<String> keys) {
-        Map<String, WorkerStatus> live = liveWorkers();
-        prune(live, System.currentTimeMillis());
+    public Map<String, Candidate> candidates(String group, List<String> keys) {
+        var fleet = workers.vitRoutingSnapshot();
+        Map<String, Snapshot> cacheView = snapshots;
+        long now = System.currentTimeMillis();
         Map<String, Candidate> matches = new HashMap<>();
-        for (WorkerStatus worker : live.values()) {
-            if (!isRoutable(worker)) {
+        for (var entry : fleet) {
+            WorkerStatus worker = entry.endpoint().getStatus();
+            if (group != null && !Objects.equals(group, worker.getGroup())) {
                 continue;
             }
-            Snapshot snapshot = snapshots.get(worker.getIpPort());
+            Snapshot snapshot = cacheView.get(entry.address());
+            if (snapshot != null && (snapshot.worker() != worker
+                    || now - snapshot.time() > 2 * SYNC_INTERVAL_MS)) {
+                snapshot = null;
+            }
             int hashHits = 0;
             int gpuHits = 0;
             int cpuHits = 0;
             List<String> matchingKeys = group == null || Objects.equals(group, worker.getGroup()) ? keys : List.of();
             for (String key : matchingKeys) {
-                if (owners.getOrDefault(key, Set.of()).contains(worker.getIpPort())) {
+                if (snapshot != null && snapshot.keys().contains(key)) {
                     hashHits++;
                 }
                 if (snapshot != null) {
