@@ -318,7 +318,7 @@ P2PBroadcastClient::controlWriteAsync(const std::string&        unique_key,
 
 std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> P2PBroadcastClient::queryLeaseStatusAsync(
     const std::string& unique_key, P2PConnectorBroadcastType operation, int64_t poll_timeout_ms) {
-    if (!tp_broadcast_manager_ || unique_key.empty() || operation != HANDLE_WRITE) {
+    if (!tp_broadcast_manager_ || unique_key.empty() || (operation != HANDLE_WRITE && operation != WRITE)) {
         return nullptr;
     }
     std::vector<FunctionRequestPB> requests(tp_broadcast_manager_->workerNum());

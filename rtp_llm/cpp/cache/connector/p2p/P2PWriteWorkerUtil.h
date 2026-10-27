@@ -40,11 +40,11 @@ struct WriteTaskGroup: public std::enable_shared_from_this<WriteTaskGroup> {
     ErrorInfo                                            error;
     std::condition_variable                              cv;
 
-    void      cancel();
-    void      watchTask(const std::string& key, const transfer::IKVCacheRecvTaskPtr& task);
-    ErrorInfo waitDone();
-    void      waitStopped();
-    void      releaseStoppedTasks();
+    void               cancel();
+    void               watchTask(const std::string& key, const transfer::IKVCacheRecvTaskPtr& task);
+    void               queryLeaseStatus(bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
+    ErrorInfo          waitDone();
+    void               releaseStoppedTasks();
     KVCacheResourcePtr sourceResource();
     bool               beginSourceTransfer(int64_t deadline);
     void               releaseSourceResource();

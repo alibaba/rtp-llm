@@ -283,13 +283,13 @@ TEST_F(BlockTreeCacheTest, WritebackAccountingChangesOnlyOnPrefillInsertAndPrese
     EXPECT_TRUE(path[0]->is_accounted);
     EXPECT_FALSE(path[1]->is_accounted);
     EXPECT_FALSE(path[2]->is_accounted);
-    cache_->insert({100, 200}, {resources[0], resources[1]}, Tier::DEVICE, false, true);
+    cache_->insert({100, 200}, {resources[0], resources[1]}, Tier::DEVICE, false, {}, true);
     EXPECT_TRUE(path[1]->is_accounted);
     EXPECT_FALSE(path[2]->is_accounted);
     auto second = cache_->match(keys);
     EXPECT_EQ(second.reuse_accounting.unaccountedBlocks(second.matched_device_blocks), 1u);
     releaseRequestRefsForTest(*cache_, second.matched_device_resources);
-    cache_->insert(keys, resources, Tier::DEVICE, false, true);
+    cache_->insert(keys, resources, Tier::DEVICE, false, {}, true);
     ASSERT_FALSE(cache_->insertExternalBlocks(keys, 1, resources, currentTimeMs() + 10000).hasError());
     auto third = cache_->match(keys);
     EXPECT_EQ(third.reuse_accounting.unaccountedBlocks(third.matched_device_blocks), 0u);
@@ -321,7 +321,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchesBeforePrefillCommitAllKeepTheirAccou
     while (matched_requests.load() != requests.size()) {
         std::this_thread::yield();
     }
-    cache_->insert({100, 200}, resources, Tier::DEVICE, false, true);
+    cache_->insert({100, 200}, resources, Tier::DEVICE, false, {}, true);
     committed.store(true);
     for (auto& request : requests) {
         request.join();
@@ -343,7 +343,7 @@ TEST_F(BlockTreeCacheTest, WritebackAccountingSnapshotSurvivesNodeRecreation) {
     resources[0][0].device_blocks = {43};
     ASSERT_FALSE(cache_->insertExternalBlocks({100}, 0, resources, currentTimeMs() + 10000).hasError());
     auto current = cache_->match({100});
-    cache_->insert({100}, resources, Tier::DEVICE, false, true);
+    cache_->insert({100}, resources, Tier::DEVICE, false, {}, true);
     EXPECT_EQ(previous.reuse_accounting.unaccountedBlocks(1), 1u);
     EXPECT_EQ(current.reuse_accounting.unaccountedBlocks(1), 1u);
     EXPECT_TRUE(cache_->tree()->findNode({100}).front()->is_accounted);
@@ -360,12 +360,12 @@ TEST_F(BlockTreeCacheTest, PrefillAccountingDoesNotConfirmRejectedInsertSuffix) 
     const auto path = cache_->tree()->findNode(keys);
     ASSERT_EQ(path.size(), 3u);
     path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
-    cache_->insert(keys, resources, Tier::DEVICE, false, true);
+    cache_->insert(keys, resources, Tier::DEVICE, false, {}, true);
     EXPECT_TRUE(path[0]->is_accounted);
     EXPECT_FALSE(path[1]->is_accounted);
     EXPECT_FALSE(path[2]->is_accounted);
     path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
-    cache_->insert(keys, resources, Tier::DEVICE, false, true);
+    cache_->insert(keys, resources, Tier::DEVICE, false, {}, true);
     EXPECT_TRUE(path[1]->is_accounted);
     EXPECT_TRUE(path[2]->is_accounted);
 }

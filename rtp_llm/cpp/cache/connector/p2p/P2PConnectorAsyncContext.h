@@ -341,10 +341,11 @@ private:
     void    failLocked(const ErrorInfo& error);
     void    checkPeerResultLocked();
     void    tryFinishLocked(const ErrorInfo& error);
-    void    finishLocked(const ErrorInfo& error);
+    void    finishRelease();
     struct DoneNotifier {
         P2PConnectorAsyncWriteContext& context;
         ~DoneNotifier() {
+            context.finishRelease();
             context.dispatchDoneCallbacks();
         }
     };
@@ -368,12 +369,16 @@ private:
     bool                                        cancelled_{false};
     bool                                        done_{false};
     bool                                        released_{false};
+    bool                                        release_ready_{false};
+    bool                                        release_in_progress_{false};
     bool                                        transfer_stopped_{false};
+    bool                                        worker_cancelled_{false};
     bool                                        control_submitting_{false};
     int64_t                                     control_next_ms_{0};
     int64_t                                     control_interval_ms_{10};
 
     std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> control_result_;
+    std::shared_ptr<P2PBroadcastClient::TpBroadcastResult> lease_result_;
 
     bool                                             peer_pending_{false};
     bool                                             peer_stopped_{false};

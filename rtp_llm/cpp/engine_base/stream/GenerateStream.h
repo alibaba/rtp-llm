@@ -629,14 +629,6 @@ public:
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
     }
-    int64_t beginTimeUs() const {
-        std::lock_guard<std::mutex> lock(*mutex_);
-        return begin_time_us_;
-    }
-    void checkTimeout() {
-        std::lock_guard<std::mutex> lock(*mutex_);
-        checkTimeoutWithoutLock();
-    }
     int64_t schedulerEnqueueTimeUs() const {
         return scheduler_enqueue_time_us_ > 0 ? scheduler_enqueue_time_us_ : enqueueTime();
     }

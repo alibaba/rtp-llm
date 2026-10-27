@@ -106,6 +106,12 @@ public:
         return failureSummaryNoLock();
     }
 
+    grpc::StatusCode rpcStatusCode(size_t rank) const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return done() && rank < worker_contexts_.size() && worker_contexts_[rank] ?
+                   worker_contexts_[rank]->status.error_code() : grpc::StatusCode::UNKNOWN;
+    }
+
     void onDone(DoneCallback callback) {
         if (!callback) {
             return;

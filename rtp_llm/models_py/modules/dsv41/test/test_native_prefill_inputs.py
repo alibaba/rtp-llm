@@ -1,13 +1,15 @@
 """V4.1 prefill consumes main's real pybind input fields and ragged bounds."""
 
+import gc
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.ops import RoleType
-from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyContextParallelParams, PyModelInputs
 
 
 class NativePrefillInputsTest(unittest.TestCase):
@@ -184,6 +186,49 @@ class NativePrefillInputsTest(unittest.TestCase):
                         model.supports_device_only_attention_metadata,
                         fp8 and model_class is not base.DeepSeekV4Model,
                     )
+
+    def test_saved_cp_metadata_does_not_retain_request_inputs(self):
+        from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+        from rtp_llm.models_py.modules.dsv41.transformer import (
+            V4Transformer as V41Transformer,
+        )
+
+        for transformer in (V4Transformer, V41Transformer):
+            with self.subTest(transformer=transformer.__module__):
+                lengths = torch.tensor([2, 3], dtype=torch.int32)
+                metadata = PyContextParallelParams()
+                metadata.prefill_actual_input_lengths_cpu = lengths
+                attention = PyAttentionInputs()
+                attention.context_parallel_info = metadata
+                inputs = PyModelInputs()
+                inputs.attention_inputs = {"swa_kv": attention}
+                inputs_ref = weakref.ref(inputs)
+                model = SimpleNamespace()
+                transformer.set_cp_info(
+                    model,
+                    inputs.attention_inputs["swa_kv"].context_parallel_info,
+                    2,
+                    0,
+                    True,
+                )
+                inputs.attention_inputs["swa_kv"].context_parallel_info.prefill_actual_input_lengths_cpu = torch.tensor([7])
+                self.assertEqual(
+                    inputs.attention_inputs["swa_kv"].context_parallel_info.prefill_actual_input_lengths_cpu.tolist(),
+                    [7],
+                )
+                del inputs
+                gc.collect()
+                self.assertIsNone(inputs_ref())
+                self.assertEqual(
+                    model._cp_info.prefill_actual_input_lengths_cpu.data_ptr(),
+                    lengths.data_ptr(),
+                )
+                self.assertEqual(
+                    (model._cp_size, model._cp_rank, model._kv_cache_sharded),
+                    (2, 0, True),
+                )
+                transformer.set_cp_info(model, None, 1, 0)
+                self.assertIsNone(model._cp_info)
 
     @unittest.skipUnless(
         torch.cuda.is_available(), "native attention factory needs CUDA"

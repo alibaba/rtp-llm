@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import copy
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
@@ -438,7 +439,8 @@ class V4Transformer(nn.Module):
         self, cp_info, cp_size: int, cp_rank: int, kv_cache_sharded: bool = False
     ) -> None:
         """Bind / clear the framework's Context-Parallel metadata for the
-        NEXT forward.  Only stashes the raw metadata; the derived
+        NEXT forward. Stores a shallow snapshot without retaining the
+        owning request inputs; the derived
         ``CPContext`` (global positions, stripped restore indices, etc.)
         is built inside ``forward`` once chunk_length is known and then
         propagated to every layer's attn + compressor + indexer via
@@ -448,7 +450,7 @@ class V4Transformer(nn.Module):
         HCA / INDEXER paged pools are RR-sharded across CP ranks, and
         attention's compressed-K reader takes the CP-aware path.
         """
-        self._cp_info = cp_info
+        self._cp_info = copy.copy(cp_info)
         self._cp_size = int(cp_size)
         self._cp_rank = int(cp_rank)
         self._kv_cache_sharded = bool(kv_cache_sharded)

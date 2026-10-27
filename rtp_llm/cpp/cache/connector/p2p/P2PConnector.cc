@@ -200,11 +200,12 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
             if (p2p_request.lease_operation() == HANDLE_WRITE) {
                 return prefill_ ? prefill_->queryLeaseStatusPerRank(unique_key, response) : reject_role();
             }
-            if (p2p_request.lease_operation() != READ) {
+            if (p2p_request.lease_operation() != READ && p2p_request.lease_operation() != WRITE) {
                 setP2PResponse(response, ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid lease operation"));
                 return false;
             }
-            return decode_ ? decode_->queryLeaseStatusPerRank(unique_key, response) : reject_role();
+            return decode_ ? decode_->queryLeaseStatusPerRank(unique_key, p2p_request.lease_operation(), response) :
+                             reject_role();
         case P2PConnectorBroadcastType::WRITE:
             return decode_ ? decode_->writePerRank(p2p_request, response) : reject_role();
         case P2PConnectorBroadcastType::HANDLE_WRITE:

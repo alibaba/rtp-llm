@@ -289,7 +289,7 @@ TEST(BlockTreeStorerTest, PrefillAccountingWaitsForSuccessfulLowerTierPublicatio
             auto barrier = std::make_shared<CallbackBarrier>();
             block_tree_cache_detail::ScopeRollback release_barrier([barrier]() { barrier->release(); });
             engine->setCopyBehavior(action, barrier);
-            env.cache->insert({100}, resources, tier, false, true);
+            env.cache->insert({100}, resources, tier, false, {}, true);
             ASSERT_TRUE(barrier->waitUntilEnteredFor(1, std::chrono::seconds(5)));
             auto before = env.cache->match({100});
             EXPECT_EQ(before.reuse_accounting.unaccountedBlocks(1), 1u);
