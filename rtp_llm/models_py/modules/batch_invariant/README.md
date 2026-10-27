@@ -37,7 +37,7 @@ capability and pass the same contract checks before it can be enabled. New
 operation families (such as MoE or recurrent attention) require additional
 implementations; a model registration alone is insufficient.
 
-Initial scope: single rank, BF16 dense causal MHA/GQA, BF16 KV cache, base RoPE,
+Initial scope: single rank, BF16 dense causal MHA/GQA, BF16 KV cache, unscaled base RoPE,
 head dimension 64/128/256, SwiGLU and ordinary RMSNorm. Quantized linear layers,
 zero-centered norms, speculative decoding, beam expansion/reordering,
 layer micro batching, disaggregated FFN and context parallelism are rejected. TP/DP/PP/EP/SP larger
@@ -52,14 +52,23 @@ than one and model execution classes without the capability are rejected.
   Odd feature widths, other architectures and FP32 operator tests use the adapted vLLM persistent
   Triton GEMM with fixed K partitions. LM head uses these same paths with FP32
   output, including when called through C++. No global BLAS flags are changed.
-* RMSNorm and Q/K norm use a fixed per-row reduction.
+* SwiGLU preserves vLLM's intermediate BF16 rounding after SiLU and before
+  multiplication, within a single fused kernel. Ordinary execution is unchanged.
+* The first input RMSNorm and Q/K norm follow vLLM's Triton reduction: fixed
+  1024-element blocks, FP32 accumulation and `1 / sqrt`. Norms after residual
+  addition use vLLM's scalar CUB reduction and `rsqrt`, with a block size that
+  depends only on feature width. RTP supplies its already BF16-rounded sum.
 * Prefill and decode share the causal BF16 subset of vLLM's 2D unified
   attention. Tensor Core QK/PV and grouped query tiles share KV loads. Logical KV
   blocks of 32 retain the same traversal/softmax partition in both phases; no
   split-KV path is enabled. The adapter computes ragged query offsets on device
-  and supplies absolute positions and HND cache strides. RoPE uses a fixed cache.
-* Vocabulary logsumexp uses fixed 1024-element partitions and a fixed merge.
-  Native prompt scoring and generation consume these same normalizers.
+  and supplies absolute positions and HND cache strides. RoPE uses a configuration-keyed cache with BF16 rounding before
+  promotion to the FP32 storage required by the native adapter.
+* Vocabulary normalization follows vLLM's fixed 1024-element reduction. The
+  Python/native contract carries two FP32 values per row: maximum and the log
+  of the shifted exponential sum. Prompt scoring and generation preserve
+  `(logit - maximum) - log_shifted_sum`; precombining the normalizers changes
+  rounding. Native contract version 2 rejects a version 1 library.
 * RPC carries the selected FP32 raw logprob directly. The token client preserves
   its bits instead of reconstructing it from a rounded/underflowed probability.
   Older servers without this field retain the existing probability fallback;
@@ -90,45 +99,45 @@ selected logprobs as byte arrays, including changed metadata on actual Graph
 replay. It never starts training, evaluation datasets or checkpoint creation.
 RPC transport tests live in `rtp_llm/RL/test/token_rpc_client_test.py`.
 
-The vLLM-derived revision was validated on L20B / SM 10.3, Torch 2.11 / CUDA 13:
+The arithmetic alignment was qualified on 2026-10-27 using Qwen3-8B revision
+`b968826d9c46dd6066d109eabc6255188de91218`, L20B / SM 10.3, single rank,
+RTP Torch 2.11.0 / Triton 3.6.0 and vLLM 0.29.0 Torch 2.13.0 / Triton 3.7.1,
+CUDA 13. The vLLM reference enables `VLLM_BATCH_INVARIANT=1`, selects
+`TRITON_ATTN`, uses BF16 LM-head operands and FP32 head output, and disables
+prefix caching. Torch compilation is disabled (`compilation_config.mode=0`);
+the timing run enables decode CUDA Graph. Ordinary vLLM AUTO attention and
+other compilation modes are outside this comparison.
 
-* 24 CUDA/operator-policy checks and 17 token RPC client tests passed. Coverage
-  includes GEMM tile boundaries, sliced-buffer alignment, row/column-major
-  weights, live weight updates, unchanged global BLAS settings, ragged attention,
-  GQA ratios including seven, head dimensions 64/128/256 and KV lengths to 1025.
-* Qwen3-8B passed 26 full-model checks with zero unequal bytes in hidden states,
-  full-vocabulary logits and selected FP32 raw logprobs. The 20 standard checks
-  use 65 tokens; six extended checks compare the final position of a 1025-token
-  sequence across peers, page placement and chunk boundaries.
+* A passive 65-token trace matched all 36 layers' inspected boundaries, final
+  hidden states, 9,875,840 full-vocabulary FP32 logits and selected logprobs
+  with zero unequal bytes. RoPE cache storage has different dtypes; promoting
+  the reference BF16 cache to FP32 gives exactly the same operand bytes.
+* Cross-runtime operator checks matched vLLM exactly: 64 normalization checks
+  in each runtime, six RoPE cache configurations through position 4096,
+  four SiLU input sweeps and 40 residual RMSNorm checks. The SiLU sweeps cover
+  every finite BF16 gate encoding with four fixed up operands.
+* Qwen3-8B passed 26 full-model batch invariance checks. They compare hidden
+  states, complete vocabulary logits and selected logprobs, including 1025-token
+  prefixes, chunk boundaries, KV page placement and live Graph metadata changes.
+* Native RPC matched the reference for all 93 fixed continuation tokens and
+  four greedy sequences of 32 tokens each, including every returned FP32 raw
+  logprob. Serial, concurrent and reversed-order scoring matched exactly.
+* Native FIFO/eager and ratio/decode-Graph modes passed real multi-request
+  prefill/decode batches, reordering, decode-versus-prefill rescoring and
+  cross-mode equality. Graph buckets were 1/2/4/8; execution logs verified
+  that actual Graph replay and batches larger than one occurred.
 * A seeded small Qwen2 fixture with QKV bias and without Q/K norm passed the
-  same 20 standard checks and a separate Hugging Face eager numerical reference.
-  Maximum absolute differences were 0.01163 for logits and 0.005094 for logprobs.
-  This is structural coverage, not acceptance of a pretrained Qwen2 checkpoint.
-* Native RPC passed FIFO/eager and ratio/decode-Graph checks, including real
-  multi-request batches, Graph padding, serial/concurrent scoring, reordering,
-  decode-versus-prefill rescoring and equality across both server modes.
-* Host and device metadata planners each passed full-model Graph capture/replay
-  with changing positions. A live graph must retain its capture-time planner;
-  switching between the planners' buffer-capacity conventions is unsupported.
+  same 20 standard checks and an independent Hugging Face eager reference.
+  Maximum absolute errors were 0.012001 for logits and 0.003486 for logprobs.
+  This is structural coverage, not pretrained Qwen2 acceptance or cross-engine
+  bitwise qualification of that checkpoint.
+* Native dispatcher tests include probability underflow and a large-logit
+  cancellation case that distinguishes `(x - max) - log_sum` from
+  `x - (max + log_sum)` for prompt targets, prompt top-k and decode outputs.
 
-The original implementation at `08bd92d9` was validated on L20B / SM 10.3,
-Torch 2.11 / CUDA 13 as follows (historical results, not a substitute for
-revalidating the updated kernels):
-
-* 16 CUDA/operator-policy checks and 17 token RPC client tests.
-* 18 full-model checks on Qwen3-8B, comparing hidden states, full-vocabulary
-  logits and selected logprobs. Every comparison has zero unequal bytes.
-* The same 18 checks on a seeded small Qwen2 fixture with QKV bias and without
-  Q/K norm, plus a separate Hugging Face numerical reference. This validates
-  an additional execution structure, not a pretrained Qwen2 checkpoint.
-* 27 native batch dispatcher tests, including raw logprob transport when the
-  corresponding probability underflows to zero.
-* A bounded native RPC check with FIFO/eager and ratio/decode-Graph modes,
-  serial/concurrent scoring, request reordering and decode-versus-prefill
-  rescoring. The Graph capture buckets are 1/2/4/8.
-
-These are bounded conformance checks, not exhaustive qualification of all
-sequence lengths, checkpoints or architectures. The v1 attention operator checks
-extended to 97 tokens; the updated checks extend to 1025 tokens. Other GPUs and
-cuBLAS releases must be qualified independently. No RL effect or end-to-end
-rollout performance acceptance is implied.
+The prior implementations are preserved at `08bd92d9` (initial feature) and
+`e5e28b98` (vLLM-derived GEMM/attention). Their historical measurements do not
+qualify this updated arithmetic. These are bounded conformance checks, not
+exhaustive qualification of every sequence length, checkpoint, architecture or
+software release. TP greater than one is unsupported. No RL quality or training
+throughput acceptance is implied.

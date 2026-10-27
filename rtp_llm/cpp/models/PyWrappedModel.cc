@@ -1474,7 +1474,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor log_normalizers;
         if (batch_invariant_) {
             py::gil_scoped_acquire gil;
-            log_normalizers = py_model_.attr("batch_invariant_logsumexp")(logits).cast<torch::Tensor>();
+            log_normalizers = py_model_.attr("batch_invariant_logprob_normalizers")(logits).cast<torch::Tensor>();
         }
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");

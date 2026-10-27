@@ -54,13 +54,13 @@ class BatchInvariantPolicy:
             raise ValueError(
                 "batch invariant dense-gqa-v1 requires BF16 causal MHA/GQA"
             )
-        if attn.rope_config.style != RopeStyle.Base or attn.size_per_head not in (
-            64,
-            128,
-            256,
+        if (
+            attn.rope_config.style != RopeStyle.Base
+            or attn.rope_config.scale != 1.0
+            or attn.size_per_head not in (64, 128, 256)
         ):
             raise ValueError(
-                "batch invariant dense-gqa-v1 requires base RoPE and head_dim 64/128/256"
+                "batch invariant dense-gqa-v1 requires unscaled base RoPE and head_dim 64/128/256"
             )
         if cfg.activation_type != ActivationType.Swiglu:
             raise ValueError("batch invariant dense-gqa-v1 requires SwiGLU")
@@ -70,6 +70,12 @@ class BatchInvariantPolicy:
 
         if attn_kv_dtype(attn) != torch.bfloat16:
             raise ValueError("batch invariant dense-gqa-v1 requires BF16 KV cache")
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        if not hasattr(rtp_llm_ops, "batch_invariant_post_residual_rmsnorm"):
+            raise RuntimeError(
+                "batch invariant requires rebuilt native libraries with residual RMSNorm"
+            )
         if torch.cuda.get_device_capability()[0] in (9, 10):
             from rtp_llm.ops.compute_ops import rtp_llm_ops
 

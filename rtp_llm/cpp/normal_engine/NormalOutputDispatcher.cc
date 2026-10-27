@@ -41,6 +41,16 @@ void syncPinnedCpuCopies(bool need_sync) {
     cuda_graph::graphGetCurrentStream().synchronize();
 }
 
+torch::Tensor normalizeInvariantLogprobs(const torch::Tensor& values, const torch::Tensor& normalizers) {
+    RTP_LLM_CHECK(values.dim() == 2 && values.scalar_type() == torch::kFloat32 && normalizers.dim() == 2
+                  && normalizers.size(1) == 2 && normalizers.size(0) == values.size(0)
+                  && normalizers.scalar_type() == torch::kFloat32 && normalizers.device() == values.device());
+    // Match vLLM's (x - max) - log(sum(exp(x - max))) rounding. Combining the
+    // two normalizers first is mathematically equivalent but not bitwise equal.
+    auto shifted = values - normalizers.narrow(1, 0, 1);
+    return shifted - normalizers.narrow(1, 1, 1);
+}
+
 }  // namespace
 
 std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
@@ -165,11 +175,9 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         auto raw_logits   = logits.narrow(0, 0, total_batch_size_out);
         auto selected_ids = token_ids_for_copy.to(logits.device(), torch::kLong).clamp(0, logits.size(1) - 1);
         if (log_normalizers.defined()) {
-            RTP_LLM_CHECK(log_normalizers.dim() == 2 && log_normalizers.size(1) == 1
-                          && log_normalizers.size(0) >= static_cast<int64_t>(total_batch_size_out)
-                          && log_normalizers.scalar_type() == torch::kFloat32
-                          && raw_logits.scalar_type() == torch::kFloat32);
-            auto selected = raw_logits.gather(1, selected_ids) - log_normalizers.narrow(0, 0, total_batch_size_out);
+            RTP_LLM_CHECK(log_normalizers.size(0) >= static_cast<int64_t>(total_batch_size_out));
+            auto selected         = normalizeInvariantLogprobs(raw_logits.gather(1, selected_ids),
+                                                       log_normalizers.narrow(0, 0, total_batch_size_out));
             selected_logprobs_cpu = copyToPinnedCpuAsync(selected, need_d2h_sync);
             selected_probs_cpu    = copyToPinnedCpuAsync(selected.exp(), need_d2h_sync);
         } else {
@@ -354,11 +362,14 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
             // topk on raw logits (monotonicity of softmax preserves ranking)
             auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);
 
-            // single reduce for log-normalizer, avoids materializing [slice_len, vocab_size]
-            auto log_sum_exp   = model_output.all_log_normalizers.defined() ?
-                                     model_output.all_log_normalizers.narrow(0, token_offset + start_pos, slice_len) :
-                                     sliced_logits.logsumexp(-1, /*keepdim=*/true);
-            auto topk_logprobs = topk_values_raw - log_sum_exp;
+            // Share the model's canonical reduction with decode scoring without
+            // materializing [slice_len, vocab_size] log probabilities.
+            const bool invariant   = model_output.all_log_normalizers.defined();
+            auto       normalizers = invariant ?
+                                         model_output.all_log_normalizers.narrow(0, token_offset + start_pos, slice_len) :
+                                         sliced_logits.logsumexp(-1, /*keepdim=*/true);
+            auto       topk_logprobs =
+                invariant ? normalizeInvariantLogprobs(topk_values_raw, normalizers) : topk_values_raw - normalizers;
 
             // target_logprobs[i] = logprob of token[start_pos+i+1] at position start_pos+i.
             // Length = min(slice_len, tokens.size() - start_pos - 1): equals slice_len when
@@ -378,8 +389,11 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                             .to(torch::kCUDA)
                                             .toType(torch::kInt64)
                                             .unsqueeze(1);
-                    auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);
-                    target_logprobs = (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).cpu();
+                    auto target_raw         = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor);
+                    auto target_normalizers = normalizers.narrow(0, 0, logprob_len);
+                    auto target_values      = invariant ? normalizeInvariantLogprobs(target_raw, target_normalizers) :
+                                                          target_raw - target_normalizers;
+                    target_logprobs         = target_values.squeeze(1).cpu();
                 }
             }
 

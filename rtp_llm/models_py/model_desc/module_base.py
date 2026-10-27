@@ -62,7 +62,7 @@ class GptModelBase(nn.Module):
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         if (
             self.batch_invariant
-            and getattr(self, "_batch_invariant_native_version", 0) != 1
+            and getattr(self, "_batch_invariant_native_version", 0) != 2
         ):
             raise RuntimeError(
                 "batch invariant requires the matching native library; rebuild libth_transformer"
@@ -134,10 +134,12 @@ class GptModelBase(nn.Module):
 
         return linear(hidden.to(weight.dtype), weight, output_dtype=torch.float32)
 
-    def batch_invariant_logsumexp(self, logits):
-        from rtp_llm.models_py.modules.batch_invariant.kernels import logsumexp
+    def batch_invariant_logprob_normalizers(self, logits):
+        from rtp_llm.models_py.modules.batch_invariant.kernels import (
+            logprob_normalizers,
+        )
 
-        return logsumexp(logits)
+        return logprob_normalizers(logits)
 
     def batch_invariant_rmsnorm(self, hidden, weight, eps):
         from rtp_llm.models_py.modules.batch_invariant.kernels import rmsnorm

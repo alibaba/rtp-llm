@@ -266,7 +266,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             !use_spec_decoding && !init_resources.is_speculative && !enable_prefill_cp_ && device_props_.tp_size == 1
                 && int(device_props_.enable_layer_micro_batch) == 0,
             "batch invariant dense-gqa-v1 requires TP=1 without speculative decoding, CP or layer micro batching");
-        py_model_.attr("_batch_invariant_native_version") = 1;
+        // Version 2 transports (row_max, log_shifted_sum) separately.
+        py_model_.attr("_batch_invariant_native_version") = 2;
     }
     auto py_initialize_method = py_model_.attr("initialize");
     try {

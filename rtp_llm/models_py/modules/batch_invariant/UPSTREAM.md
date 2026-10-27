@@ -1,6 +1,6 @@
 # Upstream provenance
 
-The persistent GEMM and 2D unified attention are adapted from the installed
+The persistent GEMM, 2D unified attention, RMSNorm and logprob reduction are adapted from the installed
 **vLLM 0.29.0** source, under Apache-2.0. Copyright/SPDX notices are retained.
 There is no vLLM runtime dependency and no process-wide aten/BLAS monkey patch.
 
@@ -9,6 +9,9 @@ There is no vLLM runtime dependency and no process-wide aten/BLAS monkey patch.
 | [v1/attention/ops/triton_attention_helpers.py](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/v1/attention/ops/triton_attention_helpers.py) | `8c730611e7b3c5fb7579ec7846d56a2ab7e348ce06b39136da22072ecc363c95` |
 | [v1/attention/ops/triton_unified_attention.py](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/v1/attention/ops/triton_unified_attention.py) | `992a2bc892e2e2b43fbd3c8163816ccf7e97ced56cb542bd827adb0ddb2df9fa` |
 | [model_executor/determinism/batch_invariant.py](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/model_executor/determinism/batch_invariant.py) | `347cdf3deb9825ec6f9123674f98f3010d842d83791db323857da8ba9b1f3fd7` |
+| [model_executor/layers/rotary_embedding/base.py](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/model_executor/layers/rotary_embedding/base.py) | `c81804498f08f072356a26b41967f211475df2694dabf5da9f488c074d1fdef5` |
+| [csrc/libtorch_stable/activation_kernels.cu](https://github.com/vllm-project/vllm/blob/v0.29.0/csrc/libtorch_stable/activation_kernels.cu) | `d6510ee0271fb6c41b14aae501da53bcd6d5ec3707288c8644c4d3c120f0f4d0` |
+| [csrc/libtorch_stable/layernorm_kernels.cu](https://github.com/vllm-project/vllm/blob/v0.29.0/csrc/libtorch_stable/layernorm_kernels.cu) | `2041b5da8fa2e2868c1ef6133a46d4ae85ffdbc599a8a5da0c5e66cb91c573f6` |
 
 ## Adaptation boundaries
 
@@ -51,9 +54,29 @@ There is no vLLM runtime dependency and no process-wide aten/BLAS monkey patch.
 * FP8/INT8 KV, tensor descriptors, sinks, ALiBi, sliding windows, bidirectional
   attention, speculative decoding and TP collectives are not imported or enabled.
   The existing capability checks remain in force.
-* Per-row RMSNorm, vocabulary logsumexp, raw FP32 logprob transport and the
-  immutable per-model policy remain RTP integrations. This is not a port of
-  vLLM's entire runtime, sampler or BLAS global-state management.
+* `normalization.py` follows the pinned vLLM RMSNorm and log-softmax reduction:
+  fixed 1024-element blocks, FP32 accumulation, `1 / sqrt` and sequential
+  accumulation of exponentials after the row maximum. The RTP adapter returns
+  `(row_max, log_shifted_sum)` so selected-token and prompt scoring retain
+  `(logit - row_max) - log_shifted_sum` through the native dispatcher. Combining
+  the two normalizer values first can change the final FP32 bits.
+* `batch_invariant_norm.cu` retains vLLM's scalar, fixed-block CUB reduction
+  and reciprocal square root for norms after residual addition. RTP already
+  materializes the same BF16-rounded sum, so the adapter reads that sum without
+  repeating the addition. Qwen's shared execution class selects this algorithm
+  for post-attention, later-layer input and final norms; its first input norm
+  and Q/K norms continue to use the upstream Triton RMSNorm.
+* `activation.py` follows the CUDA SwiGLU operation's BF16 rounding boundary:
+  SiLU rounds to BF16 before multiplying by the up operand. One Triton launch
+  preserves that boundary without materializing the intermediate tensor. The
+  source is checksum-verified from the vLLM 0.29.0 PyPI source distribution.
+* `rope.py` follows the unscaled base RoPE cache construction. Values round to
+  BF16 before promotion to the FP32 storage required by RTP's FlashInfer
+  adapter. Cache keys include device, dimension, theta and maximum position;
+  ordinary execution's global cache is not mutated. Scaled RoPE is rejected.
+* Raw FP32 logprob transport and the immutable per-model policy remain RTP
+  integrations. This is not a port of vLLM's entire runtime, sampler or BLAS
+  global-state management.
 
 The v1 implementation is retained by Git commit
 `08bd92d904da14d074ec08b261735f457058e132` for reproducible before/after comparison.

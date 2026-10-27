@@ -113,7 +113,9 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
-    // Defined only by an invariant model. Shared by online and prompt scoring.
+    // Defined only by an invariant model. [rows, 2] FP32 (row_max, log_shifted_sum)
+    // is shared by online and prompt scoring. Do not collapse it to one LSE:
+    // (logit - row_max) - log_shifted_sum must preserve both rounding steps.
     torch::Tensor log_normalizers;
     torch::Tensor all_log_normalizers;
 };

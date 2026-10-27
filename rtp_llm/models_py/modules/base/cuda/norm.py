@@ -17,13 +17,19 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 # intermediate BF16 rounding of gamma + 1.
 class RMSNorm(BaseNorm):
     def __init__(
-        self, weight: torch.Tensor, eps: float = 1e-6, *, zero_centered: bool = False
+        self,
+        weight: torch.Tensor,
+        eps: float = 1e-6,
+        *,
+        zero_centered: bool = False,
+        batch_invariant_after_add: bool = False,
     ):
         super().__init__(weight, eps)
         self.zero_centered = zero_centered
         from rtp_llm.models_py.modules.batch_invariant import construction_policy
 
         self.batch_invariant_policy = construction_policy()
+        self.batch_invariant_after_add = batch_invariant_after_add
         if self.batch_invariant_policy.enabled and zero_centered:
             raise ValueError(
                 "batch invariant dense-gqa-v1 does not support zero-centered RMSNorm"
@@ -35,7 +41,15 @@ class RMSNorm(BaseNorm):
         if self.batch_invariant_policy.enabled:
             from rtp_llm.models_py.modules.batch_invariant.kernels import rmsnorm
 
-            result = rmsnorm(hidden_states, self.weight, self.variance_epsilon)
+            if self.batch_invariant_after_add:
+                shape = hidden_states.shape
+                result = rtp_llm_ops.batch_invariant_post_residual_rmsnorm(
+                    hidden_states.reshape(-1, shape[-1]).contiguous(),
+                    self.weight.contiguous(),
+                    self.variance_epsilon,
+                ).view(shape)
+            else:
+                result = rmsnorm(hidden_states, self.weight, self.variance_epsilon)
             if output is not None:
                 output.copy_(result)
                 return output

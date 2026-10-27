@@ -21,11 +21,19 @@ class BatchInvariantAttention(FMHAImplBase):
         self.warmup = warmup
         self.warmup_cache = None
         self.params = rtp_llm_ops.FlashInferMlaAttnParams()
-        self.rope = MhaRotaryEmbeddingOp(configs)
-        if self.rope.cos_sin_cache is None:
+        from .rope import base_rope_cache
+
+        if configs.rope_config.scale != 1.0:
             raise ValueError(
-                "batch invariant requires the fixed RoPE cache; dynamic fallback is unsupported"
+                "batch invariant vLLM alignment requires unscaled base RoPE"
             )
+        cache = base_rope_cache(
+            configs.rope_config.dim,
+            configs.rope_config.base,
+            configs.max_seq_len + configs.gen_num_per_cycle + 1,
+            torch.cuda.current_device(),
+        )
+        self.rope = MhaRotaryEmbeddingOp(configs, cos_sin_cache=cache)
         self.rope.set_params(self.params)
         self.writer = KVCacheWriteOp(
             configs.kv_head_num, configs.size_per_head, configs.kernel_tokens_per_block

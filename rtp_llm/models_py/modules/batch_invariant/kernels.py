@@ -11,6 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
+from .normalization import logprob_normalizers, logsumexp, rmsnorm, selected_logprobs
 from .persistent_matmul import matmul_kernel_persistent
 from .unified_attention import unified_attention_kernel
 
@@ -101,76 +102,6 @@ def linear(x, weight, bias=None, *, output_dtype=None):
             num_stages=3,
         )
     return out.view(*shape, n)
-
-
-@triton.jit
-def _rmsnorm(X, W, Y, H: tl.constexpr, EPS: tl.constexpr, BLOCK: tl.constexpr):
-    row = tl.program_id(0)
-    col = tl.arange(0, BLOCK)
-    x = tl.load(X + row * H + col, col < H, 0).to(tl.float32)
-    w = tl.load(W + col, col < H, 0).to(tl.float32)
-    var = tl.sum(x * x, 0) / H
-    y = (x * tl.rsqrt(var + EPS)) * w
-    tl.store(Y + row * H + col, y, col < H)
-
-
-def rmsnorm(x, weight, eps):
-    x = x.contiguous()
-    h = x.shape[-1]
-    if weight.shape != (h,) or x.device != weight.device:
-        raise ValueError("invalid batch invariant RMSNorm weight")
-    out = torch.empty_like(x)
-    if x.numel():
-        _rmsnorm[(x.numel() // h,)](
-            x, weight, out, h, eps, triton.next_power_of_2(h), num_warps=4
-        )
-    return out
-
-
-@triton.jit
-def _lse_parts(X, P, V: tl.constexpr, PARTS: tl.constexpr, BLOCK: tl.constexpr):
-    row, part = tl.program_id(0), tl.program_id(1)
-    i = part * BLOCK + tl.arange(0, BLOCK)
-    x = tl.load(X + row * V + i, i < V, -float("inf")).to(tl.float32)
-    maximum = tl.max(x, 0)
-    total = tl.sum(tl.exp(x - maximum), 0)
-    tl.store(P + row * PARTS * 2 + part * 2, maximum)
-    tl.store(P + row * PARTS * 2 + part * 2 + 1, total)
-
-
-@triton.jit
-def _lse_merge(P, Y, PARTS: tl.constexpr, BLOCK: tl.constexpr):
-    row = tl.program_id(0)
-    i = tl.arange(0, BLOCK)
-    maximum = tl.load(P + row * PARTS * 2 + i * 2, i < PARTS, -float("inf"))
-    total = tl.load(P + row * PARTS * 2 + i * 2 + 1, i < PARTS, 0)
-    m = tl.max(maximum, 0)
-    s = tl.sum(total * tl.exp(maximum - m), 0)
-    tl.store(Y + row, m + tl.log(s))
-
-
-def logsumexp(logits):
-    if logits.ndim != 2 or logits.shape[1] == 0 or not logits.is_cuda:
-        raise ValueError(
-            "batch invariant logsumexp requires nonempty CUDA vocabulary rows"
-        )
-    x = logits.contiguous()
-    rows, vocab = x.shape
-    parts = triton.cdiv(vocab, 1024)
-    partials = torch.empty((rows, parts, 2), device=x.device, dtype=torch.float32)
-    out = torch.empty((rows, 1), device=x.device, dtype=torch.float32)
-    if rows:
-        _lse_parts[(rows, parts)](x, partials, vocab, parts, 1024, num_warps=4)
-        _lse_merge[(rows,)](
-            partials, out, parts, triton.next_power_of_2(parts), num_warps=4
-        )
-    return out
-
-
-def selected_logprobs(logits, token_ids):
-    if token_ids.numel() != logits.shape[0]:
-        raise ValueError("one target token is required per logits row")
-    return logits.float().gather(1, token_ids.reshape(-1, 1).long()) - logsumexp(logits)
 
 
 def paged_attention(q, cache, block_table, request_ids, positions, *, query_start=None):

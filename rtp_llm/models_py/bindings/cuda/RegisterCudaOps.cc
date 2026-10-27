@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/batch_invariant_norm.h"
 
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
@@ -14,6 +15,12 @@
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("batch_invariant_post_residual_rmsnorm",
+                  &torch_ext::batch_invariant_post_residual_rmsnorm,
+                  "vLLM batch-invariant scalar RMSNorm of a BF16-rounded residual sum",
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("epsilon"));
     rtp_ops_m.def("batch_invariant_cublaslt_gemm",
                   &torch_ext::batch_invariant_cublaslt_gemm,
                   "BF16 cuBLASLt GEMM with FP32 accumulation, no split-K and no workspace",

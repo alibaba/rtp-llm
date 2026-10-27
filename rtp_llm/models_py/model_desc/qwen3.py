@@ -19,6 +19,15 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
+def _make_norm(weight, eps, *, after_residual=False):
+    from rtp_llm.models_py.modules.batch_invariant import construction_policy
+
+    options = {}
+    if construction_policy().enabled:
+        options["batch_invariant_after_add"] = after_residual
+    return RMSNorm(weight, eps=eps, **options)
+
+
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -47,11 +56,11 @@ class Qwen3DecoderLayer(nn.Module):
             quant_config,
             hw_kernel_config,
         )
-        self.input_layernorm = RMSNorm(
-            weights[W.pre_ln_gamma], eps=config.layernorm_eps
+        self.input_layernorm = _make_norm(
+            weights[W.pre_ln_gamma], config.layernorm_eps, after_residual=layer_idx > 0
         )
-        self.post_attention_layernorm = RMSNorm(
-            weights[W.post_ln_gamma], eps=config.layernorm_eps
+        self.post_attention_layernorm = _make_norm(
+            weights[W.post_ln_gamma], config.layernorm_eps, after_residual=True
         )
 
     def forward(
@@ -120,8 +129,10 @@ class Qwen3Model(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        self.norm = _make_norm(
+            weights.get_global_weight(W.final_ln_gamma),
+            config.layernorm_eps,
+            after_residual=True,
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

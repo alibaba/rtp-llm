@@ -7,13 +7,16 @@ from rtp_llm.models_py.modules.batch_invariant import (
     BatchInvariantPolicy,
     construction_policy,
 )
+from rtp_llm.models_py.modules.batch_invariant.activation import silu_and_mul
 from rtp_llm.models_py.modules.batch_invariant.kernels import (
     linear,
+    logprob_normalizers,
     logsumexp,
     paged_attention,
     rmsnorm,
     selected_logprobs,
 )
+from rtp_llm.models_py.modules.batch_invariant.rope import base_rope_cache
 
 
 def same_bits(a, b):
@@ -86,6 +89,99 @@ def test_norm_and_logprob(width):
         )
     order = torch.randperm(35, device=x.device)
     same_bits(lp[order], selected_logprobs(logits[order], target[order]))
+
+
+def test_logprob_preserves_shift_before_log_sum():
+    # Adding log(2) to this maximum rounds it away in FP32. The selected
+    # logprob must still be -log(2), rather than zero.
+    logits = torch.tensor([[16777216.0, 16777216.0, -16777216.0]], device="cuda")
+    target = torch.zeros(1, device="cuda", dtype=torch.long)
+    expected = torch.tensor([[-0.6931471805599453]], device="cuda")
+    same_bits(selected_logprobs(logits, target), expected)
+    normalizers = logprob_normalizers(logits)
+    assert normalizers.shape == (1, 2) and normalizers.dtype == torch.float32
+    for batch in (3, 33):
+        same_bits(
+            selected_logprobs(logits.repeat(batch, 1), target.repeat(batch)),
+            expected.repeat(batch, 1),
+        )
+
+
+def test_rope_cache_isolated_across_model_configurations():
+    device = torch.cuda.current_device()
+    first = base_rope_cache(128, 10000.0, 1025, device)
+    saved = first.clone()
+    for dim, theta, length in (
+        (64, 10000.0, 97),
+        (128, 1000000.0, 1025),
+        (256, 10000.0, 33),
+    ):
+        other = base_rope_cache(dim, theta, length, device)
+        assert other.shape == (length, dim)
+        assert other.data_ptr() != first.data_ptr()
+        # Native FP32 storage must contain BF16-rounded values exactly.
+        same_bits(other, other.bfloat16().float())
+        same_bits(first, saved)
+    same_bits(base_rope_cache(128, 10000.0, 1025, device), saved)
+
+
+@pytest.mark.parametrize("width", [3, 128, 1025, 12288])
+def test_swiglu_rounding_batch_order_and_graph(width):
+    torch.manual_seed(97)
+    x = torch.randn(7, width * 2, device="cuda", dtype=torch.bfloat16)
+    expected = torch.nn.functional.silu(x[:, :width]) * x[:, width:]
+    same_bits(silu_and_mul(x), expected)
+    for row in (0, 3, 6):
+        same_bits(silu_and_mul(x[row : row + 1]), expected[row : row + 1])
+    order = torch.tensor([6, 2, 4, 1, 5, 0, 3], device="cuda")
+    same_bits(silu_and_mul(x[order]), expected[order])
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        silu_and_mul(x)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = silu_and_mul(x)
+    graph.replay()
+    same_bits(output, expected)
+    x.add_(0.25)
+    graph.replay()
+    same_bits(output, torch.nn.functional.silu(x[:, :width]) * x[:, width:])
+
+
+@pytest.mark.parametrize("width", [64, 513, 4096, 8192])
+def test_residual_norm_batch_order_and_graph(width):
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    operation = rtp_llm_ops.batch_invariant_post_residual_rmsnorm
+    torch.manual_seed(239)
+    x = torch.randn(33, width, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(width, device="cuda", dtype=x.dtype)
+    reference = operation(x, weight, 1e-6)
+    expected = (
+        x.double()
+        * torch.rsqrt(x.double().square().mean(-1, keepdim=True) + 1e-6)
+        * weight.double()
+    ).bfloat16()
+    torch.testing.assert_close(reference, expected, rtol=0.008, atol=0.008)
+    for row in (0, 16, 32):
+        same_bits(operation(x[row : row + 1], weight, 1e-6), reference[row : row + 1])
+    order = torch.randperm(33, device="cuda")
+    same_bits(operation(x[order], weight, 1e-6), reference[order])
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        operation(x, weight, 1e-6)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = operation(x, weight, 1e-6)
+    graph.replay()
+    same_bits(output, reference)
+    x.add_(0.25)
+    graph.replay()
+    same_bits(output, operation(x, weight, 1e-6))
 
 
 @pytest.mark.parametrize("head_dim", [64, 128, 256])
