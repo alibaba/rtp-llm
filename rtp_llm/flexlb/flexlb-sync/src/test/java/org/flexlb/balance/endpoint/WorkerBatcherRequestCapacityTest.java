@@ -372,6 +372,7 @@ class WorkerBatcherRequestCapacityTest {
     @Timeout(10)
     void configuredBatchGroupSizeIsIndependentOfConcurrentBatchLimit() throws Exception {
         FlexlbConfig config = productionConfig();
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
         var decision = config.getScheduler().getDecision();
         decision.setMaxRequests(2);
         decision.setMaxCollectionWaitMs(60_000L);
@@ -398,6 +399,7 @@ class WorkerBatcherRequestCapacityTest {
     @Test
     void defaultBatchLimitAllowsTwoReservationsAndReopensAfterRelease() {
         FlexlbConfig config = productionConfig();
+        config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
         try (Fixture fixture = fixture(config)) {
             var items = new ArrayList<RequestRoute>();
             var reservations = new ArrayList<PrefillState.BatchReservation>();
