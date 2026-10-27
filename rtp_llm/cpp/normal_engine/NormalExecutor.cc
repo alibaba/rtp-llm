@@ -332,7 +332,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // the next iteration can overlap forward prep with worker D2H/update work.
     // Prefill gets no overlap benefit and would only add worker startup cost.
     const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
-    if (useStreamAsync() && is_decode_only) {
+    // Beam fanout changes host batch sizes and KV ownership. The scheduler and
+    // StreamGroups must observe that bookkeeping before starting another step;
+    // NormalAsyncDeviceState only mirrors single-sequence decode today.
+    const bool single_sequence_streams = std::none_of(streams.begin(), streams.end(), [](const auto& stream) {
+        return stream->hasNumBeams() || stream->numReturnSequences() > 1;
+    });
+    if (useStreamAsync() && is_decode_only && single_sequence_streams) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
