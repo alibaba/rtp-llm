@@ -42,7 +42,10 @@ def validate_fp4_indexer_config(
             "FP4 indexer supports SP0, DSpark with three generation slots, "
             "or MTP with one generation slot"
         )
-    if reuse_cache:
+    if (
+        reuse_cache
+        and os.environ.get("DSV4_FP4_INDEXER_ALLOW_PREFIX_REUSE", "0") != "1"
+    ):
         raise ValueError("FP4 indexer requires prefix reuse disabled")
     if tokens_per_block != 256 or kernel_tokens_per_block != 256:
         raise ValueError(
