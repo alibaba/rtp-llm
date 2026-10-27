@@ -31,6 +31,7 @@ public class ServerStatus {
     @JsonProperty("dp_rank")
     private long dpRank;
 
+    /** Selection-time known work cost in ms, excluding collection and transport waits. */
     @JsonProperty("prefill_time")
     private long prefillTime;
 

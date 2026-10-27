@@ -366,7 +366,6 @@ class RequestContextLifecycleTest {
                 IllegalStateException.class,
                 () -> context.data().setFuture(new CompletableFuture<>()));
         lifecycle.cancel(800L, 0L, CancelReason.CLIENT_CANCELLED);
-        ((QueuedRequestScheduler) lifecycle).resolveControl(context, false);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), canonical.join().getCode());
         assertNull(lifecycle.requests.findActive(800L));
@@ -381,7 +380,7 @@ class RequestContextLifecycleTest {
     }
 
     @Test
-    void rejectedDuplicateSubmitCannotConsumeTheCanonicalControlTicket() {
+    void rejectedDuplicateSubmitCannotReplaceTheCanonicalCancellation() {
         var queue = (QueuedRequestScheduler) lifecycle;
         org.mockito.Mockito.doReturn(true)
                 .when(queue)
@@ -395,12 +394,9 @@ class RequestContextLifecycleTest {
         assertEquals(
                 StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 queue.submit(context).join().getCode());
-        assertFalse(
-                canonical.isDone(),
-                "duplicate submission does not own the queued cancellation ticket");
-        assertSame(context, lifecycle.requests.findActive(804L));
+        assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
+        assertNull(lifecycle.requests.findActive(804L));
 
-        queue.resolveControl(context, false);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), canonical.join().getCode());
     }
@@ -429,8 +425,8 @@ class RequestContextLifecycleTest {
         assertFalse(replacement.isDone());
         assertSame(replacement, lifecycle.requests.findActive(802L).data().getFuture());
         var queue = (QueuedRequestScheduler) lifecycle;
-        queue.resolveControl(old, false);
-        assertFalse(queue.resolveControl(old, true));
+        queue.queueControl(old, null);
+        assertNull(queue.cancel(old, 0L, CancelReason.SHUTDOWN));
         assertSame(replacement, lifecycle.requests.findActive(802L).data().getFuture());
         assertFalse(
                 replacement.isDone(),
@@ -493,7 +489,6 @@ class RequestContextLifecycleTest {
                 RequestState.Phase.CANCEL_REQUESTED,
                 RequestState.from(requestContext.snapshot()).state());
         admission.finish();
-        queue.resolveControl(requestContext, false);
         assertEquals(
                 RequestState.Phase.CANCELLED, RequestState.from(requestContext.snapshot()).state());
         assertEquals(
@@ -691,8 +686,6 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        when(prefill.control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE))
-                .thenReturn(true);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(10004L, future);
                 var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
@@ -703,9 +696,7 @@ class RequestContextLifecycleTest {
             assertTrue(future.cancel(false));
             assertTrue(future.isCancelled());
         }
-        verify(prefill, org.mockito.Mockito.atLeastOnce())
-                .control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE);
-        lifecycle.onQueueEvent(item, AbstractRequestScheduler.QueueKind.CONTROL, null, null);
+        verify(prefill).release(null, item);
         assertEquals(
                 RequestState.Phase.CANCELLED,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
@@ -726,7 +717,18 @@ class RequestContextLifecycleTest {
                 RequestProtocolTestSupport.<ExpirationTimer.Token>field(
                         context, "inactivityDeadline"),
                 Long.MAX_VALUE);
-        ((QueuedRequestScheduler) lifecycle).resolveControl(context, true);
+        lifecycle.closeRequest(
+                context,
+                new ContextResult.EndEvidence(
+                        context.snapshot().route(),
+                        ContextResult.EndKind.SHUTDOWN,
+                        null,
+                        false,
+                        0L,
+                        StrategyErrorType.DISPATCH_FAILED,
+                        "shutdown",
+                        false,
+                        false));
         assertEquals(RequestState.Phase.TIMED_OUT, RequestState.from(context.snapshot()).state());
         assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
     }
@@ -786,23 +788,22 @@ class RequestContextLifecycleTest {
     }
 
     @Test
-    void globalWaitingCancellationWaitsForDecisionOwnerTicket() throws Exception {
+    void globalWaitingCancellationDoesNotWaitForDecisionOwnerTicket() throws Exception {
         QueuedRequestScheduler queue = (QueuedRequestScheduler) lifecycle;
         org.mockito.Mockito.doReturn(true)
                 .when(queue)
                 .queueControl(
                         org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.isNull());
+        RequestContext context = context(1002L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(1002L));
+                RequestProtocolTestSupport.register(lifecycle, context);
 
         assertEquals(
-                RequestState.Phase.CANCEL_REQUESTED,
+                RequestState.Phase.CANCELLED,
                 lifecycle.cancel(1002L, 0L, CancelReason.CLIENT_CANCELLED).state());
-        assertFalse(future.isDone());
-        RequestContext context = lifecycle.requests.findActive(1002L);
+        assertNull(lifecycle.requests.findActive(1002L));
         verify(queue).queueControl(context, null);
 
-        ((QueuedRequestScheduler) lifecycle).resolveControl(context, false);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
@@ -908,7 +909,6 @@ class RequestContextLifecycleTest {
                     new ContextResult.PreparationFailure(
                             null, item, "foreign failure", System.currentTimeMillis()));
             other.onQueueEvent(item, AbstractRequestScheduler.QueueKind.EXPIRED, null, null);
-            other.onQueueEvent(item, AbstractRequestScheduler.QueueKind.CONTROL, null, null);
             other.onQueueEvent(
                     item,
                     AbstractRequestScheduler.QueueKind.REJECTED,
@@ -1046,8 +1046,6 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        when(prefill.control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE))
-                .thenReturn(true);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(707L, future);
                 var admissionCompletion7 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
@@ -1058,9 +1056,9 @@ class RequestContextLifecycleTest {
         }
 
         assertEquals(
-                RequestState.Phase.CANCEL_REQUESTED,
+                RequestState.Phase.CANCELLED,
                 lifecycle.cancel(707L, 0L, CancelReason.CLIENT_CANCELLED).state());
-        assertFalse(future.isDone(), "local owner has not consumed its control ticket");
+        assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
         lifecycle.onQueueEvent(
                 item,
                 AbstractRequestScheduler.QueueKind.REJECTED,
@@ -1141,8 +1139,6 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        when(prefill.control(item, org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE))
-                .thenReturn(true);
         try (AdmissionHandle admission = lifecycle.claimAdmissionHandle(709L, future);
                 var admissionCompletion9 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
@@ -1419,7 +1415,8 @@ class RequestContextLifecycleTest {
                                     false,
                                     false),
                             System.currentTimeMillis());
-            assertTrue(ending instanceof ContextResult.Blocked<?>);
+            assertNull(ending.after().outcome());
+            assertNotNull(ending.after().placement());
         }
         admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
         assertEquals(
@@ -1651,8 +1648,6 @@ class RequestContextLifecycleTest {
         lifecycle.cancel(old, 0L, CancelReason.CLIENT_CANCELLED);
         lifecycle.onQueueEvent(
                 registered.item(), AbstractRequestScheduler.QueueKind.EXPIRED, null, null);
-        lifecycle.onQueueEvent(
-                registered.item(), AbstractRequestScheduler.QueueKind.CONTROL, null, null);
         lifecycle.onQueueEvent(
                 registered.item(),
                 AbstractRequestScheduler.QueueKind.REJECTED,

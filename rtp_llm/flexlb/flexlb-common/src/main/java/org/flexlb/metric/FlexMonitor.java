@@ -67,6 +67,14 @@ public interface FlexMonitor extends AutoCloseable {
         // No-op by default.
     }
 
+    /**
+     * Withdraw one gauge source after its owner stops reporting. A later report registers it anew.
+     * Backends without source removal at least clear its contribution.
+     */
+    default void removeGauge(String metricName, FlexMetricTags metricsTags) {
+        report(metricName, metricsTags, 0.0);
+    }
+
     @Override
     default void close() {
         // No-op by default.

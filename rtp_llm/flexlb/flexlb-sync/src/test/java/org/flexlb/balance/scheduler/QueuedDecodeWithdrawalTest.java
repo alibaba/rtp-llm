@@ -120,7 +120,7 @@ class QueuedDecodeWithdrawalTest {
         }
         assertNotNull(reservation);
         var prefill = mock(PrefillEndpoint.class);
-        when(prefill.control(any(), eq(PrefillQueueRunner.Control.REMOVE))).thenReturn(true);
+        when(prefill.removeQueued(any())).thenReturn(true);
         var item =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -422,7 +422,7 @@ class QueuedDecodeWithdrawalTest {
                             return true;
                         })
                 .when(prefill)
-                .control(eq(item), eq(PrefillQueueRunner.Control.REMOVE));
+                .removeQueued(eq(item));
         assertTrue(replace(item));
         assertFalse(item.future().get(2, TimeUnit.SECONDS).isSuccess());
         assertNull(EndpointTestSupport.decodeReservation(decode, 4));
@@ -457,7 +457,7 @@ class QueuedDecodeWithdrawalTest {
                             return true;
                         })
                 .when(prefill)
-                .control(eq(item), eq(PrefillQueueRunner.Control.REMOVE));
+                .removeQueued(eq(item));
 
         assertTrue(replace(item));
         var response = item.future().get(2, TimeUnit.SECONDS);
@@ -472,7 +472,7 @@ class QueuedDecodeWithdrawalTest {
                 EndpointTestSupport.decodeReservation(decode, 100),
                 "closing the withdrawn victim must preserve the incoming reservation");
         verify(queue, never()).requeue(item);
-        verify(prefill).control(eq(item), eq(PrefillQueueRunner.Control.REMOVE));
+        verify(prefill).removeQueued(eq(item));
     }
 
     @Test
@@ -487,7 +487,7 @@ class QueuedDecodeWithdrawalTest {
         assertSame(
                 item, SchedulerTestSupport.repository(registry).findActive(5).snapshot().route());
         assertTrue(RequestProtocolTestSupport.prepareMember(registry, item));
-        verify(item.prefillEp(), never()).control(any(), eq(PrefillQueueRunner.Control.REMOVE));
+        verify(item.prefillEp(), never()).removeQueued(any());
     }
 
     @Test
@@ -538,7 +538,7 @@ class QueuedDecodeWithdrawalTest {
         capacity = new DecodeResources.AdmissionCapacity(2, 95);
         var first = queued(81);
         var second = queued(82);
-        when(first.prefillEp().control(first, PrefillQueueRunner.Control.REMOVE))
+        when(first.prefillEp().removeQueued(first))
                 .thenThrow(new IllegalStateException("injected Prefill removal failure"));
         assertThrows(
                 IllegalStateException.class,
@@ -603,7 +603,7 @@ class QueuedDecodeWithdrawalTest {
                             return true;
                         })
                 .when(prefill)
-                .control(eq(item), eq(PrefillQueueRunner.Control.REMOVE));
+                .removeQueued(eq(item));
         try (var executor = Executors.newSingleThreadExecutor()) {
             var replacement = executor.submit(() -> replace(item));
             try {
@@ -671,7 +671,7 @@ class QueuedDecodeWithdrawalTest {
         assertEquals(reservation, EndpointTestSupport.decodeReservation(decode, 91L));
         assertEquals(1, decode.routingView().totalLoad());
         assertFalse(item.future().isDone());
-        verify(item.prefillEp(), never()).control(any(), eq(PrefillQueueRunner.Control.REMOVE));
+        verify(item.prefillEp(), never()).removeQueued(any());
         verify(queue, never()).requeue(any());
         try (var valid =
                 ((QueuedRequestScheduler) registry).claimQueuedRoute(decode, reservation, 80)) {

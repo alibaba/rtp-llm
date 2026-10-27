@@ -131,7 +131,8 @@ public class MetricConstant {
      */
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
-    /** Selection-time first-token readiness estimate, including outstanding work. */
+    /** Known work through the selected request; excludes collection waits and transport latency.
+     * The historical metric name is retained for dashboard compatibility. */
     public static final String PREFILL_SELECTED_ESTIMATED_TTFT_MS =
             "app.flexlb.prefill.selected.estimated_ttft_ms";
 

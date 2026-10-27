@@ -1,24 +1,17 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.projection.RequestTimeEstimation;
-
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * Materialized result of crossing one delivery-admission boundary.
- * A delivery wait may carry additional route-publication restrictions;
- * absent projection semantics leave routing forecasts unchanged.
+ * The boundary carries only the resource fact; queue projection interprets it.
  */
-public record CapacityBoundary(
-        Status status,
-        Resource resource,
-        RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics,
-        Throwable cause) {
+public record CapacityBoundary(Status status, Resource resource, Throwable cause) {
 
     public static final CapacityBoundary OWNERSHIP_LOST =
-            new CapacityBoundary(Status.OWNERSHIP_LOST, null, null, null);
+            new CapacityBoundary(Status.OWNERSHIP_LOST, null, null);
 
     public CapacityBoundary {
         Objects.requireNonNull(status, "status");
@@ -27,28 +20,16 @@ public record CapacityBoundary(
         checkArgument(
                 unavailable == (resource != null)
                         && failed == (cause != null)
-                        && (unavailable || projectionSemantics == null),
+                        && (unavailable || resource == null),
                 "capacity boundary status requires its exact payload");
     }
 
-    public static CapacityBoundary unavailable(
-            Resource resource, RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics) {
-        return new CapacityBoundary(
-                Status.UNAVAILABLE,
-                Objects.requireNonNull(resource, "resource"),
-                Objects.requireNonNull(projectionSemantics, "projectionSemantics"),
-                null);
-    }
-
-    /** Park delivery without restricting publication into the worker queue. */
-    public static CapacityBoundary deliveryUnavailable(Resource resource) {
-        return new CapacityBoundary(
-                Status.UNAVAILABLE, Objects.requireNonNull(resource, "resource"), null, null);
+    public static CapacityBoundary unavailable(Resource resource) {
+        return new CapacityBoundary(Status.UNAVAILABLE, Objects.requireNonNull(resource), null);
     }
 
     public static CapacityBoundary failed(Throwable cause) {
-        return new CapacityBoundary(
-                Status.FAILED, null, null, Objects.requireNonNull(cause, "cause"));
+        return new CapacityBoundary(Status.FAILED, null, Objects.requireNonNull(cause, "cause"));
     }
 
     public boolean unavailable() {

@@ -25,6 +25,73 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RequestTimeEstimationTest {
 
     @Test
+    void nestedProjectionCannotReplaceTheOuterRequestOrPredictor() {
+        var nestedModel = new CountingEvaluator();
+        var outerModel =
+                new PrefillTimePredictor.Evaluator() {
+                    @Override
+                    public long estimateMs(long tokens, long hit) {
+                        var nested =
+                                project(
+                                        inputs(31L),
+                                        new Probe(100L, 0, 13L, Long.MAX_VALUE, 700L, 100L, 200L),
+                                        nestedModel,
+                                        routeProjection());
+                        assertEquals(600L, nested.projectedTtftMsValue());
+                        return tokens - hit;
+                    }
+
+                    @Override
+                    public double predictBatchMs(PrefillBatchFeatures features) {
+                        return features.items().stream()
+                                .mapToLong(i -> i.seqLen() - i.hitCache())
+                                .sum();
+                    }
+                };
+        var result = project(inputs(31L), probe(), outerModel, routeProjection());
+        assertEquals(Candidate.State.MODELED, result.state());
+        assertEquals(20L, result.projectedTtftMsValue());
+        assertEquals(20L, result.incomingPrefillMs());
+        assertEquals(0L, result.cacheHitTokens());
+        assertEquals(0L, result.routingCacheMatchTokens());
+    }
+
+    @Test
+    void batchSessionCreationFailureBecomesAnUnavailableProjection() {
+        var evaluator =
+                new PrefillTimePredictor.Evaluator() {
+                    public long estimateMs(long tokens, long hit) {
+                        return tokens;
+                    }
+
+                    public double predictBatchMs(PrefillBatchFeatures features) {
+                        return 1;
+                    }
+
+                    public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+                        throw new IllegalStateException("session creation failed");
+                    }
+                };
+        var queue =
+                new QueueSnapshot(
+                        31L,
+                        true,
+                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        new GroupPlanner.Constraints(4, 1000, 1000, 100, 30),
+                        List.of(new GroupPlanner.Item(1, 0, 1, 13, Long.MAX_VALUE, 10, 0)),
+                        null);
+        var result =
+                project(
+                        new RequestTimeEstimation.Inputs(queue, emptyWork(31), 0),
+                        probe(),
+                        evaluator,
+                        org.flexlb.config.DispatcherConfig.Type.BATCH);
+        assertEquals(Candidate.State.UNAVAILABLE, result.state());
+        assertEquals("BATCH_PREDICTION_FAILED", result.detail());
+    }
+
+    @Test
     void runningWorkRetainsSaturationWhenClockDifferenceWraps() {
         WorkSnapshot snapshot =
                 new WorkSnapshot(
@@ -247,7 +314,7 @@ class RequestTimeEstimationTest {
                                     new QueueSnapshot(
                                             100L,
                                             true,
-                                            org.flexlb.balance.planner.GroupingPolicy.SINGLE,
+                                            org.flexlb.balance.planner.GroupPlanner.SINGLE,
                                             Comparator.comparingLong(GroupPlanner.Item::requestId),
                                             constraints,
                                             List.of(),
@@ -264,7 +331,7 @@ class RequestTimeEstimationTest {
                                     new QueueSnapshot(
                                             100L,
                                             true,
-                                            org.flexlb.balance.planner.GroupingPolicy.SINGLE,
+                                            org.flexlb.balance.planner.GroupPlanner.SINGLE,
                                             Comparator.comparingLong(GroupPlanner.Item::requestId),
                                             constraints,
                                             List.of(
@@ -285,7 +352,7 @@ class RequestTimeEstimationTest {
                 new QueueSnapshot(
                         100L,
                         true,
-                        org.flexlb.balance.planner.GroupingPolicy.SINGLE,
+                        org.flexlb.balance.planner.GroupPlanner.SINGLE,
                         Comparator.comparingLong(GroupPlanner.Item::requestId),
                         new GroupPlanner.Constraints(16, 1_000L, 1_000L, 0L, 0L),
                         List.of(),
@@ -306,17 +373,15 @@ class RequestTimeEstimationTest {
         return new QueueSnapshot(
                 100L,
                 true,
-                org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                 Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                 constraints,
                 active,
                 null);
     }
 
-    private static RequestTimeEstimation.DeliveryProjection projection(boolean batch) {
-        return batch
-                ? RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH)
-                : routeProjection();
+    private static org.flexlb.config.DispatcherConfig.Type projection(boolean batch) {
+        return batch ? org.flexlb.config.DispatcherConfig.Type.BATCH : routeProjection();
     }
 
     private static PrefillTimePredictor.Evaluator failingBatchEvaluator(String failure) {
@@ -352,7 +417,7 @@ class RequestTimeEstimationTest {
                 new QueueSnapshot(
                         13L,
                         true,
-                        org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                         order,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 0L),
                         items,
@@ -381,7 +446,7 @@ class RequestTimeEstimationTest {
                     new QueueSnapshot(
                             13L,
                             true,
-                            org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                            org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                             new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L),
                             items,
@@ -417,7 +482,7 @@ class RequestTimeEstimationTest {
                 new QueueSnapshot(
                         13L,
                         true,
-                        org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                         Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
                         new GroupPlanner.Constraints(1, 1_000L, 1_000L, 0L, 0L),
                         items,
@@ -529,7 +594,6 @@ class RequestTimeEstimationTest {
                 0L,
                 Candidate.InitialHeadDisposition.NONE,
                 state.name(),
-                null,
                 0L,
                 0L);
     }
@@ -543,7 +607,7 @@ class RequestTimeEstimationTest {
         return new QueueSnapshot(
                 capturedAtMs,
                 true,
-                org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                 Comparator.comparingLong(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 0L, 30L),
                 List.of(),
@@ -558,8 +622,8 @@ class RequestTimeEstimationTest {
         return new Probe(99L, 50, 13L, Long.MAX_VALUE, 20L, 0L, 0L);
     }
 
-    private static RequestTimeEstimation.DeliveryProjection routeProjection() {
-        return RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+    private static org.flexlb.config.DispatcherConfig.Type routeProjection() {
+        return org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
     }
 
     private static final class CountingEvaluator implements PrefillTimePredictor.Evaluator {

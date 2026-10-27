@@ -4,7 +4,6 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -99,7 +98,7 @@ class PrefillQueueRunnerQueueTest {
                                     return CapacityBoundary.failed(preparationFailure);
                                 }
                                 laterSelected.countDown();
-                                return CapacityBoundary.deliveryUnavailable(
+                                return CapacityBoundary.unavailable(
                                         CapacityBoundary.Resource.PREFILL_BATCH);
                             })
                     .when(worker)
@@ -271,7 +270,7 @@ class PrefillQueueRunnerQueueTest {
         assertEquals(2, PrefillQueueRunnerTestSupport.state(runtime).progress().queueDepth());
         assertEquals(java.util.Map.of(70, 1, 50, 1), runtime.queueSizeByPriority());
 
-        assertTrue(runtime.control(first, PrefillQueueRunner.Control.REMOVE));
+        assertTrue(runtime.removeQueued(first));
         var removed = PrefillQueueRunnerTestSupport.capture(runtime);
         assertTrue(
                 PrefillQueueRunnerTestSupport.state(runtime).captureQueue(1).queueVersion()
@@ -287,9 +286,9 @@ class PrefillQueueRunnerQueueTest {
         RequestRoute lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
         assertTrue(runtime.offer(canonical));
 
-        assertFalse(runtime.control(lookalike, PrefillQueueRunner.Control.REMOVE));
+        assertFalse(runtime.removeQueued(lookalike));
         assertEquals(List.of(canonical), PrefillQueueRunnerTestSupport.capture(runtime).items());
-        assertTrue(runtime.control(canonical, PrefillQueueRunner.Control.REMOVE));
+        assertTrue(runtime.removeQueued(canonical));
     }
 
     @Test
@@ -310,45 +309,14 @@ class PrefillQueueRunnerQueueTest {
         var after = prefillEndpoint.captureRouteProjectionInputs();
         assertTrue(after.ownershipVersion() > before.ownershipVersion());
         assertSame(before.work(), after.work());
-        assertTrue(runtime.control(queued, PrefillQueueRunner.Control.REMOVE));
+        assertTrue(runtime.removeQueued(queued));
         assertSame(before.work(), prefillEndpoint.captureRouteProjectionInputs().work());
-    }
-
-    @Test
-    void controlTicketRunsOnWorkerOutsideQueueLock() throws Exception {
-        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
-        PrefillQueueRunner runtime =
-                PrefillQueueRunnerTestSupport.create(
-                        "test-worker", prefillEndpoint, config, deliveryStrategy, events);
-        runtimes.add(runtime);
-        runtime.start();
-        RequestRoute queued = item(906L, 50, Long.MAX_VALUE, 1L, 128L);
-        assertTrue(runtime.offer(queued));
-        CountDownLatch delivered = new CountDownLatch(1);
-        AtomicReference<Thread> callbackThread = new AtomicReference<>();
-        AtomicReference<Boolean> callbackHeldLock = new AtomicReference<>();
-        doAnswer(
-                        invocation -> {
-                            callbackThread.set(Thread.currentThread());
-                            var lock = prefillEndpoint.ownership.queueGuard();
-                            callbackHeldLock.set(lock.isHeldByCurrentThread());
-                            delivered.countDown();
-                            return null;
-                        })
-                .when(events)
-                .onQueueEvent(queued, AbstractRequestScheduler.QueueKind.CONTROL, null, null);
-
-        runtime.control(queued, PrefillQueueRunner.Control.WAKE);
-
-        assertTrue(delivered.await(5, TimeUnit.SECONDS));
-        assertFalse(callbackHeldLock.get());
-        assertFalse(callbackThread.get() == Thread.currentThread());
-        assertEquals(List.of(queued), PrefillQueueRunnerTestSupport.capture(runtime).items());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void queuedCancellationIsSettledByLocalWorker(boolean futureCancellation) throws Exception {
+    void queuedCancellationSettlesOutsideContextAndQueueLocks(boolean futureCancellation)
+            throws Exception {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         AbstractRequestScheduler registry =
@@ -384,8 +352,6 @@ class PrefillQueueRunnerQueueTest {
                             })
                     .when(prefillEndpoint)
                     .signal(PrefillEndpoint.Signal.INPUT);
-            when(prefillEndpoint.control(queued, PrefillQueueRunner.Control.WAKE))
-                    .thenAnswer(call -> runtime.control(queued, PrefillQueueRunner.Control.WAKE));
             AtomicReference<Thread> cleanupThread = new AtomicReference<>();
             AtomicInteger releases = new AtomicInteger();
             when(prefillEndpoint.release(null, queued))
@@ -457,7 +423,7 @@ class PrefillQueueRunnerQueueTest {
                                         == RequestState.Phase.CANCELLED);
             } else {
                 RequestState cancelled = registry.cancel(907L, 0L, CancelReason.CLIENT_CANCELLED);
-                assertEquals(RequestState.Phase.CANCEL_REQUESTED, cancelled.state());
+                assertEquals(RequestState.Phase.CANCELLED, cancelled.state());
                 assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
             }
             RequestProtocolTestSupport.awaitCondition(
@@ -484,7 +450,6 @@ class PrefillQueueRunnerQueueTest {
                     RequestState.Phase.CANCELLED,
                     SchedulerTestSupport.repository(registry).getRequestState(907L, 0L).state());
             assertNotNull(cleanupThread.get());
-            assertFalse(cleanupThread.get() == Thread.currentThread());
             org.mockito.Mockito.verify(prefillEndpoint).release(null, queued);
             org.mockito.Mockito.verify(prefillEndpoint).signal(PrefillEndpoint.Signal.PLACEMENT);
         } finally {
@@ -647,13 +612,7 @@ class PrefillQueueRunnerQueueTest {
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
             attempts.incrementAndGet();
-            return CapacityBoundary.unavailable(
-                    CapacityBoundary.Resource.PREFILL_BATCH,
-                    new RequestTimeEstimation.AdmissionBlockSemantics(
-                            "TEST_QUEUE_BLOCK",
-                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
-                            "TEST_QUEUE_BLOCK",
-                            RoleType.PREFILL));
+            return CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
         }
     }
 }

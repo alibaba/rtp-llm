@@ -36,6 +36,7 @@ class DeliveryStopTest {
         when(claim.item().prefillEp())
                 .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
         var scheduler = claim.owner().data().getScheduler();
+        SchedulerTestSupport.useRealCancelReply(scheduler);
         var applications = new java.util.concurrent.atomic.AtomicInteger();
         var firstFailure = new java.util.concurrent.atomic.AtomicReference<IllegalStateException>();
         var first =
@@ -183,6 +184,7 @@ class DeliveryStopTest {
         when(claim.owner().snapshot().delivery()).thenReturn(null);
         var scheduler = claim.owner().data().getScheduler();
         var rejectedFact = new IllegalStateException("transient fact application failure");
+        SchedulerTestSupport.useRealCancelReply(scheduler);
         when(scheduler.onPreemption(any(), any())).thenThrow(rejectedFact);
         if (rejectWork) {
             org.mockito.Mockito.doThrow(

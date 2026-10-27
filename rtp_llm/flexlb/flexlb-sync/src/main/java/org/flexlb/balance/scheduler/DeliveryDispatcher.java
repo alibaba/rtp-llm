@@ -10,11 +10,9 @@ import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
@@ -62,13 +60,6 @@ public class DeliveryDispatcher {
 
     record Member(RequestRoute route, DecodeEndpoint.EngineDispatchPermit decode)
             implements AutoCloseable {
-        private static final RequestTimeEstimation.AdmissionBlockSemantics DECODE_BLOCK =
-                new RequestTimeEstimation.AdmissionBlockSemantics(
-                        "DELIVERY_CAPACITY_DECODE_ENGINE",
-                        RequestTimeEstimation.AfterProbeAdmission.UNAVAILABLE,
-                        "DECODE_CAPACITY_SCOPE_UNKNOWN",
-                        RoleType.DECODE);
-
         static CapacityBoundary.Attempt<Member> prepare(
                 RequestRoute route, AdmissionCapacity capacity) {
             var endpoint = route.decodeEp();
@@ -91,7 +82,7 @@ public class DeliveryDispatcher {
                     case CAPACITY_FULL -> {
                         return CapacityBoundary.Attempt.rejected(
                                 CapacityBoundary.unavailable(
-                                        CapacityBoundary.Resource.DECODE_ENGINE, DECODE_BLOCK));
+                                        CapacityBoundary.Resource.DECODE_ENGINE));
                     }
                     case NOT_OWNED, NOT_QUEUED -> {
                         return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST);
@@ -943,28 +934,15 @@ public class DeliveryDispatcher {
                 PreemptionRegistration registration,
                 DecodeEndpoint endpoint,
                 String detail) {
-            var event =
-                    registration == null
-                            ? null
-                            : AbstractRequestScheduler.PreemptionEvent.receipt(
-                                    registration, endpoint, reply, detail, claim);
-            var acknowledgement =
-                    registration != null || claim == null
-                            ? null
-                            : AbstractRequestScheduler.PreemptionEvent.acknowledgement(
-                                    claim, reply);
             Runnable apply =
                     () -> {
                         var progress = PreemptionRegistration.Reply.UNKNOWN;
                         boolean applied = false;
                         try {
                             var scheduler = context.data().getScheduler();
-                            if (event != null) {
-                                progress =
-                                        event.progress(scheduler.onPreemption(registration, event));
-                            } else if (acknowledgement != null) {
-                                scheduler.onDeliveryEvidence(claim, acknowledgement);
-                            }
+                            progress =
+                                    scheduler.onCancelReply(
+                                            registration, claim, endpoint, reply, detail);
                             applied = true;
                         } catch (RuntimeException failed) {
                             runtime.recordFailure(failed);

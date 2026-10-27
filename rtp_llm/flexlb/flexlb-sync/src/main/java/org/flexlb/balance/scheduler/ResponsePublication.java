@@ -3,49 +3,84 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.dao.loadbalance.Response;
 
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 import static com.google.common.base.Preconditions.checkState;
 
-/** One accepted response task. State selection belongs to Context; execution belongs to this registration. */
+/** One response execution owner, registered before Context freezes the selected outcome. */
 final class ResponsePublication implements AutoCloseable {
-    private final ResponseCompletionExecutor.CompletionRegistration registration;
-    final RequestContext owner;
-    final boolean delivery;
-    private final AtomicBoolean used = new AtomicBoolean();
-
-    ResponsePublication(SchedulerRuntime runtime, RequestContext owner, boolean delivery) {
-        this.owner = Objects.requireNonNull(owner);
-        this.delivery = delivery;
-        registration = runtime.registerResponseCompletion();
-        checkState(registration != null, "frontend publication is closed");
+    private enum Phase {
+        RESERVED,
+        SUBMITTED,
+        RUNNING,
+        COMPLETED,
+        CLOSED
     }
 
-    void use() {
-        checkState(used.compareAndSet(false, true), "response task already consumed");
+    private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.RESERVED);
+    private final ResponseCompletionExecutor executor;
+    final RequestContext owner;
+    final boolean delivery;
+
+    ResponsePublication(SchedulerRuntime runtime, RequestContext owner, boolean delivery) {
+        this(runtime.responseCompletions(), owner, delivery);
+    }
+
+    ResponsePublication(
+            ResponseCompletionExecutor executor, RequestContext owner, boolean delivery) {
+        this.owner = Objects.requireNonNull(owner);
+        this.delivery = delivery;
+        this.executor = executor;
+        checkState(executor.register(this), "frontend publication is closed");
     }
 
     boolean hasCompletionOwner() {
-        return registration.hasCompletionOwner();
+        return switch (phase.get()) {
+            case SUBMITTED, RUNNING, COMPLETED -> true;
+            default -> false;
+        };
     }
 
-    void submit(Supplier<Boolean> completion) {
+    boolean isSubmitted() {
+        return phase.get() == Phase.SUBMITTED;
+    }
+
+    void submit(BooleanSupplier completion) {
         if (Thread.holdsLock(owner)) {
             close();
             throw new IllegalStateException("response submission under Context lock");
         }
-        use();
-        registration.submit(completion::get);
+        checkState(
+                phase.compareAndSet(Phase.RESERVED, Phase.SUBMITTED),
+                "response task already consumed");
+        executor.submit(this, () -> run(Phase.SUBMITTED, completion));
     }
 
-    boolean completeNow(Supplier<Boolean> completion) {
+    boolean completeNow(BooleanSupplier completion) {
         if (Thread.holdsLock(owner)) {
             close();
             throw new IllegalStateException("response completion under Context lock");
         }
-        use();
-        return registration.completeNow(completion::get);
+        return run(Phase.RESERVED, completion);
+    }
+
+    private boolean run(Phase expected, BooleanSupplier completion) {
+        if (!phase.compareAndSet(expected, Phase.RUNNING)) {
+            return false;
+        }
+        try {
+            return executor.invoke(completion);
+        } finally {
+            phase.set(Phase.COMPLETED);
+            executor.release(this);
+        }
+    }
+
+    void reject() {
+        if (phase.compareAndSet(Phase.SUBMITTED, Phase.CLOSED)) {
+            executor.release(this);
+        }
     }
 
     boolean complete(RequestFuture.Completion kind, Response response, Throwable failure) {
@@ -62,8 +97,8 @@ final class ResponsePublication implements AutoCloseable {
 
     @Override
     public void close() {
-        if (used.compareAndSet(false, true)) {
-            registration.close();
+        if (phase.compareAndSet(Phase.RESERVED, Phase.CLOSED)) {
+            executor.release(this);
         }
     }
 }

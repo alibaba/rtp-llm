@@ -180,8 +180,13 @@ class TransientCapacityQueueContractTest {
                                                 return invocation.callRealMethod();
                                             }));
             ReflectionTestUtils.setField(fixture.decodeEndpoint, "state", intercepted);
+            var cancellation =
+                    CompletableFuture.runAsync(
+                            () ->
+                                    fixture.runtime
+                                            .scheduler()
+                                            .cancel(id, 0L, CancelReason.CLIENT_CANCELLED));
             try {
-                fixture.runtime.scheduler().cancel(id, 0L, CancelReason.CLIENT_CANCELLED);
                 assertTrue(releaseEntered.await(2, TimeUnit.SECONDS));
                 assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
                 assertEquals(ContextResult.Phase.ENDING, context.snapshot().phase());
@@ -190,9 +195,7 @@ class TransientCapacityQueueContractTest {
                             1,
                             registrations.size(),
                             "terminal publication must retain its reserved owner");
-                    var reserved =
-                            (ResponseCompletionExecutor.CompletionRegistration)
-                                    registrations.iterator().next();
+                    var reserved = (ResponsePublication) registrations.iterator().next();
                     assertFalse(
                             reserved.hasCompletionOwner(),
                             "queued cancellation must finish local release before submitting its response");
@@ -201,6 +204,7 @@ class TransientCapacityQueueContractTest {
             } finally {
                 releaseAllowed.countDown();
             }
+            cancellation.get(2, TimeUnit.SECONDS);
             assertFalse(response.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, fixture.decodeEndpoint.routingView().totalLoad());
             assertEquals(0, fixture.prefillEndpoint.ownership.progress().queueDepth());
@@ -211,8 +215,8 @@ class TransientCapacityQueueContractTest {
                     2_000L);
             assertTrue(context.snapshot().close().prefillSettled());
             assertTrue(context.snapshot().close().decodeSettled());
-            assertEquals(null, context.snapshot().close().releaseOperation());
-            assertEquals(null, context.snapshot().close().endOperation());
+            assertTrue(context.snapshot().close().notificationsDone());
+            assertTrue(context.snapshot().close().timersDone());
             assertEquals(List.of(), fixture.submission.requestIds());
             awaitCondition(
                     () -> {

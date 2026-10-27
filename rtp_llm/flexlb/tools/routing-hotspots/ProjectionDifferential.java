@@ -24,10 +24,8 @@ public class ProjectionDifferential {
     public static void main(String[] args) throws Exception {
         SnapshotBench.initialize(Path.of(args[0]));
         var model = SnapshotBench.model;
-        var batchPolicy = RequestTimeEstimation.forDelivery(SnapshotBench.strategy.mode());
-        var routePolicy =
-                RequestTimeEstimation.forDelivery(
-                        org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+        var batchPolicy = SnapshotBench.strategy.mode();
+        var routePolicy = org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
         var random = new Random(1729);
         var digest = MessageDigest.getInstance("SHA-256");
         var states = new TreeMap<String, Integer>();
@@ -74,12 +72,12 @@ public class ProjectionDifferential {
                             new long[] {0, 30, 700}[trial % 3]);
             var predictor = model.newBatchPrediction();
             var selection =
-                    GroupPlanner.selectWithPrediction(
+                    GroupPlanner.FIXED_WINDOW.select(
                             items,
                             limits,
                             (added, prefix) -> predictor.append(added.seqLen(), added.hitCache()));
             add(digest, selection);
-            add(digest, GroupPlanner.dispatchReason(selection, limits, 1000));
+            add(digest, GroupPlanner.FIXED_WINDOW.dispatchReason(selection, limits, 1000));
             add(
                     digest,
                     GroupPlanner.collectionDeadlineMs(
@@ -99,7 +97,7 @@ public class ProjectionDifferential {
                             new QueueSnapshot(
                                     1000,
                                     true,
-                                    org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                                    org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                                     order,
                                     limits,
                                     items,

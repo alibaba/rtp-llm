@@ -4,7 +4,6 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -111,9 +110,7 @@ class RouteAdmissionPolicyTest {
                         blockedQueue(
                                 true,
                                 head,
-                                semantics(
-                                        RequestTimeEstimation.AfterProbeAdmission.UNAVAILABLE,
-                                        RoleType.DECODE)),
+                                semantics(RequestTimeEstimation.AfterProbeAdmission.UNAVAILABLE)),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
                         probe(99L, 90, 20L, 0L),
@@ -122,7 +119,6 @@ class RouteAdmissionPolicyTest {
         assertEquals(RequestTimeEstimation.Candidate.State.UNAVAILABLE, result.state());
         assertEquals(RequestTimeEstimation.Candidate.UNKNOWN, result.projectedTtftMsValue());
         assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", result.detail());
-        assertEquals(RoleType.DECODE, result.blockerRole());
     }
 
     @Test
@@ -133,9 +129,7 @@ class RouteAdmissionPolicyTest {
                         blockedQueue(
                                 true,
                                 head,
-                                semantics(
-                                        RequestTimeEstimation.AfterProbeAdmission.UNAVAILABLE,
-                                        RoleType.DECODE)),
+                                semantics(RequestTimeEstimation.AfterProbeAdmission.UNAVAILABLE)),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
                         probe(99L, 40, 20L, 0L),
@@ -145,7 +139,6 @@ class RouteAdmissionPolicyTest {
         assertEquals(
                 RequestTimeEstimation.Candidate.InitialHeadDisposition.BEFORE_PROBE,
                 result.initialHeadDisposition());
-        assertEquals(RoleType.DECODE, result.blockerRole());
     }
 
     @ParameterizedTest
@@ -156,7 +149,7 @@ class RouteAdmissionPolicyTest {
         WorkSnapshot unknownWork = RequestTimeEstimationTestSupport.work(List.of(), List.of(), 1L);
         RequestTimeEstimation.Candidate result =
                 project(
-                        blockedQueue(true, head, semantics(afterProbe, RoleType.DECODE)),
+                        blockedQueue(true, head, semantics(afterProbe)),
                         unknownWork,
                         TOKEN_EVALUATOR,
                         new RequestTimeEstimationTestSupport.Probe(
@@ -172,11 +165,6 @@ class RouteAdmissionPolicyTest {
         assertEquals(RequestTimeEstimation.Candidate.State.BLOCKED, result.state());
         assertEquals("HEAD_CAPACITY_BLOCKED", result.detail());
         assertEquals(RequestTimeEstimation.Candidate.UNKNOWN, result.projectedTtftMsValue());
-        assertEquals(
-                afterProbe == RequestTimeEstimation.AfterProbeAdmission.UNAVAILABLE
-                        ? RoleType.DECODE
-                        : null,
-                result.blockerRole());
         assertEquals(15L, result.incomingPrefillMs());
         assertEquals(7L, result.cacheHitTokens());
         assertEquals(11L, result.routingCacheMatchTokens());
@@ -239,12 +227,7 @@ class RouteAdmissionPolicyTest {
 
     private static RequestTimeEstimation.AdmissionBlockSemantics semantics(
             RequestTimeEstimation.AfterProbeAdmission afterProbe) {
-        return semantics(afterProbe, RoleType.PREFILL);
-    }
-
-    private static RequestTimeEstimation.AdmissionBlockSemantics semantics(
-            RequestTimeEstimation.AfterProbeAdmission afterProbe, RoleType blockerRole) {
         return new RequestTimeEstimation.AdmissionBlockSemantics(
-                "HEAD_CAPACITY_BLOCKED", afterProbe, "AFTER_PROBE_CAPACITY_UNKNOWN", blockerRole);
+                "HEAD_CAPACITY_BLOCKED", afterProbe, "AFTER_PROBE_CAPACITY_UNKNOWN");
     }
 }

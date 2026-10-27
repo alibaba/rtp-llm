@@ -23,7 +23,7 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 - `QueuedRequestScheduler` accepts requests and owns ordering, planning, capacity waits, and commit
 - `PlacementConfiguration` constructs the fixed-mode scheduler at startup
 - `RequestRepository` owns shared registration, identity lookup, and archival; each request retains its original Scheduler
-- `WorkerBatcher` owns the endpoint queue and delivery runtime; stateless `GroupingPolicy` choices select SINGLE/FIXED_WINDOW groups for both live scheduling and projection
+- `PrefillQueueRunner` owns the endpoint queue and delivery runtime; stateless `GroupPlanner` choices select SINGLE/FIXED_WINDOW groups for both live scheduling and projection
 - `DeliveryDispatcher` chooses NON_BATCH or BATCH delivery without reselecting endpoints, using the exact request owner and its `RequestContext.DeliveryClaim`
 
 ### Role-Based Routing
@@ -107,7 +107,7 @@ flexlb-sync/
 │   │   ├── RequestScheduler.java    # public scheduling and cancellation contract
 │   │   ├── RequestRepository.java   # exact shared registration and archival
 │   │   ├── SchedulerRuntime.java    # maintenance and shutdown
-│   │   └── WorkerBatcher.java       # endpoint decision/delivery runtime
+│   │   └── PrefillQueueRunner.java       # endpoint decision/delivery runtime
 │   └── strategy/
 │       ├── VitWorkerSelector.java             # VIT selection
 │       ├── CostBasedPrefillStrategy.java   # Predicted Prefill cost strategy
@@ -200,4 +200,4 @@ Do what is asked; no more, no less.
 Always prefer editing existing files over creating new ones.
 Do not proactively create documentation files (\*.md) or README files unless explicitly requested.
 
-Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared WorkerBatcher settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.
+Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared PrefillQueueRunner settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.

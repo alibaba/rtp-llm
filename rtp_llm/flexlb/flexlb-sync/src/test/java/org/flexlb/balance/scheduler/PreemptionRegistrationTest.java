@@ -17,6 +17,7 @@ import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -55,7 +56,7 @@ class PreemptionRegistrationTest {
         assertEquals(
                 PreemptionCancelPhase.NOT_FOUND_STALE, context.snapshot().preemption().phase());
         assertFalse(context.snapshot().preemption().phase().isLocallyReleasable());
-        assertInstanceOf(Blocked.class, context.beginReconciliation(registration));
+        assertInstanceOf(Blocked.class, context.prepareReconciliation(registration));
         assertTrue(finish(registration));
         assertTrue(context.snapshot().preemption().finished());
         assertFalse(advance(registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
@@ -112,11 +113,11 @@ class PreemptionRegistrationTest {
                         "local failure",
                         false,
                         false);
-        assertInstanceOf(Blocked.class, context.beginClose(failure, 1002L));
+        assertNull(context.beginClose(failure, 1002L).after().outcome());
         assertSame(failure, context.snapshot().preemption().pendingTerminal());
         assertInstanceOf(
                 Blocked.class,
-                context.beginReconciliation(registration),
+                context.prepareReconciliation(registration),
                 "UNKNOWN cannot turn local failure into Decode proof");
         context.recordEngineEvidence(
                 new EngineEvidence(
@@ -135,9 +136,14 @@ class PreemptionRegistrationTest {
                 worker,
                 context.snapshot().preemption().pendingTerminal(),
                 "authoritative Worker completion takes precedence over later local expiry");
-        var reconcile = RequestCleanupPassTest.granted(context.beginReconciliation(registration));
-        assertSame(registration, reconcile.attempt());
-        assertSame(worker, reconcile.terminal());
+        var beforeReconciliation = context.snapshot();
+        var reconcile = RequestCleanupPassTest.granted(context.prepareReconciliation(registration));
+        assertSame(
+                beforeReconciliation,
+                context.snapshot(),
+                "synchronous ledger preparation must not publish an in-progress request state");
+        assertSame(registration, reconcile);
+        assertSame(worker, context.snapshot().preemption().pendingTerminal());
     }
 
     @Test
@@ -146,24 +152,25 @@ class PreemptionRegistrationTest {
         var context = registration.owner();
         var route = context.snapshot().route();
         assertTrue(advance(registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        assertInstanceOf(
-                Blocked.class,
+        assertNull(
                 context.beginClose(
-                        new EndEvidence(
-                                route,
-                                EndKind.WORKER,
-                                RoleType.PREFILL,
-                                true,
-                                0L,
-                                null,
-                                "Prefill completed",
-                                true,
-                                false),
-                        1002L));
+                                new EndEvidence(
+                                        route,
+                                        EndKind.WORKER,
+                                        RoleType.PREFILL,
+                                        true,
+                                        0L,
+                                        null,
+                                        "Prefill completed",
+                                        true,
+                                        false),
+                                1002L)
+                        .after()
+                        .outcome());
         assertTrue(advance(registration, PreemptionCancelPhase.NOT_FOUND_STALE));
         assertInstanceOf(
                 Blocked.class,
-                context.beginReconciliation(registration),
+                context.prepareReconciliation(registration),
                 "Prefill handoff plus NOT_FOUND is not Decode release proof");
         assertFalse(context.snapshot().preemption().finished());
         context.recordEngineEvidence(
@@ -175,10 +182,12 @@ class PreemptionRegistrationTest {
                         0L,
                         null,
                         1003L));
-        var permission = RequestCleanupPassTest.granted(context.beginReconciliation(registration));
+        var permission =
+                RequestCleanupPassTest.granted(context.prepareReconciliation(registration));
         context.completePreemption(
                 permission,
-                new PreemptionReport(null, true, true, false, permission.terminal()),
+                new PreemptionReport(
+                        null, true, true, false, context.snapshot().preemption().pendingTerminal()),
                 1004L);
         assertTrue(context.snapshot().preemption().finished());
         assertTrue(context.snapshot().close().prefillSettled());

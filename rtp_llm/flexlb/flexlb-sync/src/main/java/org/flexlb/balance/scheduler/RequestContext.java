@@ -13,28 +13,21 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.flexlb.balance.scheduler.ContextResult.Abandonment;
 import static org.flexlb.balance.scheduler.ContextResult.Blocked;
 import static org.flexlb.balance.scheduler.ContextResult.Blocker;
-import static org.flexlb.balance.scheduler.ContextResult.CancelEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
-import static org.flexlb.balance.scheduler.ContextResult.CancelKind;
-import static org.flexlb.balance.scheduler.ContextResult.CancelPermit;
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
 import static org.flexlb.balance.scheduler.ContextResult.Claim;
 import static org.flexlb.balance.scheduler.ContextResult.CleanupAcknowledgement;
 import static org.flexlb.balance.scheduler.ContextResult.CloseFacts;
-import static org.flexlb.balance.scheduler.ContextResult.CloseOperation;
-import static org.flexlb.balance.scheduler.ContextResult.ClosePermit;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryFacts;
 import static org.flexlb.balance.scheduler.ContextResult.End;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EndToken;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineFacts;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
-import static org.flexlb.balance.scheduler.ContextResult.GrantValue;
 import static org.flexlb.balance.scheduler.ContextResult.Granted;
 import static org.flexlb.balance.scheduler.ContextResult.Identity;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
@@ -44,14 +37,11 @@ import static org.flexlb.balance.scheduler.ContextResult.Prediction;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionFacts;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
-import static org.flexlb.balance.scheduler.ContextResult.ProgressKind;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
-import static org.flexlb.balance.scheduler.ContextResult.ReconciliationPermit;
 import static org.flexlb.balance.scheduler.ContextResult.Rejected;
 import static org.flexlb.balance.scheduler.ContextResult.Rejection;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseCandidate;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
-import static org.flexlb.balance.scheduler.ContextResult.ResponseSelection;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 import static org.flexlb.balance.scheduler.ContextResult.RoutePermit;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
@@ -83,13 +73,11 @@ public final class RequestContext {
                     null,
                     null,
                     null,
-                    new CloseFacts(null, null, true, true, false, false, false, false),
+                    new CloseFacts(true, true, false, false, false, false),
                     new ExpirationTimer.Plan(0L, null, null, null),
                     null,
                     true,
-                    false,
-                    true,
-                    true);
+                    false);
     private Phase phase = Phase.OPEN;
     private RequestRoute route;
     private PlacementFacts placement;
@@ -99,7 +87,7 @@ public final class RequestContext {
     private CancellationFacts cancellation;
     private End outcome;
     private EndEvidence pendingEnd;
-    private ResponseSelection selected;
+    private ResponseCandidate selected;
     private CloseFacts close = EMPTY.close();
     private ExpirationTimer.Plan deadlines = EMPTY.deadlines();
     private RequestState terminalRecord;
@@ -302,9 +290,9 @@ public final class RequestContext {
     }
 
     /**
-     * Prepare identity only. The endpoint CAS must succeed before commitDelivery exposes a handoff.
+     * Prepare immutable facts locally; Scheduler holds this monitor through Decode transfer and publish.
      */
-    public synchronized Claim<DeliveryClaim> beginDelivery(
+    public synchronized Claim<DeliveryFacts> prepareDelivery(
             RequestRoute exact, DeliveryClaimKind kind, long batchId, long nowMs) {
         var before = state;
         if (phase != Phase.OPEN
@@ -332,8 +320,7 @@ public final class RequestContext {
                         new CancellationFacts(
                                 CancelReason.DEADLINE_EXCEEDED,
                                 StrategyErrorType.BATCH_SLO_EXPIRED,
-                                "request expired before delivery",
-                                null);
+                                "request expired before delivery");
             }
             retainEnd(
                     EndEvidence.failure(
@@ -345,7 +332,7 @@ public final class RequestContext {
             return new Rejected<>(before, refresh(nowMs), Rejection.CANCELLED);
         }
         var claim = new DeliveryClaim(this, ++sequence, exact, kind, batchId);
-        delivery =
+        var prepared =
                 new DeliveryFacts(
                         claim,
                         SendState.NOT_STARTED,
@@ -354,28 +341,14 @@ public final class RequestContext {
                         false,
                         false,
                         exact.decodeEp() == null || exact.decodeReservation() == null,
-                        false,
-                        nowMs,
-                        0L);
-        return new Granted<>(before, refresh(nowMs), claim);
+                        nowMs);
+        return new Granted<>(before, before, prepared);
     }
 
-    public synchronized Update commitDelivery(
-            DeliveryClaim exact, boolean transferred, long nowMs) {
-        var before = state;
-        if (delivery == null || delivery.identity() != exact) {
-            return new Update(UpdateKind.STALE, before, before);
-        }
-        if (delivery.transferred()) {
-            return update(before, before);
-        }
-        if (!transferred) {
-            delivery = null;
-        } else {
-            delivery = delivery.transferToSender();
-        }
-        var after = refresh(nowMs);
-        return update(before, after);
+    /** Scheduler retains this monitor from preparation through Decode transfer and publication. */
+    synchronized void publishDelivery(DeliveryFacts prepared) {
+        delivery = prepared;
+        refresh(prepared.startedAtMs());
     }
 
     public synchronized Claim<DeliveryClaim> beginSend(DeliveryClaim exact, long nowMs) {
@@ -383,8 +356,7 @@ public final class RequestContext {
         if (delivery == null || delivery.identity() != exact) {
             return new Stale<>(before);
         }
-        if (!delivery.transferred()
-                || delivery.send() != SendState.NOT_STARTED
+        if (delivery.send() != SendState.NOT_STARTED
                 || exact.kind() != DeliveryClaimKind.BATCH_ENQUEUE) {
             return new Rejected<>(before, before, Rejection.INVALID_STATE);
         }
@@ -582,39 +554,30 @@ public final class RequestContext {
         return update(before, after);
     }
 
-    public synchronized Claim<CancelPermit> requestCancel(Cancellation request) {
+    public synchronized Update requestCancel(Cancellation request) {
         var before = state;
         if (key == null) {
-            return new Rejected<>(before, before, Rejection.NOT_REGISTERED);
+            return new Update(UpdateKind.STALE, before, before);
         }
         Objects.requireNonNull(request.reason());
         long batchId = delivery == null ? 0L : delivery.identity().batchId();
         if (request.expectedBatchId() != 0L && request.expectedBatchId() != batchId) {
-            return new Stale<>(before);
+            return new Update(UpdateKind.STALE, before, before);
         }
         if (phase != Phase.OPEN) {
-            return new Rejected<>(before, before, Rejection.CLOSED);
+            return update(before, before);
         }
-        CancelKind currentKind =
-                placement != null
-                        ? CancelKind.WAIT_PLACEMENT
-                        : delivery != null && delivery.transferred()
-                                ? CancelKind.REMOTE
-                                : route == null ? CancelKind.GLOBAL_QUEUE : CancelKind.WORKER_QUEUE;
-        if (cancellation != null
-                && (cancellation.reason() != request.reason()
-                        || cancellation.operation() != null
-                                && cancellation.operation().kind() == currentKind)) {
-            return new Rejected<>(before, before, Rejection.CANCELLED);
+        if (cancellation != null) {
+            return update(before, before);
         }
         if (request.reason() == CancelReason.DEADLINE_EXCEEDED
                 && delivery != null
                 && cancellation == null) {
-            return new Rejected<>(before, before, Rejection.INVALID_STATE);
+            return update(before, before);
         }
-        boolean beforeSend = delivery == null || !delivery.transferred();
+        boolean beforeSend = delivery == null;
         if (request.frontend() && (selected != null || !beforeSend)) {
-            return new Rejected<>(before, before, Rejection.ALREADY_SELECTED);
+            return update(before, before);
         }
         StrategyErrorType error =
                 request.errorType() != null
@@ -629,8 +592,7 @@ public final class RequestContext {
                             error,
                             request.detail() == null
                                     ? request.reason().getMessage()
-                                    : request.detail(),
-                            null);
+                                    : request.detail());
         }
         if (delivery != null && !canRelease()) {
             var old = delivery;
@@ -641,60 +603,11 @@ public final class RequestContext {
                             : old.send();
             delivery = old.abandon(send, request.reason());
         }
-        CancelKind kind = currentKind;
-        var permit =
-                new CancelPermit(
-                        this,
-                        ++sequence,
-                        route,
-                        delivery == null ? null : delivery.identity(),
-                        kind,
-                        request.reason());
-        cancellation =
-                new CancellationFacts(
-                        cancellation.reason(),
-                        cancellation.errorType(),
-                        cancellation.detail(),
-                        permit);
-        return new Granted<>(before, refresh(request.nowMs()), permit);
-    }
-
-    public synchronized Update completeCancel(
-            CancelPermit exact, CancelEvidence evidence, long nowMs) {
-        var before = state;
-        if (exact.owner() != this
-                || cancellation == null
-                || cancellation.operation() != exact
-                || cancellation.reason() != exact.reason()
-                || exact.route() != route
-                || exact.delivery() != (delivery == null ? null : delivery.identity())
-                || phase == Phase.CLOSED) {
-            return new Update(UpdateKind.STALE, before, before);
-        }
-        if (delivery != null
-                && (evidence.kind() == CancelEvidenceKind.CLEANED
-                        || evidence.kind() == CancelEvidenceKind.FENCED)) {
-            delivery =
-                    delivery.mergeReleaseProof(
-                            false, true, evidence.kind() == CancelEvidenceKind.CLEANED);
-        }
-        close = close.mergeSettlement(evidence.prefillSettled(), evidence.decodeSettled());
-        if (evidence.kind() == CancelEvidenceKind.LOCAL_WITHDRAWN) {
-            retainEnd(
-                    new EndEvidence(
-                            route,
-                            EndKind.FRONTEND,
-                            null,
-                            false,
-                            0L,
-                            cancellation.errorType(),
-                            cancellation.detail(),
-                            evidence.prefillSettled(),
-                            evidence.decodeSettled()),
-                    nowMs);
-        }
-        var after = refresh(nowMs);
-        return update(before, after);
+        retainEnd(
+                EndEvidence.failure(
+                        route, EndKind.FRONTEND, cancellation.errorType(), cancellation.detail()),
+                request.nowMs());
+        return update(before, refresh(request.nowMs()));
     }
 
     public synchronized Update recordDeadline(
@@ -743,8 +656,7 @@ public final class RequestContext {
                                     diagnosis == null
                                             ? StrategyErrorType.BATCH_SLO_EXPIRED
                                             : diagnosis.errorType(),
-                                    diagnosis == null ? "request inactive" : diagnosis.detail(),
-                                    null);
+                                    diagnosis == null ? "request inactive" : diagnosis.detail());
                 }
                 close = close.markExpired();
                 retainEnd(
@@ -767,8 +679,7 @@ public final class RequestContext {
                                             : diagnosis.errorType(),
                                     diagnosis == null
                                             ? "request scheduling deadline exceeded"
-                                            : diagnosis.detail(),
-                                    null);
+                                            : diagnosis.detail());
                 }
                 if (placement != null) {
                     placement =
@@ -821,19 +732,15 @@ public final class RequestContext {
                         false,
                         null,
                         false,
-                        false,
-                        null);
+                        false);
         return new Granted<>(before, refresh(before.updatedAtMs()), registration);
     }
 
-    public synchronized Claim<ReconciliationPermit> beginReconciliation(
+    public synchronized Claim<PreemptionRegistration> prepareReconciliation(
             PreemptionRegistration exact) {
         var before = state;
         if (preemption == null || preemption.identity() != exact || phase == Phase.CLOSED) {
             return new Stale<>(before);
-        }
-        if (preemption.reconciliation() != null) {
-            return new Blocked<>(before, before, Blocker.RECONCILIATION);
         }
         if (preemption.finished()) {
             return new Rejected<>(before, before, Rejection.INVALID_STATE);
@@ -861,30 +768,13 @@ public final class RequestContext {
         if (!eligible) {
             return new Blocked<>(before, before, Blocker.RELEASE_PROOF);
         }
-        var permit =
-                new ReconciliationPermit(
-                        this, exact, route, terminal, preemption.confirmationPending());
-        preemption = preemption.beginReconciliation(permit);
-        return new Granted<>(before, refresh(before.updatedAtMs()), permit);
+        return new Granted<>(before, before, exact);
     }
 
     public synchronized Update completePreemption(
-            GrantValue operation, PreemptionReport report, long nowMs) {
+            PreemptionRegistration exact, PreemptionReport report, long nowMs) {
         var before = state;
-        var exact =
-                operation instanceof ReconciliationPermit permit
-                        ? permit.attempt()
-                        : operation instanceof PreemptionRegistration registration
-                                ? registration
-                                : null;
-        if (preemption == null
-                || preemption.identity() != exact
-                || phase == Phase.CLOSED
-                || operation instanceof ReconciliationPermit
-                        && preemption.reconciliation() != operation
-                || report.ledgerCommitted()
-                        && preemption.reconciliation() != null
-                        && preemption.reconciliation() != operation) {
+        if (preemption == null || preemption.identity() != exact || phase == Phase.CLOSED) {
             return new Update(UpdateKind.STALE, before, before);
         }
         var previous = preemption;
@@ -926,7 +816,7 @@ public final class RequestContext {
         return update(before, after);
     }
 
-    public synchronized Claim<ResponseSelection> selectResponse(ResponseCandidate candidate) {
+    public synchronized Claim<ResponseCandidate> selectResponse(ResponseCandidate candidate) {
         var before = state;
         if (candidate.owner() != this) {
             return new Stale<>(before);
@@ -935,7 +825,7 @@ public final class RequestContext {
             return new Rejected<>(before, before, Rejection.NOT_REGISTERED);
         }
         if (selected != null) {
-            return selected.candidate() == candidate
+            return selected == candidate
                     ? new Granted<>(before, before, selected)
                     : new Rejected<>(before, before, Rejection.ALREADY_SELECTED);
         }
@@ -966,8 +856,7 @@ public final class RequestContext {
                             new CancellationFacts(
                                     CancelReason.DEADLINE_EXCEEDED,
                                     StrategyErrorType.BATCH_SLO_EXPIRED,
-                                    "request inactive before confirmation",
-                                    null);
+                                    "request inactive before confirmation");
                 }
                 retainEnd(
                         EndEvidence.failure(
@@ -979,38 +868,29 @@ public final class RequestContext {
                 return new Rejected<>(before, refresh(candidate.nowMs()), Rejection.CANCELLED);
             }
             if (!delivery.acknowledged()) {
-                delivery = delivery.acknowledge(candidate.nowMs());
+                delivery = delivery.acknowledge();
             }
         } else if (candidate.kind() == ResponseKind.TERMINAL && outcome == null
                 || candidate.kind() == ResponseKind.CANCELLATION && cancellation == null) {
             return new Rejected<>(before, before, Rejection.NO_OUTCOME);
         }
-        var choice =
-                new ResponseSelection(
-                        this,
-                        candidate.kind(),
-                        acknowledgement ? null : outcome == null ? candidate.result() : outcome,
-                        route,
-                        delivery == null ? 0L : delivery.identity().batchId(),
-                        candidate.nowMs(),
-                        candidate);
         if (candidate.kind() != ResponseKind.CONFIRMATION) {
-            selected = choice;
+            selected = candidate;
         }
-        return new Granted<>(before, refresh(candidate.nowMs()), choice);
+        return new Granted<>(before, refresh(candidate.nowMs()), candidate);
     }
 
-    /** Publisher capacity is reserved by Scheduler before this outcome/notification claim. */
-    public synchronized Claim<EndToken> beginClose(EndEvidence evidence, long nowMs) {
+    /** Publisher capacity is reserved by Scheduler before freezing the outcome. */
+    public synchronized Update beginClose(EndEvidence evidence, long nowMs) {
         var before = state;
         if (key == null) {
-            return new Rejected<>(before, before, Rejection.NOT_REGISTERED);
+            return new Update(UpdateKind.STALE, before, before);
         }
         if (phase == Phase.CLOSED) {
-            return new Rejected<>(before, before, Rejection.CLOSED);
+            return update(before, before);
         }
         if (evidence != null && evidence.route() != null && evidence.route() != route) {
-            return new Stale<>(before);
+            return new Update(UpdateKind.STALE, before, before);
         }
         if (evidence != null) {
             retainEnd(evidence, nowMs);
@@ -1020,7 +900,7 @@ public final class RequestContext {
                         && pendingEnd != null
                         && pendingEnd.kind() == EndKind.DELIVERY_FAILURE;
         if (placement != null && !deliveryFailure) {
-            return new Blocked<>(before, refresh(nowMs), Blocker.PLACEMENT);
+            return update(before, refresh(nowMs));
         }
         if (outcome == null
                 && preemption != null
@@ -1030,13 +910,10 @@ public final class RequestContext {
                         || pendingEnd.kind() != EndKind.FRONTEND
                                 && pendingEnd.kind() != EndKind.INACTIVITY
                                 && pendingEnd.kind() != EndKind.RETIREMENT)) {
-            return new Blocked<>(before, refresh(nowMs), Blocker.PREEMPTION);
+            return update(before, refresh(nowMs));
         }
         if (outcome == null && pendingEnd == null) {
-            return new Rejected<>(before, before, Rejection.NO_OUTCOME);
-        }
-        if (close.endOperation() != null || close.notificationsDone()) {
-            return new Blocked<>(before, before, Blocker.CLOSE_IN_PROGRESS);
+            return update(before, before);
         }
         if (outcome == null) {
             outcome = classify(pendingEnd);
@@ -1066,74 +943,28 @@ public final class RequestContext {
             }
             pendingEnd = null;
         }
-        var exact =
-                new EndToken(
-                        this,
-                        ++sequence,
-                        route,
-                        preemption == null || !preemption.finished()
-                                ? null
-                                : preemption.identity());
-        close = close.claimNotifications(exact);
-        return new Granted<>(before, refresh(nowMs), exact);
+        return update(before, refresh(nowMs));
     }
 
-    public synchronized Claim<ClosePermit> beginSettlement() {
-        var before = state;
-        if (outcome == null || phase == Phase.CLOSED) {
-            return new Rejected<>(before, before, Rejection.NO_OUTCOME);
+    public synchronized DecodeResources.ReleaseReason releaseReason() {
+        if (outcome == null || phase == Phase.CLOSED || placement != null || !canRelease()) {
+            return null;
         }
-        if (placement != null) {
-            return new Blocked<>(before, before, Blocker.PLACEMENT);
-        }
-        if (close.releaseOperation() != null) {
-            return new Blocked<>(before, before, Blocker.CLOSE_IN_PROGRESS);
-        }
-        if (!canRelease()) {
-            boolean sending =
-                    delivery != null
-                            && (delivery.send() == SendState.SENDING
-                                    || delivery.send() == SendState.NOT_STARTED);
-            return new Blocked<>(before, before, sending ? Blocker.SENDER : Blocker.RELEASE_PROOF);
-        }
-        var proof =
-                delivery != null && delivery.send() == SendState.NOT_SENT
-                        ? DecodeResources.ReleaseReason.NOT_SENT
-                        : delivery != null && delivery.prefillProof() && delivery.decodeProof()
-                                ? DecodeResources.ReleaseReason.REMOTE_CLEANUP
-                                : close.expired()
-                                        ? DecodeResources.ReleaseReason.EXPIRED
-                                        : DecodeResources.ReleaseReason.COUNTERPART_FINISHED;
-        var exact =
-                new ClosePermit(
-                        this,
-                        ++sequence,
-                        route,
-                        proof,
-                        close.prefillSettled(),
-                        close.decodeSettled(),
-                        close.notificationsDone(),
-                        close.timersDone());
-        close = close.claimRelease(exact);
-        return new Granted<>(before, refresh(before.updatedAtMs()), exact);
+        return delivery != null && delivery.send() == SendState.NOT_SENT
+                ? DecodeResources.ReleaseReason.NOT_SENT
+                : delivery != null && delivery.prefillProof() && delivery.decodeProof()
+                        ? DecodeResources.ReleaseReason.REMOTE_CLEANUP
+                        : close.expired()
+                                ? DecodeResources.ReleaseReason.EXPIRED
+                                : DecodeResources.ReleaseReason.COUNTERPART_FINISHED;
     }
 
-    public synchronized Update completeClose(
-            CloseOperation exact, CloseProgress progress, long nowMs) {
+    public synchronized Update completeClose(CloseProgress progress, long nowMs) {
         var before = state;
-        boolean notification = exact instanceof EndToken;
-        if (exact.owner() != this
-                || phase == Phase.CLOSED
-                || (notification
-                        ? exact != close.endOperation()
-                        : exact != close.releaseOperation())) {
+        if (phase != Phase.ENDING) {
             return new Update(UpdateKind.STALE, before, before);
         }
-        if (notification != (progress.kind() != ProgressKind.RELEASE)) {
-            throw new IllegalArgumentException("close progress belongs to another operation");
-        }
-        if (notification
-                && delivery != null
+        if (delivery != null
                 && delivery.identity().kind() == DeliveryClaimKind.ROUTE_DECISION
                 && delivery.send() == SendState.NOT_STARTED) {
             delivery = delivery.withSendState(SendState.ROUTE_CLOSED);
@@ -1155,8 +986,6 @@ public final class RequestContext {
                 && close.timersDone()
                 && canRelease()
                 && placement == null
-                && close.releaseOperation() == null
-                && close.endOperation() == null
                 && (preemption == null || preemption.finished())) {
             terminalRecord =
                     new RequestState(
@@ -1459,21 +1288,7 @@ public final class RequestContext {
                                                                 == null
                                                         && placement.pendingTerminal() == null
                                                         && placement.pendingRetirement() == null
-                                                        && !placement.inactivityExpired()),
-                                placement == null
-                                        && !engine.decodeAccepted()
-                                        && (delivery == null
-                                                || !delivery.transferred()
-                                                || delivery.identity().kind()
-                                                                == DeliveryClaimKind.ROUTE_DECISION
-                                                        && !delivery.acknowledged()),
-                                phase == Phase.OPEN
-                                        && selected == null
-                                        && (cancellation == null
-                                                || cancellation.reason()
-                                                        != CancelReason.DEADLINE_EXCEEDED)
-                                        && !engine.decodeAccepted()
-                                        && (delivery == null || !delivery.transferred()));
+                                                        && !placement.inactivityExpired()));
         state =
                 new Snapshot(
                         facts,

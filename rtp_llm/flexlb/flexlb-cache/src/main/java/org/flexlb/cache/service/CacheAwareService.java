@@ -20,7 +20,8 @@ public interface CacheAwareService {
      *
      * @param blockCacheKeys List of cache block IDs to query
      * @param roleType       Engine role to query
-     * @param candidateEngineIpPorts exact live candidate addresses
+     * @param candidateEngineIpPorts exact live candidate addresses, borrowed read-only until return;
+     *                              implementations must not retain this list
      * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
     Map<String /*engineIpPort*/, Integer /*prefixMatchLength*/> findMatchingEngines(

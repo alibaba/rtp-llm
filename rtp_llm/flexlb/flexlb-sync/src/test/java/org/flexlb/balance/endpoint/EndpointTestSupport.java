@@ -2,7 +2,6 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
@@ -38,7 +37,10 @@ public final class EndpointTestSupport {
         return request != null && !request.phase().isEngineConfirmed();
     }
 
-    /** Check shadow estimates against production capacity; these fixtures have no released-victim KV hold. */
+    /**
+     * Check shadow estimates against production capacity; these fixtures have no released-victim KV
+     * hold.
+     */
     public static long expectedReservedKv(DecodeResources.ResourceSnapshot snapshot) {
         long expected = 0L;
         for (var request : snapshot.requests().values()) {
@@ -552,13 +554,7 @@ public final class EndpointTestSupport {
     }
 
     private static final CapacityBoundary PARKED_BOUNDARY =
-            CapacityBoundary.unavailable(
-                    CapacityBoundary.Resource.PREFILL_BATCH,
-                    new RequestTimeEstimation.AdmissionBlockSemantics(
-                            "test delivery parked",
-                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
+            CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
 
     static boolean offer(PrefillEndpoint endpoint, RequestRoute item) {
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
