@@ -23,7 +23,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -131,7 +130,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -170,7 +169,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        // A Decode worker may use the synthetic prefill memory warmup, which
+        // has no cache yet. Opt out explicitly; cache-backed decode warmup
+        // still captures graphs so its memory reservation includes them.
+        const bool allow_cuda_graph = !(params.sp_config.type == SP_TYPE_DSPARK && warm_up_ && !cache_manager);
+        model_.reset(new PyWrappedModel(
+            model_init_params, params.py_model, false, false, DSparkModelRole::NONE, allow_cuda_graph));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);

@@ -276,6 +276,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    bool          is_packed_target_verify{false};
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
@@ -380,6 +381,10 @@ struct PyModelOutputs {
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.
     torch::Tensor mtp_target_hidden_states;
+    // Optional V4.1 confidence-head hidden contribution: CUDA FP32 [B*gamma, 1],
+    // computed from pre-norm proposal hidden. The sampler adds the Markov term.
+    // Explicit output ownership lets CUDA graph replay return current values.
+    torch::Tensor dspark_confidence_hidden_logits;
 
     PyModelOutputs() = default;
 
@@ -387,6 +392,13 @@ struct PyModelOutputs {
 
     PyModelOutputs(torch::Tensor hidden_states, torch::Tensor mtp_target_hidden_states):
         hidden_states(std::move(hidden_states)), mtp_target_hidden_states(std::move(mtp_target_hidden_states)) {}
+
+    PyModelOutputs(torch::Tensor hidden_states,
+                   torch::Tensor mtp_target_hidden_states,
+                   torch::Tensor dspark_confidence_hidden_logits):
+        hidden_states(std::move(hidden_states)),
+        mtp_target_hidden_states(std::move(mtp_target_hidden_states)),
+        dspark_confidence_hidden_logits(std::move(dspark_confidence_hidden_logits)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

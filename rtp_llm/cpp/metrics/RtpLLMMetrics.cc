@@ -531,6 +531,10 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_rate_metric, "rtp_llm_sp_avg_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, "rtp_llm_sp_avg_fix_accept_rate");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_estimate_tpot_us_metric, "rtp_llm_sp_estimate_tpot_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(verify_budget_metric, "rtp_llm_sp_verify_budget");
+    REGISTER_GAUGE_MUTABLE_METRIC(decided_draft_token_num_metric, "rtp_llm_sp_decided_draft_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_verify_draft_token_num_metric, "rtp_llm_sp_total_verify_draft_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(acceptance_metrics_dropped_metric, "rtp_llm_sp_acceptance_metrics_dropped");
     return true;
 }
 
@@ -541,14 +545,34 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
     REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
 
-    if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
+    // Decisions are host metadata for the current round. Acceptance arrives
+    // asynchronously, so its denominator must use the completed round's budget.
+    if (collector->verify_budget >= 0) {
+        REPORT_MUTABLE_METRIC(verify_budget_metric, collector->verify_budget);
+        if (collector->decided_draft_token_num >= 0) {
+            REPORT_MUTABLE_METRIC(decided_draft_token_num_metric, collector->decided_draft_token_num);
+        }
+        REPORT_MUTABLE_METRIC(acceptance_metrics_dropped_metric, collector->acceptance_metrics_dropped);
+    }
+
+    double verify_draft_token_num = static_cast<double>(collector->total_verify_draft_token_num);
+    if (collector->total_verify_draft_token_num == -1) {
+        verify_draft_token_num = static_cast<double>(collector->total_stream_num) * collector->spec_steps;
+    }
+    if (collector->total_stream_num > 0 && verify_draft_token_num >= 0) {
         REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
         REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
-        double avg_accept_num = (double)collector->total_accepted_token_num / collector->total_stream_num;
+        if (collector->total_verify_draft_token_num >= 0) {
+            REPORT_MUTABLE_METRIC(total_verify_draft_token_num_metric, collector->total_verify_draft_token_num);
+        }
+        const double accepted_token_num = static_cast<double>(collector->total_accepted_token_num);
+        const double avg_accept_num     = accepted_token_num / collector->total_stream_num;
         REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
-        REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
-        if (collector->spec_steps > 0) {
-            REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
+        REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric,
+                              accepted_token_num / (verify_draft_token_num + collector->total_stream_num));
+        if (verify_draft_token_num > 0) {
+            REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric,
+                                  (accepted_token_num - collector->total_stream_num) / verify_draft_token_num);
         }
         if (avg_accept_num > 0) {
             REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, (double)collector->step_latency_us / avg_accept_num);

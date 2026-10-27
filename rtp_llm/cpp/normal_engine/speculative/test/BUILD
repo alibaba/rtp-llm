@@ -1,11 +1,39 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rules_python//python:defs.bzl", "py_test")
 
 cc_test = cc_test_wrapper
 
 test_copts = [
     "-fno-access-control",
 ] + copts()
+
+cc_test(
+    name = "dspark_adaptive_budget_test",
+    srcs = ["DSparkAdaptiveBudgetTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/normal_engine:dspark_adaptive_budget",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+    tags = ["cpu"],
+)
+
+py_test(
+    name = "dspark_bounded_distribution_test",
+    srcs = ["dspark_bounded_distribution_test.py"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+    # Pure standard-library enumeration; it does not initialize an accelerator.
+    tags = ["cpu"],
+)
 
 cc_import(
     name = "cuda13_torch_nvshmem",

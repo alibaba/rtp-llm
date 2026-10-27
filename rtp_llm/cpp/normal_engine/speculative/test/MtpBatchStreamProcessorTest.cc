@@ -1908,6 +1908,16 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
                                     122, 122, 122, 123, 123, 123, 124, 124, 124, 125, 125, 125}),
               toVec<int32_t>(model_input.combo_position_ids));
 
+    auto       packed_input  = model_input;
+    const auto packed_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
+        round_state, packed_input, proposals, torch::tensor({0, 2}, torch::kInt32).to(torch::kCUDA), 2, host_holder);
+    EXPECT_EQ((std::vector<int32_t>{102, 22, 41, 42}), toVec<int32_t>(packed_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{1, 3}), toVec<int32_t>(packed_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(packed_input.prefix_lengths));
+    EXPECT_EQ((std::vector<int64_t>{0, 4, 5, 6}), toVec<int64_t>(packed_layout.packed_to_dense));
+    EXPECT_EQ((std::vector<int32_t>{30, 40, 50, 122, 122, 122, 123, 123, 123, 124, 124, 124}),
+              toVec<int32_t>(packed_input.combo_position_ids));
+
     // Scheduling can reorder independently published rows. A fresh request's
     // committed end comes from this input, even if it is already on CUDA.
     StreamGroups   reordered({fresh_stream, steady_stream});
@@ -1918,6 +1928,17 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{22, 102}), toVec<int32_t>(reordered_state.anchors));
     EXPECT_EQ((std::vector<int32_t>{77, 9}), toVec<int32_t>(reordered_state.committed_ends));
     EXPECT_EQ((std::vector<int32_t>{22, 255, 255, 102, 255, 255}), toVec<int32_t>(reordered_input.combo_tokens));
+    auto       reordered_packed_input = reordered_input;
+    const auto reordered_proposals    = torch::tensor({{41, 42, 43}, {31, 32, 33}}, torch::kInt32).to(torch::kCUDA);
+    processor.prepareDSparkPackedTargetVerifyModelInput(reordered_state,
+                                                        reordered_packed_input,
+                                                        reordered_proposals,
+                                                        torch::tensor({2, 0}, torch::kInt32).to(torch::kCUDA),
+                                                        2,
+                                                        host_holder);
+    EXPECT_EQ((std::vector<int32_t>{22, 41, 42, 102}), toVec<int32_t>(reordered_packed_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{3, 1}), toVec<int32_t>(reordered_packed_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{77, 9}), toVec<int32_t>(reordered_packed_input.prefix_lengths));
     // The previous round remains immutable after a reorder or a smaller batch.
 #if USING_CUDA
     EXPECT_EQ((std::vector<int32_t>{102, 255, 255, 22, 255, 255}), toVec<int32_t>(proposal_input.combo_tokens));
@@ -1945,6 +1966,17 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     processor.prepareDSparkProposeModelInput(smaller_state, smaller_input, host_holder);
     EXPECT_EQ((std::vector<int32_t>{202, 255, 255}), toVec<int32_t>(smaller_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{19}), toVec<int32_t>(smaller_state.committed_ends));
+    auto smaller_packed_input = smaller_input;
+    processor.prepareDSparkPackedTargetVerifyModelInput(smaller_state,
+                                                        smaller_packed_input,
+                                                        proposals.narrow(0, 0, 1),
+                                                        torch::tensor({1}, torch::kInt32).to(torch::kCUDA),
+                                                        1,
+                                                        host_holder);
+    EXPECT_EQ((std::vector<int32_t>{202, 31}), toVec<int32_t>(smaller_packed_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{2}), toVec<int32_t>(smaller_packed_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{19}), toVec<int32_t>(smaller_packed_input.prefix_lengths));
+    EXPECT_EQ((std::vector<int32_t>{102, 22, 41, 42}), toVec<int32_t>(packed_input.combo_tokens));
 #if USING_CUDA
     EXPECT_EQ((std::vector<int32_t>{22, 255, 255, 102, 255, 255}), toVec<int32_t>(reordered_input.combo_tokens));
 #endif
@@ -1985,6 +2017,284 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_TRUE(torch::equal(model_input.lm_output_indexes, lm_output_indexes));
     EXPECT_TRUE(torch::equal(model_input.last_hidden_states, target_features));
     EXPECT_TRUE(model_input.is_target_verify);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyPreservesPerRequestRowsAndCommitGeometry) {
+    constexpr int32_t           gamma = 3;
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = gamma;
+    MtpBatchStreamProcessor    processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    TensorHolder               holder;
+    const auto                 cuda_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const std::vector<int32_t> anchors      = {100, 200, 300};
+    const std::vector<int32_t> dense_tokens = {100, 11, 12, 13, 200, 21, 22, 23, 300, 31, 32, 33};
+    const std::vector<int32_t> bases        = {30, 40, 50, 60, 70, 80, 90, 100, 110};
+    MtpBatchStreamProcessor::DSparkRoundState state;
+    state.anchors        = torch::tensor(anchors, cuda_i32);
+    state.committed_ends = torch::tensor({7, 15, 23}, cuda_i32);
+    state.position_bases = torch::tensor(bases, cuda_i32).reshape({3, 3});
+    state.engram_windows = torch::tensor({{100, 99, 98, 97}, {200, 199, 198, 197}, {300, 299, 298, 297}}, cuda_i32);
+    const auto           proposals = torch::tensor({{11, 12, 13}, {21, 22, 23}, {31, 32, 33}}, cuda_i32);
+    torch::Tensor        retained_dense_positions;
+    torch::Tensor        retained_dense_tokens;
+    std::vector<int32_t> expected_dense_positions;
+    for (int64_t row = 0; row < 3; ++row) {
+        for (int32_t position = 0; position <= gamma; ++position) {
+            for (int64_t axis = 0; axis < 3; ++axis) {
+                expected_dense_positions.push_back(bases[row * 3 + axis] + position);
+            }
+        }
+    }
+    // Include mixed empty/full prefixes, the same total budget with different
+    // ownership, zero budget, and the exact legacy full-width path.
+    for (const auto& lengths : std::vector<std::vector<int32_t>>{{0, 1, 3}, {3, 1, 0}, {0, 0, 0}, {3, 3, 3}}) {
+        int64_t              total_budget = 0;
+        std::vector<int32_t> expected_tokens;
+        std::vector<int32_t> expected_positions;
+        std::vector<int32_t> expected_windows;
+        std::vector<int32_t> expected_lengths;
+        std::vector<int32_t> expected_lm_indexes;
+        std::vector<int64_t> expected_mapping;
+        for (int64_t row = 0; row < 3; ++row) {
+            total_budget += lengths[row];
+            expected_lengths.push_back(lengths[row] + 1);
+            std::vector<int32_t> history = {anchors[row], anchors[row] - 1, anchors[row] - 2, anchors[row] - 3};
+            for (int32_t position = 0; position <= lengths[row]; ++position) {
+                const int64_t dense_index = row * (gamma + 1) + position;
+                if (position > 0) {
+                    history.insert(history.begin(), dense_tokens[dense_index]);
+                    history.pop_back();
+                }
+                expected_mapping.push_back(dense_index);
+                expected_lm_indexes.push_back(static_cast<int32_t>(expected_tokens.size()));
+                expected_tokens.push_back(dense_tokens[dense_index]);
+                expected_windows.insert(expected_windows.end(), history.begin(), history.end());
+                for (int64_t axis = 0; axis < 3; ++axis) {
+                    expected_positions.push_back(bases[row * 3 + axis] + position);
+                }
+            }
+        }
+        GptModelInputs input;
+        input.kv_cache_block_id = torch::tensor({{{7, 8}, {17, 18}, {27, 28}}}, cuda_i32);
+        const auto block_ids    = input.kv_cache_block_id;
+        const auto layout       = processor.prepareDSparkPackedTargetVerifyModelInput(
+            state, input, proposals, torch::tensor(lengths, cuda_i32), total_budget, holder);
+        EXPECT_EQ(expected_tokens, toVec<int32_t>(input.combo_tokens));
+        EXPECT_EQ(expected_lengths, toVec<int32_t>(input.input_lengths));
+        EXPECT_EQ(expected_positions, toVec<int32_t>(input.combo_position_ids));
+        EXPECT_EQ(expected_windows, toVec<int32_t>(input.engram_token_windows));
+        EXPECT_EQ(expected_lm_indexes, toVec<int32_t>(input.lm_output_indexes));
+        EXPECT_EQ((std::vector<int32_t>{7, 15, 23}), toVec<int32_t>(input.prefix_lengths));
+        EXPECT_EQ(0, input.sequence_lengths.numel());
+        EXPECT_EQ(dense_tokens, toVec<int32_t>(layout.dense_tokens));
+        EXPECT_EQ(expected_dense_positions, toVec<int32_t>(layout.dense_position_ids));
+        EXPECT_EQ((std::vector<int64_t>{3, gamma + 1}), layout.dense_tokens.sizes().vec());
+        EXPECT_TRUE(torch::equal(block_ids, input.kv_cache_block_id));
+        if (total_budget < 3 * gamma) {
+            ASSERT_TRUE(layout.packed_to_dense.defined());
+            EXPECT_EQ(expected_mapping, toVec<int64_t>(layout.packed_to_dense));
+            EXPECT_EQ((std::vector<int32_t>{8, 16, 24}), toVec<int32_t>(input.sequence_lengths_plus_1));
+        } else {
+            EXPECT_FALSE(layout.packed_to_dense.defined());
+            GptModelInputs dense_input;
+            processor.prepareDSparkTargetVerifyModelInput(state, dense_input, proposals, holder);
+            EXPECT_TRUE(torch::equal(input.combo_tokens, dense_input.combo_tokens));
+            EXPECT_TRUE(torch::equal(input.combo_position_ids, dense_input.combo_position_ids));
+            EXPECT_TRUE(torch::equal(input.engram_token_windows, dense_input.engram_token_windows));
+            EXPECT_TRUE(torch::equal(input.input_lengths, dense_input.input_lengths));
+            EXPECT_TRUE(torch::equal(input.lm_output_indexes, dense_input.lm_output_indexes));
+        }
+        const auto target_features =
+            torch::arange((3 + total_budget) * 2, cuda_i32.dtype(torch::kFloat32)).reshape({3 + total_budget, 2});
+        processor.updateDecodePostDSparkCommitInput(input, target_features, 3);
+        EXPECT_TRUE(torch::equal(input.last_hidden_states, target_features));
+        EXPECT_EQ(expected_tokens, toVec<int32_t>(input.combo_tokens));
+        EXPECT_EQ(expected_lengths, toVec<int32_t>(input.input_lengths));
+        EXPECT_EQ(expected_positions, toVec<int32_t>(input.combo_position_ids));
+        EXPECT_TRUE(input.is_target_verify);
+        EXPECT_ANY_THROW(processor.updateDecodePostDSparkCommitInput(input, target_features.narrow(0, 0, 1), 3));
+        EXPECT_ANY_THROW(processor.updateDecodePostDSparkCommitInput(input, target_features, 2));
+        if (!retained_dense_tokens.defined()) {
+            retained_dense_tokens    = layout.dense_tokens;
+            retained_dense_positions = layout.dense_position_ids;
+        }
+    }
+    // Later layouts cannot overwrite an earlier round's async dispatch data.
+    EXPECT_EQ(dense_tokens, toVec<int32_t>(retained_dense_tokens));
+    EXPECT_EQ(expected_dense_positions, toVec<int32_t>(retained_dense_positions));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedAuxFeaturesKeepRequestTokenLayerIdentityAcrossAcceptance) {
+    constexpr int32_t gamma         = 5;
+    constexpr int64_t layers        = 3;
+    constexpr int64_t channels      = 2;
+    constexpr int64_t feature_width = layers * channels;
+    ModelConfig       model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 1024;
+    model_config.num_layers  = 1;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle       = gamma;
+    sp_config.sp_dspark_mask_token_id = 1023;
+    MtpBatchStreamProcessor    processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    TensorHolder               holder;
+    const auto                 cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const std::vector<int32_t> anchors          = {101, 201, 301};
+    const std::vector<int32_t> prefixes         = {10, 20, 30};
+    const std::vector<int32_t> valid_lengths    = {0, 2, 5};
+    const std::vector<int32_t> accepted_lengths = {1, 2, 6};
+    const std::vector<int32_t> next_anchors     = {191, 291, 391};
+    const auto                 proposals =
+        torch::tensor({{111, 112, 113, 114, 115}, {211, 212, 213, 214, 215}, {311, 312, 313, 314, 315}}, cuda_i32);
+    MtpBatchStreamProcessor::DSparkRoundState state;
+    state.anchors        = torch::tensor(anchors, cuda_i32);
+    state.committed_ends = torch::tensor(prefixes, cuda_i32);
+    state.position_bases = torch::tensor(prefixes, cuda_i32).reshape({3, 1});
+
+    // Each layer segment/channel independently identifies the request, absolute
+    // position and input token. Build the reference in request/token order,
+    // without reusing the production packed-index calculation.
+    std::vector<float> dense_values;
+    std::vector<float> expected_packed_values;
+    std::vector<float> expected_last_context_values;
+    for (int64_t request = 0; request < 3; ++request) {
+        for (int32_t position = 0; position <= gamma; ++position) {
+            const int32_t token = position == 0 ? anchors[request] : anchors[request] + 9 + position;
+            for (int64_t layer = 0; layer < layers; ++layer) {
+                for (int64_t channel = 0; channel < channels; ++channel) {
+                    const float value =
+                        static_cast<float>((request + 1) * 1000000 + (prefixes[request] + position) * 10000 + token * 10
+                                           + layer * channels + channel);
+                    dense_values.push_back(value);
+                    if (position <= valid_lengths[request]) {
+                        expected_packed_values.push_back(value);
+                    }
+                    // accept_len includes the newly sampled residual/bonus;
+                    // the final committed feature precedes that new anchor.
+                    if (position == accepted_lengths[request] - 1) {
+                        expected_last_context_values.push_back(value);
+                    }
+                }
+            }
+        }
+    }
+    const auto dense_features =
+        torch::tensor(dense_values, torch::kFloat32).reshape({3 * (gamma + 1), feature_width}).to(torch::kCUDA);
+    GptModelInputs input;
+    const auto     layout = processor.prepareDSparkPackedTargetVerifyModelInput(
+        state, input, proposals, torch::tensor(valid_lengths, cuda_i32), 7, holder);
+    ASSERT_TRUE(layout.packed_to_dense.defined());
+    const auto packed_target_features = dense_features.index_select(0, layout.packed_to_dense);
+    processor.updateDecodePostDSparkCommitInput(input, packed_target_features, 3);
+    EXPECT_EQ(expected_packed_values, toVec<float>(input.last_hidden_states));
+    EXPECT_EQ((std::vector<int32_t>{101, 201, 211, 212, 301, 311, 312, 313, 314, 315}),
+              toVec<int32_t>(input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{1, 3, 6}), toVec<int32_t>(input.input_lengths));
+    EXPECT_EQ(prefixes, toVec<int32_t>(input.prefix_lengths));
+    // First rejection, middle rejection and all accepted select anchor101,
+    // proposal211 and proposal315 respectively; none select residual/bonus.
+    const auto context_rows = torch::tensor({0, 2, 9}, cuda_i32.dtype(torch::kInt64));
+    EXPECT_EQ(expected_last_context_values, toVec<float>(input.last_hidden_states.index_select(0, context_rows)));
+    const auto retained_features = input.last_hidden_states;
+
+    ResourceContext                resource_context;
+    std::vector<GenerateStreamPtr> streams;
+    for (int64_t request = 0; request < 3; ++request) {
+        auto stream = createContextStream(
+            model_config, runtime_config, resource_context, {anchors[request]}, static_cast<int>(request + 1));
+        stream->setIsContextStream(false);
+        std::vector<int32_t> accepted_tokens(gamma + 1, -1);
+        for (int32_t position = 0; position < accepted_lengths[request] - 1; ++position) {
+            accepted_tokens[position] = anchors[request] + 10 + position;
+        }
+        accepted_tokens[accepted_lengths[request] - 1] = next_anchors[request];
+        GenerateStream::MtpAsyncDeviceState next;
+        next.accept_len_gpu        = torch::tensor({accepted_lengths[request]}, cuda_i32);
+        next.accept_tokens_gpu     = torch::tensor(accepted_tokens, cuda_i32).reshape({1, gamma + 1});
+        next.next_seq_len_gpu      = torch::tensor({prefixes[request] + 1 + accepted_lengths[request]}, cuda_i32);
+        next.next_position_ids_gpu = torch::tensor({prefixes[request] + accepted_lengths[request]}, cuda_i32);
+        stream->setMtpAsyncDeviceState(std::move(next));
+        streams.push_back(std::move(stream));
+    }
+    // Independently published states must follow the current request order and
+    // survive batch shrink. Host lengths deliberately disagree with GPU state.
+    for (const auto& order : std::vector<std::vector<int64_t>>{{2, 0, 1}, {1}}) {
+        std::list<GenerateStreamPtr> reordered;
+        std::vector<int32_t>         expected_anchors;
+        std::vector<int32_t>         expected_prefixes;
+        std::vector<int32_t>         expected_query_tokens;
+        for (const auto request : order) {
+            reordered.push_back(streams[request]);
+            expected_anchors.push_back(next_anchors[request]);
+            expected_prefixes.push_back(prefixes[request] + accepted_lengths[request]);
+            expected_query_tokens.push_back(next_anchors[request]);
+            expected_query_tokens.insert(expected_query_tokens.end(), gamma - 1, 1023);
+        }
+        GptModelInputs next_input;
+        next_input.sequence_lengths   = torch::full({static_cast<int64_t>(order.size())}, 999, torch::kInt32);
+        next_input.last_hidden_states = retained_features;  // Must not leak into proposal input.
+        const auto next_state         = processor.buildDSparkRoundState(StreamGroups(reordered), next_input, holder);
+        processor.prepareDSparkProposeModelInput(next_state, next_input, holder);
+        EXPECT_EQ(expected_anchors, toVec<int32_t>(next_state.anchors));
+        EXPECT_EQ(expected_prefixes, toVec<int32_t>(next_state.committed_ends));
+        EXPECT_EQ(expected_query_tokens, toVec<int32_t>(next_input.combo_tokens));
+        EXPECT_EQ(expected_prefixes, toVec<int32_t>(next_input.prefix_lengths));
+        EXPECT_FALSE(next_input.last_hidden_states.defined());
+    }
+    EXPECT_EQ(expected_packed_values, toVec<float>(retained_features));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyRejectsInvalidMetadata) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 3;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    const auto              cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    MtpBatchStreamProcessor::DSparkRoundState state;
+    state.anchors                                    = torch::tensor({100, 200}, cuda_i32);
+    state.committed_ends                             = torch::tensor({7, 15}, cuda_i32);
+    state.position_bases                             = torch::tensor({7, 15}, cuda_i32).reshape({2, 1});
+    const auto                       proposals       = torch::tensor({{11, 12, 13}, {21, 22, 23}}, cuda_i32);
+    const auto                       lengths         = torch::tensor({1, 3}, cuda_i32);
+    const std::vector<torch::Tensor> invalid_lengths = {torch::Tensor(),
+                                                        lengths.cpu(),
+                                                        lengths.to(torch::kInt64),
+                                                        lengths.reshape({2, 1}),
+                                                        lengths.narrow(0, 0, 1),
+                                                        torch::tensor({1, 0, 3, 0}, cuda_i32).slice(0, 0, 4, 2)};
+    TensorHolder                     holder;
+    for (const auto& invalid : invalid_lengths) {
+        GptModelInputs input;
+        EXPECT_ANY_THROW(
+            processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals, invalid, 4, holder));
+    }
+    GptModelInputs input;
+    EXPECT_ANY_THROW(processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals, lengths, -1, holder));
+    EXPECT_ANY_THROW(processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals, lengths, 7, holder));
+    EXPECT_ANY_THROW(
+        processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals.cpu(), lengths, 4, holder));
+    auto host_anchor_state    = state;
+    host_anchor_state.anchors = state.anchors.cpu();
+    EXPECT_ANY_THROW(
+        processor.prepareDSparkPackedTargetVerifyModelInput(host_anchor_state, input, proposals, lengths, 4, holder));
+    auto empty_state    = state;
+    empty_state.anchors = torch::empty({0}, cuda_i32);
+    EXPECT_ANY_THROW(
+        processor.prepareDSparkPackedTargetVerifyModelInput(empty_state, input, proposals, lengths, 0, holder));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

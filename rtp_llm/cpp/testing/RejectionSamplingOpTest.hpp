@@ -267,6 +267,35 @@ protected:
         params             = makeParams();
         params.do_sample_d = torch::ones({batch_size}, int_options);
         EXPECT_ANY_THROW(rejectionSampling(params));
+
+#if USING_CUDA
+        params                       = makeParams();
+        params.valid_draft_lengths_d = torch::zeros({batch_size}, int_options.dtype(torch::kInt64));
+        EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params                       = makeParams();
+        params.valid_draft_lengths_d = torch::zeros({batch_size, 1}, int_options);
+        EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params                       = makeParams();
+        params.valid_draft_lengths_d = torch::zeros({batch_size + 1}, int_options);
+        EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params                       = makeParams();
+        params.valid_draft_lengths_d = torch::zeros({batch_size}, int_options.device(torch::kCPU));
+        EXPECT_ANY_THROW(rejectionSampling(params));
+
+        params                       = makeParams();
+        params.valid_draft_lengths_d = torch::zeros({batch_size, 2}, int_options).select(1, 0);
+        ASSERT_FALSE(params.valid_draft_lengths_d.is_contiguous());
+        EXPECT_ANY_THROW(rejectionSampling(params));
+#else
+        // The bounded prefix contract is CUDA-only. Other backends must not
+        // silently reinterpret a defined valid-length tensor as full width.
+        params                       = makeParams();
+        params.valid_draft_lengths_d = torch::zeros({batch_size}, int_options);
+        EXPECT_ANY_THROW(rejectionSampling(params));
+#endif
     }
 
 private:

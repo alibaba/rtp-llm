@@ -73,6 +73,7 @@ class DSv4DecodeFmhaImplConfigFP8:
     # doesn't hand one in). Static for the allocator's lifetime, so
     # snapshot-at-construct is safe.
     group_tags: List[int] = field(default_factory=list)
+    packed_target_verify: bool = False
 
 
 class DSv4DecodeFmhaImplFP8:
@@ -98,7 +99,16 @@ class DSv4DecodeFmhaImplFP8:
     ) -> None:
         self.config = config
         self.device = device
-        self.metadata: DSv4DecodeAttnMetadataFP8 = allocate_decode_metadata_fp8(
+        allocator = allocate_decode_metadata_fp8
+        allocation_kwargs = {}
+        if config.packed_target_verify:
+            from .packed_metadata import allocate_packed_decode_metadata
+
+            allocator = allocate_packed_decode_metadata
+            allocation_kwargs["paged_block_tables"] = self._extract_paged_block_tables(
+                attn_inputs
+            )
+        self.metadata: DSv4DecodeAttnMetadataFP8 = allocator(
             max_batch_size=config.max_batch_size,
             q_len=config.q_len,
             window_size=config.window_size,
@@ -108,6 +118,7 @@ class DSv4DecodeFmhaImplFP8:
             index_topk=config.index_topk,
             device=device,
             paged_pool_specs=config.paged_pool_specs,
+            **allocation_kwargs,
         )
         self._paged_entries_per_block: Dict[int, int] = {
             at: spec[0] for at, spec in config.paged_pool_specs.items()
@@ -145,6 +156,11 @@ class DSv4DecodeFmhaImplFP8:
         ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
         """
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if self.config.packed_target_verify:
+            self._prepare_packed(
+                attn_inputs, paged_block_tables, capture_full_width_lengths=True
+            )
+            return
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),
@@ -179,6 +195,11 @@ class DSv4DecodeFmhaImplFP8:
                 "CUDA Graph replay requires the live request count from the matching C++ runner"
             )
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
+        if self.config.packed_target_verify:
+            self._prepare_packed(
+                attn_inputs, paged_block_tables, valid_request_count=valid_request_count
+            )
+            return
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),
@@ -188,4 +209,16 @@ class DSv4DecodeFmhaImplFP8:
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
             require_device_metadata=True,
             valid_request_count=valid_request_count,
+        )
+
+    def _prepare_packed(self, attn_inputs, block_tables, **kwargs):
+        from .packed_metadata import update_packed_decode_metadata
+
+        update_packed_decode_metadata(
+            self.metadata,
+            as_tagged_attention_inputs(attn_inputs),
+            block_tables,
+            self._paged_entries_per_block,
+            self._paged_tokens_per_block,
+            **kwargs,
         )

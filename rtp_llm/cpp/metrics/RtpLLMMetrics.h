@@ -1465,6 +1465,14 @@ public:
     int64_t total_accepted_token_num       = 0;
     int64_t total_stream_num               = 0;
     int64_t spec_steps                     = 0;
+    // Current decode decision; zero is a valid anchor-only verification budget.
+    int64_t verify_budget              = -1;
+    int64_t decided_draft_token_num    = -1;
+    int64_t acceptance_metrics_dropped = 0;
+    // Completed verification budget, aligned with accepted tokens and stream
+    // count above. It may combine several ready rounds. -1 preserves legacy
+    // callers that verify spec_steps drafts per stream.
+    int64_t total_verify_draft_token_num = -1;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -1483,6 +1491,10 @@ public:
     kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
     kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
     kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
+    kmonitor::MutableMetric* verify_budget_metric                  = nullptr;
+    kmonitor::MutableMetric* decided_draft_token_num_metric        = nullptr;
+    kmonitor::MutableMetric* total_verify_draft_token_num_metric   = nullptr;
+    kmonitor::MutableMetric* acceptance_metrics_dropped_metric     = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

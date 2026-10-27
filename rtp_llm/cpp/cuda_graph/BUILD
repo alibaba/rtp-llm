@@ -1,11 +1,18 @@
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "dspark_cuda_graph_budget",
+    hdrs = ["dspark_cuda_graph_budget.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_graph_base",
     hdrs = [
         "cuda_graph_base.h",
     ],
     deps = [
+        ":dspark_cuda_graph_budget",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],
@@ -46,6 +53,7 @@ filegroup(
     name = "cuda_graph_hdrs",
     srcs = [
         "cuda_graph_base.h",
+        "dspark_cuda_graph_budget.h",
         "combo_position_ids_validation.h",
         "generation_prefill_cuda_graph_replay_metadata.h",
         "cuda_graph_device_shims.h",
@@ -65,6 +73,7 @@ cc_library(
         "cuda_graph_runner.h",
     ],
     deps = [
+        ":dspark_cuda_graph_budget",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
     ],

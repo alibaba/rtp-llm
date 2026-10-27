@@ -168,6 +168,7 @@ def try_full_decode(
                 batch_size=batch,
                 query_len=span,
                 compress_ratio=attn.compress_ratio,
+                request_ids=attn._shared_attention.get("decode_packed_request_ids"),
             )
             if work.metadata is not None:
                 plan = work.metadata

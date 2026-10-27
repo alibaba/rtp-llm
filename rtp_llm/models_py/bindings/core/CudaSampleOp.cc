@@ -121,6 +121,12 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
         checkSameDevice(params.force_mask_d, "force_mask_d", device);
         RTP_LLM_CHECK_WITH_INFO(params.force_mask_d.size(0) == batch_size, "force_mask_d shape[0] mismatch");
     }
+    if (params.valid_draft_lengths_d.defined()) {
+        checkRejectionSamplingTensor(params.valid_draft_lengths_d, "valid_draft_lengths_d", torch::kInt32, 1);
+        checkSameDevice(params.valid_draft_lengths_d, "valid_draft_lengths_d", device);
+        RTP_LLM_CHECK_WITH_INFO(params.valid_draft_lengths_d.size(0) == batch_size,
+                                "valid_draft_lengths_d shape[0] mismatch");
+    }
 
     return {static_cast<int>(batch_size),
             static_cast<int>(num_speculative_tokens),
@@ -769,24 +775,25 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     // A point-mass draft distribution passes no draft_probs buffer at all; the
     // kernel substitutes q(draft_token) == 1.
     float* draft_probs = params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>();
-    check_cuda_value(
-        invokeRejectionSampling(draft_probs,
-                                params.draft_token_ids_d.data_ptr<int32_t>(),
-                                params.uniform_samples_d.data_ptr<float>(),
-                                params.target_probs_d.data_ptr<float>(),
-                                params.target_token_ids_d.data_ptr<int32_t>(),
-                                config.target_token_stride,
-                                params.output_token_ids_d.data_ptr<int32_t>(),
-                                params.output_accepted_token_num_d.data_ptr<int32_t>(),
-                                params.do_sample_d.data_ptr<bool>(),
-                                config.batch_size,
-                                config.num_speculative_tokens,
-                                config.target_vocab_size,
-                                stream,
-                                params.draft_probs_point_mass,
-                                params.target_probs_point_mass,
-                                params.force_mask_d.defined() ? params.force_mask_d.data_ptr<bool>() : nullptr,
-                                params.finalize_outputs));
+    check_cuda_value(invokeRejectionSampling(
+        draft_probs,
+        params.draft_token_ids_d.data_ptr<int32_t>(),
+        params.uniform_samples_d.data_ptr<float>(),
+        params.target_probs_d.data_ptr<float>(),
+        params.target_token_ids_d.data_ptr<int32_t>(),
+        config.target_token_stride,
+        params.output_token_ids_d.data_ptr<int32_t>(),
+        params.output_accepted_token_num_d.data_ptr<int32_t>(),
+        params.do_sample_d.data_ptr<bool>(),
+        config.batch_size,
+        config.num_speculative_tokens,
+        config.target_vocab_size,
+        stream,
+        params.draft_probs_point_mass,
+        params.target_probs_point_mass,
+        params.force_mask_d.defined() ? params.force_mask_d.data_ptr<bool>() : nullptr,
+        params.finalize_outputs,
+        params.valid_draft_lengths_d.defined() ? params.valid_draft_lengths_d.data_ptr<int32_t>() : nullptr));
 }
 
 bool rejectionSamplingSupportsFinalize() {
@@ -1323,6 +1330,8 @@ hipError_t invokeRejectionSampling(DType*      draft_probs,
 namespace rtp_llm {
 
 void rejectionSampling(const RejectionSamplingParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(!params.valid_draft_lengths_d.defined(),
+                            "bounded rejection sampling (valid_draft_lengths_d) is CUDA-only");
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::hip::getCurrentHIPStream().stream();
 
@@ -1646,7 +1655,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return GreedyOutput{};
 }
 
-void rejectionSampling(const RejectionSamplingParams&) {
+void rejectionSampling(const RejectionSamplingParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(!params.valid_draft_lengths_d.defined(),
+                            "bounded rejection sampling (valid_draft_lengths_d) is CUDA-only");
     RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling is not supported on this device");
 }
 

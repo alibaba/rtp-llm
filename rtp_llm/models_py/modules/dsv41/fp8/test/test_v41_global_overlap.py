@@ -32,6 +32,72 @@ _ENV = {
 
 
 class GlobalOverlapCPUTest(unittest.TestCase):
+    def test_fused_paged_global_skips_end_tensor_and_keeps_projection(self):
+        from rtp_llm.models_py.modules.dsv41.attn_type import INDEXER_KV
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_decode_global,
+            _v41_decode_indexer,
+        )
+
+        class StartsWithoutAddition:
+            def __add__(self, _other):
+                raise AssertionError("fused paged decode must not compute request ends")
+
+        starts = StartsWithoutAddition()
+        x = torch.empty(2, 3, 8)
+        positions = torch.empty(6, dtype=torch.int64)
+        request_ids = torch.empty(6, dtype=torch.int32)
+        pool = torch.zeros(3, 128, 68, dtype=torch.uint8)
+        table = torch.ones(2, 1, dtype=torch.int32)
+        projections = (torch.empty(6, 512), torch.empty(6, 512))
+        for ratio in (1, 2):
+            for lengths in (None, torch.tensor([2, 4], dtype=torch.int32)):
+                for projected in (None, projections):
+                    with self.subTest(
+                        ratio=ratio,
+                        packed=lengths is not None,
+                        projected=projected is not None,
+                    ):
+                        owner = SimpleNamespace(
+                            compress_ratio=ratio,
+                            _rope_max_seq_len=128,
+                            _cp_ctx=None,
+                            _kv_cache=SimpleNamespace(
+                                get_kernel_seq_size_per_block=lambda _tag: 128
+                            ),
+                            _block_tables_by_type={INDEXER_KV: table},
+                            _source_pool=lambda _tag: pool,
+                            _shared_attention={"decode_input_lengths": lengths},
+                            layer_id=2,
+                            index_n_heads=32,
+                            index_head_dim=128,
+                        )
+                        with patch.object(
+                            _v41_decode_global, "try_produce_global", return_value=True
+                        ) as producer, patch.object(
+                            _v41_decode_indexer, "is_supported", return_value=True
+                        ):
+                            AttentionV41FP8._produce_global_decode(
+                                owner,
+                                x,
+                                positions,
+                                request_ids,
+                                starts,
+                                projected=projected,
+                            )
+                        producer.assert_called_once_with(
+                            owner,
+                            x,
+                            positions,
+                            request_ids,
+                            starts,
+                            projected=projected,
+                            input_lengths=lengths,
+                        )
+                        keys = owner._shared_attention["global"][2]
+                        self.assertIs(keys.pool, pool)
+                        self.assertEqual(keys.logical_entries_per_block, 128 // ratio)
+
     def test_query_preparation_keeps_unsupported_scorer_on_original_path(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer
 
@@ -533,6 +599,69 @@ class GlobalOverlapCudaTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
+    @torch.inference_mode()
+    def test_merged_projection_preserves_packed_request_boundaries(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_global
+        from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
+            _linear_bf16_bf16_fp32,
+        )
+
+        lengths = torch.tensor([1, 2, 6], device="cuda", dtype=torch.int32)
+        chosen = torch.tensor([0, 6, 7, 12, 13, 14, 15, 16, 17], device="cuda")
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                reference = _case("cuda", ratio, 3, 6)
+                reference.x = (
+                    reference.x.flatten(0, 1)
+                    .index_select(0, chosen)
+                    .reshape(3, 3, -1)
+                    .contiguous()
+                )
+                reference.positions = reference.positions.index_select(0, chosen)
+                reference.req_ids = reference.req_ids.index_select(0, chosen)
+                candidate = _clone_case(reference)
+                flat = candidate.x.reshape(9, -1)
+                values = _linear_bf16_bf16_fp32(flat, candidate.owner.global_wkv)
+                scores = (
+                    _linear_bf16_bf16_fp32(flat, candidate.owner.global_wgate)
+                    if ratio == 2
+                    else values
+                )
+                # FULL's merged projection returns row-strided column views.
+                storage = torch.cat((values, scores), dim=1)
+                projected = (storage[:, :512], storage[:, 512:])
+                self.assertGreater(projected[0].stride(0), 512)
+                self.assertTrue(
+                    _v41_decode_global.try_produce_global(
+                        reference.owner,
+                        reference.x,
+                        reference.positions,
+                        reference.req_ids,
+                        reference.starts,
+                        input_lengths=lengths,
+                    )
+                )
+                with patch(
+                    "rtp_llm.models_py.modules.dsv41.fp8.compressor."
+                    "_linear_bf16_bf16_fp32",
+                    side_effect=AssertionError("merged projection must be reused"),
+                ):
+                    self.assertTrue(
+                        _v41_decode_global.try_produce_global(
+                            candidate.owner,
+                            candidate.x,
+                            candidate.positions,
+                            candidate.req_ids,
+                            candidate.starts,
+                            projected=projected,
+                            input_lengths=lengths,
+                        )
+                    )
+                for tag, actual in candidate.owner._test_pools.items():
+                    torch.testing.assert_close(
+                        actual, reference.owner._test_pools[tag], rtol=0, atol=0
+                    )
+
     def test_independent_threads_capture_with_separate_auxiliary_streams(self):
         import traceback
 
@@ -958,8 +1087,11 @@ class FullOverlapCudaTest(unittest.TestCase):
                         case.owner._test_pools[key].copy_(value)
                     graph.replay()
                     for key in expected:
-                        if expected[key] is None:
-                            self.assertIsNone(actual[key])
+                        # Complete sorted-prefix candidates deliberately omit
+                        # the bitmap; both paths must preserve that contract.
+                        if actual[key] is None or expected[key] is None:
+                            self.assertIsNone(actual[key], key)
+                            self.assertIsNone(expected[key], key)
                             continue
                         self.assertTrue(torch.isfinite(actual[key]).all())
                         # Both selectors permit tie ordering; comparing it exactly here
