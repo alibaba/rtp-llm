@@ -2314,6 +2314,69 @@ TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsA
     }
 }
 
+TEST_F(BlockTreeCacheFactoryTest, FullWatermarksPropagateAndRejectPartialOrInvalidOverrides) {
+    const auto                               config = makeSingleConfig();
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_watermarks");
+    KVCacheConfig                            runtime;
+    runtime.enable_memory_cache  = true;
+    runtime.memory_cache_size_mb = 1;
+    runtime.enable_disk_cache    = true;
+    runtime.disk_cache_size_mb   = 1;
+    runtime.disk_cache_paths     = disk_dir.path;
+    {
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        auto cache     = createBlockTreeCache(config, runtime, allocator);
+        ASSERT_NE(cache, nullptr);
+        for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+            EXPECT_FALSE(cache->config().fullWatermarkForTier(tier).has_value());
+        }
+    }
+    runtime.block_tree_full_device_evict_low_watermark_ratio  = 0.90;
+    runtime.block_tree_full_device_evict_high_watermark_ratio = 0.95;
+    runtime.block_tree_full_memory_evict_low_watermark_ratio  = 0.94;
+    runtime.block_tree_full_memory_evict_high_watermark_ratio = 0.97;
+    runtime.block_tree_full_disk_evict_low_watermark_ratio    = 0.96;
+    runtime.block_tree_full_disk_evict_high_watermark_ratio   = 0.98;
+    {
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        auto cache     = createBlockTreeCache(config, runtime, allocator);
+        ASSERT_NE(cache, nullptr);
+        for (const auto& [tier, expected] : {std::pair<Tier, TierWatermark>{Tier::DEVICE, {0.90, 0.95}},
+                                             std::pair<Tier, TierWatermark>{Tier::HOST, {0.94, 0.97}},
+                                             std::pair<Tier, TierWatermark>{Tier::DISK, {0.96, 0.98}}}) {
+            const auto actual = cache->config().fullWatermarkForTier(tier);
+            ASSERT_TRUE(actual.has_value());
+            EXPECT_DOUBLE_EQ(actual->low_ratio, expected.low_ratio);
+            EXPECT_DOUBLE_EQ(actual->high_ratio, expected.high_ratio);
+        }
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.low_ratio, 0.82);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.high_ratio, 0.90);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.90);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.94);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.low_ratio, 0.92);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.high_ratio, 0.97);
+    }
+    using Field = double KVCacheConfig::*;
+    for (const auto& [low, high] :
+         {std::pair<Field, Field>{&KVCacheConfig::block_tree_full_device_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_full_device_evict_high_watermark_ratio},
+          std::pair<Field, Field>{&KVCacheConfig::block_tree_full_memory_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_full_memory_evict_high_watermark_ratio},
+          std::pair<Field, Field>{&KVCacheConfig::block_tree_full_disk_evict_low_watermark_ratio,
+                                  &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio}}) {
+        for (const auto& [low_value, high_value] : {std::pair<double, double>{-1.0, 0.95},
+                                                    std::pair<double, double>{0.90, -1.0},
+                                                    std::pair<double, double>{0.95, 0.90},
+                                                    std::pair<double, double>{0.90, 1.01}}) {
+            auto invalid   = runtime;
+            invalid.*low   = low_value;
+            invalid.*high  = high_value;
+            auto allocator = initAllocator<CoordinatorCacheManager>(config);
+            expectFactoryRejects(config, allocator, invalid);
+        }
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
     const auto config = makeSingleConfig();
     {

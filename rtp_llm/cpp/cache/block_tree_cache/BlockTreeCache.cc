@@ -288,10 +288,10 @@ void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
 void BlockTreeCache::checkWatermark() {
     for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
         const auto watermark = config_.watermarkForTier(tier);
-        if (!config_.isTierEnabled(tier) || !watermark.enabled()) {
+        if (!config_.isTierEnabled(tier)) {
             continue;
         }
-        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark);
+        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark, config_.fullWatermarkForTier(tier));
     }
 }
 
