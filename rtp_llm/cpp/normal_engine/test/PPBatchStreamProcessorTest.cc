@@ -3422,6 +3422,44 @@ TEST_F(PPBatchStreamProcessorTest, CPSingletonLimitAppliesToRescheduledChunks) {
     }
 }
 
+TEST_F(PPBatchStreamProcessorTest, ContextBatchLimitAppliesToRescheduledChunks) {
+    auto params                                                        = makeMtpParams(3);
+    params.sp_config.type                                              = SP_TYPE_NONE;
+    params.pd_sep_config.role_type                                     = RoleType::PREFILL;
+    params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+    auto cache = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache->init());
+    PPScheduler     scheduler(params.runtime_config,
+                          params.model_config_,
+                          params.pd_sep_config,
+                          params.parallelism_config,
+                          params.model_specific_config,
+                          params.sp_config,
+                          cache);
+    ResourceContext resources;
+    resources.cache_manager = cache;
+    std::vector<GenerateStreamPtr> streams;
+    for (int64_t id = 930; id < 933; ++id) {
+        auto stream              = makeStream(resources, params.model_config_, id, {1, 2, 3, 4, 5, 6, 7, 8}, 0);
+        stream->enable_fast_gen_ = true;
+        stream->resetChunkLen(4, 8);
+        scheduler.running_streams_.push_back(stream);
+        streams.push_back(stream);
+    }
+    auto ready = scheduler.evaluateRunningStreams();
+    ASSERT_EQ(ready.size(), 2u);
+    EXPECT_EQ(ready.front(), streams[0]);
+    EXPECT_EQ(ready.back(), streams[1]);
+    EXPECT_EQ(streams[2]->ppOutstandingResults(), 0);
+
+    for (const auto& stream : ready) {
+        stream->setPPInflight();
+    }
+    ready = scheduler.evaluateRunningStreams();
+    ASSERT_EQ(ready.size(), 1u);
+    EXPECT_EQ(ready.front(), streams[2]);
+}
+
 TEST_F(PPBatchStreamProcessorTest, DSparkChunkPlanDefersPublicationAndSampling) {
     auto params                              = makeMtpParams(3);
     params.sp_config.type                    = SP_TYPE_DSPARK;
