@@ -1,6 +1,7 @@
 """Optional W4A16 FFN execution using independently loaded weights."""
 
 import logging
+import os
 
 import torch
 from torch import nn
@@ -8,6 +9,11 @@ from torch import nn
 from rtp_llm.model_loader.w4a16_weight import w4a16_key
 from rtp_llm.models_py.kernels.cuda.w4a16_sm120 import gemm, rotate, support
 from rtp_llm.utils.model_weight import W
+
+# Decode: fuse sign-flip + Hadamard (and silu_and_mul for the down projection)
+# into one Triton launch per projection. Matches the unfused path to within
+# one bf16 ulp (fp32 Hadamard summation order differs).
+_FUSED_ROTATE = os.environ.get("RTP_LLM_W4A16_FUSED_ROTATE", "0") == "1"
 
 
 class RotatedW4A16Linear(nn.Module):
@@ -73,7 +79,32 @@ class W4A16DenseMLP(nn.Module):
             for key, bias in zip(keys, (up_bias, down_bias))
         ]
         logging.info("W4A16 FFN initialized: block=128, 0<M<64")
-        return cls(*projections)
+        mlp = cls(*projections)
+        mlp.fused_rotate = _FUSED_ROTATE and is_gated
+        if mlp.fused_rotate:
+            logging.info("W4A16 FFN: fused silu_mul+rotate prologues enabled")
+        return mlp
+
+    fused_rotate = False
 
     def forward(self, inputs: torch.Tensor, activation: nn.Module) -> torch.Tensor:
+        if (
+            self.fused_rotate
+            and inputs.dim() == 2
+            and inputs.dtype == torch.bfloat16
+            and inputs.stride(1) == 1
+        ):
+            from rtp_llm.models_py.kernels.cuda.w4a16_rotate_fused import (
+                fused_rotate,
+                fused_silu_mul_rotate,
+            )
+
+            up, down = self.up_proj, self.down_proj
+            gate_up = gemm(fused_rotate(inputs, up.signs), up.packed, up.scales)
+            if up.bias is not None:
+                gate_up = gate_up + up.bias
+            output = gemm(
+                fused_silu_mul_rotate(gate_up, down.signs), down.packed, down.scales
+            )
+            return output if down.bias is None else output + down.bias
         return self.down_proj(activation(self.up_proj(inputs)))

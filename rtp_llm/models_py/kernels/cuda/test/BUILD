@@ -18,6 +18,14 @@ py_test(
 )
 
 py_test(
+    name = "w4a16_rotate_fused_test",
+    srcs = ["w4a16_rotate_fused_test.py"],
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
     name = "fast_bf16_int8_tp_test",
     srcs = ["fast_bf16_int8_tp_test.py"],
     deps = py_test_deps + [":fast_bf16_int8_test_utils"],
