@@ -104,7 +104,9 @@ class DeviceOnlyPrepare:
         type(self).prepare_calls += 1
         # This backend reads only device metadata. CPU mirrors must remain
         # untouched rather than forcing a D2H before each replay.
-        assert torch.equal(inputs["full"].prefix_lengths, self.host_prefix)
+        assert torch.equal(
+            inputs["full"].prefix_lengths.cpu(), self.host_prefix.cpu()
+        )
 
 
 class DeviceOnlySequenceLengthModel(TaggedSequenceLengthModel):

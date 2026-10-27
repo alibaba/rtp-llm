@@ -13,9 +13,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
-    record_function_range,
-)
+from rtp_llm.models_py.utils.profiler import record_function_range
 
 # Fused SiLU + (optional clamp) + element-wise mul replacement for the
 # Expert.forward chain. See silu_mul_split.py for the kernel contract.

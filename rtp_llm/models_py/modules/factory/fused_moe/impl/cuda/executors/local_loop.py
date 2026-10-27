@@ -232,6 +232,10 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
 
     def dense_gemm_warmup_weights(self):
         """Expose dense fallback GEMMs to model-level JIT warmup."""
+        if self._routed_storage != "fp4":
+            # FP8 routed weights do not build the transposed DeepGEMM scale
+            # stacks this warmup consumes.
+            return ()
         return (
             ("local_w1", self._W1_w, self._W1_s_gemm_t),
             ("local_w2", self._W2_w, self._W2_s_gemm_t),

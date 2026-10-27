@@ -32,7 +32,7 @@ def selection(rank=0, *, device_name="ZW-M890P", **changed):
         pp_size=1,
         world_size=4,
         cp_enabled=False,
-        role="PDFUSION",
+        role="PREFILL",
         speculative=False,
         cuda_graph=False,
         reuse_cache=False,
@@ -427,6 +427,28 @@ class Dsv4PlanTest(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "No compatible"):
                             ctx.prepare([request_for("model", ctx.selection)])
 
+    def test_plan_phases_follow_runtime_role_and_graph_mode(self):
+        for changed, expected in (
+            ({"role": "PREFILL"}, {"prefill"}),
+            ({"role": "DECODE"}, {"decode"}),
+            ({"role": "PDFUSION"}, {"prefill", "decode"}),
+            ({"role": "PREFILL", "cuda_graph": True}, {"prefill", "decode"}),
+            (
+                {"role": "PDFUSION", "speculative": True},
+                {"prefill", "decode", "target_verify"},
+            ),
+        ):
+            with self.subTest(**changed):
+                request = request_for("model", selection(**changed))
+                self.assertEqual(
+                    request.required_capabilities, frozenset(expected)
+                )
+
+    def test_pdfusion_requires_an_implementation_with_both_phases(self):
+        ctx = self.context(selection(role="PDFUSION"))
+        with self.assertRaisesRegex(ValueError, "No compatible"):
+            ctx.prepare([request_for("model", ctx.selection)])
+
     def test_selected_plan_controls_actual_forward_phase(self):
         from rtp_llm.models.dsv4.specs import (
             forward_capabilities,
@@ -696,9 +718,8 @@ class Dsv4PlanTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "No compatible"):
                     ctx.prepare([request_for("model", ctx.selection)])
 
-    def test_engine_feature_flags_no_longer_disqualify(self):
+    def test_engine_feature_flags_match_executed_phases(self):
         for flagged in (
-            {"cuda_graph": True},
             {"lora": True},
             {"eplb": True},
         ):
@@ -706,6 +727,11 @@ class Dsv4PlanTest(unittest.TestCase):
                 ctx = self.context(selection(**flagged))
                 ctx.prepare([request_for("model", ctx.selection)])
                 self.assertEqual(len(ctx.bindings), 130)
+        # Graph capture runs a decode-shaped forward during construction, so a
+        # prefill-only implementation must be rejected at plan time.
+        ctx = self.context(selection(cuda_graph=True))
+        with self.assertRaisesRegex(ValueError, "No compatible"):
+            ctx.prepare([request_for("model", ctx.selection)])
         for flagged in (
             {"cuda_graph": False},
             {"lora": True},
@@ -733,6 +759,8 @@ class Dsv4PlanTest(unittest.TestCase):
             env = {
                 **PREFILL_EXECUTION_OPTIONS,
                 "DSV4_TASK_RUN": f"/tmp/run/rank{rank}",
+                "DSV4_PROFILE_TRACE": f"/tmp/trace/rank{rank}.json",
+                "DSV4_TRITON_WARMUP_TMPDIR": f"/tmp/triton/rank{rank}",
                 "MOEDBG_DIR": f"/tmp/dumps/rank{rank}",
                 "WORLD_RANK": str(rank),
                 "DSV4_INDEXER_TOPK_BACKEND": "sglang",

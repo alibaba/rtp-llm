@@ -13,7 +13,10 @@ class PpuDecodeProvider(PpuModuleProvider):
     name = "m890p-dsv4-fp4-decode-candidate"
     indexer_mode = "FP4"
     capabilities = PpuModuleProvider.capabilities | frozenset(
-        {Dsv4ProviderCapability.DECODE_METADATA}
+        {
+            Dsv4ProviderCapability.DECODE_METADATA,
+            Dsv4ProviderCapability.MTP_INPUT_FUSION,
+        }
     )
     _moe_hint = "capacity"
     _moe_output_dtype = torch.bfloat16
@@ -52,6 +55,34 @@ class PpuDecodeProvider(PpuModuleProvider):
         if batch_indexer not in ("0", "1"):
             raise ValueError("DSV4_PPU_MTP_BATCH_INDEXER must be 0 or 1")
         self._mtp_batch_indexer = batch_indexer == "1"
+        # Opt-in is captured in the model's execution-options snapshot.
+        self._decode_fusions = self._bool("DSV4_PPU_DECODE_FUSIONS", False)
+        self._projection_tiles = self._bool("DSV4_PPU_DECODE_PROJECTION_TILES", False)
+        self._moe_backend = self.execution_options.get(
+            "DSV4_PPU_DECODE_MOE_BACKEND", "deepep"
+        )
+        if self._moe_backend not in ("deepep", "megamoe"):
+            raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        self._shared_staged = self._bool("DSV4_PPU_MEGAMOE_SHARED_STAGED", False)
+        self._mega_streamed = self._bool("DSV4_PPU_MEGAMOE_STREAMED", False)
+        if self._mega_streamed and self._moe_backend != "megamoe":
+            raise ValueError("Streamed execution requires the MegaMoE backend")
+        if self._mega_streamed and self._shared_staged:
+            raise ValueError("Streamed MegaMoE does not support staged shared experts")
+        if self._shared_staged and self._moe_backend != "megamoe":
+            raise ValueError("Staged shared execution requires the MegaMoE backend")
+        self._mega_resources = None
+        self._mega_module_name = self.execution_options.get(
+            "DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm"
+        )
+        if self._moe_backend == "megamoe":
+            if self._mega_module_name not in ("deep_gemm", "deep_gemm_mega"):
+                raise ValueError(
+                    "DSV4_PPU_MEGAMOE_PACKAGE must be deep_gemm or deep_gemm_mega"
+                )
+            from .ppu_mega_moe import PpuMegaMoEResources
+
+            self._mega_resources = PpuMegaMoEResources()
         self._decode_attention_refs = []
         self.stream_pool = PpuStreamPool()
 
@@ -89,14 +120,32 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
 
     def build_fp8_linear(self, default_factory, *args, **kwargs):
-        return super().build_fp8_linear(
+        linear = super().build_fp8_linear(
             default_factory, *args, quantization="v2_column", **kwargs
         )
+        linear._decode_projection_gemm = self._projection_tiles
+        return linear
+
+    def build_mtp_input_fusion(self, enorm, hnorm, e_proj, h_proj):
+        if not self._decode_fusions:
+            return None
+        from .ppu_mtp_input import PpuMtpInputFusion
+
+        return PpuMtpInputFusion(enorm, hnorm, e_proj, h_proj)
 
     def build_wo_a_fp8_linear(self, default_factory, *args, **kwargs):
-        return super().build_wo_a_fp8_linear(
+        linear = super().build_wo_a_fp8_linear(
             default_factory, *args, quantization="v2_row", **kwargs
         )
+        linear.fuse_inverse_rope_quant = self._decode_fusions
+        return linear
+
+    def build_shared_expert(self, *args, **kwargs):
+        shared = super().build_shared_expert(*args, **kwargs)
+        shared.fuse_activation_quant = self._decode_fusions
+        for linear in (shared.w13, shared.w2):
+            linear._decode_projection_gemm = self._projection_tiles
+        return shared
 
     def build_attention(self, default_factory, *args, **kwargs):
         attention = super().build_attention(
@@ -112,13 +161,33 @@ class PpuDecodeProvider(PpuModuleProvider):
         # Materialization can replace the RoPE table. Resolve it when binding
         # metadata, without a provider <-> attention ownership cycle.
         self._decode_attention_refs.append(weakref.ref(attention))
+        attention._fuse_qkv_quant = self._decode_fusions
+        from rtp_llm.platforms.ppu.modules.linear.fp8_linear import PpuFp8Linear
+
+        from .ppu_wo_a import PpuWoAFp8Linear
+
+        for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
+            if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
+                linear._decode_attention_gemm = self._decode_fusions
+        if type(attention._decode_qkv_projection) is PpuFp8Linear:
+            attention._decode_qkv_projection._decode_projection_gemm = (
+                self._projection_tiles
+            )
+        if attention.indexer is not None:
+            attention.indexer.wq_b._decode_projection_gemm = self._projection_tiles
+            attention.indexer.compressor._fuse_decode_queries = self._decode_fusions
+            attention.indexer._fuse_query_slices = self._decode_fusions
+            attention.indexer._fuse_topk_order = self._decode_fusions
+            attention.indexer.compressor._fuse_decode_store = self._decode_fusions
         return attention
 
     def build_shared_expert_executor(self, **kwargs):
         from .ppu_shared_expert import PpuSharedExpertExecutor
 
         return PpuSharedExpertExecutor(
-            stream_pool=self.stream_pool, start_before_routing=True
+            stream_pool=self.stream_pool,
+            start_before_routing=True,
+            staged=self._shared_staged,
         )
 
     def build_hc_unit(self, *args, **kwargs):
@@ -130,5 +199,21 @@ class PpuDecodeProvider(PpuModuleProvider):
             allow_graph=True,
             fuse_prenorm=True,
             fuse_norm=True,
+            fuse_moe_sum=self._decode_fusions,
+            fuse_pre_quant=self._decode_fusions,
+            # Keep small-batch POST tiling opt-in until the local kernel
+            # improvement is established on the service's critical path.
+            fuse_post=self._decode_fusions
+            and self._bool("DSV4_PPU_HC_POST_TILING", False),
             **kwargs,
         )
+
+    def build_hc_head(self, *args, **kwargs):
+        if not self._decode_fusions:
+            return super().build_hc_head(*args, **kwargs)
+        from .ppu_hc_head import PpuDecodeHCHead
+
+        tp_size, tp_rank = kwargs.pop("tp_size"), kwargs.pop("tp_rank")
+        head = PpuDecodeHCHead(*args, options=self.execution_options, **kwargs)
+        head.tp_size, head.tp_rank = tp_size, tp_rank
+        return head

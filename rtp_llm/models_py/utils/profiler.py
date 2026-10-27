@@ -1,4 +1,4 @@
-"""Profiler ranges shared by generic fused-MoE implementations."""
+"""Profiler ranges and suppression shared by model implementations."""
 
 from __future__ import annotations
 

@@ -38,11 +38,22 @@ def _prefill_fast_norm(
     *,
     tp_size: int = 1,
     tp_rank: int = 0,
+    global_dim: int | None = None,
 ) -> torch.Tensor:
     # Regular CUDA TP retains full-width hidden states. Preserve its in-place
-    # norm path; only hidden-dimension shards need the TP adapter.
-    if tp_size > 1 and norm.weight.numel() != x.shape[-1]:
-        return tp_rms_norm(norm, x, tp_size=tp_size, tp_rank=tp_rank)
+    # norm path; hidden-dimension shards need the TP adapter, including the
+    # layout where the affine weight is sharded to the same local width.
+    if tp_size > 1 and (
+        (global_dim is not None and x.shape[-1] != global_dim)
+        or norm.weight.numel() != x.shape[-1]
+    ):
+        return tp_rms_norm(
+            norm,
+            x,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            global_dim=global_dim,
+        )
     if (
         isinstance(norm, RMSNorm)
         and norm.__class__.__module__ == "rtp_llm.models_py.modules.base.cuda.norm"
@@ -74,6 +85,7 @@ class Block(nn.Module):
     # pre-TP single-rank behavior; real instances overwrite both in __init__.
     tp_size: int = 1
     tp_rank: int = 0
+    dim: int | None = None
 
     def __init__(
         self,
@@ -131,6 +143,7 @@ class Block(nn.Module):
         self.layer_id = layer_id
         self.tp_size = int(tp_size)
         self.tp_rank = int(tp_rank)
+        self.dim = int(dim)
         self.fp8_kv_cache = fp8_kv_cache
         self._platform_provider = platform_provider
         self._attention_layout = resolve_dsv4_attention_layout(
@@ -421,6 +434,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
         return residual, x_pre, post, comb
 
@@ -468,6 +482,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
         return residual, x_pre, post, comb
 
@@ -522,23 +537,32 @@ class Block(nn.Module):
         else:
             # Attention path
             residual = x
-            x_pre, post, comb = self.attn_hc.pre_norm(
-                x,
-                self.attn_norm,
-                tp_size=self.tp_size,
-                tp_rank=self.tp_rank,
-                dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
-            )
-            if _dbg_layer:
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
-            if attn_fn is not None:
-                attn_out = attn_fn(x_pre)
-            else:
-                attn_out = self.attn.forward_decode(
-                    x_pre,
-                    attn_metadata,
-                    kv_cache=kv_cache,
+            prepared = None
+            fused_attn_pre = getattr(self.attn, "forward_decode_with_hc_pre", None)
+            if not _dbg_layer and attn_fn is None and callable(fused_attn_pre):
+                prepared = fused_attn_pre(
+                    x, attn_metadata, self.attn_hc, self.attn_norm, kv_cache=kv_cache
                 )
+            if prepared is not None:
+                attn_out, post, comb = prepared
+            else:
+                x_pre, post, comb = self.attn_hc.pre_norm(
+                    x,
+                    self.attn_norm,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                    dbg_tag=f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None,
+                )
+                if _dbg_layer:
+                    _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
+                if attn_fn is not None:
+                    attn_out = attn_fn(x_pre)
+                else:
+                    attn_out = self.attn.forward_decode(
+                        x_pre,
+                        attn_metadata,
+                        kv_cache=kv_cache,
+                    )
             if _dbg_layer:
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
             x = self.attn_hc.post(attn_out, residual, post, comb)
@@ -547,6 +571,14 @@ class Block(nn.Module):
 
         # FFN path — MoE has no per-step state, reuse existing forward
         residual = x
+        fused_ffn_pre = getattr(self.ffn, "forward_with_hc_pre", None)
+        if not _dbg_layer and callable(fused_ffn_pre):
+            fused = fused_ffn_pre(
+                x, input_ids, self.ffn_hc, self.ffn_norm,
+                active_token_mask=getattr(attn_metadata, "active_token_mask", None),
+            )
+            if fused is not None:
+                return fused
         x_pre, post, comb = self.ffn_hc.pre_norm(
             x,
             self.ffn_norm,
@@ -561,6 +593,13 @@ class Block(nn.Module):
             {"active_token_mask": active_token_mask}
             if active_token_mask is not None else {}
         )
+        fused_ffn_hc = getattr(self.ffn, "forward_with_hc", None)
+        if not _dbg_layer and callable(fused_ffn_hc):
+            fused = fused_ffn_hc(
+                x_pre, input_ids, self.ffn_hc, residual, post, comb, **ffn_kwargs
+            )
+            if fused is not None:
+                return fused
         ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True, **ffn_kwargs)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
@@ -668,6 +707,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
             attn_out = self.attn(
                 x_pre,
@@ -693,6 +733,7 @@ class Block(nn.Module):
                 x_pre,
                 tp_size=self.tp_size,
                 tp_rank=self.tp_rank,
+                global_dim=self.dim,
             )
         ffn_out = self.ffn(x_pre, input_ids)
         return ffn_hc_post(ffn_out, residual, post, comb)

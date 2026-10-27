@@ -12,8 +12,9 @@ from functools import lru_cache
 from typing import Callable, Optional, Sequence
 
 import torch
-from rtp_llm.platforms.ppu.runtime import install_deep_gemm_build_lock, require_symbol
 from torch import nn
+
+from rtp_llm.platforms.ppu.runtime import install_deep_gemm_build_lock, require_symbol
 
 FP8_BLOCK_SIZE = 128
 FP8_QUANT_EPS = 1.0e-4
@@ -309,6 +310,8 @@ class PpuFp8Linear(nn.Module):
         self.register_buffer("weight", weight, persistent=False)
         self.register_buffer("weight_scale", weight_scale, persistent=False)
         self._gemm = _resolve_deep_gemm_symbol(_DENSE_SYMBOL)
+        self._decode_attention_gemm = False
+        self._decode_projection_gemm = False
 
         self._share_input_quantization = share_input_quantization
 
@@ -413,6 +416,27 @@ class PpuFp8Linear(nn.Module):
     def _run_gemm(
         self, x_fp8: torch.Tensor, x_scale: torch.Tensor, output: torch.Tensor
     ) -> None:
+        if self._decode_attention_gemm or self._decode_projection_gemm:
+            from rtp_llm.platforms.ppu.kernels.ppu_attention_gemm import (
+                decode_attention_gemm_config,
+                decode_projection_gemm_config,
+            )
+
+            config = None
+            if self._decode_projection_gemm:
+                config = decode_projection_gemm_config(x_fp8.shape[0], self.n, self.k)
+            if config is None and self._decode_attention_gemm:
+                config = decode_attention_gemm_config(x_fp8.shape[0], self.n, self.k)
+            if config is not None:
+                from deep_gemm.jit_kernels.gemm_fp8 import gemm_fp8_fp8_bf16_nt
+
+                gemm_fp8_fp8_bf16_nt(
+                    (x_fp8, x_scale),
+                    (self.weight, self.weight_scale),
+                    output,
+                    configs=config,
+                )
+                return
         try:
             self._gemm(
                 (x_fp8, x_scale),

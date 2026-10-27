@@ -37,14 +37,23 @@ def build_decode_moe(*, build_ctx, request, platform_provider, **kwargs):
     from .ppu_ep_moe import PpuEPMoE
 
     baseline.validate_arguments(build_ctx, request, kwargs)
+    strategy_type = PpuDeepEPFP4Strategy
+    strategy_kwargs = {
+        "expected_m_policy": platform_provider._moe_hint,
+        "output_dtype": platform_provider._moe_output_dtype,
+        "gemm_tile": platform_provider._moe_tile,
+    }
+    if platform_provider._moe_backend == "megamoe":
+        from .ppu_mega_moe import PpuMegaMoEFP4Strategy
+
+        strategy_type = PpuMegaMoEFP4Strategy
+        strategy_kwargs["resources"] = platform_provider._mega_resources
+        strategy_kwargs["module_name"] = platform_provider._mega_module_name
+        strategy_kwargs["streamed"] = platform_provider._mega_streamed
     return PpuEPMoE(
         platform_provider=platform_provider,
-        strategy_type=PpuDeepEPFP4Strategy,
-        strategy_kwargs={
-            "expected_m_policy": platform_provider._moe_hint,
-            "output_dtype": platform_provider._moe_output_dtype,
-            "gemm_tile": platform_provider._moe_tile,
-        },
+        strategy_type=strategy_type,
+        strategy_kwargs=strategy_kwargs,
         **kwargs,
     )
 

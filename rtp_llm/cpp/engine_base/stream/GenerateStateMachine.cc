@@ -79,6 +79,11 @@ void GenerateStateMachine::handleWaiting() {
         bool ret = stream_cache_resource_->asyncLoadCache();
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);
+        // Without an async load the reuse point is already final; otherwise
+        // defer the reachability check until LOADING_CACHE returns to WAITING.
+        if (!ret && rejectUnreachablePrefill()) {
+            return;
+        }
         if (ret) {
             if (stream != nullptr) {
                 stream->recordLoadingCacheStartTime();
@@ -97,6 +102,9 @@ void GenerateStateMachine::handleWaiting() {
     // the same role can continue into decode after GenerateStream::update()
     // flips isContextStream() to false; from that point block tables must grow
     // exactly like a decode stream.
+    if (rejectUnreachablePrefill()) {
+        return;
+    }
     if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
         && stream_cache_resource_->isContextStream()) {
         transitionToRunning();
@@ -113,6 +121,39 @@ void GenerateStateMachine::handleWaiting() {
         return;
     }
     transitionToRunning();
+}
+
+bool GenerateStateMachine::rejectUnreachablePrefill() {
+    auto* stream = stream_cache_resource_->stream();
+    if (stream == nullptr || stream->isFakeStream() || !stream->isContextStream()) {
+        return false;
+    }
+    const auto role_type = stream_cache_resource_->resourceContext().role_type;
+    if (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION) {
+        return false;
+    }
+    std::string reason;
+    if (stream->chunkedPrefillEnabled()) {
+        if (stream->chunkedPrefillGrant() <= 0) {
+            reason = "[chunked_prefill] request cannot make progress: rows="
+                     + std::to_string(stream->currentBatchSize())
+                     + " x block_size=" + std::to_string(stream->seqSizePerBlock())
+                     + " exceeds chunk budget=" + std::to_string(stream->prefillChunkBudget());
+        }
+    } else if (stream->currentBatchSize() > 1
+               && stream->nonChunkedPrefillTokens() > stream->prefillTokenBudget()) {
+        reason = "[prefill] request exceeds the model prefill budget: rows="
+                 + std::to_string(stream->currentBatchSize())
+                 + ", tokens=" + std::to_string(stream->nonChunkedPrefillTokens())
+                 + ", budget=" + std::to_string(stream->prefillTokenBudget());
+    }
+    if (reason.empty()) {
+        return false;
+    }
+    error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, reason);
+    status.store(StreamState::FINISHED, std::memory_order_release);
+    releaseResource();
+    return true;
 }
 
 void GenerateStateMachine::handleLoading() {

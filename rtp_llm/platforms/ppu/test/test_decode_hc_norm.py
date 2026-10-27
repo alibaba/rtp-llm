@@ -39,7 +39,10 @@ class HCNormDefaultTest(unittest.TestCase):
         self.assertIs(apply_norm.call_args.args[0], norm)
         self.assertEqual(apply_norm.call_args.args[1].shape, (3, 4))
         self.assertEqual(apply_norm.call_args.args[1].data_ptr(), readout.data_ptr())
-        self.assertEqual(apply_norm.call_args.kwargs, {"tp_size": 8, "tp_rank": 3})
+        self.assertEqual(
+            apply_norm.call_args.kwargs,
+            {"tp_size": 8, "tp_rank": 3, "global_dim": 4},
+        )
         self.assertEqual(actual[0].shape, readout.shape)
         self.assertEqual(actual[0].data_ptr(), normalized.data_ptr())
         self.assertIs(actual[1], post)
@@ -150,6 +153,7 @@ class HCNormGraphTest(unittest.TestCase):
         block = Block.__new__(Block)
         torch.nn.Module.__init__(block)
         block.layer_id, block.tp_size, block.tp_rank = 0, 1, 0
+        block._mega_csa_adapter = block._mega_hca_adapter = None
         block.attn_hc, block.ffn_hc = self.unit(), self.unit()
         block.attn_norm, block.ffn_norm = self.norm(), self.norm()
         block.attn = SimpleNamespace(forward_decode=lambda x, *args, **kwargs: x)

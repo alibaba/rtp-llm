@@ -22,6 +22,7 @@ py_library(
         "utils/*.py",
     ]),
     visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:torch"],
 )
 
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the

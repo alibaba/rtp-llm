@@ -141,7 +141,11 @@ class HCUnitBase(nn.Module):
         y, post, comb = self.pre(x, dbg_tag=dbg_tag)
         shape = y.shape
         y = tp_rms_norm(
-            norm, y.reshape(-1, shape[-1]), tp_size=tp_size, tp_rank=tp_rank
+            norm,
+            y.reshape(-1, shape[-1]),
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            global_dim=self.dim,
         ).view(shape)
         return y, post, comb
 

@@ -152,13 +152,19 @@ class HybridHCUnit(TileLangHCUnit):
         # determinism/parity gate. Keep every other/default backend on the
         # validated FP32 reference path during capture.
         pre_backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+        # Same aliases as the ops layer; otherwise a value accepted by warmup
+        # and the fused kernel is rejected here on the first request.
+        pre_backend = {
+            "auto": "deepgemm",
+            "dg": "deepgemm",
+            "single": "tilelang_single",
+        }.get(pre_backend, pre_backend)
         allowed_pre_backends = {
             "",
             "fallback",
             "tilelang",
             "tilelang_single",
             "deepgemm",
-            "deepgemm_deterministic",
         }
         if pre_backend not in allowed_pre_backends:
             allowed = ", ".join(repr(value) for value in sorted(allowed_pre_backends))
@@ -178,11 +184,6 @@ class HybridHCUnit(TileLangHCUnit):
             and torch.cuda.is_current_stream_capturing()
             and capture_uses_fallback
         ):
-            if pre_backend == "deepgemm_deterministic":
-                raise RuntimeError(
-                    "deepgemm_deterministic HC is qualified for eager Prefill only; "
-                    "CUDA Graph capture has not been validated"
-                )
             from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCUnit
 
             return FallbackHCUnit._pre_impl(self, x, dbg_tag=dbg_tag)

@@ -436,7 +436,7 @@ class TestHCImpl(unittest.TestCase):
         tilelang_result = object()
         fallback_result = object()
 
-        for backend in (None, "tilelang", "deepgemm", "TILELANG_SINGLE "):
+        for backend in (None, "tilelang", "deepgemm", "TILELANG_SINGLE ", "single", "dg", "auto"):
             with self.subTest(backend=backend), _env(
                 "DSV4_MHC_PRE_GEMM_BACKEND", backend
             ), mock.patch(
@@ -448,10 +448,16 @@ class TestHCImpl(unittest.TestCase):
             ) as fallback_pre:
                 actual = unit._pre_impl(cuda_x, dbg_tag="graph")
 
-            if backend is not None and backend.strip().lower() in {
-                "tilelang_single",
-                "deepgemm",
-            }:
+            normalized = (
+                None
+                if backend is None
+                else {
+                    "auto": "deepgemm",
+                    "dg": "deepgemm",
+                    "single": "tilelang_single",
+                }.get(backend.strip().lower(), backend.strip().lower())
+            )
+            if normalized in {"tilelang_single", "deepgemm"}:
                 self.assertIs(actual, tilelang_result)
                 tilelang_pre.assert_called_once_with(cuda_x, dbg_tag="graph")
                 fallback_pre.assert_not_called()
@@ -475,7 +481,7 @@ class TestHCImpl(unittest.TestCase):
         )
         cuda_x = mock.Mock(is_cuda=True)
         expected = object()
-        for backend in ("deepgemm", "deepgemm_deterministic"):
+        for backend in ("deepgemm", "dg", "auto"):
             with self.subTest(backend=backend), _env(
                 "DSV4_MHC_PRE_GEMM_BACKEND", backend
             ), mock.patch(
@@ -491,11 +497,15 @@ class TestHCImpl(unittest.TestCase):
             tilelang_pre.assert_called_once_with(cuda_x, dbg_tag="eager")
             fallback_pre.assert_not_called()
 
+        # deepgemm_deterministic requires the PPU prenorm adapter, which this
+        # unit does not carry; reject it instead of advertising a dead path.
         with _env("DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm_deterministic"), mock.patch(
-            "torch.cuda.is_current_stream_capturing", return_value=True
+            "torch.cuda.is_current_stream_capturing", return_value=False
         ), mock.patch.object(FallbackHCUnit, "_pre_impl") as fallback_pre:
-            with self.assertRaisesRegex(RuntimeError, "capture has not been validated"):
-                unit._pre_impl(cuda_x, dbg_tag="graph")
+            with self.assertRaisesRegex(
+                ValueError, "invalid DSV4_MHC_PRE_GEMM_BACKEND"
+            ):
+                unit._pre_impl(cuda_x, dbg_tag="eager")
             fallback_pre.assert_not_called()
 
     def test_fallback_deepgemm_backend_replaces_only_linear_projection(self) -> None:
@@ -538,7 +548,7 @@ class TestHCImpl(unittest.TestCase):
             norm_eps=1e-6,
             hc_eps=1e-6,
         )
-        with _env("DSV4_MHC_PRE_GEMM_BACKEND", "tilelang"), self.assertRaisesRegex(
+        with _env("DSV4_MHC_PRE_GEMM_BACKEND", "typo"), self.assertRaisesRegex(
             ValueError, "fallback mHC supports"
         ):
             unit._linear_mixes(object())

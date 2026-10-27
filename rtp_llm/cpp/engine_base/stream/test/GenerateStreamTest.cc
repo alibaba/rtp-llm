@@ -1495,6 +1495,10 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
          [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
         {"return_all_probs",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"custom_output",
+         [](GenerateInput& input, GenerateConfig&) {
+             input.custom_output_token_position = 0;
+         }},
         {"multimodal",
          [](GenerateInput& input, GenerateConfig&) {
              input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};

@@ -602,11 +602,31 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                                                  runtime_config.fifo_scheduler_config.prefill_chunk_batch_tokens :
                                                  chunk_size;
     const bool    use_global_budget_warmup = chunk_size > 0 && !runtime_config.warm_up_with_loss;
+    const bool    generation_prefill_cuda_graph_requested =
+        shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
+                                               /*allow_cuda_graph=*/true,
+                                               /*primary_graph_is_prefill=*/false,
+                                               params.parallelism_config.role_type,
+                                               params.sp_config.type);
+    size_t        chunk_runtime_bytes      = 0;
     const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
-    fake_input->generate_config->num_return_sequences =
-        use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
+    int64_t warmup_rows = use_global_budget_warmup ?
+                              1 :
+                              runtime_config.fifo_scheduler_config.max_context_batch_size;
+    if (!use_global_budget_warmup) {
+        // The model prefill workspace is capped at
+        // max(max_batch_tokens_size, max_seq_len). Keep the warmed rectangle
+        // within the same budget; oversize warmups would assert in
+        // _materialize_prefill_q before the engine can start.
+        const int64_t budget = std::max<int64_t>(
+            runtime_config.fifo_scheduler_config.max_batch_tokens_size,
+            static_cast<int64_t>(model_config_.max_seq_len));
+        const int64_t max_rows = std::max<int64_t>(1, budget / token_heavy_seq_len);
+        warmup_rows            = std::min(warmup_rows, max_rows);
+    }
+    fake_input->generate_config->num_return_sequences = warmup_rows;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     if (use_global_budget_warmup) {
         size_t max_consumed                               = 0;
@@ -672,15 +692,14 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         }
         cudaDeviceSynchronize();
         c10::cuda::CUDACachingAllocator::emptyCache();
-        return WarmUpResult({getGpuExecStatus().device_memory_status.available_bytes, max_consumed});
+        if (!generation_prefill_cuda_graph_requested) {
+            return WarmUpResult({getGpuExecStatus().device_memory_status.available_bytes, max_consumed});
+        }
+        // Chunk warmup alone never captures the generation-prefill graph; carry
+        // its measurement into the graph-aware reservation pass below.
+        chunk_runtime_bytes = max_consumed;
     }
 
-    const bool generation_prefill_cuda_graph_requested =
-        shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
-                                               /*allow_cuda_graph=*/true,
-                                               /*primary_graph_is_prefill=*/false,
-                                               params.parallelism_config.role_type,
-                                               params.sp_config.type);
     if (!generation_prefill_cuda_graph_requested) {
         rtp_llm::setTraceMemory(true);
         executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
@@ -729,7 +748,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         std::max({positiveDelta(baseline_status.available_bytes, measured_status.available_bytes),
                   positiveDelta(measured_allocated, baseline_allocated),
                   positiveDelta(measured_reserved, baseline_reserved),
-                  measured_status.max_consumed_bytes});
+                  measured_status.max_consumed_bytes,
+                  chunk_runtime_bytes});
     RTP_LLM_LOG_INFO("prefill warmup runtime reservation: measured=%zu MiB allocated_delta=%zu MiB "
                      "reserved_delta=%zu MiB free_delta=%zu MiB",
                      measured_runtime_bytes / 1024 / 1024,

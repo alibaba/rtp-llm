@@ -13,13 +13,12 @@ the shared expert runs on one slice instead of every rank.
 from contextlib import nullcontext
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.modules.dsv4.chunk_env import chunked_moe_enabled
 from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
     fused_moe_epilogue as combine_routed_and_shared,
 )
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 from .ppu_gate import PpuGate
 from .ppu_moe_config import PpuMoeConfig
@@ -109,6 +108,7 @@ class PpuEPMoE(nn.Module):
         self._tp_size = int(tp_size)
         self._tp_rank = int(tp_rank)
         self._is_decode_role = bool(is_decode_role)
+        self._fuse_hc_sum = getattr(platform_provider, "_decode_fusions", False)
         self.chunking_enabled = chunked_moe_enabled(platform_provider.execution_options)
         self._observer_factory = observer_factory
         self._record_function_scope = record_function_scope
@@ -157,47 +157,190 @@ class PpuEPMoE(nn.Module):
         )
         self._shared_executor = platform_provider.build_shared_expert_executor()
         self._shared_executor.prepare(self.shared_experts)
+        if getattr(self._shared_executor, "staged", False):
+            self._strategy.require_staged_shared()
 
-    def _route_and_start_shared(self, x, input_ids):
+    def _route_and_start_shared(
+        self, x, input_ids, active_token_mask=None, input_quantized=None
+    ):
+        shared_kwargs = (
+            {} if input_quantized is None else {"input_quantized": input_quantized}
+        )
         early = self._shared_executor.start_before_routing
         if early:
-            self._shared_executor.start(self.shared_experts, x)
+            self._shared_executor.start(self.shared_experts, x, **shared_kwargs)
         try:
-            routing = self.gate(x, input_ids)
+            masked_gate = getattr(self.gate, "forward_with_mask", None)
+            if callable(masked_gate):
+                routing = masked_gate(x, input_ids, active_token_mask)
+            else:
+                weights, indices = self.gate(x, input_ids)
+                routing = weights, indices, active_token_mask
         except Exception:
             if early:
-                self._shared_executor.finish()
+                if hasattr(self._shared_executor, "abort"):
+                    self._shared_executor.abort()
+                else:
+                    self._shared_executor.finish()
             raise
         if not early:
-            self._shared_executor.start(self.shared_experts, x)
+            self._shared_executor.start(self.shared_experts, x, **shared_kwargs)
         return routing
 
-    def _run_chunk(self, x, input_ids, out, *, observer=None, active_token_mask=None):
-        weights, indices = self._route_and_start_shared(x, input_ids)
+    def _run_experts(
+        self,
+        x,
+        input_ids,
+        *,
+        observer=None,
+        active_token_mask=None,
+        input_quantized=None,
+    ):
+        weights, indices, remaining_mask = self._route_and_start_shared(
+            x,
+            input_ids,
+            active_token_mask if observer is None else None,
+            input_quantized,
+        )
+        if observer is not None:
+            remaining_mask = active_token_mask
         try:
             if observer is not None:
                 observer("input", x)
                 observer("topk_weights", weights)
                 observer("topk_indices", indices)
-            if active_token_mask is None:
-                routed = self._strategy(x, weights, indices)
+            schedule = {}
+            if getattr(self._shared_executor, "staged", False):
+                schedule["after_gemm1"] = self._shared_executor.after_routed_gemm1
+            if remaining_mask is None:
+                routed = self._strategy(x, weights, indices, **schedule)
             else:
                 routed = self._strategy(
-                    x, weights, indices, active_token_mask=active_token_mask
+                    x, weights, indices, active_token_mask=remaining_mask, **schedule
                 )
         except Exception:
-            self._shared_executor.finish()
+            if hasattr(self._shared_executor, "abort"):
+                self._shared_executor.abort()
+            else:
+                self._shared_executor.finish()
             raise
         shared = self._shared_executor.finish()
         if observer is not None:
             observer("routed_y", routed)
             observer("shared_y", shared)
+        return routed, shared
+
+    def _run_chunk(self, x, input_ids, out, *, observer=None, active_token_mask=None):
+        routed, shared = self._run_experts(
+            x, input_ids, observer=observer, active_token_mask=active_token_mask
+        )
         combine_routed_and_shared(routed, shared, x.dtype, out=out)
         if observer is not None:
             observer("final_y", out)
 
+    def forward_with_hc(
+        self,
+        x,
+        input_ids,
+        hc,
+        residual,
+        post,
+        comb,
+        *,
+        active_token_mask=None,
+        input_quantized=None,
+    ):
+        """Return None before execution when the ordinary FFN/HC path is needed."""
+        can_fuse = getattr(hc, "can_fuse_moe_sum", None)
+        if (
+            not self._fuse_hc_sum
+            or not self._is_decode_role
+            or self._tp_size != 1
+            or self._strategy.output_dtype != torch.bfloat16
+            or not callable(can_fuse)
+            or not can_fuse(x, residual, post, comb)
+            or x.numel() // self.dim > self.max_tokens_per_rank
+        ):
+            return None
+        # Tensor recording requires the materialized MoE output boundary.
+        if self._observer_factory and self._observer_factory(None) is not None:
+            return None
+        flat, ids = x.reshape(-1, self.dim), input_ids.reshape(-1)
+        if ids.numel() != flat.size(0):
+            raise ValueError("MoE input_ids/token mismatch")
+        if active_token_mask is not None and (
+            active_token_mask.shape != (flat.size(0),)
+            or active_token_mask.dtype != torch.bool
+            or active_token_mask.device != flat.device
+            or not active_token_mask.is_contiguous()
+        ):
+            raise ValueError("MoE active_token_mask must be one device bool per token")
+        with self._record_function_scope():
+            routed, shared = self._run_experts(
+                flat,
+                ids,
+                active_token_mask=active_token_mask,
+                input_quantized=input_quantized,
+            )
+        # finish() above joins the shared stream before either buffer is read.
+        return hc.post_moe_sum(
+            routed.view_as(x), shared.view_as(x), residual, post, comb
+        )
+
+    def forward_with_hc_pre(
+        self, residual, input_ids, hc, norm, *, active_token_mask=None
+    ):
+        from ...modules.linear.fp8_linear import PpuFp8Linear
+        from .ppu_shared_expert import PpuSharedExpertExecutor
+
+        if (
+            not self._fuse_hc_sum
+            or not self._is_decode_role
+            or self._tp_size != 1
+            or self._strategy.output_dtype != torch.bfloat16
+            or not isinstance(self._shared_executor, PpuSharedExpertExecutor)
+            or type(self.shared_experts.w13) is not PpuFp8Linear
+            or self.shared_experts.w13.quantization != "v2_column"
+            or not callable(getattr(hc, "can_fuse_pre_quant", None))
+            or not hc.can_fuse_pre_quant(residual, norm)
+            or not getattr(hc, "_fuse_moe_sum", False)
+            or residual.numel() // (4 * self.dim) > self.max_tokens_per_rank
+            or (self._observer_factory and self._observer_factory(None) is not None)
+        ):
+            return None
+        x, post, comb, quantized = hc.pre_norm_quantized(residual, norm)
+        result = self.forward_with_hc(
+            x,
+            input_ids,
+            hc,
+            residual,
+            post,
+            comb,
+            active_token_mask=active_token_mask,
+            input_quantized=quantized,
+        )
+        if result is None:
+            # The inputs have been prepared, but no expert work has run yet.
+            return hc.post(
+                self.forward(
+                    x,
+                    input_ids,
+                    is_decode_forward=True,
+                    active_token_mask=active_token_mask,
+                ),
+                residual,
+                post,
+                comb,
+            )
+        return result
+
     def forward(
-        self, x, input_ids, *, is_decode_forward=False, positions=None,
+        self,
+        x,
+        input_ids,
+        *,
+        is_decode_forward=False,
+        positions=None,
         active_token_mask=None,
     ):
         shape = x.shape
@@ -229,8 +372,12 @@ class PpuEPMoE(nn.Module):
             # every rank, so chunk counts and collective order stay in sync.
             flat, ids, positions, active_token_mask, original_tokens = (
                 _slice_tokens_for_tp(
-                    flat, ids, positions, active_token_mask,
-                    self._tp_size, self._tp_rank,
+                    flat,
+                    ids,
+                    positions,
+                    active_token_mask,
+                    self._tp_size,
+                    self._tp_rank,
                 )
             )
         # Each call owns its output, including graph-pool allocations. Retaining
@@ -247,10 +394,14 @@ class PpuEPMoE(nn.Module):
             )
             with self._record_function_scope():
                 self._run_chunk(
-                    flat[start:end], ids[start:end], out[start:end], observer=observer,
+                    flat[start:end],
+                    ids[start:end],
+                    out[start:end],
+                    observer=observer,
                     active_token_mask=(
                         active_token_mask[start:end]
-                        if active_token_mask is not None else None
+                        if active_token_mask is not None
+                        else None
                     ),
                 )
         if self._tp_size > 1:

@@ -5852,6 +5852,8 @@ class CommitOnlyAttentionFP8(AttentionFP8):
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
         tp_size: int = 1,
         tp_rank: int = 0,
+        platform_provider=None,
+        indexer_factory=None,
     ):
         del compress_rope_theta, original_seq_len, max_batch_size, index_topk
         if layer_weights is None:
@@ -5898,8 +5900,11 @@ class CommitOnlyAttentionFP8(AttentionFP8):
         self.kv_norm = layer_weights[W.v4_attn_kv_norm]
 
         self.attn_sink = None
+        self._platform_provider = platform_provider
+        self._indexer_factory = indexer_factory
         self.wq_a = None
         self.wq_b = None
+        self.wo_a = None
         self.wo_a_w = None
         self.wo_a_s = None
         self.wo_b = None

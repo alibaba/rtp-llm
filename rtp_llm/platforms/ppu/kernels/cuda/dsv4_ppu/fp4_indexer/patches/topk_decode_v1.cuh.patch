@@ -16,6 +16,47 @@
 +    rtp_topk::exact_topk<kTopK>(input, output, length, s_input_idx);
 +    return;
 +  }
-@@ -722 +732 @@
+@@ -615,0 +626,28 @@
++#ifdef RTP_CANONICAL_TOPK
++// Order logical indices before the final store; preserve the selected set.
++SGL_DEVICE void canonical_sort(int32_t* shared) {
++  const int tx = threadIdx.x;
++  int value = tx < kTopK ? shared[tx] : 2147483647;
++#pragma unroll
++  for (int size = 2; size <= kTopK; size <<= 1) {
++#pragma unroll
++    for (int stride = size >> 1; stride > 0; stride >>= 1) {
++      int other;
++      if (stride < 32) {
++        other = __shfl_xor_sync(0xFFFFFFFF, value, stride);
++      } else {
++        if (tx < kTopK) shared[tx] = value;
++        __syncthreads();
++        other = tx < kTopK ? shared[tx ^ stride] : 2147483647;
++        __syncthreads();
++      }
++      const bool take_min = ((tx & size) == 0) == ((tx & stride) == 0);
++      value = take_min ? min(value, other) : max(value, other);
++    }
++  }
++  if (tx < kTopK) shared[tx] = value;
++  __syncthreads();
++}
++
++#endif
++
+@@ -648,0 +687,3 @@
++#ifdef RTP_CANONICAL_TOPK
++    canonical_sort(s_topk_indices);
++#endif
+@@ -659,0 +701,3 @@
++#ifdef RTP_CANONICAL_TOPK
++    canonical_sort(s_topk_indices);
++#endif
+@@ -670,0 +715,3 @@
++#ifdef RTP_CANONICAL_TOPK
++    canonical_sort(s_topk_indices);
++#endif
+@@ -722 +769 @@
 -    const auto fptr = std::bit_cast<const void*>(f);
 +    const auto fptr = reinterpret_cast<const void*>(f);

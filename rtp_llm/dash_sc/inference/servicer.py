@@ -905,7 +905,7 @@ def _apply_dash_sc_controls_to_generate_config(
     if request_max_think is not None:
         max_think = int(request_max_think)
         generate_config.max_thinking_tokens = INT32_MAX if max_think < 0 else max_think
-    elif runtime.thinking_uses_output_budget:
+    elif runtime.thinking_uses_output_budget and generate_config.max_new_tokens is not None:
         generate_config.max_thinking_tokens = max(
             generate_config.max_thinking_tokens, generate_config.max_new_tokens
         )

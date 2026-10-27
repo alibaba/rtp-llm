@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cuda_pipeline.h>
 #include "cutlass/arch/memory.h"
 
 // Fused permute(1,0,2) for a paired (A, SFA) tensor set.

@@ -324,9 +324,9 @@ def _cp_local_varlen_metadata(
     chunk_lengths = tuple(int(v) for v in cp_ctx.chunk_lengths_per_req or ())
     if not chunk_lengths:
         raise RuntimeError("CP context is missing rank-local request chunk lengths")
-    if any(v <= 0 for v in chunk_lengths):
+    if any(v < 0 for v in chunk_lengths):
         raise RuntimeError(
-            f"CP rank-local chunk lengths must be positive: {chunk_lengths}"
+            f"CP rank-local chunk lengths must be non-negative: {chunk_lengths}"
         )
     if sum(chunk_lengths) != int(cp_ctx.chunk_length):
         raise RuntimeError(

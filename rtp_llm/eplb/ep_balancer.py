@@ -58,6 +58,7 @@ class ExpertBalancer:
         phy2log: Any,
         database: BaseDatabase,
         model_config: Optional[ModelConfig] = None,
+        weight_preparation: Any = None,
     ):
         """
         Initialize ExpertBalancer.
@@ -82,6 +83,8 @@ class ExpertBalancer:
             exported_device=get_current_device(),
             force_cpu_load_weights=False,  # Default to False for EPBalancer
         )
+        # Reloads must apply the same split strategies as the initial load.
+        self._load_config.weight_preparation = weight_preparation
         self.num_layers = self._load_config.num_layers
         self.num_replicas = self._load_config.phy_exp_num
         self.num_groups = self._load_config.moe_n_group
