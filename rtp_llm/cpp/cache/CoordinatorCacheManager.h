@@ -211,7 +211,6 @@ protected:
                                                      bool enable_reuse_cache,
                                                      int  target_batch_size) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
-    virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     void          decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
