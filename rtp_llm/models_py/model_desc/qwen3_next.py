@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 from functools import lru_cache
 from typing import Any, Dict, Optional
@@ -48,6 +49,7 @@ from rtp_llm.models_py.triton_kernels.fla.chunk import (
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
+from rtp_llm.models_py.triton_kernels.fla.gdn_ba_gating import fused_ba_gdn_gating
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
@@ -463,6 +465,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         is_target_verify: bool,
+        gating: Optional[tuple] = None,
     ) -> torch.Tensor:
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
@@ -484,7 +487,10 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+        if gating is not None:
+            g, beta = gating
+        else:
+            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
 
         # contiguous will be applyed when call fused_recurrent_gated_delta_rule
         g = g.view(batch, seq, self.local_num_v_heads)
@@ -517,6 +523,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
+        gating: Optional[tuple] = None,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
         assert (
@@ -541,6 +548,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.seq_size_per_block,
             attn_inputs,
             is_target_verify,
+            gating=gating,
         )
 
         return attn_out
@@ -871,6 +879,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             qkvz_w, ba_w
         )
         self._qkvz_ba_fused = qkvz_is_bf16 and rocm_fused_layout_safe
+        self._ba_w_t: Optional[torch.Tensor] = None
         if qkvz_is_bf16 and rocm_swizzle_enabled and not rocm_fused_layout_safe:
             _warn_qkvz_ba_swizzle_fallback(tuple(qkvz_w.shape), tuple(ba_w.shape))
 
@@ -924,6 +933,15 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 hw_kernel_config=ba_hw_kernel_config,
             )
             self.in_proj_fused = None
+            # Decode-only: fuse the tiny BF16 in_proj_ba GEMV with fused_gdn_gating.
+            if (
+                os.environ.get("RTP_LLM_FUSE_BA_GATING", "0") == "1"
+                and not _is_rocm
+                and ba_w.dtype == torch.bfloat16
+                and ba_w.dim() == 2
+                and ba_w.shape[1] == 2 * self.local_num_v_heads
+            ):
+                self._ba_w_t = ba_w.t().contiguous()
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
             linear_attn_config, parallelism_config, weights
@@ -1184,11 +1202,51 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
-        projected_states_qkvz, projected_states_ba = self._input_project(hidden_states)
-        mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        if attention_inputs.is_prefill and not attn_meta.is_target_verify:
+        gating = None
+        if (
+            self._ba_w_t is not None
+            and not attention_inputs.is_prefill
+            and not attn_meta.is_target_verify
+            and hidden_states.dim() == 2
+            and hidden_states.stride(1) == 1
+        ):
+            # Decode fast path: in_proj_ba GEMV + gdn gating in one kernel.
+            projected_states_qkvz = self.in_proj_qkvz(hidden_states)
+            gating = fused_ba_gdn_gating(
+                hidden_states,
+                self._ba_w_t,
+                self.decode_gdn.alog,
+                self.decode_gdn.dt_bias,
+                self.local_num_v_heads,
+            )
+            mixed_qkv, z = torch.split(
+                projected_states_qkvz,
+                [
+                    self.head_k_dim * self.local_num_k_heads * 2
+                    + self.head_v_dim * self.local_num_v_heads,
+                    self.head_v_dim * self.local_num_v_heads,
+                ],
+                dim=1,
+            )
+            b = a = None
+        else:
+            projected_states_qkvz, projected_states_ba = self._input_project(
+                hidden_states
+            )
+            mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
+                projected_states_qkvz, projected_states_ba
+            )
+        if gating is not None:
+            attn_output = self.decode_gdn(
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
+                gating=gating,
+            )
+        elif attention_inputs.is_prefill and not attn_meta.is_target_verify:
             if attn_meta.is_cp_linear_attn:
                 return self._forward_cp_prefill(
                     mixed_qkv, z, b, a, attention_inputs, kv_cache, attn_meta
