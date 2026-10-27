@@ -4,6 +4,7 @@ import logging
 import multiprocessing.pool
 import threading
 import time
+from functools import wraps
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
@@ -82,6 +83,33 @@ def _report_vit_metric(metric, value, tags=None) -> None:
         kmonitor.report(metric, value, tags or {})
     except Exception:
         logging.exception("Failed to report ViT metric")
+
+
+def _measure_vit_request(method):
+    """Time one blocking engine request, not an async submission ACK.
+
+    Includes cache/queue waits, preprocessing, embedding, inspection and output
+    preparation performed by this call. Excludes RPC transport and time before
+    this invocation (e.g. work already started by async_submit). No extra CUDA
+    synchronization is introduced for telemetry.
+    """
+
+    @wraps(method)
+    def measured(*args, **kwargs):
+        started = time.perf_counter()
+        status = "error"
+        try:
+            result = method(*args, **kwargs)
+            status = "success"
+            return result
+        finally:
+            _report_vit_metric(
+                GaugeMetrics.VIT_REQUEST_RT_METRIC,
+                (time.perf_counter() - started) * 1000.0,
+                {"source": method.__name__, "status": status},
+            )
+
+    return measured
 
 
 def _count_images(mm_inputs: List[MultimodalInput]) -> int:
@@ -769,6 +797,7 @@ class MMProcessEngine:
             self.report_vit_error(error, current_entry)
             raise error
 
+    @_measure_vit_request
     def mm_embedding_cpp(
         self,
         urls: List[str],
@@ -1127,6 +1156,7 @@ class MMProcessEngine:
             self.report_vit_error(error)
             raise
 
+    @_measure_vit_request
     def get_embedding_result(
         self,
         mm_inputs: List[MultimodalInput],

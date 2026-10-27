@@ -119,6 +119,11 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    # Milliseconds from a blocking engine request's entry to return/error,
+    # including CPU/GPU work, queue/cache and GreenNet waits, but not RPC output
+    # serialization. source distinguishes mm_embedding_cpp/get_embedding_result;
+    # status is success/error. Async submission ACKs are deliberately excluded.
+    VIT_REQUEST_RT_METRIC = "py_rtp_vit_request_rt"
     # Milliseconds per non-empty inspection group, including OSS/HTTP work,
     # excluding input preparation, source handoff wait and GPU embedding.
     GREENNET_RT_METRIC = "py_rtp_greennet_rt"
