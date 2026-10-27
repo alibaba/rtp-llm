@@ -2649,6 +2649,127 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsRequestHeldDeviceForEveryTargetTie
     }
 }
 
+TEST_F(BlockTreeEvictorTest, ReclaimDeviceBlocksRetriesReleasedCandidateOnNextBatch) {
+    const auto blocks = allocateDeviceBlocksForTest(*group_, 3, BlockTreeRefType::CACHE);
+    ASSERT_EQ(blocks.size(), 3u);
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        insert({static_cast<CacheKeyType>((i + 1) * 100)}, {{makeResource(Tier::DEVICE, blocks[i][0])}});
+    }
+    unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
+    const BlockIdxType held_block = blocks[0][0];
+    device_pool_->incRef(held_block);
+
+    size_t settled_count = 0;
+    evictor_->settled_   = [this, held_block, &settled_count](bool check_watermark) {
+        EXPECT_FALSE(check_watermark);
+        if (++settled_count == 1) {
+            // Release the oldest candidate after the first successful drop.
+            device_pool_->decRef(held_block);
+        }
+    };
+
+    EXPECT_EQ(evictor_->reclaimDeviceBlocksLocked(0, 0, 0), 0u);
+    EXPECT_EQ(settled_count, 0u);
+    EXPECT_EQ(tree_->size(), 3u);
+
+    // This batch must retain its rejected candidates across individual drops.
+    EXPECT_EQ(evictor_->reclaimDeviceBlocksLocked(0, 0, 3), 2u);
+    EXPECT_EQ(settled_count, 2u);
+    EXPECT_EQ(tree_->size(), 1u);
+    EXPECT_TRUE(device_pool_->isAllocated(held_block));
+    EXPECT_FALSE(device_pool_->hasRequestRef(held_block));
+    EXPECT_FALSE(device_pool_->isAllocated(blocks[1][0]));
+    EXPECT_FALSE(device_pool_->isAllocated(blocks[2][0]));
+
+    // A new batch must retry the released candidate without any caller-owned cache.
+    EXPECT_EQ(evictor_->reclaimDeviceBlocksLocked(0, 0, 3), 1u);
+    EXPECT_EQ(settled_count, 3u);
+    EXPECT_EQ(tree_->size(), 0u);
+    EXPECT_EQ(device_pool_->freeBlocksNum(), 128u);
+    EXPECT_EQ(evictor_->reclaimDeviceBlocksLocked(0, 0, 1), 0u);
+    EXPECT_EQ(settled_count, 3u);
+    evictor_->settled_ = [](bool) {};
+}
+
+TEST_F(BlockTreeEvictorTest, SelectionCacheDefersReleasedCandidateUntilNextPass) {
+    for (const bool force_drop : {false, true}) {
+        SCOPED_TRACE(force_drop);
+        resetGroup(makePinnedHostPool(3));
+        const auto blocks = allocateDeviceBlocksForTest(*group_, 3, BlockTreeRefType::CACHE);
+        ASSERT_EQ(blocks.size(), 3u);
+        std::vector<TreeNode*> nodes;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            auto result =
+                insert({static_cast<CacheKeyType>((i + 1) * 100)}, {{makeResource(Tier::DEVICE, blocks[i][0])}});
+            nodes.push_back(insertedNode(result));
+        }
+        unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
+        device_pool_->incRef(blocks[0][0]);
+
+        BlockTreeEvictor::VictimSelectionCache selection_cache;
+        const auto first = evictor_->chooseVictim(0, Tier::DEVICE, force_drop, &selection_cache);
+        ASSERT_TRUE(first.has_value());
+        EXPECT_EQ(first->node, nodes[1]);
+        EXPECT_EQ(selection_cache.count(nodes[0]), 1u);
+        evictor_->reserveSource({*first});
+
+        // Model a concurrent request release. The same pass must not revisit
+        // the held prefix, even after its pool reference has gone away.
+        device_pool_->decRef(blocks[0][0]);
+        const auto second = evictor_->chooseVictim(0, Tier::DEVICE, force_drop, &selection_cache);
+        ASSERT_TRUE(second.has_value());
+        EXPECT_EQ(second->node, nodes[2]);
+        evictor_->reserveSource({*second});
+        EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE, force_drop, &selection_cache).has_value());
+
+        const auto next_pass = evictor_->chooseVictim(0, Tier::DEVICE, force_drop);
+        ASSERT_TRUE(next_pass.has_value());
+        EXPECT_EQ(next_pass->node, nodes[0]);
+        EXPECT_TRUE(evictor_->restoreSource({*first, *second}).empty());
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            EXPECT_TRUE(evictor_->dropLocked(0, Tier::DEVICE, false));
+        }
+        EXPECT_EQ(device_pool_->freeBlocksNum(), 128u);
+    }
+}
+
+TEST(BlockTreeEvictorCascadeTest, NonFullDeviceDropStillProtectsRequestHeldCascade) {
+    for (const size_t primary_group_id : {1u, 2u}) {
+        SCOPED_TRACE(primary_group_id);
+        auto                          groups = makeCascadeGroups();
+        BlockTree                     tree(groups);
+        TestEvictorRuntime            runtime;
+        auto                          evictor = runtime.make(&tree);
+        std::vector<GroupSetResource> resources(groups.size());
+        for (size_t i = 0; i < groups.size(); ++i) {
+            const auto blocks = allocateDeviceBlocksForTest(*groups[i], 1, BlockTreeRefType::CACHE);
+            ASSERT_EQ(blocks.size(), 1u);
+            resources[i].device_blocks = blocks.front();
+        }
+        const auto result = tree.insertNode({100}, {resources}, false, false);
+        for (size_t i = 0; i < groups.size(); ++i) {
+            unreferenceDeviceBlocksForTest(*groups[i], {resources[i].device_blocks}, BlockTreeRefType::CACHE);
+        }
+        evictor->onInserted(result);
+        const auto& full_pool  = groups[0]->devicePools().front();
+        const auto  full_block = resources[0].device_blocks.front();
+        full_pool->incRef(full_block);
+
+        EXPECT_FALSE(evictor->dropLocked(primary_group_id, Tier::DEVICE, false));
+        EXPECT_EQ(tree.size(), 1u);
+        EXPECT_EQ(full_pool->refCount(full_block), 2u);
+        EXPECT_TRUE(groups[primary_group_id]->devicePools().front()->isAllocated(
+            resources[primary_group_id].device_blocks.front()));
+
+        full_pool->decRef(full_block);
+        EXPECT_TRUE(evictor->dropLocked(primary_group_id, Tier::DEVICE, false));
+        EXPECT_EQ(tree.size(), 0u);
+        for (size_t i = 0; i < groups.size(); ++i) {
+            EXPECT_FALSE(groups[i]->devicePools().front()->isAllocated(resources[i].device_blocks.front()));
+        }
+    }
+}
+
 TEST_F(BlockTreeEvictorTest, DeviceWatermarkSkipsHeldMemberAndMigratesIdleCandidate) {
     for (const Tier target_tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(tierName(target_tier));
