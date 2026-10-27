@@ -67,6 +67,51 @@ TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
     EXPECT_EQ(cache_->getStats().tree_node_count, 1u);  // [100]
 }
 
+TEST_F(FullSWAEvictionTest, FullForceDropPrunesRequestHeldAncestorAfterSwaWindowRelease) {
+    insertPath({100, 200}, 10, 20);
+    const auto& groups    = cache_->groupSets();
+    const auto& full_pool = groups[0]->devicePools().front();
+    const auto& swa_pool  = groups[1]->devicePools().front();
+
+    // A live request reuses A, then generates an unpublished, divergent suffix.
+    auto active_request = cache_->match({100});
+    ASSERT_EQ(active_request.matched_device_blocks, 1u);
+    ASSERT_EQ(active_request.matched_device_resources.size(), 2u);
+    ASSERT_EQ(active_request.matched_device_resources[0].group_set_id, 0u);
+    ASSERT_EQ(active_request.matched_device_resources[1].group_set_id, 1u);
+    // Advancing its SWA window releases A/SWA while FULL retains A's history.
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, {active_request.matched_device_resources[1]});
+    EXPECT_TRUE(full_pool->hasRequestRef(10));
+    EXPECT_FALSE(swa_pool->hasRequestRef(20));
+
+    // A later short request hits A->B and finishes. Equal LRU access sequences
+    // make the older admission A the first SWA victim, even with default LRU.
+    auto short_request = cache_->match({100, 200});
+    ASSERT_EQ(short_request.matched_device_blocks, 2u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, short_request.matched_device_resources);
+    EXPECT_EQ(cache_->evictForGroup(groups[1]->groupTags().front(), 1), 1);
+    const auto path = cache_->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_TRUE(path[0]->group_set_resources[1].is_empty());
+    EXPECT_TRUE(path[1]->group_set_resources[1].hasTier(Tier::DEVICE));
+    EXPECT_TRUE(full_pool->hasRequestRef(10));
+    EXPECT_FALSE(full_pool->hasRequestRef(11));
+
+    // B/FULL is reclaimable. The FULL fast path permits upward cleanup of A,
+    // which is no longer a matchable endpoint despite its live request holder.
+    EXPECT_EQ(cache_->evictForGroup(groups[0]->groupTags().front(), 1), 1);
+    EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
+    EXPECT_FALSE(full_pool->isAllocated(11));
+    EXPECT_FALSE(swa_pool->isAllocated(21));
+    EXPECT_TRUE(full_pool->isAllocated(10));
+    EXPECT_TRUE(full_pool->hasRequestRef(10));
+    EXPECT_EQ(full_pool->treeRefCount(10), 0u);
+    EXPECT_EQ(full_pool->refCount(10), 1u);
+
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, {active_request.matched_device_resources[0]});
+    EXPECT_FALSE(full_pool->isAllocated(10));
+}
+
 // ---------------------------------------------------------------------------
 // Test: SWA-only cache — sequential reclaim drains chain.
 //

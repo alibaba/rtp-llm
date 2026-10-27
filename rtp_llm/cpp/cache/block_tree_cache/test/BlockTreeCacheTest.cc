@@ -1446,6 +1446,12 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     force_drop_tags.AddTag("tier", tierName(Tier::DEVICE));
     force_drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
+    kmonitor::MetricsTags required_tags = force_drop_tags;
+    required_tags.AddTag("block_type", "required");
+    kmonitor::MetricsTags scheduled_tags = force_drop_tags;
+    scheduled_tags.AddTag("block_type", "scheduled");
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 2);
     kmonitor::MetricsTags lifetime_tags("tier", tierName(Tier::DEVICE));
     lifetime_tags.AddTag("trigger_type", "force_drop");
     lifetime_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
@@ -2050,7 +2056,7 @@ TEST_F(BlockTreeCacheTest, ForceDropRequiresEveryDevicePoolMemberToBeReclaimable
     }
 }
 
-TEST_F(BlockTreeCacheTest, ForceDropPreservesRequestHeldCascadeResource) {
+TEST_F(BlockTreeCacheTest, FullForceDropKeepsRequestHeldCascadePhysicallyAlive) {
     const std::vector<DeviceBlockPoolPtr> pools = {makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
     std::vector<GroupSetPtr> groups;
     for (const auto& pool : pools) {
@@ -2066,14 +2072,16 @@ TEST_F(BlockTreeCacheTest, ForceDropPreservesRequestHeldCascadeResource) {
     cache->insert({100}, resources, Tier::DEVICE);
 
     const size_t initial_free = pools[0]->freeBlocksNum();
-    EXPECT_EQ(cache->evictForGroup("group0", 1), 0);
-    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free);
-    EXPECT_EQ(pools[0]->refCount(42), 1u);
-    EXPECT_EQ(pools[1]->refCount(42), 2u);
-    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free + 1);
+    EXPECT_FALSE(pools[0]->isAllocated(42));
+    EXPECT_TRUE(pools[1]->isAllocated(42));
+    EXPECT_EQ(pools[1]->refCount(42), 1u);
+    EXPECT_EQ(pools[1]->treeRefCount(42), 0u);
+    EXPECT_TRUE(cache->tree()->findNode({100}).empty());
 
     pools[1]->decRef(42);
-    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 0);
     EXPECT_FALSE(pools[0]->isAllocated(42));
     EXPECT_FALSE(pools[1]->isAllocated(42));
     EXPECT_TRUE(cache->tree()->findNode({100}).empty());
