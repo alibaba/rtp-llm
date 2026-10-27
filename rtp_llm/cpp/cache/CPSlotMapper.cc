@@ -16,7 +16,8 @@ size_t groupSeqSize(const CacheConfig& config, size_t gid, size_t fallback) {
 bool isCompactFullBlockList(const KVCacheResource&  source,
                             const BlockIndicesType& src_blocks,
                             const CacheKeysType&    selected_keys) {
-    return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
+    return source.cpFullBlocksAreCompact() || src_blocks.size() <= selected_keys.size()
+           || src_blocks.size() < source.cacheKeys().size();
 }
 
 bool selectedLastRankKeysAreAligned(const KVCacheResource& source, int cp_size) {

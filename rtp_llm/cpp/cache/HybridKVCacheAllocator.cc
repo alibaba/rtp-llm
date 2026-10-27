@@ -192,6 +192,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     const int   seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
     const auto& cp_mapper      = cp_slot_mapper_;
+    for (int row = 0; row < batch_size; ++row) {
+        kv_resource->cacheResource(row).setCpFullBlocksAreCompact(cp_mapper && cp_mapper->isSharded());
+    }
     // reuse_unit_tokens is computed against the canonical (paged FULL) group's
     // block_size: cache_keys reuse only happens for paged groups so virtual block
     // size = canonical block_size * cp_size; non-paged groups don't enter reuse.
@@ -763,6 +766,8 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
             batch_kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
         } else {
             batch_kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
+            batch_kv_cache_resource->cacheResource(new_batch_idx)
+                .setCpFullBlocksAreCompact(old_resources[old_batch_idx].cpFullBlocksAreCompact());
             for (int gid = 0; gid < group_nums; ++gid) {
                 auto& block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, gid);
                 kv_cache_groups_[static_cast<size_t>(gid)]->reference(block_ids,

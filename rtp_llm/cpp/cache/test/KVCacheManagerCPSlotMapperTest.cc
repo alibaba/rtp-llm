@@ -159,6 +159,41 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
 }
 
+TEST_F(KVCacheManagerCPSlotMapperTest, MtpConnectorProjectionKeepsCompactPagesAfterDeviceInsertAndFork) {
+    constexpr int              spb    = 4;
+    auto                       config = makeSimpleHybridMhaCacheConfig(4, 20, spb, DataType::TYPE_FP16);
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type = SP_TYPE_MTP;
+    auto mgr       = std::make_shared<KVCacheManager>(
+        config, false, nullptr, KVCacheConfig{}, ParallelismConfig{}, RuntimeConfig{}, sp_config);
+    ASSERT_TRUE(mgr->init());
+    auto mapper          = std::make_shared<CPSlotMapper>(0, 2, spb);
+    mgr->cp_slot_mapper_ = mapper;
+    mgr->allocator_->setCPSlotMapper(mapper);
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(1);
+    resource->initGroups(config.topologyPtr());
+    auto       tokens = makeTokenIds(1, 3 * spb, spb);
+    MallocInfo info{resource, tokens};
+    info.enable_device_cache = false;
+    ASSERT_TRUE(mgr->malloc(info).success);
+    ASSERT_TRUE(resource->cacheResource().cpFullBlocksAreCompact());
+    const auto full_blocks = resource->blocks(0, 1);
+    ASSERT_EQ(full_blocks.size(), 2);
+    mgr->insertIntoCache(InsertInfo{resource, tokens, false});
+    ASSERT_EQ(resource->cacheKeys().size(), 2);
+    const auto canonical = mapper->canonicalCacheKeys(resource->cacheKeys());
+    auto       projected = mapper->projectConnectorResource(resource->cacheResource(), config, canonical);
+    ASSERT_EQ(projected.blocks(1).size(), 1);
+    EXPECT_EQ(projected.blocks(1).front(), full_blocks.front());
+    std::vector<TaggedBlockIdPair> mapping;
+    ASSERT_TRUE(mgr->updateKVBlock(resource, {0, 0}, false, mapping));
+    ASSERT_EQ(resource->batchSize(), 2);
+    EXPECT_TRUE(resource->cacheResource(0).cpFullBlocksAreCompact());
+    EXPECT_TRUE(resource->cacheResource(1).cpFullBlocksAreCompact());
+    mgr->free(FreeInfo{resource, tokens});
+}
+
 // malloc() should use the manager-level cpSlotMapper.
 // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
 // A sequence of 16 tokens needs ceil(16/8)=2 physical blocks per batch (not 4).

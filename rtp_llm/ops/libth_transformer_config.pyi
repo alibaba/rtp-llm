@@ -2186,7 +2186,7 @@ def check_rope_cache(rope_config: RopeConfig, rope_cache: RopeCache) -> bool:
     """
     Check if RoPE cache matches the given config
     """
-def get_block_cache_keys(token_ids_list: list[list[int]]) -> list[int]:
+def get_block_cache_keys(token_ids_list: list[list[int]], mtp_lookahead: bool = False) -> list[int]:
     ...
 def get_rope_cache(rope_config: RopeConfig, max_position_embeddings: int, interleave: bool) -> torch.Tensor:
     """

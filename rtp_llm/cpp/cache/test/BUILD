@@ -184,6 +184,19 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_hash_util_test",
+    srcs = ["KVCacheHashUtilTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/p2p:layer_cache_buffer",
+        "//rtp_llm/cpp/utils:hash_util",
+    ],
+    env = {},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
+)
+
+cc_test(
     name = "block_pool_test",
     srcs = [
         "BlockPoolTest.cc",

@@ -22,6 +22,10 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.speculative_config import (
+    MODEL_BASED_SPECULATIVE_TYPES,
+    resolve_speculative_type,
+)
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
@@ -143,26 +147,17 @@ class ModelFactory:
         gen_num_per_circle = engine_config.sp_config.gen_num_per_cycle
 
         # Adjust sp_type based on propose model type if needed
-        if (
-            sp_type == SpeculativeType.VANILLA
-            or sp_type == SpeculativeType.MTP
-            or sp_type == SpeculativeType.EAGLE3
-            or sp_type == SpeculativeType.EAGLE
-            or sp_type == SpeculativeType.DSPARK
-        ):
+        if sp_type in MODEL_BASED_SPECULATIVE_TYPES:
             model_type = propose_model_config.model_type
-            if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
+            resolved_type = resolve_speculative_type(sp_type, model_type)
+            if resolved_type != sp_type:
                 logging.warning(
-                    f"create sp model type is {model_type}, so change the sp type to mtp"
+                    "create sp model type is %s, so change the sp type to %s",
+                    model_type,
+                    resolved_type.name.lower(),
                 )
-                engine_config.sp_config.type = SpeculativeType.MTP
-                sp_type = SpeculativeType.MTP
-            elif model_type == "qwen_3_moe-mtp":
-                logging.warning(
-                    f"create sp model type is {model_type}, so change the sp type to eagle3"
-                )
-                engine_config.sp_config.type = SpeculativeType.EAGLE3
-                sp_type = SpeculativeType.EAGLE3
+                engine_config.sp_config.type = resolved_type
+                sp_type = resolved_type
 
             # Need to create GPT model for propose model
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
