@@ -25,6 +25,9 @@ constexpr char kLinkProbeToken = 0x5a;
 
 constexpr uint32_t kFrameMagic   = 0x52545042;  // "RTPB"
 constexpr uint16_t kFrameVersion = 1;
+// This impossible payload size is reserved for an ordered, zero-payload terminal.
+// Keep ordinary v1 data headers and zero-byte broadcasts unchanged.
+constexpr uint64_t kShutdownPayloadBytes = std::numeric_limits<uint64_t>::max();
 
 struct BroadcastFrameHeader {
     uint32_t magic         = kFrameMagic;
@@ -68,7 +71,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
 
         const auto remaining_ms =
             static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-        struct pollfd pfd {};
+        struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = events;
         int rc     = ::poll(&pfd, 1, remaining_ms);
@@ -214,7 +217,8 @@ ssize_t readAll(int fd, void* buf, std::size_t nbytes) {
             return -1;
         }
         if (n == 0) {
-            // peer closed prematurely
+            // Peer EOF is an error, never an implicit shutdown frame.
+            errno = ECONNRESET;
             return -1;
         }
         p += n;
@@ -250,6 +254,8 @@ void CpuTpBroadcaster::reset() {
     tp_rank_       = 0;
     tp_size_       = 1;
     next_sequence_ = 0;
+    shutdown_.store(false, std::memory_order_release);
+    engine_session_claimed_ = false;
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -257,6 +263,8 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
     std::lock_guard<std::mutex> lock(mu_);
 
     if (initialized_.load(std::memory_order_acquire)) {
+        RTP_LLM_CHECK_WITH_INFO(!shutdown_.load(std::memory_order_acquire),
+                                "CpuTpBroadcaster session is shut down; reset before re-initializing");
         if (tp_rank_ == tp_rank && tp_size_ == tp_size && base_path_ == base_path) {
             return;
         }
@@ -292,7 +300,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuTpBroadcaster socket: %s", std::strerror(errno));
 
-            struct sockaddr_un addr {};
+            struct sockaddr_un addr{};
             addr.sun_family = AF_UNIX;
             RTP_LLM_CHECK_WITH_INFO(
                 path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -360,7 +368,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         }
     } else {
         const std::string  path = makeUdsPath(base_path, 0);
-        struct sockaddr_un addr {};
+        struct sockaddr_un addr{};
         addr.sun_family = AF_UNIX;
         RTP_LLM_CHECK_WITH_INFO(
             path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -416,6 +424,44 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
     initialized_.store(true, std::memory_order_release);
 }
 
+void CpuTpBroadcaster::claimEngineSession(int tp_rank, int tp_size) {
+    std::lock_guard<std::mutex> lock(mu_);
+    RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire) && tp_size_ > 1,
+                            "CpuTpBroadcaster engine session requires initialized multi-rank UDS");
+    RTP_LLM_CHECK_WITH_INFO(tp_rank_ == tp_rank && tp_size_ == tp_size,
+                            "CpuTpBroadcaster engine topology mismatch: channel=%d/%d engine=%d/%d",
+                            tp_rank_,
+                            tp_size_,
+                            tp_rank,
+                            tp_size);
+    RTP_LLM_CHECK_WITH_INFO(!shutdown_.load(std::memory_order_acquire) && !engine_session_claimed_,
+                            "CpuTpBroadcaster session already claimed or shut down; reset before a new engine");
+    engine_session_claimed_ = true;
+}
+
+void CpuTpBroadcaster::sendShutdown() {
+    std::lock_guard<std::mutex> lock(broadcast_mu_);
+    RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire) && tp_size_ > 1 && tp_rank_ == 0,
+                            "CpuTpBroadcaster::sendShutdown requires initialized multi-rank root 0");
+    if (shutdown_.load(std::memory_order_acquire)) {
+        return;
+    }
+    const BroadcastFrameHeader terminal{
+        kFrameMagic, kFrameVersion, sizeof(BroadcastFrameHeader), next_sequence_, kShutdownPayloadBytes};
+    for (int rank = 1; rank < tp_size_; ++rank) {
+        const auto n = writeAll(peer_fds_[rank], &terminal, sizeof(terminal));
+        RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(terminal)),
+                                "CpuTpBroadcaster shutdown write to rank %d failed at sequence %llu: %s",
+                                rank,
+                                static_cast<unsigned long long>(next_sequence_),
+                                std::strerror(errno));
+    }
+    RTP_LLM_LOG_INFO("CpuTpBroadcaster sent shutdown at sequence %llu",
+                     static_cast<unsigned long long>(next_sequence_));
+    ++next_sequence_;
+    shutdown_.store(true, std::memory_order_release);
+}
+
 void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     std::lock_guard<std::mutex> lock(broadcast_mu_);
     RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
@@ -423,9 +469,11 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     if (tp_size_ <= 1) {
         return;
     }
+    RTP_LLM_CHECK_WITH_INFO(!shutdown_.load(std::memory_order_acquire),
+                            "CpuTpBroadcaster broadcast after shutdown; reset before reuse");
     RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
     RTP_LLM_CHECK_WITH_INFO(
-        nbytes <= std::numeric_limits<uint64_t>::max(), "CpuTpBroadcaster payload is too large: %zu bytes", nbytes);
+        nbytes < kShutdownPayloadBytes, "CpuTpBroadcaster payload is too large or reserved: %zu bytes", nbytes);
 
     const BroadcastFrameHeader expected_header{
         kFrameMagic, kFrameVersion, sizeof(BroadcastFrameHeader), next_sequence_, static_cast<uint64_t>(nbytes)};
@@ -465,6 +513,14 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
                                 "CpuTpBroadcaster sequence mismatch: expected %llu, got %llu",
                                 static_cast<unsigned long long>(next_sequence_),
                                 static_cast<unsigned long long>(received_header.sequence));
+        if (received_header.payload_bytes == kShutdownPayloadBytes) {
+            RTP_LLM_LOG_INFO("CpuTpBroadcaster rank %d received shutdown at sequence %llu",
+                             tp_rank_,
+                             static_cast<unsigned long long>(next_sequence_));
+            ++next_sequence_;
+            shutdown_.store(true, std::memory_order_release);
+            throw CpuTpShutdown();
+        }
         RTP_LLM_CHECK_WITH_INFO(
             received_header.payload_bytes == nbytes,
             "CpuTpBroadcaster payload size mismatch at sequence %llu: rank 0 sent %llu bytes, rank %d expects %zu",
