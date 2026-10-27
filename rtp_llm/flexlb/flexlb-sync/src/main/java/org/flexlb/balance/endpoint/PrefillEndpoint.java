@@ -83,10 +83,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public final PrefillState ownership;
     private final long configuredPendingTokens;
     public final long serviceWindowMs;
+    public final long ttftSloMs;
     private volatile long adaptivePendingTokens = 1;
     private volatile long budgetRefreshMs = Long.MIN_VALUE;
 
     public long pendingComputeLimit() {
+        if (ttftSloMs > 0) { return Long.MAX_VALUE; }
         if (configuredPendingTokens > 0) { return configuredPendingTokens; }
         long now = System.nanoTime() / 1_000_000L;
         if (budgetRefreshMs == Long.MIN_VALUE || now - budgetRefreshMs >= 1_000) {
@@ -114,7 +116,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 ? new LearningPredictor() : new FormulaPredictor(estimator.getExpression());
         this.dispatcher = dispatcher;
         this.dispatcherType = config.getDispatcher().getType();
-        this.requestLimit = config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
+        this.ttftSloMs = config.getTtftSloMs() == null ? 0 : config.getTtftSloMs();
+        this.requestLimit = ttftSloMs == 0 && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                 ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0L;
         this.deliveryProjection = RouteProjection.forDelivery(dispatcher.mode());
         this.projectionOrder = config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;

@@ -18,6 +18,8 @@ public final class FlexlbConfig {
     public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
+    /** Optional single-knob adaptive scheduling. Null preserves the explicit schema-v3 policy. */
+    private Long ttftSloMs;
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();

@@ -245,6 +245,7 @@ final class DeliveryExecution {
         var availability = configuration.getRouter().getRoles().getDecode().getAvailability();
         decodeDeliveryCapacity = new AdmissionCapacity(availability.getMaxEngineRequests() == null ? 0L
                 : availability.getMaxEngineRequests(), availability.getMaxKvUsagePercent());
-        maxInflightBatches = configuration.getDispatcher().getMaxInflightPerPrefillWorker();
+        maxInflightBatches = configuration.getTtftSloMs() == null
+                ? configuration.getDispatcher().getMaxInflightPerPrefillWorker() : Integer.MAX_VALUE;
     }
 }

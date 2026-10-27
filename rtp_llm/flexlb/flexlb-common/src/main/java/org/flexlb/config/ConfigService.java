@@ -70,6 +70,7 @@ public class ConfigService {
                 config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
                         .setType(RoutingConfig.EstimatorType.LEARNING);
             }
+            SloConfig.apply(tree, config);
             FlexlbConfigValidator.validate(config);
             return config;
         } catch (ConfigValidationException error) {

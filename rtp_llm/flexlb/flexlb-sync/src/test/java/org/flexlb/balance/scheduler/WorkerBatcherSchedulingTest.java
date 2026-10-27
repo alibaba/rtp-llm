@@ -57,6 +57,82 @@ class WorkerBatcherSchedulingTest {
 
     private final List<WorkerBatcher> runtimes = new ArrayList<>();
 
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void sloProjectionDoesNotAcquireRequestMonitorWhileHoldingWorkerLock() throws Exception {
+        FlexlbConfig config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":3000}");
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "ttftSloMs", 3000L);
+        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        WorkerBatcher runtime = boundaryRuntime("slo-lock-order", endpoint, config, new EventDrivenBlock(), events);
+        runtimes.add(runtime);
+        RequestRoute head = item(config, endpoint, 919L, 50, System.currentTimeMillis());
+        SchedulerTestSupport.bindOwner(head.ctx(), events);
+        var state = WorkerBatcherTestSupport.state(runtime);
+        state.lock.lock();
+        try {
+            assertSame(head, state.updateQueue(PrefillState.QueueChange.ENQUEUE, head, 0L, System.currentTimeMillis()));
+        } finally {
+            state.lock.unlock();
+        }
+        try (var pool = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            java.util.concurrent.Future<WorkerBatcher.PlanningView> view;
+            CountDownLatch locked = new CountDownLatch(1);
+            synchronized (head.ctx()) {
+                view = pool.submit(() -> {
+                    state.lock.lock();
+                    try {
+                        locked.countDown();
+                        return runtime.planningViewLocked();
+                    } finally {
+                        state.lock.unlock();
+                    }
+                });
+                await(locked);
+                assertEquals(2700, view.get(1, TimeUnit.SECONDS).constraints().predictedExecutionBudgetMs());
+            }
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void invalidSloCollectionPredictionDoesNotStopWorker() {
+        FlexlbConfig config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":3000}");
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "ttftSloMs", 3000L);
+        var evaluator = endpoint.predictor.evaluator();
+        AtomicBoolean invalid = new AtomicBoolean(true);
+        when(evaluator.estimateMs(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenAnswer(call -> invalid.get() ? -1L : 1L);
+        when(evaluator.newBatchPrediction()).thenAnswer(call ->
+                (PrefillTimePredictor.BatchPrediction) (seqLen, hitCache) -> invalid.get() ? -1.0 : 1.0);
+        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        CountDownLatch failedRequest = new CountDownLatch(1);
+        doAnswer(call -> { failedRequest.countDown(); return null; })
+                .when(events).onDeliveryEvidence(org.mockito.ArgumentMatchers.isNull(),
+                        org.mockito.ArgumentMatchers.argThat(e -> e instanceof ContextResult.PreparationFailure));
+        EventDrivenBlock delivery = new EventDrivenBlock();
+        WorkerBatcher runtime = boundaryRuntime("slo-prediction", endpoint, config, delivery, events);
+        runtimes.add(runtime);
+        RequestRoute failed = item(config, endpoint, 920L, 50, System.currentTimeMillis());
+        SchedulerTestSupport.bindOwner(failed.ctx(), events);
+        var state = WorkerBatcherTestSupport.state(runtime);
+        state.lock.lock();
+        try {
+            assertSame(failed, state.updateQueue(PrefillState.QueueChange.ENQUEUE, failed, 0L, System.currentTimeMillis()));
+            assertEquals(0, runtime.planningViewLocked().constraints().collectionWindowMs());
+        } finally {
+            state.lock.unlock();
+        }
+        runtime.start();
+        await(failedRequest);
+        assertEquals(0, state.progress().queueDepth());
+        invalid.set(false);
+        assertTrue(runtime.offer(item(config, endpoint, 921L, 50, System.currentTimeMillis())));
+        await(delivery.firstAttempt);
+        assertEquals(1, delivery.attempts.get(), "worker must process a request after prediction recovers");
+    }
+
     @AfterEach
     void stopRuntimes() {
         for (WorkerBatcher runtime : runtimes) {

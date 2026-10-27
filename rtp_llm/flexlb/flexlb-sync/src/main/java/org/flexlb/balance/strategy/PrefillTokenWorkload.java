@@ -8,7 +8,11 @@ import java.util.ArrayDeque;
  */
 public final class PrefillTokenWorkload {
     private record Completion(long atMs, long tokens) { }
-    public record Snapshot(long completedTokens, long pendingTokens, long plannedTokens) {
+    public record Snapshot(long completedTokens, long pendingTokens, long plannedTokens, long plannedExecutionMs,
+                           long earliestPlannedTargetMs) {
+        public Snapshot(long completedTokens, long pendingTokens, long plannedTokens) {
+            this(completedTokens, pendingTokens, plannedTokens, 0L, Long.MAX_VALUE);
+        }
         public Snapshot(long completedTokens, long pendingTokens) { this(completedTokens, pendingTokens, 0L); }
         /** Only outstanding compute competes for current service. Completed-window
          * expiry must not move new traffic between otherwise identical workers. */
@@ -19,6 +23,8 @@ public final class PrefillTokenWorkload {
     private long completedTokens;
     private long pendingTokens;
     private long plannedTokens;
+    private long plannedExecutionMs;
+    private final java.util.TreeMap<Long, Integer> plannedTargets = new java.util.TreeMap<>();
 
     /** Planned work shared by a selection and its canonical route copy.
      * It blocks competing selections and transfers exactly once to committed ownership or releases.
@@ -26,14 +32,21 @@ public final class PrefillTokenWorkload {
     public final class Reservation implements AutoCloseable {
         private final long tokens;
         private boolean open = true;
-        private Reservation(long tokens) { this.tokens = tokens; }
+        private final long executionMs;
+        private final long targetMs;
+        private Reservation(long tokens, long executionMs, long targetMs) {
+            this.tokens = tokens; this.executionMs = executionMs; this.targetMs = targetMs;
+        }
         @Override public void close() { release(); }
 
         /** True only for the caller that releases this shared reservation. */
         public boolean release() {
             synchronized (PrefillTokenWorkload.this) {
                 if (open) {
-                    plannedTokens -= tokens;
+                    plannedTokens -= tokens; plannedExecutionMs -= executionMs;
+                    if (targetMs != Long.MAX_VALUE) {
+                        plannedTargets.compute(targetMs, (key, count) -> count == 1 ? null : count - 1);
+                    }
                     open = false;
                     return true;
                 }
@@ -43,9 +56,21 @@ public final class PrefillTokenWorkload {
     }
 
     public synchronized Reservation plan(long tokens) {
-        if (tokens < 0) { throw new IllegalArgumentException("negative planned work"); }
-        plannedTokens = Math.addExact(plannedTokens, tokens);
-        return new Reservation(tokens);
+        return plan(tokens, 0L);
+    }
+
+    public synchronized Reservation plan(long tokens, long executionMs) {
+        return plan(tokens, executionMs, Long.MAX_VALUE);
+    }
+
+    public synchronized Reservation plan(long tokens, long executionMs, long targetMs) {
+        if (tokens < 0 || executionMs < 0) { throw new IllegalArgumentException("negative planned work"); }
+        long nextTokens = Math.addExact(plannedTokens, tokens);
+        long nextMs = Math.addExact(plannedExecutionMs, executionMs);
+        plannedTokens = nextTokens;
+        plannedExecutionMs = nextMs;
+        if (targetMs != Long.MAX_VALUE) { plannedTargets.merge(targetMs, 1, Math::addExact); }
+        return new Reservation(tokens, executionMs, targetMs);
     }
 
     public PrefillTokenWorkload(long windowMs) {
@@ -73,7 +98,8 @@ public final class PrefillTokenWorkload {
 
     public synchronized Snapshot snapshot(long nowMs) {
         expire(nowMs);
-        return new Snapshot(completedTokens, pendingTokens, plannedTokens);
+        return new Snapshot(completedTokens, pendingTokens, plannedTokens, plannedExecutionMs,
+                plannedTargets.isEmpty() ? Long.MAX_VALUE : plannedTargets.firstKey());
     }
 
     private void expire(long nowMs) {

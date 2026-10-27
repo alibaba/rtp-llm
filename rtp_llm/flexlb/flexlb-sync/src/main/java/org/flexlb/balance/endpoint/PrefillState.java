@@ -319,6 +319,10 @@ public final class PrefillState {
         return tokenWorkload == null ? null : tokenWorkload.plan(tokens);
     }
 
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens, long executionMs, long targetMs) {
+        return tokenWorkload == null ? null : tokenWorkload.plan(tokens, executionMs, targetMs);
+    }
+
     private void acceptTokenWork(RequestRoute route) {
         route.releaseTokenPlan();
         if (tokenWorkload != null) { tokenWorkload.accept(computeTokens(route)); }

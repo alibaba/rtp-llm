@@ -413,8 +413,27 @@ public final class WorkerBatcher {
     private GroupPlanner.Constraints schedulingConstraints() {
         WorkerStatus status = prefillEndpoint.getStatus();
         var engine = status == null ? null : status.committedEngineObservation();
+        long budget = settings.executionBudgetMs();
+        long collection = settings.collectionWaitMs();
+        if (prefillEndpoint.ttftSloMs > 0 && grouping != GroupingPolicy.SINGLE) {
+            long now = System.currentTimeMillis();
+            var head = prefillState.captureQueue(1).head();
+            if (head != null) {
+                // Queue expiry is arrival + 2*SLO. Read immutable request data under the worker lock.
+                long age = Math.max(0, now - (head.expiresAtMs() - 2 * prefillEndpoint.ttftSloMs));
+                budget = Math.max(1, org.flexlb.balance.strategy.PrefillSloPolicy.executionBudgetMs(prefillEndpoint.ttftSloMs) - age);
+                try {
+                    long service = PrefillPredictionBoundary.predictSingleRequestMs(
+                            prefillEndpoint.predictor.evaluator(), head.seqLen(), head.hitCache());
+                    collection = org.flexlb.balance.strategy.PrefillSloPolicy.collectionWindowMs(collection, budget, service);
+                } catch (InvalidPrefillPredictionException failure) {
+                    // Group prediction owns request failure; an optional wait estimate must not stop the worker.
+                    collection = 0;
+                }
+            }
+        }
         return new GroupPlanner.Constraints(settings.maxRequests(), schedulingCapacity(engine, PlanningResource.TOKENS),
-                schedulingCapacity(engine, PlanningResource.KV), settings.executionBudgetMs(), settings.collectionWaitMs());
+                schedulingCapacity(engine, PlanningResource.KV), budget, collection);
     }
 
     public enum PlanningResource { TOKENS, KV }
@@ -614,7 +633,6 @@ public final class WorkerBatcher {
     private BatcherCycleResult processQueue() {
         int maxRequests = settings.maxRequests();
         long predictionBudgetMs = settings.executionBudgetMs();
-        long windowMs = settings.collectionWaitMs();
         PrefillState.QueueSnapshot snapshot = prefillState.captureQueue(maxRequests);
         RequestRoute head = snapshot.head();
         if (head == null) {
@@ -654,7 +672,7 @@ public final class WorkerBatcher {
             if (reason == null) {
                 return BatcherCycleResult.awaitingSchedulingChange(head, snapshot.queueVersion(),
                         snapshot.schedulingInputVersion(),
-                        Math.min(GroupPlanner.collectionDeadlineMs(selection.windowOpenedAtMs(), windowMs),
+                        Math.min(GroupPlanner.collectionDeadlineMs(selection.windowOpenedAtMs(), constraints.collectionWindowMs()),
                                 head.expiresAtMs()), "Prefill collection window");
             }
             // Recheck advisory capacity after prediction, before acquiring hard-capacity leases.
