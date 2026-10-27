@@ -1,5 +1,7 @@
 import copy
+import threading
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -107,6 +109,108 @@ class VisionGraphTest(unittest.TestCase):
         self.assertEqual(cache.stats()["entries"], 0)
         with self.assertRaises(ValueError):
             VisionGraphCache(vision, max_entries=-1)
+
+    def test_capture_error_checks_are_scoped_to_vit_thread(self):
+        # Exercise the production capture branch without requiring a GPU.
+        vision = TinyVision()
+        cache = VisionGraphCache(vision, enabled=True)
+        pixels, grid = torch.ones(16, 8), torch.tensor([[1, 4, 4]])
+        with (
+            mock.patch.object(
+                torch.Tensor,
+                "is_cuda",
+                new_callable=mock.PropertyMock,
+                return_value=True,
+            ),
+            mock.patch("torch.cuda.is_current_stream_capturing", return_value=False),
+            mock.patch("torch.cuda.current_stream"),
+            mock.patch("torch.cuda.Stream") as stream,
+            mock.patch("torch.cuda.Event"),
+            mock.patch("torch.cuda.CUDAGraph") as graph,
+            mock.patch("torch.cuda.stream", side_effect=lambda _: nullcontext()),
+            mock.patch("torch.cuda.graph") as capture,
+        ):
+            cache.run(pixels, grid)
+            result = cache.run(pixels, grid)
+            capture.assert_called_once_with(
+                graph.return_value,
+                stream=stream.return_value,
+                capture_error_mode="thread_local",
+            )
+        self.assertTrue(torch.equal(result, vision(pixels, grid).pooler_output))
+        self.assertEqual(cache.stats()["capture"], 1)
+        self.assertEqual(cache.stats()["fallback"], 0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_capture_overlaps_other_thread_h2d_d2h(self):
+        capture_started = threading.Event()
+        copies_done = threading.Event()
+        cancelled = threading.Event()
+        errors, copied = [], []
+
+        class GatedVision(TinyVision):
+            def forward(self, *args, **kwargs):
+                if torch.cuda.is_current_stream_capturing():
+                    capture_started.set()
+                    if not copies_done.wait(timeout=30):
+                        raise RuntimeError(
+                            "LLM copy thread did not finish during capture"
+                        )
+                return super().forward(*args, **kwargs)
+
+        vision = GatedVision("cuda")
+        pixels, grid = torch.ones(16, 8, device="cuda"), torch.tensor([[1, 4, 4]])
+        cache = VisionGraphCache(vision, enabled=True)
+        expected = vision(pixels, grid).pooler_output
+        cache.run(pixels, grid)
+        host_input = torch.arange(128, dtype=torch.float32).pin_memory()
+        device_buffer = torch.empty_like(host_input, device=pixels.device)
+        copy_stream = torch.cuda.Stream(device=pixels.device)
+        copy_stream.wait_stream(torch.cuda.current_stream(pixels.device))
+
+        def llm_copies():
+            try:
+                if not capture_started.wait(timeout=30):
+                    raise RuntimeError("ViT capture did not start")
+                if cancelled.is_set():
+                    return
+                with torch.inference_mode(), torch.cuda.stream(copy_stream):
+                    # Model the pinned allocator and async transfers used by
+                    # prefill inputs / NormalOutputDispatcher in another thread.
+                    host_output = torch.empty_like(host_input, pin_memory=True)
+                    device_buffer.copy_(host_input, non_blocking=True)
+                    host_output.copy_(device_buffer, non_blocking=True)
+                    copy_stream.synchronize()
+                    # Cover the blocking D2H path as well, still on our stream.
+                    blocking_output = device_buffer.to("cpu")
+                    copied.extend((host_output, blocking_output))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                copies_done.set()
+
+        worker = threading.Thread(target=llm_copies, daemon=True)
+        worker.start()
+        try:
+            first = cache.run(pixels, grid)
+        finally:
+            cancelled.set()
+            capture_started.set()
+            worker.join(timeout=30)
+        self.assertFalse(worker.is_alive(), "LLM copy thread did not exit")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(copied), 2)
+        for output in copied:
+            self.assertTrue(torch.equal(output, host_input))
+        self.assertEqual(cache.stats()["capture"], 1)
+        self.assertEqual(cache.stats()["fallback"], 0)
+        self.assertTrue(torch.equal(first, expected))
+        # Replaying new inputs must not mutate the previous output.
+        changed = pixels * 2
+        replayed = cache.run(changed, grid)
+        self.assertTrue(torch.equal(replayed, vision(changed, grid).pooler_output))
+        self.assertTrue(torch.equal(first, expected))
+        self.assertEqual(cache.stats()["hit"], 1)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_replay_isolation_exact_grid_and_eviction(self):

@@ -121,11 +121,18 @@ class VisionGraphCache:
                             static_input,
                             grid_thw=grid,
                             _graph_metadata=metadata,
-                            **kwargs
+                            **kwargs,
                         )
                 stream.wait_stream(capture_stream)
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, stream=capture_stream):
+                # PDFusion runs LLM transfers/pinned allocations on other CPU
+                # threads with independent streams and buffers. A global
+                # capture would also restrict those threads. Keep capture
+                # safety checks on the ViT thread without restricting LLM I/O;
+                # the stream/event dependencies below still protect ViT data.
+                with torch.cuda.graph(
+                    graph, stream=capture_stream, capture_error_mode="thread_local"
+                ):
                     output = self.visual(
                         static_input, grid_thw=grid, _graph_metadata=metadata, **kwargs
                     ).pooler_output
