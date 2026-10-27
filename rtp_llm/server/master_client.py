@@ -296,7 +296,6 @@ class MasterClient:
                         CANCEL_REASON_DEADLINE_EXCEEDED,
                         trace_metadata,
                     )
-                await self._close_channel(target)
                 raise FtRuntimeException(
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
                     message=f"FlexLB schedule deadline exceeded for request {request_id}",
@@ -412,8 +411,6 @@ class MasterClient:
                 value = selected_vit.get(name)
                 if value is not None:
                     setattr(request_pb.selected_vit, name, value)
-        if vit_only:
-            timeout_s = min(timeout_s, 0.5) if timeout_s is not None else 0.5
         if input_pb is not None and not vit_only:
             request_pb.generate_input = input_pb.SerializeToString()
 

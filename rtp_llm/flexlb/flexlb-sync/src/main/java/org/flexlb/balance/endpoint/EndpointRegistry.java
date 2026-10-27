@@ -115,6 +115,9 @@ public class EndpointRegistry {
     private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
     /** PDFusion uses the same Prefill planning path but a distinct role map. */
     private volatile List<PrefillRoutingEntry> pdFusionDirectory = List.of();
+    /** Advisory ViT generations; only the selected entry acquires a pin. */
+    public record VitRoutingEntry(String address, WorkerEndpoint endpoint) { }
+    private volatile List<VitRoutingEntry> vitDirectory = List.of();
     /**
      * Advisory Decode routing directory. Writers publish a complete immutable
      * replacement after changing the endpoint map. A racing reader may finish
@@ -262,6 +265,10 @@ public class EndpointRegistry {
             case PDFUSION -> pdFusionDirectory;
             default -> List.of();
         };
+    }
+
+    public List<VitRoutingEntry> vitRoutingSnapshot() {
+        return vitDirectory;
     }
 
     /**
@@ -471,7 +478,7 @@ public class EndpointRegistry {
     }
 
     /**
-     * Execute one exact-address map mutation. Decode and Prefill mutations also
+     * Execute one exact-address map mutation. Routing-role mutations also
      * publish their immutable routing directories under the lifecycle gate.
      */
     private WorkerEndpoint mutateEndpointMap(
@@ -481,7 +488,8 @@ public class EndpointRegistry {
             BiFunction<String, WorkerEndpoint, WorkerEndpoint> mutation) {
         boolean updatesPrefillDirectory = role != null && role.supportsPrefill();
         boolean updatesDecodeDirectory = role == RoleType.DECODE;
-        if (!updatesPrefillDirectory && !updatesDecodeDirectory) {
+        boolean updatesVitDirectory = role == RoleType.VIT;
+        if (!updatesPrefillDirectory && !updatesDecodeDirectory && !updatesVitDirectory) {
             return endpoints.compute(address, mutation);
         }
         synchronized (lifecycleGate) {
@@ -505,6 +513,8 @@ public class EndpointRegistry {
                                     address,
                                     (DecodeEndpoint) next)
                             : null;
+            List<VitRoutingEntry> nextVitDirectory = updatesVitDirectory
+                    ? vitDirectoryAfterMutationLocked(address, next) : null;
             WorkerEndpoint published = endpoints.compute(
                     address, (ignored, observed) -> {
                 if (observed != exactCurrent) {
@@ -516,11 +526,30 @@ public class EndpointRegistry {
             });
             if (updatesPrefillDirectory) {
                 publishPrefillDirectory(role, nextPrefillDirectory);
-            } else {
+            } else if (updatesDecodeDirectory) {
                 this.decodeDirectory = nextDecodeDirectory;
+            } else {
+                this.vitDirectory = nextVitDirectory;
             }
             return published;
         }
+    }
+
+    private List<VitRoutingEntry> vitDirectoryAfterMutationLocked(
+            String address, WorkerEndpoint next) {
+        if (registryPhase != RegistryPhase.OPEN) {
+            return List.of();
+        }
+        List<VitRoutingEntry> entries = new ArrayList<>(vitDirectory.size() + 1);
+        for (VitRoutingEntry entry : vitDirectory) {
+            if (!entry.address().equals(address)) {
+                entries.add(entry);
+            }
+        }
+        if (next != null) {
+            entries.add(new VitRoutingEntry(address, next));
+        }
+        return List.copyOf(entries);
     }
 
     /** Build the exact post-mutation Prefill directory before its CHM write. */
@@ -794,6 +823,7 @@ public class EndpointRegistry {
                 registryPhase = RegistryPhase.CLOSING;
                 prefillDirectory = List.of();
                 pdFusionDirectory = List.of();
+                vitDirectory = List.of();
                 decodeDirectory = List.of();
                 closeOwner = true;
             }
