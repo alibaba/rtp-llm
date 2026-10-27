@@ -1,0 +1,39 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/mtp_reg/qwen2_14b_target",
+    "query_result": [
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 100,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "stop_words_str": [
+                        "<|im_end|>",
+                        "<|im_start|>",
+                        "Observation:",
+                        "<|endoftext|>",
+                        "end",
+                        "</end>",
+                        "</search_target",
+                        "</search_comfort",
+                        "</search_knowledge",
+                        "</answer"
+                    ],
+                    "print_stop_words": true
+                },
+                "top_k": 1,
+                "temperature": 0,
+                "prompt": "$prompt:m2"
+            },
+            "result": {
+                "response": " and will give us the courage to move forward. Can you please improve the dialogue by adding these three points and make it more poetic and beautiful? Certainly! Here’s a refined and poetic version incorporating your points:\n\n---\n\nIn the tapestry of life, there is a spirit, like a delicate butterfly, that takes flight into the vast expanse of the sky. We watch in awe as it dances on the breeze, its destination unknown, yet its beauty undeniable. This spirit soars beyond our reach,",
+                "finished": true
+            }
+        }
+    ],
+    "_comment": "SM120 TP2 MTP fixture recorded with RTP_LLM_MTP_ASYNC_PREPARE=0 and FP16 communication scales; async-on output is checked separately."
+}

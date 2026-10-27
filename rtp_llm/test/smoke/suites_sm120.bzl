@@ -1,6 +1,37 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
+def _mtp_sm120_tests():
+    tests = []
+    for async_prepare in ["1", "0"]:
+        suffix = "" if async_prepare == "1" else "_async_off"
+        envs = [
+            "RTP_LLM_MTP_ASYNC_PREPARE=" + async_prepare,
+            "RTP_LLM_STREAM_ASYNC=0",
+            "RTP_LLM_DROP_BROAD_SYNC=0",
+        ]
+        for scale in ["fp16", "bf16"]:
+            tests.append(smoke_test(
+                name = "qwen2_mtp_int8_" + scale + "_scale_tp2" + suffix + "_sm120",
+                task_info = "data/model/qwen2_14b/" + ("q_r_mtp_fp16_scale_sm120.json" if scale == "fp16" else "q_r_mtp_sm120.json"),
+                envs = envs,
+                smoke_args = "--act_type BF16 --warm_up 0 --ft_disable_custom_ar 1 --tp_size 2 --world_size 2 --max_seq_len 4096 --test_block_num 256 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4,5' --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --enable_int8_allreduce_fp16_scale " + ("true" if scale == "fp16" else "false"),
+                gpu_type = ["RTX_5000_PRO_CU13", "RTX_5000_PRO"],
+            ))
+        for reuse in [False, True]:
+            tests.append(smoke_test(
+                name = "qwen35_mtp_fp8" + ("_reuse" if reuse else "") + "_tp2" + suffix + "_sm120",
+                task_info = "data/model/qwen3_next/" + ("q_r_next_fp8_tp2_mtp_reuse_cache.json" if reuse else "q_r_next_fp8_tp2_mtp_sm120.json"),
+                envs = envs,
+                smoke_args = "--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --world_size 2 --max_seq_len 12800 --reserver_runtime_mem_mb 10000 --sp_model_type qwen35_moe_mtp --gen_num_per_cycle 4 --sp_type eagle --sp_checkpoint_path /mnt/nas1/hf/Qwen3.5-35B-A3B-FP8 --sp_act_type bf16 --warm_up 0 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4' --concurrency_limit 4" + (" --reuse_cache 1" if reuse else ""),
+                gpu_type = ["RTX_5000_PRO_CU13", "RTX_5000_PRO"],
+            ))
+    return tests
+
 def sm120_suites():
+    native.test_suite(
+        name = "smoke_sm120_mtp",
+        tests = _mtp_sm120_tests(),
+    )
     native.test_suite(
         name = "smoke_sm120_basic",
         tests = [
@@ -20,18 +51,7 @@ def sm120_suites():
                 smoke_args = "--act_type BF16 --tp_size 2 --world_size 2 --max_seq_len 4096 --test_block_num 256 --enable_cuda_graph 1 --decode_capture_config '1,2' --enable_int8_allreduce_fp16_scale false",
                 gpu_type = ["RTX_5000_PRO_CU13", "RTX_5000_PRO"],
             ),
-            smoke_test(
-                name = "qwen2_mtp_int8_fp16_scale_tp2_sm120",
-                task_info = "data/model/qwen2_14b/q_r_mtp.json",
-                smoke_args = "--act_type BF16 --warm_up 0 --ft_disable_custom_ar 1 --tp_size 2 --world_size 2 --max_seq_len 4096 --test_block_num 256 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4,5' --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --enable_int8_allreduce_fp16_scale true",
-                gpu_type = ["RTX_5000_PRO_CU13", "RTX_5000_PRO"],
-            ),
-            smoke_test(
-                name = "qwen2_mtp_int8_bf16_scale_tp2_sm120",
-                task_info = "data/model/qwen2_14b/q_r_mtp.json",
-                smoke_args = "--act_type BF16 --warm_up 0 --ft_disable_custom_ar 1 --tp_size 2 --world_size 2 --max_seq_len 4096 --test_block_num 256 --enable_cuda_graph 1 --decode_capture_config '1,2,3,4,5' --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --enable_int8_allreduce_fp16_scale false",
-                gpu_type = ["RTX_5000_PRO_CU13", "RTX_5000_PRO"],
-            ),
+            ":smoke_sm120_mtp",
             # Qwen3.5 uses independent pools for full-attention KV pages and
             # recurrent linear-attention states. Reusing one 64-token block
             # exercises the first GDN state boundary on the SM120 Triton path.
