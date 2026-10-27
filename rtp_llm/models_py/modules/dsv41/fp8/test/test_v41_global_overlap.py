@@ -853,6 +853,56 @@ def update_full_positions(case):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class FullOverlapCudaTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_merged_projection_multistream_graph_refreshes_inputs_and_weights(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_full_projection
+
+        for ratio in (1, 2):
+            case = full_attention_case(ratio, 3, 6, 32768)
+            _v41_full_projection.prepare(case.owner)
+            case.metadata.start_pos = case.starts.int()
+            initial = {k: v.clone() for k, v in case.owner._test_pools.items()}
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    run_full_attention(case, True)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = run_full_attention(case, True)
+                    observed = {k: v.clone() for k, v in case.owner._test_pools.items()}
+            torch.cuda.current_stream().wait_stream(stream)
+            for step in range(3):
+                case.x.normal_()
+                case.starts.sub_(1)
+                case.metadata.start_pos.copy_(case.starts)
+                update_full_positions(case)
+                case.owner.global_wkv.mul_(0.5)
+                case.owner.index_weights.mul_(0.5)
+                _v41_full_projection.prepare(case.owner)
+                for table in case.owner._block_tables_by_type.values():
+                    table.copy_(table.roll(1, 1))
+                for key, value in initial.items():
+                    case.owner._test_pools[key].copy_(value)
+                expected = run_full_attention(case, True)
+                expected_pools = {
+                    k: v.clone() for k, v in case.owner._test_pools.items()
+                }
+                for key, value in initial.items():
+                    case.owner._test_pools[key].copy_(value)
+                graph.replay()
+                for key in expected:
+                    if expected[key] is None:
+                        self.assertIsNone(actual[key])
+                    else:
+                        torch.testing.assert_close(
+                            actual[key], expected[key], rtol=0, atol=0
+                        )
+                for key in observed:
+                    torch.testing.assert_close(
+                        observed[key], expected_pools[key], rtol=0, atol=0
+                    )
+
     def test_qb_pdl_dynamic_graph(self):
         import deep_gemm
 
@@ -908,6 +958,9 @@ class FullOverlapCudaTest(unittest.TestCase):
                         case.owner._test_pools[key].copy_(value)
                     graph.replay()
                     for key in expected:
+                        if expected[key] is None:
+                            self.assertIsNone(actual[key])
+                            continue
                         self.assertTrue(torch.isfinite(actual[key]).all())
                         # Both selectors permit tie ordering; comparing it exactly here
                         # also catches timing-sensitive nondeterminism in this fixture.

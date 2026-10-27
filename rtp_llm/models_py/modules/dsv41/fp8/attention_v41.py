@@ -866,8 +866,10 @@ class AttentionV41FP8(AttentionFP8):
 
     def init_rope_cache(self, device=None):
         super().init_rope_cache(device=device)
+        from ._v41_full_projection import prepare as prepare_full_projection
         from ._v41_mega_attention import prepare
 
+        prepare_full_projection(self)
         if self._mega_attention is not None:
             # Reinitialization must refresh the buffers captured by existing
             # graphs, including the shared Main/Indexer Q-B weight slices.
@@ -1310,6 +1312,7 @@ class AttentionV41FP8(AttentionFP8):
                     pending.wait()
             self._shared_attention["global"] = {}
             self._shared_attention["topk"] = {}
+            self._shared_attention.pop("decode_global_slots", None)
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
             self._shared_attention.pop("decode_sparse_plan", None)
@@ -3002,7 +3005,7 @@ class AttentionV41FP8(AttentionFP8):
             out=self._prefill_output_buffer(x, qkv.qr.shape[0]),
         )
 
-    def _produce_global_decode(self, x, positions, req_ids, starts):
+    def _produce_global_decode(self, x, positions, req_ids, starts, *, projected=None):
         """Fixed-shape global writes and index reads, safe for CUDA graphs."""
         from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
             dequantize_indexer_k_fp4,
@@ -3018,7 +3021,9 @@ class AttentionV41FP8(AttentionFP8):
             try_produce_global,
         )
 
-        if not try_produce_global(self, x, positions, req_ids, starts):
+        if not try_produce_global(
+            self, x, positions, req_ids, starts, projected=projected
+        ):
             flat = x.reshape(B * S, -1)
             values = _linear_bf16_bf16_fp32(flat, self.global_wkv)
             if self.compress_ratio == 2:
@@ -3577,13 +3582,54 @@ class AttentionV41FP8(AttentionFP8):
                 translate_local_to_global_slots,
             )
 
-            return translate_local_to_global_slots(
+            shared = getattr(self, "_shared_attention", None)
+            reuse = (
+                shared is not None
+                and shared.get("topk", {}).get(
+                    getattr(self, "index_source_layer_id", None)
+                )
+                is selected
+            )
+            if reuse:
+                layout = (
+                    self.index_source_layer_id,
+                    self.kv_source_layer_id,
+                    region,
+                    self.compress_ratio,
+                    logical_entries,
+                    pool.data_ptr(),
+                    pool.shape,
+                    pool.stride(),
+                    table.data_ptr(),
+                    table.shape,
+                    table.stride(),
+                    req.data_ptr(),
+                    req.shape,
+                    req.stride(),
+                    selected.shape,
+                    selected.stride(),
+                    torch.cuda.current_stream(selected.device).cuda_stream,
+                )
+                cached = shared.get("decode_global_slots")
+                if cached is not None and cached[0] is selected and cached[1] == layout:
+                    return cached[2]
+            slots = translate_local_to_global_slots(
                 req,
                 table,
                 selected,
                 entries_per_block=pool.shape[1],
                 tokens_per_block_for_block_table=logical_entries,
             )
+            if reuse:
+                # Capture records one producer per mapping; every replay still
+                # refreshes its output. Retain inputs until the forward ends.
+                shared["decode_global_slots"] = (
+                    selected,
+                    layout,
+                    slots,
+                    (pool, table, req),
+                )
+            return slots
         slots = self._slots(
             region,
             (selected.long().clamp_min(0) + 1).reshape(-1) * self.compress_ratio - 1,
