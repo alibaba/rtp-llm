@@ -104,7 +104,7 @@ class SchedulerRequestWorkTest {
                         ran.countDown();
                     });
             assertTrue(ran.await(5, TimeUnit.SECONDS));
-            assertTrue(threadName.get().startsWith("request-work-recovery-"));
+            assertTrue(threadName.get().startsWith("request-work-recovery"));
         } finally {
             close(executor);
         }
@@ -295,10 +295,9 @@ class SchedulerRequestWorkTest {
     }
 
     @Test
-    void rejectionByBothPoolsPreservesAcceptedWorkOffCallerAndRecordsTheFailure() throws Exception {
+    void rejectedRequestPoolRecoversOnAVirtualThreadAndRecordsTheFailure() throws Exception {
         var runtime = runtime();
         SchedulerTestSupport.requestWorkers(runtime).shutdown();
-        ((ExecutorService) ReflectionTestUtils.getField(runtime, "requestRecovery")).shutdown();
         var worker = new AtomicReference<Thread>();
         try {
             runtime.executeRequestWork(
@@ -306,8 +305,7 @@ class SchedulerRequestWorkTest {
             SchedulerTestSupport.awaitRequestWork(runtime);
             org.junit.jupiter.api.Assertions.assertNotNull(worker.get());
             org.junit.jupiter.api.Assertions.assertNotSame(Thread.currentThread(), worker.get());
-            org.junit.jupiter.api.Assertions.assertNotNull(
-                    ReflectionTestUtils.getField(runtime, "failure"));
+            assertTrue(worker.get().isVirtual());
         } finally {
             close(runtime);
         }

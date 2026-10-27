@@ -1760,7 +1760,7 @@ class DeliveryClaimTest {
             value = EngineGrpcClient.CancelReply.class,
             names = {"REQUEST_CLEANED", "UNSUPPORTED"})
     @org.junit.jupiter.api.Timeout(15)
-    void receivedAckDoesNotRetryWhileStopWorkIsQueued(EngineGrpcClient.CancelReply ack)
+    void receivedAckNeedsNoStopQueueAndPreventsFurtherRetries(EngineGrpcClient.CancelReply ack)
             throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
@@ -1773,7 +1773,7 @@ class DeliveryClaimTest {
                             System.currentTimeMillis()));
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             var original =
-                    (java.util.concurrent.ExecutorService)
+                    (java.util.concurrent.Executor)
                             ReflectionTestUtils.getField(f.owner.runtime, "stopWorkers");
             var queued = new java.util.concurrent.LinkedBlockingQueue<Runnable>();
             var held = mock(java.util.concurrent.ExecutorService.class);
@@ -1801,10 +1801,13 @@ class DeliveryClaimTest {
                                 anyInt(),
                                 argThat(request -> request.getRequestId() == 41L),
                                 eq(500L));
-                assertFalse(
-                        f.settlement().isDone(), "queued ACK has not supplied release proof yet");
                 assertEquals(
-                        1, queued.size(), "one received ACK must enqueue one proof application");
+                        ack == EngineGrpcClient.CancelReply.REQUEST_CLEANED,
+                        f.settlement().isDone());
+                assertEquals(0, queued.size(), "reply application must not enqueue stop work");
+                verify(f.owner)
+                        .onDeliveryEvidence(
+                                eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
             } finally {
                 ReflectionTestUtils.setField(f.owner.runtime, "stopWorkers", original);
                 Runnable task;
@@ -2142,8 +2145,10 @@ class DeliveryClaimTest {
         }
     }
 
-    @Test
-    void senderCompletionAdvancesTheSameStopRecordAfterItsInitialWaitExpires() throws Exception {
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void senderCompletionAdvancesTheSameStopRecordAfterItsInitialWaitExpires(boolean duringExit)
+            throws Exception {
         try (var f = new Fixture()) {
             when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
                     .thenReturn(
@@ -2154,17 +2159,25 @@ class DeliveryClaimTest {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             var record = f.stopRecord();
-            assertEquals(
-                    DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
-            assertSame(record, f.stopRecord());
-            assertFalse(f.settlement().isDone());
             var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
-            ReflectionTestUtils.invokeMethod(
-                    dispatcher,
-                    "report",
-                    51L,
-                    java.util.List.of(f.claim),
-                    java.util.List.of(DeliveryResult.delivered()));
+            Runnable report =
+                    () ->
+                            ReflectionTestUtils.invokeMethod(
+                                    dispatcher,
+                                    "report",
+                                    51L,
+                                    java.util.List.of(f.claim),
+                                    java.util.List.of(DeliveryResult.delivered()));
+            var driver = f.driver();
+            var reported =
+                    duringExit ? driver.thenRun(report) : CompletableFuture.completedFuture(null);
+            assertEquals(DeliveryDispatcher.StopResult.UNRESOLVED, driver.get(6, TimeUnit.SECONDS));
+            if (!duringExit) {
+                assertSame(record, f.stopRecord());
+                assertFalse(f.settlement().isDone());
+                report.run();
+            }
+            reported.get(2, TimeUnit.SECONDS);
             f.assertArchivedAfterCleanup();
             verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
             assertFalse(f.context.data().getFuture().join().isSuccess());
@@ -2310,7 +2323,7 @@ class DeliveryClaimTest {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             var original =
-                    (java.util.concurrent.ExecutorService)
+                    (java.util.concurrent.Executor)
                             ReflectionTestUtils.getField(f.owner.runtime, "stopWorkers");
             var queued = new java.util.concurrent.ConcurrentLinkedQueue<Runnable>();
             var paused = mock(java.util.concurrent.ExecutorService.class);
@@ -2336,8 +2349,9 @@ class DeliveryClaimTest {
                 var stopping = f.driver();
                 Runnable task;
                 while ((task = queued.poll()) != null) {
-                    task.run();
+                    Thread.ofVirtual().start(task);
                 }
+                verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
                 assertFalse(
                         stopping.isDone(),
                         "queued cancellation must not see an uninitialized deadline");
@@ -2423,35 +2437,24 @@ class DeliveryClaimTest {
     }
 
     @Test
-    void concurrentStopEventsAreSerializedWithoutHoldingTheContextLock() throws Exception {
+    void concurrentWakeupsRetainOneStopOwnerWithoutHoldingTheContextLock() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             var record = f.stopRecord();
-            var active = new java.util.concurrent.atomic.AtomicInteger();
-            var maximum = new java.util.concurrent.atomic.AtomicInteger();
+            var driver = f.driver();
             var done = new java.util.concurrent.CountDownLatch(1_000);
             try (var producers = java.util.concurrent.Executors.newFixedThreadPool(8)) {
                 for (int i = 0; i < 1_000; i++) {
                     producers.submit(
-                            () ->
-                                    ReflectionTestUtils.invokeMethod(
-                                            record,
-                                            "post",
-                                            (Runnable)
-                                                    () -> {
-                                                        maximum.accumulateAndGet(
-                                                                active.incrementAndGet(),
-                                                                Math::max);
-                                                        assertFalse(Thread.holdsLock(f.context));
-                                                        Thread.yield();
-                                                        active.decrementAndGet();
-                                                        done.countDown();
-                                                    }));
+                            () -> {
+                                assertSame(driver, f.driver());
+                                ReflectionTestUtils.invokeMethod(record, "signal");
+                                done.countDown();
+                            });
                 }
             }
             assertTrue(done.await(3, TimeUnit.SECONDS));
-            assertEquals(1, maximum.get());
             assertSame(record, f.stopRecord());
             verify(f.channel, times(1)).cancelAsync(any(), anyInt(), any(), anyLong());
             f.owner.onDeliveryEvidence(
@@ -2465,7 +2468,7 @@ class DeliveryClaimTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void rejectedTimerRetainsTheSameRecordAndAcceptsLateProof(boolean permanent) throws Exception {
+    void ordinaryStopDoesNotNeedRetryTimerSubmissions(boolean permanent) throws Exception {
         try (var f = new Fixture()) {
             var original =
                     (java.util.concurrent.ScheduledThreadPoolExecutor)
@@ -2491,8 +2494,8 @@ class DeliveryClaimTest {
                 f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
                 var record = f.stopRecord();
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-                assertEquals(3, submissions.get());
-                assertEquals(permanent, f.driver().isCompletedExceptionally());
+                assertEquals(0, submissions.get());
+                assertFalse(f.driver().isCompletedExceptionally());
                 assertFalse(f.settlement().isDone());
                 assertSame(record, f.stopRecord());
                 ReflectionTestUtils.setField(f.owner.runtime, "cleanupExecutor", original);

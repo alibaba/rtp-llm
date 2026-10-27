@@ -538,22 +538,24 @@ class DecodeAdmissionProtocolTest {
                                         event.endpoint() == fixture.endpoint()
                                                 && event.reservation() != null));
         firstAck.complete(EngineGrpcClient.CancelReply.ACCEPTED);
+        verify(channel, org.mockito.Mockito.timeout(2000).times(2))
+                .cancelAsync(any(), anyInt(), any(), anyLong());
         verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
                 .onPreemption(first, phaseEvent(PreemptionCancelPhase.CANCEL_REQUESTED));
         switch (secondReply) {
             case FAILED ->
-                    verify(fixture.requests())
+                    verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
                             .onPreemption(second, phaseEvent(PreemptionCancelPhase.CANCEL_UNKNOWN));
             case NOT_FOUND ->
-                    verify(fixture.requests())
+                    verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
                             .onPreemption(
                                     second, phaseEvent(PreemptionCancelPhase.NOT_FOUND_STALE));
             case REQUEST_FENCED ->
-                    verify(fixture.requests())
+                    verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
                             .onPreemption(
                                     second, phaseEvent(PreemptionCancelPhase.CANCEL_REQUESTED));
             case REQUEST_CLEANED -> {
-                verify(fixture.requests())
+                verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
                         .onPreemption(
                                 second,
                                 new AbstractRequestScheduler.PreemptionEvent(
@@ -1073,7 +1075,7 @@ class DecodeAdmissionProtocolTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void acknowledgementCoordinationRunsOnRequestWorkers(boolean rejected) throws Exception {
+    void cancellationReceiptDoesNotHopThroughRequestWorkers(boolean rejected) throws Exception {
         if (rejected) {
             ((java.util.concurrent.ExecutorService)
                             org.springframework.test.util.ReflectionTestUtils.getField(
@@ -1120,8 +1122,9 @@ class DecodeAdmissionProtocolTest {
         ack.complete(EngineGrpcClient.CancelReply.ACCEPTED);
         String observed = threadName.get(2, TimeUnit.SECONDS);
         assertTrue(
-                observed.startsWith(rejected ? "request-work-recovery-" : "request-work-"),
-                "coordinator must leave the stop worker, including executor rejection");
+                observed.equals(Thread.currentThread().getName())
+                        || observed.startsWith("delivery-stop-"),
+                "apply directly on completion, including a reply already done at registration");
         terminal.complete(new VictimResolution(11L, VictimResolution.Outcome.REQUEST_END));
         outcome.get(2, TimeUnit.SECONDS);
     }
@@ -1129,11 +1132,7 @@ class DecodeAdmissionProtocolTest {
     @Test
     void slowAckCoordinationDoesNotPreventAnUnrelatedCancel() throws Exception {
         var release = new java.util.concurrent.CountDownLatch(1);
-        int size =
-                ((java.util.concurrent.ThreadPoolExecutor)
-                                org.springframework.test.util.ReflectionTestUtils.getField(
-                                        runtime, "stopWorkers"))
-                        .getMaximumPoolSize();
+        int size = 8;
         var entered = new java.util.concurrent.CountDownLatch(size);
         var outcomes = new java.util.ArrayList<CompletableFuture<?>>();
         var terminals = new java.util.ArrayList<CompletableFuture<VictimResolution>>();
@@ -1183,7 +1182,7 @@ class DecodeAdmissionProtocolTest {
                                         "slow coordination")));
                 verify(channel, org.mockito.Mockito.timeout(1000))
                         .cancelAsync(any(), anyInt(), any(), anyLong());
-                ack.complete(EngineGrpcClient.CancelReply.ACCEPTED);
+                Thread.ofVirtual().start(() -> ack.complete(EngineGrpcClient.CancelReply.ACCEPTED));
             }
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             var nextClient = mock(EngineGrpcClient.class);
@@ -1203,7 +1202,7 @@ class DecodeAdmissionProtocolTest {
             assertTrue(
                     nextSent.await(1, TimeUnit.SECONDS),
                     "slow coordinators must not occupy stop workers");
-            assertEquals(PreemptionRegistration.Reply.UNKNOWN, next.get(1, TimeUnit.SECONDS));
+            assertEquals(PreemptionRegistration.Reply.WAITING, next.get(1, TimeUnit.SECONDS));
             release.countDown();
         } finally {
             release.countDown();

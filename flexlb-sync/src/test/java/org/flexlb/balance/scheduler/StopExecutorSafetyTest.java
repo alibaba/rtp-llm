@@ -6,7 +6,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -26,12 +25,61 @@ import static org.mockito.Mockito.when;
 @Timeout(15)
 class StopExecutorSafetyTest {
     @Test
-    void saturatedStopPoolDoesNotOccupyNormalRequestWorkers() throws Exception {
+    void stopNotificationsCoalesceWithoutBlockingLocalSettlementForTheSameRequest()
+            throws Exception {
+        var runtime = runtime();
+        var context = context();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var resumed = new CountDownLatch(1);
+        var locallySettled = new CountDownLatch(1);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        Runnable workflow =
+                () -> {
+                    if (calls.incrementAndGet() == 1) {
+                        entered.countDown();
+                        RequestProtocolTestSupport.await(release);
+                    } else {
+                        resumed.countDown();
+                    }
+                };
+        try {
+            assertTrue(runtime.executeStopWork(context, workflow));
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            assertTrue(runtime.executeStopWork(context, workflow));
+            for (int i = 0; i < 100; i++) {
+                assertFalse(runtime.executeStopWork(context, workflow));
+            }
+            try (var local = runtime.registerRequestWork(context)) {
+                local.submitClose(locallySettled::countDown, false);
+            }
+            assertTrue(locallySettled.await(2, TimeUnit.SECONDS));
+            SchedulerTestSupport.awaitRequestWork(runtime);
+            release.countDown();
+            assertTrue(resumed.await(2, TimeUnit.SECONDS));
+        } finally {
+            release.countDown();
+            runtime.shutdown();
+        }
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void shutdownRejectsNewStopsEvenWithoutAnExecutorService() {
+        var runtime = runtime();
+        runtime.shutdown();
+        var started = new java.util.concurrent.atomic.AtomicBoolean();
+        org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class,
+                () -> runtime.executeStopWork(context(), () -> started.set(true)));
+        assertFalse(started.get());
+    }
+
+    @Test
+    void waitingStopsDoNotOccupyNormalRequestWorkersOrLocalDrain() throws Exception {
         var runtime = runtime();
         var release = new CountDownLatch(1);
-        int size =
-                ((ThreadPoolExecutor) ReflectionTestUtils.getField(runtime, "stopWorkers"))
-                        .getMaximumPoolSize();
+        int size = 32;
         var entered = new CountDownLatch(size);
         var normal = new CountDownLatch(1);
         try {
@@ -39,6 +87,7 @@ class StopExecutorSafetyTest {
                 runtime.executeStopWork(
                         context(),
                         () -> {
+                            assertTrue(Thread.currentThread().isVirtual());
                             entered.countDown();
                             RequestProtocolTestSupport.await(release);
                         });
@@ -46,6 +95,7 @@ class StopExecutorSafetyTest {
             assertTrue(entered.await(3, TimeUnit.SECONDS));
             runtime.executeRequestWork(context(), normal::countDown);
             assertTrue(normal.await(1, TimeUnit.SECONDS));
+            SchedulerTestSupport.awaitRequestWork(runtime);
         } finally {
             release.countDown();
             runtime.shutdown();
@@ -157,7 +207,13 @@ class StopExecutorSafetyTest {
         var runtime = runtime();
         var caller = Thread.currentThread();
         var worker = new CompletableFuture<Thread>();
-        ((ExecutorService) ReflectionTestUtils.getField(runtime, "stopWorkers")).shutdown();
+        ReflectionTestUtils.setField(
+                runtime,
+                "stopWorkers",
+                (java.util.concurrent.Executor)
+                        work -> {
+                            throw new java.util.concurrent.RejectedExecutionException();
+                        });
         try {
             runtime.executeStopWork(context(), () -> worker.complete(Thread.currentThread()));
             assertNotSame(caller, worker.get(3, TimeUnit.SECONDS));
@@ -175,7 +231,7 @@ class StopExecutorSafetyTest {
                         null,
                         DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
-        var client = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
+        var client = runtime.engineClient;
         var rpcReplies =
                 new java.util.concurrent.CopyOnWriteArrayList<
                         CompletableFuture<org.flexlb.engine.grpc.EngineGrpcClient.CancelReply>>();
@@ -194,6 +250,7 @@ class StopExecutorSafetyTest {
         try {
             for (int i = 0; i < 30; i++) {
                 var context = context();
+                ReflectionTestUtils.setField(context.data().getScheduler(), "runtime", runtime);
                 when(context.snapshot().delivery()).thenReturn(null);
                 when(context.snapshot().cancellation()).thenReturn(null);
                 var claim =
@@ -203,8 +260,7 @@ class StopExecutorSafetyTest {
                                 new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
                                         1, i + 1, i + 1),
                                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
-                answers.add(
-                        cleanup.preempt(claim, client, runtime, 500L, null, "priority preemption"));
+                answers.add(cleanup.preempt(claim, null, "priority preemption", 500L));
             }
             assertTrue(
                     entered.await(2, TimeUnit.SECONDS),
