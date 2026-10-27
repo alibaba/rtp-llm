@@ -3091,6 +3091,32 @@ TEST_F(MtpExecutorTest, testDSparkForceTopK4096PreservesFullVocabularyQ) {
         sampler.sampleDSparkDraft(logits, anchors, temperature, top_k, top_p, markov, markov, vocab, false, 4096);
     EXPECT_TRUE(torch::allclose(explicit_k.all_probs.select(1, 0), expected, 1e-5, 1e-6));
 }
+TEST_F(MtpExecutorTest, testDSparkForceTopK4096SparseDraftQ) {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3)) {
+        GTEST_SKIP() << "DeepSelect FP32 K4096 requires SM100 or SM103";
+    }
+    constexpr int64_t        vocab   = 129280;
+    auto                     options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto                     markov  = torch::zeros({vocab, 1}, options.dtype(torch::kBFloat16));
+    spec::SpeculativeSampler sampler(torch::Tensor(), 1);
+    for (int64_t batch : {6, 16}) {
+        SCOPED_TRACE(batch);
+        auto logits = torch::full({batch, vocab}, -std::numeric_limits<float>::max(), options);
+        logits.select(1, vocab - 1).zero_();
+        auto anchors     = torch::zeros({batch}, options.dtype(torch::kInt32));
+        auto temperature = torch::full({batch}, 0.5f, options);
+        auto top_p       = torch::full({batch}, 0.8f, options);
+        auto output =
+            sampler.sampleDSparkDraft(logits, anchors, temperature, {}, top_p, markov, markov, vocab, false, 4096);
+        auto q = output.all_probs.select(1, 0);
+        EXPECT_TRUE(q.select(1, vocab - 1).eq(1.0f).all().item<bool>());
+        EXPECT_TRUE(q.slice(1, 0, vocab - 1).eq(0.0f).all().item<bool>());
+        auto tokens = toVec<int32_t>(output.token_ids.cpu());
+        ASSERT_EQ(tokens.size(), batch);
+        EXPECT_TRUE(std::all_of(tokens.begin(), tokens.end(), [=](int32_t token) { return token == vocab - 1; }));
+    }
+}
 #endif
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
