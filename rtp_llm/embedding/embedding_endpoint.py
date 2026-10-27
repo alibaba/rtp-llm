@@ -12,11 +12,27 @@ import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import EmbeddingConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import RoleType
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.utils.grpc_util import trans_from_tensor
+
+# Do not sit in a long reconnect backoff after a backend restart.
+_SHARED_CHANNEL_GRPC_OPTIONS = (
+    ("grpc.initial_reconnect_backoff_ms", 100),
+    ("grpc.min_reconnect_backoff_ms", 100),
+    ("grpc.max_reconnect_backoff_ms", 1000),
+)
+# Aggressive keepalive is opt-in: a missed ACK can fail an active RPC even
+# without an RPC deadline, while the paused backend may later finish its work.
+_KEEPALIVE_GRPC_OPTIONS = (
+    ("grpc.keepalive_time_ms", 10000),
+    ("grpc.keepalive_timeout_ms", 5000),
+    ("grpc.keepalive_permit_without_calls", 1),
+    ("grpc.http2.max_pings_without_data", 0),
+)
 
 
 def tensor_pb_to_torch(tensor_pb) -> Optional[torch.Tensor]:
@@ -55,6 +71,7 @@ class EmbeddingEndpoint(object):
         grpc_config,
         server_config,
         tokenizer: BaseTokenizer,
+        embedding_config: Optional[EmbeddingConfig] = None,
     ):
         self.renderer = create_custom_module(model_config, tokenizer).renderer
         # 创建到服务器的连接
@@ -67,7 +84,60 @@ class EmbeddingEndpoint(object):
                 self.options.append((key, value))
         host_args = HostServiceArgs.create_from_env()
         self.host_service = HostService(host_args)
-        logging.info(f"embedding endpoint grpc options: {self.options}")
+
+        embedding_config = embedding_config or EmbeddingConfig()
+        # Reuse one HTTP/2 connection per event loop instead of a new channel per request.
+        self.share_channel: bool = embedding_config.embedding_share_grpc_channel
+        # The RPC deadline is opt-in. EmbeddingRpcServer does not observe gRPC
+        # cancellation yet, so an expired deadline only fails the frontend call
+        # while the backend still finishes the request.
+        rpc_timeout_s = embedding_config.embedding_rpc_timeout_s
+        self.rpc_timeout: Optional[float] = (
+            rpc_timeout_s if rpc_timeout_s is not None and rpc_timeout_s > 0 else None
+        )
+        # Only wait for a reconnecting channel when a deadline bounds the wait;
+        # otherwise fail fast like the per-request channel does.
+        self.wait_for_ready: bool = self.share_channel and self.rpc_timeout is not None
+        channel_options = _SHARED_CHANNEL_GRPC_OPTIONS if self.share_channel else ()
+        if embedding_config.embedding_grpc_keepalive:
+            channel_options += _KEEPALIVE_GRPC_OPTIONS
+        option_keys = {key for key, _ in self.options}
+        for key, value in channel_options:
+            if key not in option_keys:
+                self.options.append((key, value))
+        # id(loop) -> (loop, channel). The loop is kept to detect a reused id.
+        self._channels: Dict[
+            int, Tuple[asyncio.AbstractEventLoop, grpc.aio.Channel]
+        ] = {}
+        logging.info(
+            f"embedding endpoint grpc options: {self.options}, "
+            f"share_channel: {self.share_channel}, rpc_timeout: {self.rpc_timeout}, "
+            f"wait_for_ready: {self.wait_for_ready}"
+        )
+
+    def _get_shared_channel(self) -> grpc.aio.Channel:
+        # grpc.aio channels are bound to the event loop that created them.
+        loop = asyncio.get_running_loop()
+        entry = self._channels.get(id(loop))
+        if entry is not None and entry[0] is loop:
+            return entry[1]
+        # Drop channels of loops that are gone; they cannot be awaited any more.
+        for loop_id, (owner_loop, _) in list(self._channels.items()):
+            if owner_loop.is_closed():
+                self._channels.pop(loop_id, None)
+        channel = grpc.aio.insecure_channel(self.address, options=self.options)
+        self._channels[id(loop)] = (loop, channel)
+        return channel
+
+    async def close(self) -> None:
+        """Close this loop's channel and prune entries whose owner loop is closed."""
+        current_loop = asyncio.get_running_loop()
+        for loop_id, (owner_loop, channel) in list(self._channels.items()):
+            if owner_loop is current_loop:
+                del self._channels[loop_id]
+                await channel.close()
+            elif owner_loop.is_closed():
+                self._channels.pop(loop_id, None)
 
     async def embedding(
         self, request: Dict[str, Any]
@@ -133,7 +203,10 @@ class EmbeddingEndpoint(object):
         profile_config: Optional[Dict[str, Any]] = None,
     ):
         profile_config = profile_config or {}
-        channel = grpc.aio.insecure_channel(self.address, options=self.options)
+        if self.share_channel:
+            channel = self._get_shared_channel()
+        else:
+            channel = grpc.aio.insecure_channel(self.address, options=self.options)
         stub = pb2_grpc.EmbeddingRpcServiceStub(channel)
         multimodal_features = []
 
@@ -175,7 +248,9 @@ class EmbeddingEndpoint(object):
             profile_trace_name=profile_config.get("profile_trace_name", ""),
         )
         try:
-            response = await stub.embedding(request)
+            response = await stub.embedding(
+                request, timeout=self.rpc_timeout, wait_for_ready=self.wait_for_ready
+            )
             if response.output_is_tensor:
                 tensor_pb = response.output_t
                 result = tensor_pb_to_torch(tensor_pb)
@@ -194,4 +269,5 @@ class EmbeddingEndpoint(object):
             logging.warning(f"RPC failed: {e.code()}: {e.details()}")
             raise
         finally:
-            await channel.close()
+            if not self.share_channel:
+                await channel.close()
