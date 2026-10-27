@@ -13,6 +13,18 @@ def create_custom_module(
     tokenizer: Optional[BaseTokenizer],
 ):
     task_type = config.task_type
+    if (Path(config.ckpt_path) / "decision_config.json").is_file():
+        for other in ("jev_config.json", "kev_config.json"):
+            if (Path(config.ckpt_path) / other).is_file():
+                family = other.removesuffix("_config.json").upper()
+                raise ValueError(
+                    f"Checkpoint cannot contain both D3 and {family} manifests"
+                )
+        if task_type != TaskType.LANGUAGE_MODEL:
+            raise ValueError("D3 checkpoints require the LANGUAGE_MODEL task type")
+        from rtp_llm.models.downstream_modules.d3 import D3Module
+
+        return D3Module(config, tokenizer)
     if (Path(config.ckpt_path) / "jev_config.json").is_file():
         if (Path(config.ckpt_path) / "kev_config.json").exists():
             raise ValueError("Checkpoint cannot contain both JEV and Kev manifests")

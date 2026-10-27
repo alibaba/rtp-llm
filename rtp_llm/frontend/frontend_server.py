@@ -645,14 +645,21 @@ class FrontendServer(object):
             self._access_logger.log_exception_access(log_request, error)
             raise
         except Exception as error:
+            from rtp_llm.frontend.d3 import D3RequestError
             from rtp_llm.frontend.jev import JevRequestError
 
-            if isinstance(error, (KevRequestError, JevRequestError)) or (
+            if isinstance(
+                error, (KevRequestError, JevRequestError, D3RequestError)
+            ) or (
                 isinstance(error, FtRuntimeException)
                 and error.exception_type
                 in (ExceptionType.LONG_PROMPT_ERROR, ExceptionType.MM_LONG_PROMPT_ERROR)
             ):
-                content = {validation_field: str(error)}
+                # D3RequestError carries the official 422 detail body (the
+                # invalid_questions object, or the reason text) when it differs.
+                content = {
+                    validation_field: getattr(error, "detail", None) or str(error)
+                }
                 status = validation_status
                 error_code = "INVALID_PARAMS"
             else:

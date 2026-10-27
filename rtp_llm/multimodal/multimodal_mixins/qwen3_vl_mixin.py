@@ -25,7 +25,11 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
     Qwen2_5_VLMixin,
     smart_resize,
 )
-from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+from rtp_llm.multimodal.multimodal_util import (
+    get_bytes_io_from_url,
+    is_d3_video_group_url,
+    parse_d3_video_group_url,
+)
 from rtp_llm.multimodal.vit_metrics import (
     record_vit_preprocess_value,
     vit_preprocess_timer,
@@ -152,6 +156,10 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 )
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
+            if is_d3_video_group_url(mm_input.url):
+                return Qwen3_VLImageEmbedding._preprocess_d3_video_group(
+                    mm_input, processor
+                )
             tags = {"model": "qwen3_vl", "mm_type": "video"}
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
                 video_data = get_bytes_io_from_url(
@@ -174,6 +182,68 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         else:
             raise Exception("unknown mm url type")
 
+    @staticmethod
+    def _preprocess_d3_video_group(mm_input: MultimodalInput, processor):
+        """One d3 video group: normalize + patchify the pre-resized frames.
+
+        The producer already sampled and resized the frames (the official d3
+        contract), so this step never resamples or resizes: the video processor
+        only rescales, normalizes and patchifies the group's two frames
+        (do_sample_frames=False and do_resize=False are both explicit — both
+        5.2 and 5.17 default them to True). The frames ALWAYS come from the
+        envelope URL's lossless, validated payload — the URL fully determines
+        a group (the engine media cache keys on it); the attached
+        ``MultimodalInput.tensor`` is ignored (the RPC restores it as a 1-element
+        placeholder anyway, and a same-shaped tensor is not integrity
+        evidence). Returns the group's pixel values, its ``[1, H/patch, W/patch]``
+        grid and the envelope metadata. Positions come from the grid alone
+        (local t=0, h, w — the engine adds each timestamp-separated span's base
+        offset, exactly like the official get_rope_index); the metadata only
+        identifies the item as a d3 group for batching and cache integrity.
+        """
+        tags = {"model": "qwen3_vl", "mm_type": "video", "d3": "group"}
+        meta = parse_d3_video_group_url(mm_input.url)
+        expected = (2, 3, int(meta["height"]), int(meta["width"]))
+        # The URL payload is AUTHORITATIVE for every d3 group: the engine media
+        # cache keys on the URL, so the URL alone must determine the frames,
+        # and the parse fully validated them (uint8, exact 2*3*H*W bytes). The
+        # attached tensor is deliberately ignored: the RPC always restores it
+        # as a 1-element placeholder (QueryConverter.cc), and on the in-process
+        # path a same-shaped tensor is not integrity evidence — same shape with
+        # different bytes would silently fork the media cache.
+        frames = torch.frombuffer(bytearray(meta["frames"]), dtype=torch.uint8).reshape(
+            expected
+        )
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags):
+            # The producer already sampled exactly this group's two frames, so
+            # neither resampling nor resizing may happen here: both 5.2 and
+            # 5.17 video processors default do_sample_frames=True (and would
+            # re-run the fps/min_frames index math over the bare tensor).
+            res = processor.video_processor(
+                videos=[frames],
+                return_tensors="pt",
+                do_resize=False,
+                do_sample_frames=False,
+            )
+        pixel_values = res["pixel_values_videos"]
+        grid = res["video_grid_thw"]
+        patch_size = getattr(processor.video_processor, "patch_size", 16)
+        expected_grid = [
+            1,
+            int(meta["height"]) // patch_size,
+            int(meta["width"]) // patch_size,
+        ]
+        if grid.numel() != 3 or [int(v) for v in grid[0].tolist()] != expected_grid:
+            raise ValueError(
+                f"the video processor returned grid {grid.tolist()}, expected {expected_grid} "
+                "for a d3 video group"
+            )
+        # The frames bytes are transport-only: drop them before the result
+        # crosses back through the preprocessing pool (the meta feeds d3-group
+        # detection and debugging only, not positions or embeddings).
+        meta = {key: value for key, value in meta.items() if key != "frames"}
+        return pixel_values, grid, meta
+
     def get_preprocess_params(self):
         return {
             "processor": self.mm_processor,
@@ -189,6 +259,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         deepstack_embeds = vision_output.deepstack_features
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
+        # A d3 video group's grid is [1, h, w]: its LOCAL positions (t=0, h, w)
+        # are the official ones — the engine adds each span's base offset when
+        # it splices the positions, exactly like the official get_rope_index.
         pos_id = self.get_position_ids(grid_thw)[0]
         # Flatten deepstack [layers, tokens, hidden] into a 1-D extra-input tensor for
         # transport; the qwen3vl model reshapes it back using tokens/hidden from features.

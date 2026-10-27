@@ -73,6 +73,57 @@ class TokenizerEncodeResponse(BaseModel):
     error: str = ""
 
 
+def d3_model_name(ckpt_path: str) -> str:
+    """The served model name of a d3 checkpoint: its manifest name, else the directory."""
+    manifest_path = pathlib.Path(ckpt_path) / "MODEL_MANIFEST.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except ValueError:
+            manifest = None
+        name = manifest.get("model_name") if isinstance(manifest, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name
+    return pathlib.Path(ckpt_path).name
+
+
+def d3_executor(
+    ckpt_path: str,
+    run_rows,
+    *,
+    tokenizer,
+    max_seq_len: Optional[int],
+    kev_config,
+    jev_config,
+    timeout_seconds: float | None,
+):
+    """Build the SystemOne D3 executor of a d3 checkpoint, or None for other models.
+
+    A checkpoint may carry at most one of the Kev, JEV and D3 task manifests.
+    """
+    from rtp_llm.models.downstream_modules.d3_config import load_d3_config
+
+    config = load_d3_config(ckpt_path)
+    if config is None:
+        return None
+    if kev_config is not None or jev_config is not None:
+        raise ValueError("Checkpoint cannot combine D3 with Kev or JEV manifests")
+    from rtp_llm.frontend.d3 import D3Executor
+
+    max_rows = int(os.environ.get("D3_MAX_ROWS_PER_RPC", "8"))
+    if not 1 <= max_rows <= 64:
+        raise ValueError("D3_MAX_ROWS_PER_RPC must be in 1..64")
+    return D3Executor(
+        config,
+        run_rows,
+        tokenizer=tokenizer,
+        model_name=d3_model_name(ckpt_path),
+        max_row_tokens=max_seq_len,
+        batch_rows=max_rows,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 class FrontendWorker:
     def __init__(
         self,
@@ -158,6 +209,21 @@ class FrontendWorker:
                 ),
             )
 
+        self.d3_executor = d3_executor(
+            model_config.ckpt_path,
+            self._d3_rows,
+            tokenizer=self.tokenizer,
+            max_seq_len=model_config.max_seq_len,
+            kev_config=self.kev_config,
+            jev_config=self.jev_config,
+            timeout_seconds=(
+                engine_config.pd_sep_config.max_rpc_timeout_ms / 1000
+                if engine_config.pd_sep_config.max_rpc_timeout_ms > 0
+                else 300
+            ),
+        )
+        self._d3_request_context = ContextVar("d3_request_context")
+
         logging.info("frontend worker start done.")
 
     async def close(self):
@@ -193,6 +259,8 @@ class FrontendWorker:
     async def systemone(
         self, request: dict, *, headers: Optional[Dict[str, str]] = None
     ) -> dict:
+        if getattr(self, "d3_executor", None) is not None:
+            return await self._d3_request(request, headers)
         if getattr(self, "jev_executor", None) is not None:
             return await self._jev_request("systemone", request, headers)
         from rtp_llm.frontend.systemone import parse_request, to_answers
@@ -306,6 +374,118 @@ class FrontendWorker:
             vision_tokens=vision_tokens,
             cache_reuse_tokens=result.aux_info.reuse_len,
         )
+
+    async def _d3_request(self, request: dict, headers) -> dict:
+        # Every row of one decision routes to the same replica, with per-request
+        # correlation headers kept independent of concurrent callers.
+        token = self._d3_request_context.set(
+            (dict(headers or {}), uuid.uuid4().int & ((1 << 63) - 1))
+        )
+        try:
+            return await self.d3_executor.systemone(request)
+        finally:
+            self._d3_request_context.reset(token)
+
+    async def _d3_rows(self, rows):
+        """Submit complete d3 rows through one bounded batch RPC, in request order.
+
+        Every row is an independent GenerateInput with its own request id; the
+        request's rows share one routing key. No shared-prefix RPC is used: d3's
+        noncausal full-attention rows must never reuse language-layer prefixes.
+        """
+        import torch
+
+        from rtp_llm.frontend.d3 import (
+            IMAGE_MAX_PIXELS,
+            IMAGE_MIN_PIXELS,
+            MAX_OPTIONS,
+            D3RowResult,
+        )
+        from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+        from rtp_llm.utils.base_model_datatypes import GenerateInput, MMUrlType
+
+        headers, routing_key = self._d3_request_context.get()
+        inputs = []
+        for row in rows:
+            mm_inputs = []
+            for media in row.media:
+                if media.kind == "image":
+                    mm_inputs.append(
+                        MultimodalInput(
+                            media.url,
+                            MMUrlType.IMAGE,
+                            torch.empty(0),
+                            MMPreprocessConfig(
+                                min_pixels=IMAGE_MIN_PIXELS, max_pixels=IMAGE_MAX_PIXELS
+                            ),
+                        )
+                    )
+                else:
+                    # One d3 video group: the envelope URL carries the clip
+                    # identity, group index and frame size, the tensor the
+                    # group's already-resized uint8 frames. The consumer only
+                    # normalizes and patchifies them (no second resize).
+                    mm_inputs.append(
+                        MultimodalInput(
+                            media.url,
+                            MMUrlType.VIDEO,
+                            media.tensor,
+                            MMPreprocessConfig(),
+                        )
+                    )
+            inputs.append(
+                GenerateInput(
+                    request_id=uuid.uuid4().int & ((1 << 63) - 1),
+                    token_ids=torch.tensor(row.token_ids, dtype=torch.int32),
+                    mm_inputs=mm_inputs,
+                    generate_config=GenerateConfig(
+                        max_new_tokens=0, is_streaming=False
+                    ),
+                    tokenizer=self.tokenizer,
+                    headers=dict(headers),
+                )
+            )
+        outputs = await self.backend_rpc_server_visitor.batch_enqueue(
+            inputs, routing_key=routing_key
+        )
+        if len(outputs) != len(inputs):
+            raise RuntimeError("D3 backend returned an incorrect row count")
+        results = []
+        for index, output in enumerate(outputs):
+            if len(output.generate_outputs) != 1:
+                raise RuntimeError("D3 backend must return one result per row")
+            result = output.generate_outputs[0]
+            logits = result.custom_output
+            # Structural corruption only: an unfinished row, a missing readout
+            # or a wrong shape cannot produce any answer and fails the batch
+            # (the row RPC is atomic). NON-FINITE logits are deliberately NOT
+            # rejected here: the official contract maps them to a per-question
+            # invalid_model_output, which the executor's probabilities() already
+            # implements (over the question's own masked answer codes, exactly
+            # like the official product_answer); rejecting them here would
+            # pre-empt that with a whole-request 500.
+            if (
+                not result.finished
+                or logits is None
+                or logits.shape != (1, MAX_OPTIONS)
+            ):
+                raise RuntimeError("D3 backend returned invalid readout logits")
+            reuse_len = result.aux_info.reuse_len if result.aux_info else 0
+            if reuse_len:
+                raise RuntimeError("D3 rows must not reuse cached prefixes")
+            # aux_info.input_len is the engine's expanded multimodal length; the
+            # placeholder ids left in token_ids are not counted by the engine.
+            prompt_tokens = (
+                result.aux_info.input_len if result.aux_info else 0
+            ) or len(rows[index].token_ids)
+            results.append(
+                D3RowResult(
+                    logits=logits[0].tolist(),
+                    prompt_tokens=prompt_tokens,
+                    reuse_len=reuse_len,
+                )
+            )
+        return results
 
     async def _decide(
         self, request: dict, *, headers: Optional[Dict[str, str]] = None

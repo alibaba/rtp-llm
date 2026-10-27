@@ -27,6 +27,20 @@ from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
+
+def d3_video_group_meta(data: Any) -> Optional[dict]:
+    """The d3 video-group envelope of a preprocessed input, or None.
+
+    A d3 video group preprocesses to ``(pixel_values, grid, envelope)``; every
+    other input keeps its ``(pixel_values, grid)`` shape.
+    """
+    if isinstance(data, (list, tuple)) and len(data) > 2:
+        meta = data[2]
+        if isinstance(meta, dict) and meta.get("mode") == "d3_video_group":
+            return meta
+    return None
+
+
 default_attn_impl = "sdpa"
 try:
     if can_use_flash_attn():
@@ -77,6 +91,11 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
         image_embeds = vision_output.pooler_output
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
+        # Images and d3 video groups both carry one [1, h, w] grid whose LOCAL
+        # (t=0, h, w) positions are the official ones; the engine adds each
+        # span's base offset when it splices the positions into the sequence,
+        # exactly like the official get_rope_index (a group is a timestamp-
+        # separated [1, h, w] span; its temporal coordinate is local zero).
         pos_id = self.get_position_ids(grid_thw)[0]
         return image_embeds[0].to(self._data_type), pos_id
 
@@ -84,7 +103,16 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
     def batched_embedding(
         self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
     ):
-        if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
+        # Images and d3 video groups both embed one [1, h, w] grid row per input
+        # (a group's attention is its own segment in the vision tower), so they
+        # share one batched forward. Legacy video inputs fall back to the
+        # per-input path.
+        def batchable(data, mm_type):
+            return mm_type == MMUrlType.IMAGE or d3_video_group_meta(data) is not None
+
+        if not all(
+            batchable(data, mm_type) for data, mm_type in zip(data_list, mm_types)
+        ):
             return super().batched_embedding(data_list, mm_types, **kwargs)
         res_list = []
         pixel_values_list = []
@@ -102,9 +130,11 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
         image_embeds = vision_output.pooler_output
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
-        pos_id = self.get_position_ids(grid_thw)
-        for e, p in zip(image_embeds, pos_id):
-            res_list.append((e.to(self._data_type), p))
+        # One local (t=0, h, w) position block per grid row, images and d3
+        # video groups alike.
+        pos_ids = self.get_position_ids(grid_thw)
+        for embeds, pos_id in zip(image_embeds, pos_ids):
+            res_list.append((embeds.to(self._data_type), pos_id))
         return res_list
 
     def get_position_ids(self, grid_thw: torch.Tensor = None) -> torch.Tensor:

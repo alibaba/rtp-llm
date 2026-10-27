@@ -271,7 +271,13 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model(
         "qwen35_dense",
         "rtp_llm.models.qwen3_next.qwen3_next",
-        ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"],
+        [
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5ForCausalLM",
+            # A d3 code-readout export ships the bare Qwen3.5 backbone
+            # (no LM head) under the transformers model-only architecture.
+            "Qwen3_5Model",
+        ],
     )
     register_lazy_model(
         "qwen3_next_mtp",

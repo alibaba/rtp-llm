@@ -9,6 +9,16 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Stdlib-only token span parser (MultimodalTokenUtils.h) so its regression
+# tests link no torch and stay off GPU nodes; multimodal_input_class keeps
+# exporting the same header for torch users.
+cc_library(
+    name = "multimodal_token_utils",
+    hdrs = ["MultimodalTokenUtils.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Torch-free multimodal ingress decision table.
 cc_library(
     name = "mm_processor_config",

@@ -14,3 +14,13 @@ py_test(
     ],
     env = {"GPU_COUNT": "0"},
 )
+
+py_test(
+    name = "d3_test",
+    srcs = ["d3_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:safetensors",
+    ],
+    env = {"GPU_COUNT": "0"},
+)

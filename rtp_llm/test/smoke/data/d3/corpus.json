@@ -1,0 +1,896 @@
+{
+ "schema": "d3-acceptance-corpus/1",
+ "format_id": "d3-code-readout-v1",
+ "notes": "Requests consumed by //rtp_llm/test/smoke:d3_acceptance_* and the independent official-reference generator. state_builder materializes to text*times; @model:<path> media entries inline the staged model file as a base64 data URL. cross_question_isolation carries set_a/set_b groups, not a single request. choice_255_semantic keeps 255 options but only opt-100 describes password reset; every other criterion is a concrete, distinct label, so the correct route is semantically unambiguous (near-tie argmax flips under quantization are not legitimate here). The original ambiguous choice_255 case and its recorded results are preserved.",
+ "cases": [
+  {
+   "name": "short",
+   "request": {
+    "state": "Write a Python function that merges two sorted lists.",
+    "questions": {
+     "kind": {
+      "type": "choice",
+      "instructions": "What kind of work is this?",
+      "criteria": {
+       "code": "Writing or fixing code",
+       "math": "Mathematics",
+       "chat": "Anything else"
+      }
+     },
+     "reasoning": {
+      "type": "noul",
+      "instructions": "Does answering this need multi-step reasoning?"
+     },
+     "urgency": {
+      "type": "score",
+      "instructions": "How urgent is a review of this request?",
+      "criteria": [
+       "urgency level 0 of 3",
+       "urgency level 1 of 3",
+       "urgency level 2 of 3",
+       "urgency level 3 of 3"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "long",
+   "state_builder": {
+    "kind": "repeat",
+    "text": "At 14:03 the checkout service error rate rose from 0.1% to 6.4%. Payment timeouts concentrated on the order-submit RPC; the p99 latency climbed from 210ms to 4.2s and the working thread pool saturated at 320 of 320 threads. The change board shows release checkout-1.8.3 deployed to 40% of pods at 13:58, adding a synchronous inventory hold call before payment capture.\n",
+    "times": 20
+   },
+   "request": {
+    "questions": {
+     "severity": {
+      "type": "score",
+      "instructions": "Rate the incident severity.",
+      "criteria": [
+       "severity level 0 of 4",
+       "severity level 1 of 4",
+       "severity level 2 of 4",
+       "severity level 3 of 4",
+       "severity level 4 of 4"
+      ]
+     },
+     "owner": {
+      "type": "choice",
+      "instructions": "Which team should take the first look?",
+      "criteria": {
+       "checkout": "The checkout service owners",
+       "inventory": "The inventory service owners",
+       "sre": "Site reliability on call",
+       "release": "The release engineering team"
+      }
+     },
+     "needs_rollback": {
+      "type": "noul",
+      "instructions": "Does the evidence point to the new release?",
+      "criteria": {
+       "false": "Evidence points elsewhere",
+       "true": "Evidence points to the release"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "changed_state",
+   "request": {
+    "state": "Draft a birthday poem for a retired sailor who misses the sea and keeps a parrot named Cesare.",
+    "questions": {
+     "kind": {
+      "type": "choice",
+      "instructions": "What kind of work is this?",
+      "criteria": {
+       "code": "Writing or fixing code",
+       "math": "Mathematics",
+       "chat": "Anything else"
+      }
+     },
+     "reasoning": {
+      "type": "noul",
+      "instructions": "Does answering this need multi-step reasoning?"
+     },
+     "urgency": {
+      "type": "score",
+      "instructions": "How urgent is a review of this request?",
+      "criteria": [
+       "urgency level 0 of 3",
+       "urgency level 1 of 3",
+       "urgency level 2 of 3",
+       "urgency level 3 of 3"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "empty_state",
+   "request": {
+    "state": null,
+    "questions": {
+     "kind": {
+      "type": "choice",
+      "instructions": "What kind of work is this?",
+      "criteria": {
+       "code": "Writing code",
+       "chat": "Anything else"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "chinese",
+   "request": {
+    "state": "用户反馈在双十一零点抢购开始后，购物车结算按钮持续置灰，页面提示系统繁忙。重试十余次后仍然失败，但商品详情页可以正常打开。",
+    "questions": {
+     "分类": {
+      "type": "choice",
+      "instructions": "这个问题属于哪一类？",
+      "criteria": {
+       "前端": "页面或按钮的前端缺陷",
+       "库存": "库存或下单服务的问题",
+       "网络": "用户网络的问题"
+      }
+     },
+     "是否阻塞": {
+      "type": "noul",
+      "instructions": "这个问题是否阻塞用户下单？"
+     },
+     "严重度": {
+      "type": "score",
+      "instructions": "给问题严重程度打分。",
+      "criteria": [
+       "轻微",
+       "一般",
+       "较重",
+       "严重",
+       "紧急"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "choice_255",
+   "request": {
+    "state": "Classify an inbound ticket about a failed password reset email.",
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "Pick the routing bucket for this ticket.",
+      "criteria": {
+       "opt-001": "routing bucket number 1 of 255",
+       "opt-002": "routing bucket number 2 of 255",
+       "opt-003": "routing bucket number 3 of 255",
+       "opt-004": "routing bucket number 4 of 255",
+       "opt-005": "routing bucket number 5 of 255",
+       "opt-006": "routing bucket number 6 of 255",
+       "opt-007": "routing bucket number 7 of 255",
+       "opt-008": "routing bucket number 8 of 255",
+       "opt-009": "routing bucket number 9 of 255",
+       "opt-010": "routing bucket number 10 of 255",
+       "opt-011": "routing bucket number 11 of 255",
+       "opt-012": "routing bucket number 12 of 255",
+       "opt-013": "routing bucket number 13 of 255",
+       "opt-014": "routing bucket number 14 of 255",
+       "opt-015": "routing bucket number 15 of 255",
+       "opt-016": "routing bucket number 16 of 255",
+       "opt-017": "routing bucket number 17 of 255",
+       "opt-018": "routing bucket number 18 of 255",
+       "opt-019": "routing bucket number 19 of 255",
+       "opt-020": "routing bucket number 20 of 255",
+       "opt-021": "routing bucket number 21 of 255",
+       "opt-022": "routing bucket number 22 of 255",
+       "opt-023": "routing bucket number 23 of 255",
+       "opt-024": "routing bucket number 24 of 255",
+       "opt-025": "routing bucket number 25 of 255",
+       "opt-026": "routing bucket number 26 of 255",
+       "opt-027": "routing bucket number 27 of 255",
+       "opt-028": "routing bucket number 28 of 255",
+       "opt-029": "routing bucket number 29 of 255",
+       "opt-030": "routing bucket number 30 of 255",
+       "opt-031": "routing bucket number 31 of 255",
+       "opt-032": "routing bucket number 32 of 255",
+       "opt-033": "routing bucket number 33 of 255",
+       "opt-034": "routing bucket number 34 of 255",
+       "opt-035": "routing bucket number 35 of 255",
+       "opt-036": "routing bucket number 36 of 255",
+       "opt-037": "routing bucket number 37 of 255",
+       "opt-038": "routing bucket number 38 of 255",
+       "opt-039": "routing bucket number 39 of 255",
+       "opt-040": "routing bucket number 40 of 255",
+       "opt-041": "routing bucket number 41 of 255",
+       "opt-042": "routing bucket number 42 of 255",
+       "opt-043": "routing bucket number 43 of 255",
+       "opt-044": "routing bucket number 44 of 255",
+       "opt-045": "routing bucket number 45 of 255",
+       "opt-046": "routing bucket number 46 of 255",
+       "opt-047": "routing bucket number 47 of 255",
+       "opt-048": "routing bucket number 48 of 255",
+       "opt-049": "routing bucket number 49 of 255",
+       "opt-050": "routing bucket number 50 of 255",
+       "opt-051": "routing bucket number 51 of 255",
+       "opt-052": "routing bucket number 52 of 255",
+       "opt-053": "routing bucket number 53 of 255",
+       "opt-054": "routing bucket number 54 of 255",
+       "opt-055": "routing bucket number 55 of 255",
+       "opt-056": "routing bucket number 56 of 255",
+       "opt-057": "routing bucket number 57 of 255",
+       "opt-058": "routing bucket number 58 of 255",
+       "opt-059": "routing bucket number 59 of 255",
+       "opt-060": "routing bucket number 60 of 255",
+       "opt-061": "routing bucket number 61 of 255",
+       "opt-062": "routing bucket number 62 of 255",
+       "opt-063": "routing bucket number 63 of 255",
+       "opt-064": "routing bucket number 64 of 255",
+       "opt-065": "routing bucket number 65 of 255",
+       "opt-066": "routing bucket number 66 of 255",
+       "opt-067": "routing bucket number 67 of 255",
+       "opt-068": "routing bucket number 68 of 255",
+       "opt-069": "routing bucket number 69 of 255",
+       "opt-070": "routing bucket number 70 of 255",
+       "opt-071": "routing bucket number 71 of 255",
+       "opt-072": "routing bucket number 72 of 255",
+       "opt-073": "routing bucket number 73 of 255",
+       "opt-074": "routing bucket number 74 of 255",
+       "opt-075": "routing bucket number 75 of 255",
+       "opt-076": "routing bucket number 76 of 255",
+       "opt-077": "routing bucket number 77 of 255",
+       "opt-078": "routing bucket number 78 of 255",
+       "opt-079": "routing bucket number 79 of 255",
+       "opt-080": "routing bucket number 80 of 255",
+       "opt-081": "routing bucket number 81 of 255",
+       "opt-082": "routing bucket number 82 of 255",
+       "opt-083": "routing bucket number 83 of 255",
+       "opt-084": "routing bucket number 84 of 255",
+       "opt-085": "routing bucket number 85 of 255",
+       "opt-086": "routing bucket number 86 of 255",
+       "opt-087": "routing bucket number 87 of 255",
+       "opt-088": "routing bucket number 88 of 255",
+       "opt-089": "routing bucket number 89 of 255",
+       "opt-090": "routing bucket number 90 of 255",
+       "opt-091": "routing bucket number 91 of 255",
+       "opt-092": "routing bucket number 92 of 255",
+       "opt-093": "routing bucket number 93 of 255",
+       "opt-094": "routing bucket number 94 of 255",
+       "opt-095": "routing bucket number 95 of 255",
+       "opt-096": "routing bucket number 96 of 255",
+       "opt-097": "routing bucket number 97 of 255",
+       "opt-098": "routing bucket number 98 of 255",
+       "opt-099": "routing bucket number 99 of 255",
+       "opt-100": "routing bucket number 100 of 255",
+       "opt-101": "routing bucket number 101 of 255",
+       "opt-102": "routing bucket number 102 of 255",
+       "opt-103": "routing bucket number 103 of 255",
+       "opt-104": "routing bucket number 104 of 255",
+       "opt-105": "routing bucket number 105 of 255",
+       "opt-106": "routing bucket number 106 of 255",
+       "opt-107": "routing bucket number 107 of 255",
+       "opt-108": "routing bucket number 108 of 255",
+       "opt-109": "routing bucket number 109 of 255",
+       "opt-110": "routing bucket number 110 of 255",
+       "opt-111": "routing bucket number 111 of 255",
+       "opt-112": "routing bucket number 112 of 255",
+       "opt-113": "routing bucket number 113 of 255",
+       "opt-114": "routing bucket number 114 of 255",
+       "opt-115": "routing bucket number 115 of 255",
+       "opt-116": "routing bucket number 116 of 255",
+       "opt-117": "routing bucket number 117 of 255",
+       "opt-118": "routing bucket number 118 of 255",
+       "opt-119": "routing bucket number 119 of 255",
+       "opt-120": "routing bucket number 120 of 255",
+       "opt-121": "routing bucket number 121 of 255",
+       "opt-122": "routing bucket number 122 of 255",
+       "opt-123": "routing bucket number 123 of 255",
+       "opt-124": "routing bucket number 124 of 255",
+       "opt-125": "routing bucket number 125 of 255",
+       "opt-126": "routing bucket number 126 of 255",
+       "opt-127": "routing bucket number 127 of 255",
+       "opt-128": "routing bucket number 128 of 255",
+       "opt-129": "routing bucket number 129 of 255",
+       "opt-130": "routing bucket number 130 of 255",
+       "opt-131": "routing bucket number 131 of 255",
+       "opt-132": "routing bucket number 132 of 255",
+       "opt-133": "routing bucket number 133 of 255",
+       "opt-134": "routing bucket number 134 of 255",
+       "opt-135": "routing bucket number 135 of 255",
+       "opt-136": "routing bucket number 136 of 255",
+       "opt-137": "routing bucket number 137 of 255",
+       "opt-138": "routing bucket number 138 of 255",
+       "opt-139": "routing bucket number 139 of 255",
+       "opt-140": "routing bucket number 140 of 255",
+       "opt-141": "routing bucket number 141 of 255",
+       "opt-142": "routing bucket number 142 of 255",
+       "opt-143": "routing bucket number 143 of 255",
+       "opt-144": "routing bucket number 144 of 255",
+       "opt-145": "routing bucket number 145 of 255",
+       "opt-146": "routing bucket number 146 of 255",
+       "opt-147": "routing bucket number 147 of 255",
+       "opt-148": "routing bucket number 148 of 255",
+       "opt-149": "routing bucket number 149 of 255",
+       "opt-150": "routing bucket number 150 of 255",
+       "opt-151": "routing bucket number 151 of 255",
+       "opt-152": "routing bucket number 152 of 255",
+       "opt-153": "routing bucket number 153 of 255",
+       "opt-154": "routing bucket number 154 of 255",
+       "opt-155": "routing bucket number 155 of 255",
+       "opt-156": "routing bucket number 156 of 255",
+       "opt-157": "routing bucket number 157 of 255",
+       "opt-158": "routing bucket number 158 of 255",
+       "opt-159": "routing bucket number 159 of 255",
+       "opt-160": "routing bucket number 160 of 255",
+       "opt-161": "routing bucket number 161 of 255",
+       "opt-162": "routing bucket number 162 of 255",
+       "opt-163": "routing bucket number 163 of 255",
+       "opt-164": "routing bucket number 164 of 255",
+       "opt-165": "routing bucket number 165 of 255",
+       "opt-166": "routing bucket number 166 of 255",
+       "opt-167": "routing bucket number 167 of 255",
+       "opt-168": "routing bucket number 168 of 255",
+       "opt-169": "routing bucket number 169 of 255",
+       "opt-170": "routing bucket number 170 of 255",
+       "opt-171": "routing bucket number 171 of 255",
+       "opt-172": "routing bucket number 172 of 255",
+       "opt-173": "routing bucket number 173 of 255",
+       "opt-174": "routing bucket number 174 of 255",
+       "opt-175": "routing bucket number 175 of 255",
+       "opt-176": "routing bucket number 176 of 255",
+       "opt-177": "routing bucket number 177 of 255",
+       "opt-178": "routing bucket number 178 of 255",
+       "opt-179": "routing bucket number 179 of 255",
+       "opt-180": "routing bucket number 180 of 255",
+       "opt-181": "routing bucket number 181 of 255",
+       "opt-182": "routing bucket number 182 of 255",
+       "opt-183": "routing bucket number 183 of 255",
+       "opt-184": "routing bucket number 184 of 255",
+       "opt-185": "routing bucket number 185 of 255",
+       "opt-186": "routing bucket number 186 of 255",
+       "opt-187": "routing bucket number 187 of 255",
+       "opt-188": "routing bucket number 188 of 255",
+       "opt-189": "routing bucket number 189 of 255",
+       "opt-190": "routing bucket number 190 of 255",
+       "opt-191": "routing bucket number 191 of 255",
+       "opt-192": "routing bucket number 192 of 255",
+       "opt-193": "routing bucket number 193 of 255",
+       "opt-194": "routing bucket number 194 of 255",
+       "opt-195": "routing bucket number 195 of 255",
+       "opt-196": "routing bucket number 196 of 255",
+       "opt-197": "routing bucket number 197 of 255",
+       "opt-198": "routing bucket number 198 of 255",
+       "opt-199": "routing bucket number 199 of 255",
+       "opt-200": "routing bucket number 200 of 255",
+       "opt-201": "routing bucket number 201 of 255",
+       "opt-202": "routing bucket number 202 of 255",
+       "opt-203": "routing bucket number 203 of 255",
+       "opt-204": "routing bucket number 204 of 255",
+       "opt-205": "routing bucket number 205 of 255",
+       "opt-206": "routing bucket number 206 of 255",
+       "opt-207": "routing bucket number 207 of 255",
+       "opt-208": "routing bucket number 208 of 255",
+       "opt-209": "routing bucket number 209 of 255",
+       "opt-210": "routing bucket number 210 of 255",
+       "opt-211": "routing bucket number 211 of 255",
+       "opt-212": "routing bucket number 212 of 255",
+       "opt-213": "routing bucket number 213 of 255",
+       "opt-214": "routing bucket number 214 of 255",
+       "opt-215": "routing bucket number 215 of 255",
+       "opt-216": "routing bucket number 216 of 255",
+       "opt-217": "routing bucket number 217 of 255",
+       "opt-218": "routing bucket number 218 of 255",
+       "opt-219": "routing bucket number 219 of 255",
+       "opt-220": "routing bucket number 220 of 255",
+       "opt-221": "routing bucket number 221 of 255",
+       "opt-222": "routing bucket number 222 of 255",
+       "opt-223": "routing bucket number 223 of 255",
+       "opt-224": "routing bucket number 224 of 255",
+       "opt-225": "routing bucket number 225 of 255",
+       "opt-226": "routing bucket number 226 of 255",
+       "opt-227": "routing bucket number 227 of 255",
+       "opt-228": "routing bucket number 228 of 255",
+       "opt-229": "routing bucket number 229 of 255",
+       "opt-230": "routing bucket number 230 of 255",
+       "opt-231": "routing bucket number 231 of 255",
+       "opt-232": "routing bucket number 232 of 255",
+       "opt-233": "routing bucket number 233 of 255",
+       "opt-234": "routing bucket number 234 of 255",
+       "opt-235": "routing bucket number 235 of 255",
+       "opt-236": "routing bucket number 236 of 255",
+       "opt-237": "routing bucket number 237 of 255",
+       "opt-238": "routing bucket number 238 of 255",
+       "opt-239": "routing bucket number 239 of 255",
+       "opt-240": "routing bucket number 240 of 255",
+       "opt-241": "routing bucket number 241 of 255",
+       "opt-242": "routing bucket number 242 of 255",
+       "opt-243": "routing bucket number 243 of 255",
+       "opt-244": "routing bucket number 244 of 255",
+       "opt-245": "routing bucket number 245 of 255",
+       "opt-246": "routing bucket number 246 of 255",
+       "opt-247": "routing bucket number 247 of 255",
+       "opt-248": "routing bucket number 248 of 255",
+       "opt-249": "routing bucket number 249 of 255",
+       "opt-250": "routing bucket number 250 of 255",
+       "opt-251": "routing bucket number 251 of 255",
+       "opt-252": "routing bucket number 252 of 255",
+       "opt-253": "routing bucket number 253 of 255",
+       "opt-254": "routing bucket number 254 of 255",
+       "opt-255": "routing bucket number 255 of 255"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "choice_255_semantic",
+   "request": {
+    "state": "Support ticket from account u-88421: \"I forgot my password and now I cannot sign in. I clicked the reset link yesterday but the email never arrives, and I need to get back into my account today.\" Submitted at 09:14; account age 3 years; no password changes in the last 90 days; reset emails to the primary address are not in spam.",
+    "questions": {
+     "route": {
+      "type": "choice",
+      "instructions": "Which routing bucket should own this ticket?",
+      "criteria": {
+       "opt-000": "Cloud Storage — billing dispute on the current plan",
+       "opt-001": "Cloud Storage — refund request for a duplicate charge",
+       "opt-002": "Cloud Storage — subscription cancellation",
+       "opt-003": "Cloud Storage — plan upgrade guidance",
+       "opt-004": "Cloud Storage — plan downgrade",
+       "opt-005": "Cloud Storage — gift card redemption failure",
+       "opt-006": "Cloud Storage — promo code not applying at checkout",
+       "opt-007": "Cloud Storage — content download failure",
+       "opt-008": "Cloud Storage — cross-device sync error",
+       "opt-009": "Cloud Storage — offline mode problem",
+       "opt-010": "Cloud Storage — shared link not opening",
+       "opt-011": "Cloud Storage — storage quota exceeded",
+       "opt-012": "Cloud Storage — playback stuttering",
+       "opt-013": "Cloud Storage — SSO sign-in for enterprise accounts",
+       "opt-014": "Cloud Storage — merging two accounts",
+       "opt-015": "Cloud Storage — exporting personal data",
+       "opt-016": "Cloud Storage — privacy settings walkthrough",
+       "opt-017": "Cloud Storage — notification overload",
+       "opt-018": "Cloud Storage — dark mode rendering bug",
+       "opt-019": "Cloud Storage — mobile app crash on launch",
+       "opt-020": "Cloud Storage — web dashboard slowness",
+       "opt-021": "Cloud Storage — API rate limit increase",
+       "opt-022": "Cloud Storage — webhook delivery failures",
+       "opt-023": "Cloud Storage — two-factor setup for teams",
+       "opt-024": "Cloud Storage — accessibility features (screen reader)",
+       "opt-025": "Email Service — billing dispute on the current plan",
+       "opt-026": "Email Service — refund request for a duplicate charge",
+       "opt-027": "Email Service — subscription cancellation",
+       "opt-028": "Email Service — plan upgrade guidance",
+       "opt-029": "Email Service — plan downgrade",
+       "opt-030": "Email Service — gift card redemption failure",
+       "opt-031": "Email Service — promo code not applying at checkout",
+       "opt-032": "Email Service — content download failure",
+       "opt-033": "Email Service — cross-device sync error",
+       "opt-034": "Email Service — offline mode problem",
+       "opt-035": "Email Service — shared link not opening",
+       "opt-036": "Email Service — storage quota exceeded",
+       "opt-037": "Email Service — playback stuttering",
+       "opt-038": "Email Service — SSO sign-in for enterprise accounts",
+       "opt-039": "Email Service — merging two accounts",
+       "opt-040": "Email Service — exporting personal data",
+       "opt-041": "Email Service — privacy settings walkthrough",
+       "opt-042": "Email Service — notification overload",
+       "opt-043": "Email Service — dark mode rendering bug",
+       "opt-044": "Email Service — mobile app crash on launch",
+       "opt-045": "Email Service — web dashboard slowness",
+       "opt-046": "Email Service — API rate limit increase",
+       "opt-047": "Email Service — webhook delivery failures",
+       "opt-048": "Email Service — two-factor setup for teams",
+       "opt-049": "Email Service — accessibility features (screen reader)",
+       "opt-050": "Video Streaming — billing dispute on the current plan",
+       "opt-051": "Video Streaming — refund request for a duplicate charge",
+       "opt-052": "Video Streaming — subscription cancellation",
+       "opt-053": "Video Streaming — plan upgrade guidance",
+       "opt-054": "Video Streaming — plan downgrade",
+       "opt-055": "Video Streaming — gift card redemption failure",
+       "opt-056": "Video Streaming — promo code not applying at checkout",
+       "opt-057": "Video Streaming — content download failure",
+       "opt-058": "Video Streaming — cross-device sync error",
+       "opt-059": "Video Streaming — offline mode problem",
+       "opt-060": "Video Streaming — shared link not opening",
+       "opt-061": "Video Streaming — storage quota exceeded",
+       "opt-062": "Video Streaming — playback stuttering",
+       "opt-063": "Video Streaming — SSO sign-in for enterprise accounts",
+       "opt-064": "Video Streaming — merging two accounts",
+       "opt-065": "Video Streaming — exporting personal data",
+       "opt-066": "Video Streaming — privacy settings walkthrough",
+       "opt-067": "Video Streaming — notification overload",
+       "opt-068": "Video Streaming — dark mode rendering bug",
+       "opt-069": "Video Streaming — mobile app crash on launch",
+       "opt-070": "Video Streaming — web dashboard slowness",
+       "opt-071": "Video Streaming — API rate limit increase",
+       "opt-072": "Video Streaming — webhook delivery failures",
+       "opt-073": "Video Streaming — two-factor setup for teams",
+       "opt-074": "Video Streaming — accessibility features (screen reader)",
+       "opt-075": "Music App — billing dispute on the current plan",
+       "opt-076": "Music App — refund request for a duplicate charge",
+       "opt-077": "Music App — subscription cancellation",
+       "opt-078": "Music App — plan upgrade guidance",
+       "opt-079": "Music App — plan downgrade",
+       "opt-080": "Music App — gift card redemption failure",
+       "opt-081": "Music App — promo code not applying at checkout",
+       "opt-082": "Music App — content download failure",
+       "opt-083": "Music App — cross-device sync error",
+       "opt-084": "Music App — offline mode problem",
+       "opt-085": "Music App — shared link not opening",
+       "opt-086": "Music App — storage quota exceeded",
+       "opt-087": "Music App — playback stuttering",
+       "opt-088": "Music App — SSO sign-in for enterprise accounts",
+       "opt-089": "Music App — merging two accounts",
+       "opt-090": "Music App — exporting personal data",
+       "opt-091": "Music App — privacy settings walkthrough",
+       "opt-092": "Music App — notification overload",
+       "opt-093": "Music App — dark mode rendering bug",
+       "opt-094": "Music App — mobile app crash on launch",
+       "opt-095": "Music App — web dashboard slowness",
+       "opt-096": "Music App — API rate limit increase",
+       "opt-097": "Music App — webhook delivery failures",
+       "opt-098": "Music App — two-factor setup for teams",
+       "opt-099": "Music App — accessibility features (screen reader)",
+       "opt-100": "Password reset and sign-in recovery when a user cannot log in",
+       "opt-101": "Smart Home Hub — billing dispute on the current plan",
+       "opt-102": "Smart Home Hub — refund request for a duplicate charge",
+       "opt-103": "Smart Home Hub — subscription cancellation",
+       "opt-104": "Smart Home Hub — plan upgrade guidance",
+       "opt-105": "Smart Home Hub — plan downgrade",
+       "opt-106": "Smart Home Hub — gift card redemption failure",
+       "opt-107": "Smart Home Hub — promo code not applying at checkout",
+       "opt-108": "Smart Home Hub — content download failure",
+       "opt-109": "Smart Home Hub — cross-device sync error",
+       "opt-110": "Smart Home Hub — offline mode problem",
+       "opt-111": "Smart Home Hub — shared link not opening",
+       "opt-112": "Smart Home Hub — storage quota exceeded",
+       "opt-113": "Smart Home Hub — playback stuttering",
+       "opt-114": "Smart Home Hub — SSO sign-in for enterprise accounts",
+       "opt-115": "Smart Home Hub — merging two accounts",
+       "opt-116": "Smart Home Hub — exporting personal data",
+       "opt-117": "Smart Home Hub — privacy settings walkthrough",
+       "opt-118": "Smart Home Hub — notification overload",
+       "opt-119": "Smart Home Hub — dark mode rendering bug",
+       "opt-120": "Smart Home Hub — mobile app crash on launch",
+       "opt-121": "Smart Home Hub — web dashboard slowness",
+       "opt-122": "Smart Home Hub — API rate limit increase",
+       "opt-123": "Smart Home Hub — webhook delivery failures",
+       "opt-124": "Smart Home Hub — two-factor setup for teams",
+       "opt-125": "Smart Home Hub — accessibility features (screen reader)",
+       "opt-126": "Fitness Tracker — billing dispute on the current plan",
+       "opt-127": "Fitness Tracker — refund request for a duplicate charge",
+       "opt-128": "Fitness Tracker — subscription cancellation",
+       "opt-129": "Fitness Tracker — plan upgrade guidance",
+       "opt-130": "Fitness Tracker — plan downgrade",
+       "opt-131": "Fitness Tracker — gift card redemption failure",
+       "opt-132": "Fitness Tracker — promo code not applying at checkout",
+       "opt-133": "Fitness Tracker — content download failure",
+       "opt-134": "Fitness Tracker — cross-device sync error",
+       "opt-135": "Fitness Tracker — offline mode problem",
+       "opt-136": "Fitness Tracker — shared link not opening",
+       "opt-137": "Fitness Tracker — storage quota exceeded",
+       "opt-138": "Fitness Tracker — playback stuttering",
+       "opt-139": "Fitness Tracker — SSO sign-in for enterprise accounts",
+       "opt-140": "Fitness Tracker — merging two accounts",
+       "opt-141": "Fitness Tracker — exporting personal data",
+       "opt-142": "Fitness Tracker — privacy settings walkthrough",
+       "opt-143": "Fitness Tracker — notification overload",
+       "opt-144": "Fitness Tracker — dark mode rendering bug",
+       "opt-145": "Fitness Tracker — mobile app crash on launch",
+       "opt-146": "Fitness Tracker — web dashboard slowness",
+       "opt-147": "Fitness Tracker — API rate limit increase",
+       "opt-148": "Fitness Tracker — webhook delivery failures",
+       "opt-149": "Fitness Tracker — two-factor setup for teams",
+       "opt-150": "Fitness Tracker — accessibility features (screen reader)",
+       "opt-151": "E-reader Store — billing dispute on the current plan",
+       "opt-152": "E-reader Store — refund request for a duplicate charge",
+       "opt-153": "E-reader Store — subscription cancellation",
+       "opt-154": "E-reader Store — plan upgrade guidance",
+       "opt-155": "E-reader Store — plan downgrade",
+       "opt-156": "E-reader Store — gift card redemption failure",
+       "opt-157": "E-reader Store — promo code not applying at checkout",
+       "opt-158": "E-reader Store — content download failure",
+       "opt-159": "E-reader Store — cross-device sync error",
+       "opt-160": "E-reader Store — offline mode problem",
+       "opt-161": "E-reader Store — shared link not opening",
+       "opt-162": "E-reader Store — storage quota exceeded",
+       "opt-163": "E-reader Store — playback stuttering",
+       "opt-164": "E-reader Store — SSO sign-in for enterprise accounts",
+       "opt-165": "E-reader Store — merging two accounts",
+       "opt-166": "E-reader Store — exporting personal data",
+       "opt-167": "E-reader Store — privacy settings walkthrough",
+       "opt-168": "E-reader Store — notification overload",
+       "opt-169": "E-reader Store — dark mode rendering bug",
+       "opt-170": "E-reader Store — mobile app crash on launch",
+       "opt-171": "E-reader Store — web dashboard slowness",
+       "opt-172": "E-reader Store — API rate limit increase",
+       "opt-173": "E-reader Store — webhook delivery failures",
+       "opt-174": "E-reader Store — two-factor setup for teams",
+       "opt-175": "E-reader Store — accessibility features (screen reader)",
+       "opt-176": "Team Chat — billing dispute on the current plan",
+       "opt-177": "Team Chat — refund request for a duplicate charge",
+       "opt-178": "Team Chat — subscription cancellation",
+       "opt-179": "Team Chat — plan upgrade guidance",
+       "opt-180": "Team Chat — plan downgrade",
+       "opt-181": "Team Chat — gift card redemption failure",
+       "opt-182": "Team Chat — promo code not applying at checkout",
+       "opt-183": "Team Chat — content download failure",
+       "opt-184": "Team Chat — cross-device sync error",
+       "opt-185": "Team Chat — offline mode problem",
+       "opt-186": "Team Chat — shared link not opening",
+       "opt-187": "Team Chat — storage quota exceeded",
+       "opt-188": "Team Chat — playback stuttering",
+       "opt-189": "Team Chat — SSO sign-in for enterprise accounts",
+       "opt-190": "Team Chat — merging two accounts",
+       "opt-191": "Team Chat — exporting personal data",
+       "opt-192": "Team Chat — privacy settings walkthrough",
+       "opt-193": "Team Chat — notification overload",
+       "opt-194": "Team Chat — dark mode rendering bug",
+       "opt-195": "Team Chat — mobile app crash on launch",
+       "opt-196": "Team Chat — web dashboard slowness",
+       "opt-197": "Team Chat — API rate limit increase",
+       "opt-198": "Team Chat — webhook delivery failures",
+       "opt-199": "Team Chat — two-factor setup for teams",
+       "opt-200": "Team Chat — accessibility features (screen reader)",
+       "opt-201": "Online Courses — billing dispute on the current plan",
+       "opt-202": "Online Courses — refund request for a duplicate charge",
+       "opt-203": "Online Courses — subscription cancellation",
+       "opt-204": "Online Courses — plan upgrade guidance",
+       "opt-205": "Online Courses — plan downgrade",
+       "opt-206": "Online Courses — gift card redemption failure",
+       "opt-207": "Online Courses — promo code not applying at checkout",
+       "opt-208": "Online Courses — content download failure",
+       "opt-209": "Online Courses — cross-device sync error",
+       "opt-210": "Online Courses — offline mode problem",
+       "opt-211": "Online Courses — shared link not opening",
+       "opt-212": "Online Courses — storage quota exceeded",
+       "opt-213": "Online Courses — playback stuttering",
+       "opt-214": "Online Courses — SSO sign-in for enterprise accounts",
+       "opt-215": "Online Courses — merging two accounts",
+       "opt-216": "Online Courses — exporting personal data",
+       "opt-217": "Online Courses — privacy settings walkthrough",
+       "opt-218": "Online Courses — notification overload",
+       "opt-219": "Online Courses — dark mode rendering bug",
+       "opt-220": "Online Courses — mobile app crash on launch",
+       "opt-221": "Online Courses — web dashboard slowness",
+       "opt-222": "Online Courses — API rate limit increase",
+       "opt-223": "Online Courses — webhook delivery failures",
+       "opt-224": "Online Courses — two-factor setup for teams",
+       "opt-225": "Online Courses — accessibility features (screen reader)",
+       "opt-226": "Food Delivery — billing dispute on the current plan",
+       "opt-227": "Food Delivery — refund request for a duplicate charge",
+       "opt-228": "Food Delivery — subscription cancellation",
+       "opt-229": "Food Delivery — plan upgrade guidance",
+       "opt-230": "Food Delivery — plan downgrade",
+       "opt-231": "Food Delivery — gift card redemption failure",
+       "opt-232": "Food Delivery — promo code not applying at checkout",
+       "opt-233": "Food Delivery — content download failure",
+       "opt-234": "Food Delivery — cross-device sync error",
+       "opt-235": "Food Delivery — offline mode problem",
+       "opt-236": "Food Delivery — shared link not opening",
+       "opt-237": "Food Delivery — storage quota exceeded",
+       "opt-238": "Food Delivery — playback stuttering",
+       "opt-239": "Food Delivery — SSO sign-in for enterprise accounts",
+       "opt-240": "Food Delivery — merging two accounts",
+       "opt-241": "Food Delivery — exporting personal data",
+       "opt-242": "Food Delivery — privacy settings walkthrough",
+       "opt-243": "Food Delivery — notification overload",
+       "opt-244": "Food Delivery — dark mode rendering bug",
+       "opt-245": "Food Delivery — mobile app crash on launch",
+       "opt-246": "Food Delivery — web dashboard slowness",
+       "opt-247": "Food Delivery — API rate limit increase",
+       "opt-248": "Food Delivery — webhook delivery failures",
+       "opt-249": "Food Delivery — two-factor setup for teams",
+       "opt-250": "Food Delivery — accessibility features (screen reader)",
+       "opt-251": "hardware warranty claim for a broken device",
+       "opt-252": "returning a damaged accessory",
+       "opt-253": "reporting a suspected security incident",
+       "opt-254": "general product feedback"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "score_2",
+   "request": {
+    "state": "A user asks how to export a CSV from a dashboard.",
+    "questions": {
+     "helpfulness": {
+      "type": "score",
+      "instructions": "Rate how helpful the response is.",
+      "criteria": [
+       "not helpful",
+       "helpful"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "score_10",
+   "request": {
+    "state": "A user asks how to export a CSV from a dashboard.",
+    "questions": {
+     "helpfulness": {
+      "type": "score",
+      "instructions": "Rate how helpful the response is.",
+      "criteria": [
+       "helpfulness level 0 of 9",
+       "helpfulness level 1 of 9",
+       "helpfulness level 2 of 9",
+       "helpfulness level 3 of 9",
+       "helpfulness level 4 of 9",
+       "helpfulness level 5 of 9",
+       "helpfulness level 6 of 9",
+       "helpfulness level 7 of 9",
+       "helpfulness level 8 of 9",
+       "helpfulness level 9 of 9"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "image",
+   "request": {
+    "state": "A scanned grocery receipt: Corner Market, 2026-10-19, two apples, one sourdough loaf, milk, and a box of green tea.",
+    "images": [
+     "@model:assets/example-receipt.png"
+    ],
+    "questions": {
+     "kind": {
+      "type": "choice",
+      "instructions": "What kind of image is this?",
+      "criteria": {
+       "chart": "A chart or plot",
+       "photo": "A photograph",
+       "document": "A document"
+      }
+     },
+     "is_receipt": {
+      "type": "noul",
+      "instructions": "Is this a store receipt?"
+     }
+    }
+   }
+  },
+  {
+   "name": "two_images",
+   "request": {
+    "state": "One chart banner and one scanned receipt.",
+    "images": [
+     "@model:assets/banner.png",
+     "@model:assets/example-receipt.png"
+    ],
+    "questions": {
+     "first_kind": {
+      "type": "choice",
+      "instructions": "What kind of content is the first image?",
+      "criteria": {
+       "chart": "A chart or plot",
+       "photo": "A photograph",
+       "document": "A document"
+      }
+     },
+     "count": {
+      "type": "choice",
+      "instructions": "How many images were provided?",
+      "criteria": {
+       "one": "Exactly one",
+       "two": "Exactly two"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "video",
+   "request": {
+    "state": "What happens in the clip?",
+    "videos": [
+     "@model:assets/example-video.mp4"
+    ],
+    "questions": {
+     "moving": {
+      "type": "noul",
+      "instructions": "Does something move across the scene?"
+     },
+     "setting": {
+      "type": "choice",
+      "instructions": "Where does the clip take place?",
+      "criteria": {
+       "indoors": "Inside a building",
+       "outdoors": "Outside",
+       "screen": "A screen or interface recording"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "mixed",
+   "request": {
+    "state": "A receipt image and a short clip.",
+    "images": [
+     "@model:assets/example-receipt.png"
+    ],
+    "videos": [
+     "@model:assets/example-video.mp4"
+    ],
+    "questions": {
+     "has_image": {
+      "type": "noul",
+      "instructions": "Does the request include a receipt image?"
+     },
+     "media_count": {
+      "type": "choice",
+      "instructions": "How many media items were provided?",
+      "criteria": {
+       "one": "Exactly one",
+       "two": "Exactly two",
+       "three": "Three or more"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "over_limit",
+   "state_builder": {
+    "kind": "repeat",
+    "text": "At 14:03 the checkout service error rate rose from 0.1% to 6.4%. Payment timeouts concentrated on the order-submit RPC; the p99 latency climbed from 210ms to 4.2s and the working thread pool saturated at 320 of 320 threads. The change board shows release checkout-1.8.3 deployed to 40% of pods at 13:58, adding a synchronous inventory hold call before payment capture.\n",
+    "times": 360
+   },
+   "request": {
+    "questions": {
+     "owner": {
+      "type": "choice",
+      "instructions": "Which team should take the first look?",
+      "criteria": {
+       "checkout": "The checkout service owners",
+       "sre": "Site reliability on call"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "cross_question_isolation",
+   "state": "Write a Python function that merges two sorted lists.",
+   "set_a": {
+    "a_kind": {
+     "type": "choice",
+     "instructions": "What kind of work is this?",
+     "criteria": {
+      "code": "Writing or fixing code",
+      "math": "Mathematics",
+      "chat": "Anything else"
+     }
+    },
+    "a_reasoning": {
+     "type": "noul",
+     "instructions": "Does answering this need multi-step reasoning?"
+    }
+   },
+   "set_b": {
+    "b_severity": {
+     "type": "score",
+     "instructions": "How severe is a wrong answer here?",
+     "criteria": [
+      "severity level 0 of 4",
+      "severity level 1 of 4",
+      "severity level 2 of 4",
+      "severity level 3 of 4",
+      "severity level 4 of 4"
+     ]
+    },
+    "b_extra": {
+     "type": "noul",
+     "instructions": "Is the request written in English?"
+    }
+   }
+  }
+ ]
+}

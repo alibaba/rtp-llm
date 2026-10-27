@@ -79,7 +79,8 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
 }
 
 TEST_F(MultimodalProcessorTest, testWrongMMTag) {
-    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{2, 3, 4}}, false, 10);
+    FakeMultimodalProcessor processor =
+        FakeMultimodalProcessor::createFakeMultimodalProcessor({{2, 3, 4, 5}}, false, 10);
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->input_ids                     = torch::tensor({0, 1, 2, 3, 4}, torch::kInt32);
     auto mm_inputs                       = std::vector<MultimodalInput>();
@@ -87,13 +88,100 @@ TEST_F(MultimodalProcessorTest, testWrongMMTag) {
     input->multimodal_inputs = mm_inputs;
     auto res                 = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
-    EXPECT_EQ(res.ToString(), "more than 2 sep tokens or no sep tokens for multimodal model is not supported");
+    EXPECT_EQ(res.ToString(), "more than 3 sep tokens or no sep tokens for multimodal model is not supported");
     EXPECT_EQ(res.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
 
     processor.sep_token_ids_ = {{3, 5}};
     res                      = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), false);
     EXPECT_EQ(res.ToString(), "unclosed multimodal tag pairs");
+    EXPECT_EQ(res.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+}
+
+TEST_F(MultimodalProcessorTest, testD3NestedSpansExpandLeafFeatures) {
+    // Official d3 prompt shape: the template's outer vision pair wraps the
+    // timestamped per-group pairs; only the pad runs are feature-bearing. The
+    // nested-aware 3-separator descriptors must replace exactly one leaf per
+    // feature group and keep every other token (both marker levels, the
+    // timestamps) as text.
+    FakeMultimodalProcessor processor =
+        FakeMultimodalProcessor::createFakeMultimodalProcessor({{90, 91, 81}, {90, 91, 80}}, false, 100);
+    std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
+    input->input_ids =
+        torch::tensor({1, 90, 81, 91, 5, 90, 7, 90, 80, 80, 91, 8, 90, 80, 80, 91, 91, 9}, torch::kInt32);
+    auto mm_inputs = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("6");  // image: 1 pad leaf -> 6 features
+    mm_inputs.emplace_back("2");  // video group 1: 2 pads -> 2 features
+    mm_inputs.emplace_back("2");  // video group 2
+    input->multimodal_inputs = mm_inputs;
+    auto res                 = processor.updateMultimodalFeatures(input);
+    EXPECT_EQ(res.ok(), true);
+
+    // 18 tokens - 5 leaf tokens + 10 features = 23 expanded positions.
+    EXPECT_EQ(input->input_ids.numel(), 23);
+    auto expanded = input->input_ids.data_ptr<int32_t>();
+    // Text (both marker levels and the timestamps) is preserved verbatim.
+    EXPECT_EQ(expanded[0], 1);
+    EXPECT_EQ(expanded[1], 90);
+    EXPECT_EQ(expanded[8], 91);
+    EXPECT_EQ(expanded[9], 5);
+    EXPECT_EQ(expanded[10], 90);
+    EXPECT_EQ(expanded[11], 7);
+    EXPECT_EQ(expanded[12], 90);
+    EXPECT_EQ(expanded[15], 91);
+    EXPECT_EQ(expanded[16], 8);
+    EXPECT_EQ(expanded[17], 90);
+    EXPECT_EQ(expanded[20], 91);
+    EXPECT_EQ(expanded[21], 91);
+    EXPECT_EQ(expanded[22], 9);
+
+    // Feature positions are masked as non-text; text stays 1.
+    EXPECT_TRUE(input->text_tokens_mask);
+    auto mask = input->text_tokens_mask.value().data_ptr<int32_t>();
+    for (int i = 0; i < 23; ++i) {
+        bool text = i < 2 || (8 <= i && i < 13) || (15 <= i && i < 18) || 20 <= i;
+        EXPECT_EQ(mask[i], text ? 1 : 0);
+    }
+
+    // One loc per feature group, at each group's expanded offset.
+    EXPECT_TRUE(input->mm_locs);
+    EXPECT_EQ(input->mm_locs.value().numel(), 3);
+    auto locs = input->mm_locs.value().data_ptr<int32_t>();
+    EXPECT_EQ(locs[0], 2);
+    EXPECT_EQ(locs[1], 13);
+    EXPECT_EQ(locs[2], 18);
+
+    EXPECT_TRUE(input->multimodal_features);
+    EXPECT_EQ(input->multimodal_features.value().size(), 3);
+}
+
+TEST_F(MultimodalProcessorTest, testD3NestedSpansRequireOneInputPerLeaf) {
+    FakeMultimodalProcessor processor =
+        FakeMultimodalProcessor::createFakeMultimodalProcessor({{90, 91, 80}}, false, 100);
+    std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
+    input->input_ids = torch::tensor({1, 90, 7, 90, 80, 80, 91, 8, 90, 80, 80, 91, 91, 9}, torch::kInt32);
+    auto mm_inputs   = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("2");
+    input->multimodal_inputs = mm_inputs;
+    auto res                 = processor.updateMultimodalFeatures(input);
+    EXPECT_EQ(res.ok(), false);
+    EXPECT_EQ(res.ToString(), "number of multimodal tags and multimodal input not matched, expect 2, get 1");
+    EXPECT_EQ(res.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+}
+
+TEST_F(MultimodalProcessorTest, testD3NestedSpanSyntaxErrors) {
+    // A payload run wrapping a nested pair is malformed d3 syntax, not a
+    // wrapper: it must fail loudly instead of silently binding features.
+    FakeMultimodalProcessor processor =
+        FakeMultimodalProcessor::createFakeMultimodalProcessor({{90, 91, 80}}, false, 100);
+    std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
+    input->input_ids                     = torch::tensor({90, 80, 90, 80, 91, 91}, torch::kInt32);
+    auto mm_inputs                       = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("1");
+    input->multimodal_inputs = mm_inputs;
+    auto res                 = processor.updateMultimodalFeatures(input);
+    EXPECT_EQ(res.ok(), false);
+    EXPECT_EQ(res.ToString(), "payload tokens mixed with text or nested tags inside one multimodal tag pair");
     EXPECT_EQ(res.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
 }
 

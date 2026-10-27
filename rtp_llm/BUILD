@@ -281,12 +281,23 @@ py_library(
 )
 
 py_library(
+    # models/__init__.py imports rtp_llm.model_factory_register eagerly, so
+    # every :models consumer needs this module in runfiles. Existing consumers
+    # only worked because :testlib pulls :sdk transitively; minimal consumers
+    # (e.g. frontend d3 tests) hit ModuleNotFoundError without this dep.
+    name = "model_factory_register",
+    srcs = ["model_factory_register.py"],
+    deps = [":utils"],
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
         "models/**/*.py",
     ], exclude=["models/test/*.py"]),
     deps = [
+        ":model_factory_register",
         ":sentencepiece",
         ":sentence-transformers",
         ":transformers",

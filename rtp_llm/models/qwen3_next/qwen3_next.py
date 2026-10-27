@@ -6,6 +6,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig, ssm_state_dtype_str_to_data_type
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.models.downstream_modules.d3_config import load_d3_config
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.mrope_utils import apply_mrope_section
 from rtp_llm.models.qwen3_next.qwen3_next_weight import (
@@ -330,11 +331,51 @@ class Qwen35Dense(Qwen35Moe):
     def _parse_moe_config(cls, config_json: Dict[str, Any], config: ModelConfig):
         config.inter_size = config_json["intermediate_size"]
 
+    @classmethod
+    def _bind_d3_nested_multimodal_separators(cls, ckpt_path: str, config: ModelConfig):
+        """Bind the d3 nested prompt encoding: leaf-only multimodal spans.
+
+        The official d3 prompts wrap every feature-bearing leaf pair (the
+        image placeholder's single pad; each 2-frame video group's pad run)
+        inside an outer template pair whose direct content is the group
+        timestamps plus those inner pairs. The strict 2-separator form
+        rejects that nesting, so a valid d3 sidecar opts into the
+        nested-aware 3-separator descriptors: only the pad leaves become
+        multimodal spans (both the backend parser and the frontend routing
+        consume the same binding); wrappers, markers and timestamps stay
+        text. Ordinary Qwen3.5 checkpoints keep the strict 2-separator form.
+        """
+        with open(os.path.join(ckpt_path, "config.json")) as reader:
+            config_json = json.loads(reader.read())
+        vision_start = config_json["vision_start_token_id"]
+        vision_end = config_json["vision_end_token_id"]
+        config.mm_model_config.mm_sep_tokens = [
+            [vision_start, vision_end, config_json["image_token_id"]],
+            [vision_start, vision_end, config_json["video_token_id"]],
+        ]
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = super()._create_config(ckpt_path)
+        # A d3 code-readout sidecar turns the softmax-attention layers
+        # bidirectional: its full-attention layers see the whole prompt while
+        # the Gated DeltaNet layers keep their causal scan. Only the sidecar
+        # changes this; ordinary Qwen/Kev/JEV checkpoints stay causal.
+        d3_config = load_d3_config(ckpt_path)
+        if (
+            d3_config is not None
+            and d3_config.attention_mode == "noncausal_full_attention"
+        ):
+            config.attn_config.is_causal = False
+        if d3_config is not None:
+            cls._bind_d3_nested_multimodal_separators(ckpt_path, config)
+        return config
+
 
 register_model("qwen3_next", Qwen3Next, ["Qwen3NextForCausalLM"])
 register_model("qwen35_moe", Qwen35Moe, ["Qwen3_5MoeForConditionalGeneration"])
 register_model(
     "qwen35_dense",
     Qwen35Dense,
-    ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"],
+    ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM", "Qwen3_5Model"],
 )

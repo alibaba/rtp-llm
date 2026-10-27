@@ -13,6 +13,149 @@ py_test(
     legacy_create_init = 0,
 )
 
+# d3 code-readout acceptance: one test and one full-modal corpus, three thin
+# platform variants (H20 / RTX PRO 5000 / MI308X). The staged model snapshot
+# and the precision-specific official reference are supplied at run time via
+# D3_ACCEPTANCE_MODEL_PATH / D3_ACCEPTANCE_REFERENCE and are never committed;
+# the corpus fixture data/d3/corpus.json is the shared request source.
+_D3_ACCEPTANCE_DEPS = SMOKE_FRAMEWORK_DEPS + [
+    "//rtp_llm:requests",
+    "//rtp_llm:transformers",
+]
+
+py_test(
+    name = "d3_acceptance_h20",
+    srcs = ["d3_acceptance_test.py"],
+    main = "d3_acceptance_test.py",
+    data = [
+        "//rtp_llm:sdk",
+        "data/d3/corpus.json",
+    ],
+    deps = _D3_ACCEPTANCE_DEPS,
+    env = {
+        "D3_ACCEPTANCE_USE_FLYDSL": "0",
+        "GPU_COUNT": "1",
+        "PYTHONNOUSERSITE": "1",
+    },
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    tags = ["manual", "cuda13"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "d3_acceptance_pro5000",
+    srcs = ["d3_acceptance_test.py"],
+    main = "d3_acceptance_test.py",
+    data = [
+        "//rtp_llm:sdk",
+        "data/d3/corpus.json",
+    ],
+    deps = _D3_ACCEPTANCE_DEPS,
+    env = {
+        "D3_ACCEPTANCE_USE_FLYDSL": "0",
+        "GPU_COUNT": "1",
+        "PYTHONNOUSERSITE": "1",
+    },
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    tags = ["manual", "cuda13"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "d3_acceptance_mi308x",
+    srcs = ["d3_acceptance_test.py"],
+    main = "d3_acceptance_test.py",
+    data = [
+        "//rtp_llm:sdk",
+        "data/d3/corpus.json",
+    ],
+    deps = _D3_ACCEPTANCE_DEPS,
+    env = {
+        "D3_ACCEPTANCE_USE_FLYDSL": "1",
+        "GPU_COUNT": "1",
+        "PYTHONNOUSERSITE": "1",
+    },
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+    tags = ["manual", "rocm"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
+
+
+# Official reference generation: runs the staged snapshot's pinned d3_runtime
+# with the frozen official deps (transformers 5.17.0 venv supplied via
+# D3_REFERENCE_VENV) over the shared corpus; writes reference + raw outputs to
+# D3_REFERENCE_OUTPUT. GPU ownership via the canonical gpu_lock wrapper.
+py_test(
+    name = "d3_reference_gen_pro5000",
+    srcs = [
+        "d3_reference_gen_test.py",
+        "d3_acceptance_test.py",
+    ],
+    main = "d3_reference_gen_test.py",
+    data = ["data/d3/corpus.json"],
+    deps = _D3_ACCEPTANCE_DEPS,
+    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    tags = ["manual", "cuda13"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "d3_reference_gen_mi308x",
+    srcs = [
+        "d3_reference_gen_test.py",
+        "d3_acceptance_test.py",
+    ],
+    main = "d3_reference_gen_test.py",
+    data = ["data/d3/corpus.json"],
+    deps = _D3_ACCEPTANCE_DEPS,
+    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "1"},
+    tags = ["manual", "rocm"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "d3_reference_gen_h20",
+    srcs = [
+        "d3_reference_gen_test.py",
+        "d3_acceptance_test.py",
+    ],
+    main = "d3_reference_gen_test.py",
+    data = ["data/d3/corpus.json"],
+    deps = _D3_ACCEPTANCE_DEPS,
+    env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    tags = ["manual", "cuda13"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
+
+# Exact token-sequence audit: official d3_runtime.prepare vs RTP
+# D3Executor._prompt_text per question, using the actual checkpoint tokenizer.
+# CPU only (no GPU lock); text cases while the video transport fix is pending.
+py_test(
+    name = "d3_token_audit",
+    srcs = [
+        "d3_token_audit_test.py",
+        "d3_acceptance_test.py",
+    ],
+    main = "d3_token_audit_test.py",
+    data = ["data/d3/corpus.json"],
+    deps = _D3_ACCEPTANCE_DEPS + [
+        "//rtp_llm:frontend",
+    ],
+    env = {"GPU_COUNT": "0", "PYTHONNOUSERSITE": "1"},
+    tags = ["manual"],
+    timeout = "eternal",
+    legacy_create_init = 0,
+)
+
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their
 # own smoke/ children through smoke.__path__ without duplicating runner srcs.

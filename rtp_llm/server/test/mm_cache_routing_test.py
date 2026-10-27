@@ -200,6 +200,142 @@ class MMCacheRoutingTest(unittest.TestCase):
         self.assertEqual(kept, [1, 90, -1, 3, 91, 2, 90, -1, 3, 91])
         self.assertEqual(removed, [1, -1, 3, 2, -1, 3])
 
+    def test_d3_nested_leaf_spans_route_image_and_video_groups(self):
+        # The official d3 prompt nests every feature-bearing leaf pair (the
+        # image placeholder's single pad; each 2-frame video group's pad run)
+        # inside an outer template pair whose direct content is the group
+        # timestamps plus the inner pairs. The nested-aware 3-separator
+        # descriptors route exactly one leaf span per feature group; wrappers,
+        # markers and timestamps stay text tokens.
+        vs, ve, ipad, vpad = 90, 91, 81, 80
+        tokens = [
+            1,
+            vs,
+            ipad,
+            ve,
+            5,
+            vs,
+            7,
+            vs,
+            vpad,
+            vpad,
+            ve,
+            8,
+            vs,
+            vpad,
+            vpad,
+            ve,
+            ve,
+            9,
+        ]
+        separators = [[vs, ve, ipad], [vs, ve, vpad]]
+        keys = ["image", "video-group-0", "video-group-1"]
+        data = metadata(keys, [[-1, -2, -3, -4, -5, -6], [-7, -8], [-9, -10]])
+        spans = []
+        tokens_out, length = multimodal_routing_tokens(
+            tokens,
+            separators,
+            False,
+            keys,
+            data,
+            100,
+            compact=True,
+            expanded_spans=spans,
+        )
+        # One expanded span per actual feature group (image + 2 groups), at
+        # the group's offset in the expanded stream.
+        self.assertEqual(spans, [(2, 6), (13, 2), (18, 2)])
+        self.assertEqual(
+            list(tokens_out),
+            [
+                1,
+                vs,
+                -1,
+                -2,
+                -3,
+                -4,
+                -5,
+                -6,
+                ve,
+                5,
+                vs,
+                7,
+                vs,
+                -7,
+                -8,
+                ve,
+                8,
+                vs,
+                -9,
+                -10,
+                ve,
+                ve,
+                9,
+            ],
+        )
+        self.assertEqual(length, 23)
+
+    def test_d3_nested_leaf_spans_route_repeated_one_token_groups(self):
+        # A 1-token video group's leaf is itself placeholder-shaped; two
+        # videos must still route one leaf per group, in prompt order.
+        vs, ve, vpad = 90, 91, 80
+        tokens = [
+            1,
+            vs,
+            7,
+            vs,
+            vpad,
+            ve,
+            8,
+            vs,
+            vpad,
+            ve,
+            ve,
+            4,
+            vs,
+            6,
+            vs,
+            vpad,
+            vpad,
+            ve,
+            ve,
+            9,
+        ]
+        keys = ["tiny-0", "tiny-1", "long-0"]
+        data = metadata(keys, [[-1], [-2], [-3, -4]])
+        tokens_out, length = multimodal_routing_tokens(
+            tokens, [[vs, ve, vpad]], False, keys, data, 100
+        )
+        self.assertEqual(
+            tokens_out,
+            [1, vs, 7, vs, -1, ve, 8, vs, -2, ve, ve, 4, vs, 6, vs, -3, -4, ve, ve, 9],
+        )
+        self.assertEqual(length, 20)
+
+    def test_d3_nested_span_errors_reject_malformed_prompts(self):
+        vs, ve, vpad = 90, 91, 80
+        data = metadata(["k"], [[-1]])
+        cases = [
+            # payload next to text inside one pair
+            ([vs, 7, vpad, ve], [[vs, ve, vpad]]),
+            # a payload run wrapping a nested pair
+            ([vs, vpad, vs, vpad, ve, ve], [[vs, ve, vpad]]),
+            # a payload token outside every pair
+            ([1, vpad, 2], [[vs, ve, vpad]]),
+            # an end marker without a start
+            ([ve], [[vs, ve, vpad]]),
+            # an unclosed start
+            ([vs, vpad], [[vs, ve, vpad]]),
+            # the flat 2-separator form stays strict about nesting
+            ([vs, vs, ve, ve], [[vs, ve]]),
+        ]
+        for tokens, separators in cases:
+            with self.subTest(tokens=tokens):
+                with self.assertRaises(ValueError):
+                    multimodal_routing_tokens(
+                        tokens, separators, False, ["k"], data, 100
+                    )
+
     def test_missing_metadata_returns_only_safe_prefix(self):
         for data in (None, {}, {"entries": []}):
             self.assertEqual(

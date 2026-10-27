@@ -17,6 +17,22 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+# getMultimodalTokenSpans regression: the d3 nested-aware 3-separator
+# descriptors (start/end/payload leaf spans) plus the unchanged flat
+# 1/2-separator behavior. Lean target, no torch, no GPU node.
+cc_test(
+    name = "multimodal_token_spans_test",
+    srcs = [
+        "MultimodalTokenSpansTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/multimodal_processor:multimodal_token_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_test(
     name = "multimodal_processor_test",
     srcs = glob([

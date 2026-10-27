@@ -180,3 +180,14 @@ py_test(
     srcs = ["qwen3_vl_embedding_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "d3_video_group_test",
+    srcs = ["d3_video_group_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        # the transport test drives the REAL production RPC serializer
+        # (model_rpc_client.trans_input + BatchGenerateInputPB wire round trip)
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+    ],
+)

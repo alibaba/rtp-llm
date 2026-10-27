@@ -5,14 +5,16 @@ import concurrent.futures
 import contextvars
 import json
 import logging
+import math
 import re
 import threading
 import time
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 import requests
 import torch
@@ -148,6 +150,249 @@ FRAMES_PACK_URL_PREFIX = "frames-pack:base64,"
 
 def is_frames_pack_url(url: str) -> bool:
     return isinstance(url, str) and url.startswith(FRAMES_PACK_URL_PREFIX)
+
+
+D3_VIDEO_GROUP_URL_PREFIX = "frames-pack:base64,"
+
+# Envelope "version" of the d3 video-group contract. Bump on any field change.
+# v3: the group's two frames ride losslessly inside the URL. The frontend RPC
+# does not transport MultimodalInput.tensor (the python client never writes it
+# into MultimodalInputPB and the C++ restore substitutes a 1-element
+# placeholder, QueryConverter.cc), so the URL is the only channel that carries
+# the frames across the RPC; the tensor stays as an in-process fast path.
+D3_VIDEO_GROUP_VERSION = 3
+D3_VIDEO_GROUP_MODE = "d3_video_group"
+# Strict bounds the consumer re-validates (mirror of the frontend constants).
+D3_VIDEO_GROUP_MAX_GROUPS = 16
+D3_VIDEO_GROUP_FACTOR = 32
+D3_VIDEO_GROUP_PATCH = 16
+# The official producer's per-frame pixel ceiling: video_resize_dims caps every
+# frame at VIDEO_TOKENS_PER_FRAME * IMAGE_FACTOR**2 = 196 * 32 * 32 = 200,704
+# pixels (the checkpoint processor's cap_pixels_per_frame). The codec enforces
+# the same ceiling on BOTH sides so a forged envelope can never advertise
+# dimensions that imply an unbounded frames payload.
+D3_VIDEO_GROUP_MAX_FRAME_PIXELS = 196 * 32 * 32
+# video_key is the producer's sha256 content hash (64 hex chars). The bound
+# keeps every identifying field — video_key, group_index, total_groups — inside
+# the engine media cache key's first 256 encoded chars (url.substr(0, 256),
+# MultimodalInputClass.h): a longer key could push group_index outside the
+# truncated prefix and let different groups of one clip collide in the cache.
+D3_VIDEO_GROUP_MAX_KEY_CHARS = 64
+
+
+def is_d3_video_group_url(url: str) -> bool:
+    """True for a d3 video-group envelope URL (one temporal group of one clip)."""
+    if not isinstance(url, str) or not url.startswith(D3_VIDEO_GROUP_URL_PREFIX):
+        return False
+    try:
+        envelope = _decode_d3_video_group_envelope(url)
+    except ValueError:
+        return False
+    return envelope.get("mode") == D3_VIDEO_GROUP_MODE
+
+
+def _decode_d3_video_group_envelope(url: str) -> dict:
+    if not isinstance(url, str) or not url.startswith(D3_VIDEO_GROUP_URL_PREFIX):
+        raise ValueError("not a d3 video-group url")
+    body = url[len(D3_VIDEO_GROUP_URL_PREFIX) :]
+    try:
+        envelope = json.loads(base64.b64decode(body).decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"d3 video-group envelope decode failed: {e}") from e
+    if not isinstance(envelope, dict):
+        raise ValueError("d3 video-group envelope must be a JSON object")
+    return envelope
+
+
+def _validate_d3_video_group_shape(height: int, width: int) -> None:
+    """Frame-size bounds the codec enforces on encode AND parse.
+
+    Multiples of 32 (already checked by callers) with the official per-frame
+    pixel ceiling: the producer never emits larger frames, so anything beyond
+    it is a forged envelope and must be rejected BEFORE the frames payload is
+    sized, decoded or inflated.
+    """
+    if height * width > D3_VIDEO_GROUP_MAX_FRAME_PIXELS:
+        raise ValueError(
+            f"d3 video-group frame size {width}x{height} exceeds the official "
+            f"per-frame ceiling of {D3_VIDEO_GROUP_MAX_FRAME_PIXELS} pixels"
+        )
+
+
+def encode_d3_video_group_url(
+    video_key: str,
+    group_index: int,
+    total_groups: int,
+    fps: float,
+    frames_indices: Sequence[int],
+    height: int,
+    width: int,
+    tokens: int,
+    frames: bytes,
+) -> str:
+    """Encode one d3 video group (metadata + its two frames) as a URL.
+
+    Each group is an INDEPENDENT unit: the envelope carries only this group's
+    identity (which clip, which temporal group, the source fps and frame
+    indices, the resized frame size, the token count) plus this group's two
+    frames. ``frames`` are the group's raw uint8 RGB bytes in ``[2, 3, height,
+    width]`` order, exactly as the producer resized them; they are embedded
+    losslessly (zlib + base64) inside the URL because the RPC transports mm
+    inputs by URL — ``MultimodalInput.tensor`` does not cross it. The frame
+    size is bounded by the official per-frame ceiling before anything is
+    compressed or serialized.
+    """
+    if not isinstance(video_key, str) or not video_key:
+        raise ValueError("a d3 video group needs a nonempty video_key")
+    if len(video_key) > D3_VIDEO_GROUP_MAX_KEY_CHARS:
+        raise ValueError(
+            f"a d3 video group video_key is at most {D3_VIDEO_GROUP_MAX_KEY_CHARS} chars"
+        )
+    _validate_d3_video_group_shape(int(height), int(width))
+    frames = bytes(frames)
+    expected = 2 * 3 * int(height) * int(width)
+    if len(frames) != expected:
+        raise ValueError(
+            f"a d3 video group needs {expected} raw frame bytes for "
+            f"{width}x{height}, got {len(frames)}"
+        )
+    envelope = {
+        "version": D3_VIDEO_GROUP_VERSION,
+        "mode": D3_VIDEO_GROUP_MODE,
+        "video_key": str(video_key),
+        "group_index": int(group_index),
+        "total_groups": int(total_groups),
+        "fps": float(fps),
+        "frames_indices": [int(i) for i in frames_indices],
+        "height": int(height),
+        "width": int(width),
+        "tokens": int(tokens),
+        # Lossless frame payload: zlib-then-base64 keeps the bytes exact while
+        # keeping the URL (and so the RPC message and the engine media-cache
+        # key material) bounded; frames_bytes pins the size before inflating.
+        "frames_bytes": len(frames),
+        "frames": base64.b64encode(zlib.compress(frames, 6)).decode("ascii"),
+    }
+    payload = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+    return D3_VIDEO_GROUP_URL_PREFIX + base64.b64encode(payload).decode("ascii")
+
+
+def parse_d3_video_group_url(url: str) -> dict:
+    """Decode and validate a d3 video-group envelope URL; ValueError on any gap.
+
+    Returns the envelope with normalized int/float fields and the group's two
+    frames as raw uint8 bytes under ``frames``. Every bound is enforced BEFORE
+    any payload is decoded or inflated: the frame size (multiples of 32, the
+    official per-frame pixel ceiling, which caps the payload at ~1.2 MB), the
+    video_key length and the base64 payload length (a compressed stream can
+    never usefully exceed the raw frame size, so a longer one is rejected
+    without decoding it). Inflation itself is bounded: a zlib decompressor with
+    a hard output cap of the declared size + 1 byte, so a stream that expands
+    beyond it, is truncated, or carries trailing bytes is rejected without ever
+    allocating beyond the declared frames.
+    """
+    envelope = _decode_d3_video_group_envelope(url)
+    if envelope.get("version") != D3_VIDEO_GROUP_VERSION:
+        raise ValueError(
+            f"d3 video-group envelope version {envelope.get('version')!r} "
+            f"is not {D3_VIDEO_GROUP_VERSION}"
+        )
+    if envelope.get("mode") != D3_VIDEO_GROUP_MODE:
+        raise ValueError(
+            f"not a d3 video-group envelope: mode {envelope.get('mode')!r}"
+        )
+    video_key = envelope.get("video_key")
+    group_index = envelope.get("group_index")
+    total_groups = envelope.get("total_groups")
+    frames_indices = envelope.get("frames_indices")
+    height = envelope.get("height")
+    width = envelope.get("width")
+    tokens = envelope.get("tokens")
+    fps = envelope.get("fps")
+    if not isinstance(video_key, str) or not video_key:
+        raise ValueError("d3 video-group envelope needs a nonempty video_key")
+    if len(video_key) > D3_VIDEO_GROUP_MAX_KEY_CHARS:
+        raise ValueError("d3 video-group envelope video_key is too long")
+    if type(group_index) is not int or type(total_groups) is not int:
+        raise ValueError(
+            "d3 video-group envelope needs integer group_index/total_groups"
+        )
+    if (
+        not 0 <= group_index < total_groups
+        or not 1 <= total_groups <= D3_VIDEO_GROUP_MAX_GROUPS
+    ):
+        raise ValueError(
+            f"d3 video-group group_index {group_index} of {total_groups} groups is out of range"
+        )
+    if not isinstance(frames_indices, list) or len(frames_indices) != 2:
+        raise ValueError("d3 video-group envelope needs the group's two frames_indices")
+    if any(type(i) is not int or i < 0 for i in frames_indices):
+        raise ValueError("d3 video-group frames_indices must be nonnegative integers")
+    if type(height) is not int or type(width) is not int:
+        raise ValueError("d3 video-group envelope needs integer height/width")
+    if (
+        height <= 0
+        or width <= 0
+        or height % D3_VIDEO_GROUP_FACTOR
+        or width % D3_VIDEO_GROUP_FACTOR
+    ):
+        raise ValueError(
+            f"d3 video-group frame size {width}x{height} must be positive multiples of "
+            f"{D3_VIDEO_GROUP_FACTOR}"
+        )
+    _validate_d3_video_group_shape(height, width)
+    if type(tokens) is not int or tokens <= 0:
+        raise ValueError("d3 video-group envelope needs a positive token count")
+    if tokens != (height // D3_VIDEO_GROUP_FACTOR) * (width // D3_VIDEO_GROUP_FACTOR):
+        raise ValueError("d3 video-group token count disagrees with the frame size")
+    if type(fps) not in (int, float) or not math.isfinite(float(fps)) or fps <= 0:
+        raise ValueError("d3 video-group envelope needs a positive finite fps")
+    frames_bytes = envelope.get("frames_bytes")
+    frames_payload = envelope.get("frames")
+    expected_bytes = 2 * 3 * height * width
+    if type(frames_bytes) is not int or frames_bytes != expected_bytes:
+        raise ValueError(
+            "d3 video-group envelope frames_bytes must equal the raw size of "
+            f"two {width}x{height} frames ({expected_bytes})"
+        )
+    if not isinstance(frames_payload, str):
+        raise ValueError("d3 video-group envelope needs a frames payload")
+    # Bound the ENCODED payload before decoding it: a compressed stream never
+    # usefully exceeds the raw frame size (zlib adds well under 0.1% on
+    # incompressible data), so anything beyond base64 of the raw size plus
+    # slack is rejected without allocating anything.
+    max_encoded = (expected_bytes * 4 // 3) + 4096
+    if len(frames_payload) > max_encoded:
+        raise ValueError(
+            f"d3 video-group frames payload is {len(frames_payload)} chars, over the "
+            f"{max_encoded} bound for {width}x{height} frames"
+        )
+    try:
+        compressed = base64.b64decode(frames_payload, validate=True)
+    except Exception as e:
+        raise ValueError(f"d3 video-group frames payload decode failed: {e}") from e
+    # Bounded inflation: the decompressor may emit at most expected+1 bytes, so
+    # an expansion bomb, a truncated stream or trailing junk is rejected without
+    # ever allocating beyond the declared frames.
+    inflater = zlib.decompressobj()
+    try:
+        frames = inflater.decompress(compressed, expected_bytes + 1)
+    except zlib.error as e:
+        raise ValueError(f"d3 video-group frames payload decode failed: {e}") from e
+    if inflater.unconsumed_tail:
+        raise ValueError(
+            "d3 video-group frames payload expands beyond the declared frame size"
+        )
+    if not inflater.eof or inflater.unused_data:
+        raise ValueError(
+            "d3 video-group frames payload is truncated or carries trailing bytes"
+        )
+    if len(frames) != frames_bytes:
+        raise ValueError(
+            f"d3 video-group frames payload is {len(frames)} bytes, expected {frames_bytes}"
+        )
+    envelope["frames"] = frames
+    return envelope
 
 
 def encode_frames_pack_url(
