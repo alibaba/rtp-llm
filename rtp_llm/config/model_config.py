@@ -98,6 +98,7 @@ class ModelConfig(CppModelConfig):
         "vit_separation",
         "src_quantization_bit",
         "config_dtype",
+        "expert_weight_dtype",
         "template_type",
         "model_name",
         "quant_config",
@@ -258,9 +259,36 @@ class ModelConfig(CppModelConfig):
         elif quant_algo.getWeightBits() == 4:
             layer_param_bytes = 0.54
 
+        # Routed experts can be stored narrower than the model-wide
+        # quant_algo width.  DeepSeek-V4 checkpoints, for instance, keep the
+        # dense weights in FP8 block-wise (all that ``quantization_config``
+        # describes) while the routed experts are FP4 values packed two per
+        # I8 byte plus a UE8M0 group-32 scale byte per 32 values (~0.53
+        # bytes/param on disk).  Pricing those experts at the model-wide
+        # 8-bit width inflated the V4-Pro estimate to 1562GB against 893GB
+        # on disk -- the experts hold 99.3% of the parameters, so the expert
+        # slice alone accounted for the 1.81x overestimate and pushed
+        # v4_pro off the fastsafetensors load path.  Reuse the 0.54
+        # bytes/param figure of the whole-model 4-bit branch above: packed
+        # 4-bit weights plus group-scale overhead, with a little headroom.
+        expert_param_bytes = layer_param_bytes
+        expert_weight_dtype = (self.expert_weight_dtype or "").strip().lower()
+        if expert_weight_dtype:
+            if expert_weight_dtype in ("fp4", "int4", "nf4"):
+                expert_param_bytes = 0.54
+            elif expert_weight_dtype not in ("fp8", "int8"):
+                raise ValueError(
+                    f"expert_weight_dtype {self.expert_weight_dtype!r} is not a "
+                    "supported routed-expert storage dtype; expected 'fp4'/'int4' "
+                    "(narrow experts) or 'fp8'/'int8' (model-wide width)"
+                )
+
+        layer_param_count = self.layer_weight_param_count()
+        moe_param_count = self.moe_weight_param_count()
         model_size = (
             self.word_emb_param_count(vocab_size) * 2
-            + self.layer_weight_param_count() * layer_param_bytes
+            + max(layer_param_count - moe_param_count, 0) * layer_param_bytes
+            + moe_param_count * expert_param_bytes
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
@@ -599,6 +627,12 @@ class ModelConfig(CppModelConfig):
         )
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
+        # Storage dtype of the routed MoE experts when the checkpoint keeps
+        # them at a different width than the model-wide quant_algo (e.g.
+        # DeepSeek-V4 declares ``expert_dtype: fp4`` next to an FP8
+        # ``quantization_config``).  None keeps experts at the model-wide
+        # quant width; see eval_model_weight_size for the pricing effect.
+        self.expert_weight_dtype: Optional[str] = None
 
         # Model metadata fields (merged from function parameters)
         self.template_type: Optional[Any] = None  # TemplateType enum
