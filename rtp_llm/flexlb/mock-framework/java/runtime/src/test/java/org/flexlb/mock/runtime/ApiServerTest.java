@@ -53,7 +53,7 @@ class ApiServerTest {
 
     @Test void validatesAndDecodesSpecialTypes() throws Exception {
         for (Object output : List.of(128, Map.of("distribution", "normal", "mean", 128, "stddev", 32, "min", 0, "max", 512, "seed", 42),
-                Map.of("distribution", "choice", "values", List.of(1, 2), "weights", List.of(0, 1), "seed", 42)))
+                Map.of("distribution", "uniform", "min", 1, "max", 2, "seed", 42)))
             assertEquals(200, call("probe/prepare", Map.of("output_tokens", output), "foreground", 1000).statusCode());
         assertEquals(400, call("probe/prepare", Map.of("output_tokens", Map.of("distribution", "uniform", "min", 5, "max", 1, "seed", 1)), "foreground", 1000).statusCode());
         assertEquals(200, call("probe/echo", Map.of("range", List.of("-60s", "0s")), "foreground", 1000).statusCode());

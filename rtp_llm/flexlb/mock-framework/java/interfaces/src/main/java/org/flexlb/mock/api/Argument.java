@@ -12,6 +12,4 @@ public @interface Argument {
     boolean optional() default false;
     double minimum() default Double.NaN;
     String[] ranges() default {};
-    int minItems() default 0;
-    double itemMinimum() default Double.NaN;
 }

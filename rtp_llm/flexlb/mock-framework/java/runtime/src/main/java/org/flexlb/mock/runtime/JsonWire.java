@@ -57,8 +57,6 @@ final class JsonWire {
                     var first = node.get(fields.getFirst());
                     boolean valid = switch ((String) check.get("rule")) {
                         case "ordered" -> first.decimalValue().compareTo(node.get(fields.get(1)).decimalValue()) <= 0;
-                        case "same_length" -> first.size() == node.get(fields.get(1)).size();
-                        case "positive_sum" -> { boolean any = false; for (var item : first) any |= item.doubleValue() > 0; yield any; }
                         default -> throw new IllegalArgumentException("Unknown constraint");
                     };
                     require(valid, "Constraint failed: " + check);
@@ -66,7 +64,6 @@ final class JsonWire {
             }
             case "array" -> {
                 require(node.isArray(), "Expected array");
-                require(node.size() >= ((Number) spec.getOrDefault("minItems", 0)).intValue(), "Too few items");
                 for (var child : node) validate(child, (Map<String, Object>) spec.get("items"));
             }
             case "string" -> {

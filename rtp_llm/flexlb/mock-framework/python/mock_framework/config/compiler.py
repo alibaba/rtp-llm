@@ -39,10 +39,6 @@ def _checks(value, schema, where):
         rule = check['rule']
         if rule == 'ordered':
             valid = values[0] <= values[1]
-        elif rule == 'same_length':
-            valid = len(values[0]) == len(values[1])
-        elif rule == 'positive_sum':
-            valid = any(item > 0 for item in values[0])
         else:
             raise ConfigError(f'Unknown catalog constraint: {rule}')
         if not valid:
@@ -91,8 +87,6 @@ def _value(value, schema, previous, where):
     if kind == 'array':
         if not isinstance(value, list):
             raise ConfigError(f'{where}: expected list')
-        if len(value) < schema.get('minItems', 0):
-            raise ConfigError(f'{where}: too few items')
         return [_value(v, schema['items'], previous, where) for v in value]
     if kind == 'range':
         choices = schema.get('ranges', ())

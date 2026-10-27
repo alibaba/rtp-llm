@@ -104,15 +104,6 @@ public final class InterfaceRegistry {
             if (annotation != null) {
                 if (!Double.isNaN(annotation.minimum())) spec.put("minimum", annotation.minimum());
                 if (annotation.ranges().length > 0) spec.put("ranges", List.of(annotation.ranges()));
-                if (annotation.minItems() > 0) spec.put("minItems", annotation.minItems());
-                if (!Double.isNaN(annotation.itemMinimum())) {
-                    if (!"array".equals(spec.get("type")))
-                        throw new IllegalArgumentException("itemMinimum requires an array: " + field);
-                    @SuppressWarnings("unchecked")
-                    var item = new LinkedHashMap<>((Map<String, Object>) spec.get("items"));
-                    item.put("minimum", annotation.itemMinimum());
-                    spec.put("items", item);
-                }
             }
             fields.put(field.getName(), spec);
         }

@@ -47,9 +47,9 @@ TTFT使用`client/requests/ttft`，参数为`stat: avg/max/p99`及`range`。时�
 
 `expect`支持`eq`、`count`或`gte/lte`上下界。单位为秒的接口允许`2s`这类阈值；集合引用按Java声明类型校验。Master逐实例的Engine集合可与操作回执的Engine集合引用比较，不能通过合并各Master结果掩盖不一致。compile仅编译断言，真正的比较逻辑由执行器实现。
 
-播放配置支持trace时间节奏或uniform总QPS，模式专属字段不混用。输出长度调整支持固定整数及以下分布配置，调用时实际采样、播放和优先级语义归Java Client。Client尚未接入，输出分布当前只编译与校验，不生成随机样本或启动请求。
+播放配置支持trace时间节奏或uniform总QPS，模式专属字段不混用。输出长度调整仅支持固定整数、均匀分布和正态分布，调用时实际采样、播放和优先级语义归Java Client。Client尚未接入，输出分布当前只编译与校验，不生成随机样本或启动请求。
 
-### 输出长度分布
+### 输出长度调整
 
 `input.prepare.output_tokens`可为非负整数，也可为带`distribution`的对象。类型、参数和约束在Java `OutputTokens`定义，Python读取生成清单，不维护第二份分布参数表。
 
@@ -62,15 +62,9 @@ output_tokens: {distribution: uniform, min: 64, max: 256, seed: 42}
 
 # 正态分布：mean/stddev是原始分布参数，单位为token
 output_tokens: {distribution: normal, mean: 128, stddev: 32, min: 1, max: 512, seed: 42}
-
-# 对数正态：ln(X)服从N(mu, sigma²)，不是token长度的算术均值/标准差
-output_tokens: {distribution: lognormal, mu: 4.5, sigma: 0.8, min: 1, max: 2048, seed: 42}
-
-# 离散选择：weights可省略，省略时等概率
-output_tokens: {distribution: choice, values: [64, 128, 512], weights: [1, 2, 1], seed: 42}
 ```
 
-随机形式必须提供int64的seed。token数与上下界是非负int32，min≤max；正态和对数正态先裁剪到[min,max]，再四舍五入到整数，不进行条件重采样，因此配置的mean不是裁剪后样本均值。stddev/sigma可为0，数值必须有限。离散values非空，weights如提供必须与其等长、有限、非负且至少一个为正，权重不要求加起来等于1。
+随机形式必须提供int64的seed。token数与上下界是非负int32，min≤max；正态先裁剪到[min,max]，再四舍五入到整数，不进行条件重采样，因此配置的mean不是裁剪后样本均值。stddev可为0，数值必须有限。
 
 Java Client实现时应基于seed和稳定逻辑请求身份生成每个请求的一次输出目标，不随JVM数、分片或线程调度顺序改变；同一次请求的重试保留已选目标。覆盖只影响本次输出，不改写数据集settings/observed或输入结构，采样后的实际目标随请求记录保存。此处规定采样语义，实际采样器与多JVM读取在Client批次实现。
 

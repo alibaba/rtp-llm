@@ -13,5 +13,5 @@ public @interface Checks {
         Rule rule();
         String[] fields();
     }
-    enum Rule { ordered, same_length, positive_sum }
+    enum Rule { ordered }
 }
