@@ -623,9 +623,9 @@ class TestPyFlashinferPrefillPagedAttnOpFP8(TestPyFlashinferPrefillPagedAttnOp):
             self.assertIsNone(cache)
             return fused_forward(qkv_input, cache, params)
 
-        def observed_cache_write(key, value, cache):
+        def observed_cache_write(key, value, cache, token_indptr=None):
             events.append("cache_write")
-            return cache_write(key, value, cache)
+            return cache_write(key, value, cache, token_indptr=token_indptr)
 
         def observed_cache_store(*args, **kwargs):
             events.append("cache_store")

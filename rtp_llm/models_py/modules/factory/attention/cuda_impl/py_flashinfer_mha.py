@@ -1526,7 +1526,16 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
             value = quantize_to_fp8_if_needed(value, kv_cache_dtype)
 
         if self.need_rope_kv_cache or self.use_per_token_fp8_kv_cache:
-            self.kv_cache_write_op.forward(key, value, kv_cache)
+            self.kv_cache_write_op.forward(
+                key,
+                value,
+                kv_cache,
+                token_indptr=(
+                    self.fmha_params.qo_indptr_d
+                    if self.attn_inputs.is_cuda_graph
+                    else None
+                ),
+            )
 
         fmha_inputs = self._prepare_fmha_input(query, key, value)
 

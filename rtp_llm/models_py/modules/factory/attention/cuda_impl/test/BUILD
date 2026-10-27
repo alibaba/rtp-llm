@@ -50,6 +50,11 @@ flashinfer_platforms = [
 
 flashinfer_attention_tests = [
     {
+        "name": "test_kv_cache_write_cuda_graph",
+        "main": "test_kv_cache_write_cuda_graph.py",
+        "extra_srcs": [],
+    },
+    {
         "name": "test_py_flashinfer_mha_decode",
         "main": "test_py_flashinfer_mha_decode.py",
         "extra_srcs": [
