@@ -741,8 +741,6 @@ def status_prefill_suppress_all(ctx: CaseContext):
             and batches_zero
             and final_sched == 0
             and final_batches == 0
-
-
             and master_ok
             and recovery_ok
         )
@@ -862,7 +860,6 @@ def status_status_no_respond(ctx: CaseContext):
             and all_retired
             and drained
             and final_sched == 0
-
             and master_ok
             and alive_back
             and recovery_ok
@@ -993,13 +990,7 @@ def status_version_regress(ctx: CaseContext):
             0.5,
         )
 
-        passed = (
-            alive_dropped
-            and drained
-            and final_sched == 0
-            and master_ok
-
-        )
+        passed = alive_dropped and drained and final_sched == 0 and master_ok
         return passed, (
             f"generation_retired={alive_dropped} "
             f"(alive={ops.master_alive_count('PREFILL')}), "
@@ -2112,7 +2103,8 @@ def status_zombie_fake_running(ctx: CaseContext):
 
     Observe two request lifetimes, then clear the injection and require a clean
     Master ledger. Unknown Engine work remains tracked without an invented
-    waiting deadline until authoritative status reconciles it; this case asserts request identity."""
+    waiting deadline until authoritative status reconciles it; this case asserts request identity.
+    """
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "status")

@@ -32,22 +32,31 @@ class FlexlbGrpcPayloadTest {
     @Test
     @Timeout(30)
     void serverAndForwarderAcceptTwentyMiBMessages() throws Exception {
-        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(918L)
-                .setGenerateInput(ByteString.copyFrom(new byte[20 * 1024 * 1024]))
-                .build();
+        var request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(918L)
+                        .setGenerateInput(ByteString.copyFrom(new byte[20 * 1024 * 1024]))
+                        .build();
         // A large response also exercises the production forwarder's receive limit.
         String responsePayload = "x".repeat(20 * 1024 * 1024);
-        AtomicReference<FlexlbScheduleProtocol.FlexlbScheduleRequestPB> received = new AtomicReference<>();
+        AtomicReference<FlexlbScheduleProtocol.FlexlbScheduleRequestPB> received =
+                new AtomicReference<>();
         FlexlbServiceImpl service = mock(FlexlbServiceImpl.class, CALLS_REAL_METHODS);
-        doAnswer(call -> {
-            received.set(call.getArgument(0));
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = call.getArgument(1);
-            observer.onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                    .setSuccess(true).setErrorMessage(responsePayload).build());
-            observer.onCompleted();
-            return null;
-        }).when(service).schedule(any(), any());
+        doAnswer(
+                        call -> {
+                            received.set(call.getArgument(0));
+                            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
+                                    observer = call.getArgument(1);
+                            observer.onNext(
+                                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                                            .setSuccess(true)
+                                            .setErrorMessage(responsePayload)
+                                            .build());
+                            observer.onCompleted();
+                            return null;
+                        })
+                .when(service)
+                .schedule(any(), any());
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(TestFlexlbConfigs.create());
         Environment environment = mock(Environment.class);
@@ -55,19 +64,34 @@ class FlexlbGrpcPayloadTest {
         when(environment.getProperty("server.port")).thenReturn("-2");
         NioEventLoopGroup serverGroup = new NioEventLoopGroup(1);
         NioEventLoopGroup clientGroup = new NioEventLoopGroup(1);
-        FlexlbGrpcServer server = new FlexlbGrpcServer(service, config, environment, serverGroup,
-                null, new GrpcServerTimingInterceptor(), new GrpcQosHeaderInterceptor());
+        FlexlbGrpcServer server =
+                new FlexlbGrpcServer(
+                        service,
+                        config,
+                        environment,
+                        serverGroup,
+                        null,
+                        new GrpcServerTimingInterceptor(),
+                        new GrpcQosHeaderInterceptor());
         LBStatusConsistencyService election = mock(LBStatusConsistencyService.class);
-        FlexlbGrpcForwarder forwarder = new FlexlbGrpcForwarder(election, config,
-                mock(EngineHealthReporter.class), clientGroup, Runnable::run);
+        FlexlbGrpcForwarder forwarder =
+                new FlexlbGrpcForwarder(
+                        election,
+                        config,
+                        mock(EngineHealthReporter.class),
+                        clientGroup,
+                        Runnable::run);
         try {
             server.start();
             int port = ((Server) ReflectionTestUtils.getField(server, "server")).getPort();
             when(election.getMasterHostIpPort()).thenReturn("127.0.0.1:" + (port - 2));
             when(election.getLocalHostIp()).thenReturn("127.0.0.2");
 
-            var result = forwarder.forwardScheduleToMaster(request).toCompletableFuture()
-                    .get(20, TimeUnit.SECONDS);
+            var result =
+                    forwarder
+                            .forwardScheduleToMaster(request)
+                            .toCompletableFuture()
+                            .get(20, TimeUnit.SECONDS);
 
             assertNotNull(result.response(), result.failure());
             assertTrue(result.response().getSuccess());

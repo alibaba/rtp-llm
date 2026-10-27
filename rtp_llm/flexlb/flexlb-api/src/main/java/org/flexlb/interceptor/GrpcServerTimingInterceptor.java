@@ -6,8 +6,8 @@ import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
-import org.springframework.stereotype.Component;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.springframework.stereotype.Component;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -36,6 +36,7 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
      * Accessed by {@code FlexlbServiceImpl} via {@link #get()}.
      */
     public static final Context.Key<Long> GRPC_ENTRY_TIME_KEY = Context.key("grpcEntryTime");
+
     public static final Context.Key<Long> GRPC_ENTRY_NANOS_KEY = Context.key("grpcEntryNanos");
 
     /**
@@ -53,17 +54,18 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
 
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-            ServerCall<ReqT, RespT> call, Metadata headers,
-            ServerCallHandler<ReqT, RespT> next) {
-        if (call.getMethodDescriptor().getFullMethodName()
+            ServerCall<ReqT, RespT> call, Metadata headers, ServerCallHandler<ReqT, RespT> next) {
+        if (call.getMethodDescriptor()
+                .getFullMethodName()
                 .equals(FlexlbServiceGrpc.getScheduleMethod().getFullMethodName())) {
             lastScheduleArrivalNanos.updateAndGet(previous -> System.nanoTime());
         }
         long grpcEntryTime = System.currentTimeMillis();
         long grpcEntryNanos = System.nanoTime();
-        Context ctx = Context.current()
-                .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
-                .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
+        Context ctx =
+                Context.current()
+                        .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
+                        .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
         return Contexts.interceptCall(ctx, call, headers, next);
     }
 }

@@ -7,7 +7,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlacementWaitQueueTest {
     private final PlacementAvailability availability = new PlacementAvailability();
@@ -28,7 +30,8 @@ class PlacementWaitQueueTest {
         assertEquals(List.of(backlog.getFirst()), drain(16));
         assertTrue(drain(16).isEmpty(), "an active attempt owns the domain's retry opportunity");
         queue.remove(backlog.getFirst());
-        assertEquals(List.of(backlog.get(1)), drain(16), "successful progress permits one more attempt");
+        assertEquals(
+                List.of(backlog.get(1)), drain(16), "successful progress permits one more attempt");
         queue.park(backlog.get(1), A, 0);
         assertTrue(drain(16).isEmpty(), "the confirming failure ends this capacity round");
         assertTrue(queue.isWaiting(backlog.getLast()));
@@ -194,7 +197,10 @@ class PlacementWaitQueueTest {
         queue.park(first, A, 0);
         first.future.complete(null);
         queue.capacityChanged(A);
-        assertEquals(List.of(first), drain(1), "the owner must remove completed nodes from the ordered queue");
+        assertEquals(
+                List.of(first),
+                drain(1),
+                "the owner must remove completed nodes from the ordered queue");
         assertFalse(queue.isWaiting(first));
     }
 

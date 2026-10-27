@@ -13,5 +13,4 @@ import lombok.Setter;
 public class SyncLBStatusReq {
 
     private String roleId;
-
 }

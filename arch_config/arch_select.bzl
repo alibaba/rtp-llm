@@ -10,6 +10,20 @@ load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requireme
 load("@pip_ppu_torch//:requirements.bzl", requirement_ppu = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
+# RDMA arch-selects live in the main repo's bazel package (see
+# bazel/rdma_arch_select.bzl for why) and are re-exported here for the
+# canonical @arch_config//:arch_select.bzl consumers.
+load("@rtp_llm//bazel:rdma_arch_select.bzl", _rdma_cache_store_deps = "cache_store_deps", _rdma_rdma_transport_deps = "rdma_transport_deps", _rdma_transfer_backend_deps = "transfer_backend_deps")
+
+def cache_store_deps():
+    _rdma_cache_store_deps()
+
+def rdma_transport_deps():
+    _rdma_rdma_transport_deps()
+
+def transfer_backend_deps():
+    _rdma_transfer_backend_deps()
+
 def copy_all_so():
     copy_so("@rtp_llm//:mm_rdma_exporter")
     copy_so("@rtp_llm//:th_transformer")
@@ -85,20 +99,6 @@ def requirement(names):
             }),
             visibility = ["//visibility:public"],
         )
-
-def cache_store_deps():
-    native.alias(
-        name = "cache_store_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl",
-    )
-
-def rdma_transport_deps():
-    # Open-source builds expose the same factory API but have no RDMA provider.
-    native.alias(
-        name = "rdma_transport_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/rdma_transport:rdma_transport_no_impl",
-        visibility = ["//visibility:public"],
-    )
 
 def embedding_arpc_deps():
     native.alias(
@@ -301,9 +301,3 @@ def no_block_copy_link_deps():
             "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
         ],
     })
-
-def transfer_backend_deps():
-    native.alias(
-        name = "transfer_backend_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_base_impl",
-    )

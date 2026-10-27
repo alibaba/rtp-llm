@@ -24,7 +24,11 @@ import java.util.function.BooleanSupplier;
 
 /** Exact selected route and its provisional resources, shared by both scheduling modes. */
 public final class RouteAdmission implements AutoCloseable {
-    private enum Ownership { PROVISIONAL, COMMITTED, CLOSED }
+    private enum Ownership {
+        PROVISIONAL,
+        COMMITTED,
+        CLOSED
+    }
 
     private final long requestId;
     private final Response response;
@@ -33,8 +37,8 @@ public final class RouteAdmission implements AutoCloseable {
     private WorkerEndpoint blockedEndpoint;
     private Ownership ownership = Ownership.PROVISIONAL;
 
-    private RouteAdmission(long requestId, Response response, Selection selection,
-                           DecodeBinding decodeRequest) {
+    private RouteAdmission(
+            long requestId, Response response, Selection selection, DecodeBinding decodeRequest) {
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
         this.selection = Objects.requireNonNull(selection, "selection");
@@ -65,17 +69,14 @@ public final class RouteAdmission implements AutoCloseable {
             for (SelectedRole selected : selectedRoles) {
                 ServerStatus status = selected.serverStatus();
                 if (status.getRequestId() != requestId) {
-                    throw new IllegalStateException(
-                            "selected role belongs to another request");
+                    throw new IllegalStateException("selected role belongs to another request");
                 }
                 RoleType role = status.getRole();
                 long placementVersion = selected.placementVersion();
-                WorkerEndpoint.GenerationPin pin =
-                        selected.takeGenerationPin();
+                WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin();
                 WorkerEndpoint endpoint = pin.endpoint();
                 if (role != null && role.supportsPrefill()) {
-                    if (prefillPin != null
-                            || !(endpoint instanceof PrefillEndpoint prefill)) {
+                    if (prefillPin != null || !(endpoint instanceof PrefillEndpoint prefill)) {
                         pin.close();
                         throw new IllegalStateException(
                                 "route requires one exact Prefill selection");
@@ -88,8 +89,7 @@ public final class RouteAdmission implements AutoCloseable {
                     continue;
                 }
                 if (role == RoleType.DECODE) {
-                    if (decodePin != null
-                            || !(endpoint instanceof DecodeEndpoint decode)) {
+                    if (decodePin != null || !(endpoint instanceof DecodeEndpoint decode)) {
                         pin.close();
                         throw new IllegalStateException(
                                 "route requires at most one exact Decode selection");
@@ -104,10 +104,8 @@ public final class RouteAdmission implements AutoCloseable {
                 // has been frozen.
                 pin.close();
             }
-            if (prefillPin == null || prefillEndpoint == null
-                    || prefillStatus == null) {
-                throw new IllegalStateException(
-                        "route has no Prefill endpoint generation");
+            if (prefillPin == null || prefillEndpoint == null || prefillStatus == null) {
+                throw new IllegalStateException("route has no Prefill endpoint generation");
             }
             return new RouteAdmission(
                     requestId,
@@ -124,24 +122,29 @@ public final class RouteAdmission implements AutoCloseable {
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
-            try (ownedPrefillPin; ownedDecodePin) {
+            try (ownedPrefillPin;
+                    ownedDecodePin) {
                 throw failure;
             }
         }
     }
 
-    static RouteAdmission prepare(BalanceContext context, List<SelectedRole> selections, Response response) {
+    static RouteAdmission prepare(
+            BalanceContext context, List<SelectedRole> selections, Response response) {
         return prepare(context, selections, response, DecodeBinding.capture(context));
     }
 
-    WorkerEndpoint blockedEndpoint() { return blockedEndpoint; }
+    WorkerEndpoint blockedEndpoint() {
+        return blockedEndpoint;
+    }
 
     boolean blockedEndpointChanged() {
         requireProvisional();
         if (blockedEndpoint == prefillEndpoint()) {
             return prefillPlacementVersion() != prefillEndpoint().placementVersion();
         }
-        return blockedEndpoint == decodeEndpoint() && decodeEndpoint() != null
+        return blockedEndpoint == decodeEndpoint()
+                && decodeEndpoint() != null
                 && decodePlacementVersion() != decodeEndpoint().placementVersion();
     }
 
@@ -155,8 +158,9 @@ public final class RouteAdmission implements AutoCloseable {
         }
         ScheduledRequest item = createScheduledRequest(context, future, System.currentTimeMillis());
         context.setRouteSubmittedNanos(System.nanoTime());
-        PlacementResult.Status result = lifecycle.commitRoute(item,
-                () -> prefillEndpoint().offerPinned(prefillPin(), item));
+        PlacementResult.Status result =
+                lifecycle.commitRoute(
+                        item, () -> prefillEndpoint().offerPinned(prefillPin(), item));
         return switch (result) {
             case SUCCESS -> {
                 markCommitted();
@@ -164,52 +168,96 @@ public final class RouteAdmission implements AutoCloseable {
             }
             case BLOCKED -> {
                 blockedEndpoint = prefillEndpoint();
-                yield PlacementResult.blocked(PlacementKey.exact(prefillStatus().getRole(),
-                        prefillStatus().getGroup(), prefillEndpoint().ipPort()));
+                yield PlacementResult.blocked(
+                        PlacementKey.exact(
+                                prefillStatus().getRole(),
+                                prefillStatus().getGroup(),
+                                prefillEndpoint().ipPort()));
             }
             case CLOSED -> PlacementResult.closed();
-            case REJECTED -> throw new IllegalStateException("route commit cannot reject with a response");
+            case REJECTED ->
+                    throw new IllegalStateException("route commit cannot reject with a response");
         };
     }
 
     public boolean commitQueuedRequest(RequestRegistry lifecycle, ScheduledRequest item) {
         requireProvisional();
         if (lifecycle.commitRoute(item, () -> prefillEndpoint().offerPinned(prefillPin(), item))
-                != PlacementResult.Status.SUCCESS) { return false; }
+                != PlacementResult.Status.SUCCESS) {
+            return false;
+        }
         markCommitted();
         return true;
     }
 
-    Response response() { return response; }
-    public PrefillEndpoint prefillEndpoint() { return selection.prefillEndpoint(); }
-    public DecodeEndpoint decodeEndpoint() { return decodeBinding.endpoint(); }
-    private WorkerEndpoint.GenerationPin prefillPin() { return selection.prefillPin(); }
-    private WorkerEndpoint.GenerationPin decodePin() { return selection.decodePin(); }
-    private ServerStatus prefillStatus() { return selection.prefillStatus(); }
-    private ServerStatus decodeStatus() { return decodeBinding.status(); }
-    private long prefillPlacementVersion() { return selection.prefillPlacementVersion(); }
-    private long decodePlacementVersion() { return selection.decodePlacementVersion(); }
-    public DecodeBinding decodeBinding() { return decodeBinding; }
+    Response response() {
+        return response;
+    }
+
+    public PrefillEndpoint prefillEndpoint() {
+        return selection.prefillEndpoint();
+    }
+
+    public DecodeEndpoint decodeEndpoint() {
+        return decodeBinding.endpoint();
+    }
+
+    private WorkerEndpoint.GenerationPin prefillPin() {
+        return selection.prefillPin();
+    }
+
+    private WorkerEndpoint.GenerationPin decodePin() {
+        return selection.decodePin();
+    }
+
+    private ServerStatus prefillStatus() {
+        return selection.prefillStatus();
+    }
+
+    private ServerStatus decodeStatus() {
+        return decodeBinding.status();
+    }
+
+    private long prefillPlacementVersion() {
+        return selection.prefillPlacementVersion();
+    }
+
+    private long decodePlacementVersion() {
+        return selection.decodePlacementVersion();
+    }
+
+    public DecodeBinding decodeBinding() {
+        return decodeBinding;
+    }
 
     boolean reserveDecode() {
         requireProvisional();
-        if (decodeEndpoint() == null || decodeBinding.reservation() != null) { return true; }
-        DecodeEndpoint.ReservationHandle reservation = switch (decodeBinding.mode()) {
-            case IMMEDIATE -> decodeEndpoint().reserve(
-                    decodePin(),
-                    requestId,
-                    decodeBinding.hardKvTokens(),
-                    decodeBinding.expectedKvTokens(),
-                    decodeBinding.priority());
-            case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT -> decodeEndpoint().reserve(
-                    decodePin(),
-                    requestId,
-                    decodeBinding.hardKvTokens(),
-                    decodeBinding.expectedKvTokens(),
-                    decodeBinding.priority(),
-                    decodeBinding.capacity());
-        };
-        if (reservation == null) { return false; }
+        if (decodeEndpoint() == null || decodeBinding.reservation() != null) {
+            return true;
+        }
+        DecodeEndpoint.ReservationHandle reservation =
+                switch (decodeBinding.mode()) {
+                    case IMMEDIATE ->
+                            decodeEndpoint()
+                                    .reserve(
+                                            decodePin(),
+                                            requestId,
+                                            decodeBinding.hardKvTokens(),
+                                            decodeBinding.expectedKvTokens(),
+                                            decodeBinding.priority());
+                    case WAIT_AT_PLACEMENT, PREEMPT_AT_PLACEMENT ->
+                            decodeEndpoint()
+                                    .reserve(
+                                            decodePin(),
+                                            requestId,
+                                            decodeBinding.hardKvTokens(),
+                                            decodeBinding.expectedKvTokens(),
+                                            decodeBinding.priority(),
+                                            decodeBinding.capacity());
+                };
+        if (reservation == null) {
+            return false;
+        }
         try {
             decodeBinding = decodeBinding.bind(decodeStatus(), decodeEndpoint(), reservation);
             return true;
@@ -219,11 +267,17 @@ public final class RouteAdmission implements AutoCloseable {
         }
     }
 
-    public boolean adoptDecodeReservation(DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+    public boolean adoptDecodeReservation(
+            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
         requireProvisional();
-        if (endpoint == null || endpoint != decodeEndpoint() || reservation == null || reservation.requestId() != requestId
+        if (endpoint == null
+                || endpoint != decodeEndpoint()
+                || reservation == null
+                || reservation.requestId() != requestId
                 || decodeBinding.reservation() != null) {
-            if (endpoint != null && reservation != null) { endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
+            if (endpoint != null && reservation != null) {
+                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            }
             return false;
         }
         try {
@@ -240,14 +294,23 @@ public final class RouteAdmission implements AutoCloseable {
         }
     }
 
-    public ScheduledRequest createScheduledRequest(BalanceContext context, CompletableFuture<Response> future, long enqueuedAtMs) {
+    public ScheduledRequest createScheduledRequest(
+            BalanceContext context, CompletableFuture<Response> future, long enqueuedAtMs) {
         requireProvisional();
         if (context.getRequestId() != requestId) {
             throw new IllegalArgumentException("admission cannot build another request");
         }
-        return new ScheduledRequest(context, future, response,
-                ServerStatus.copyOf(prefillStatus()), ServerStatus.copyOf(decodeStatus()),
-                prefillEndpoint(), decodeEndpoint(), decodeBinding.reservation(), enqueuedAtMs, decodeBinding);
+        return new ScheduledRequest(
+                context,
+                future,
+                response,
+                ServerStatus.copyOf(prefillStatus()),
+                ServerStatus.copyOf(decodeStatus()),
+                prefillEndpoint(),
+                decodeEndpoint(),
+                decodeBinding.reservation(),
+                enqueuedAtMs,
+                decodeBinding);
     }
 
     /** The caller has registered the same canonical request before selecting this route. */
@@ -261,20 +324,27 @@ public final class RouteAdmission implements AutoCloseable {
     PlacementResult<RouteDelivery, PlacementKey> tryCommitDirectRoute(
             BalanceContext context, RequestRegistry lifecycle) {
         requireProvisional();
-        try (AdmissionHandle handle = lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
-            if (handle == null) { return PlacementResult.closed(); }
+        try (AdmissionHandle handle =
+                lifecycle.claimAdmissionHandle(requestId, context.getFuture())) {
+            if (handle == null) {
+                return PlacementResult.closed();
+            }
             if (!reserveDecode()) {
                 return PlacementResult.blocked(decodePlacementKey());
             }
-            ScheduledRequest item = createScheduledRequest(context, context.getFuture(), context.getEnqueueTime());
+            ScheduledRequest item =
+                    createScheduledRequest(context, context.getFuture(), context.getEnqueueTime());
             CapacityBoundary.Attempt<PrefillAdmissionResources.Member> attempt =
                     PrefillAdmissionResources.prepareMember(item);
             if (!attempt.accepted()) {
                 return switch (attempt.boundary().status()) {
                     case UNAVAILABLE -> PlacementResult.blocked(decodePlacementKey());
-                    case OWNERSHIP_LOST -> PlacementResult.rejected(
-                            Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
-                    case FAILED -> throw new IllegalStateException("route admission failed", attempt.boundary().cause());
+                    case OWNERSHIP_LOST ->
+                            PlacementResult.rejected(
+                                    Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
+                    case FAILED ->
+                            throw new IllegalStateException(
+                                    "route admission failed", attempt.boundary().cause());
                 };
             }
             PrefillAdmissionResources.Member member = attempt.value();
@@ -282,39 +352,54 @@ public final class RouteAdmission implements AutoCloseable {
                 return commitImmediateRoute(lifecycle, item, member);
             } finally {
                 Throwable cleanup = PrefillAdmissionResources.rollbackMember(member, null);
-                if (cleanup != null) { PrefillAdmissionResources.throwRollbackFailure(cleanup); }
+                if (cleanup != null) {
+                    PrefillAdmissionResources.throwRollbackFailure(cleanup);
+                }
             }
         }
     }
 
     private PlacementResult<RouteDelivery, PlacementKey> commitImmediateRoute(
-            RequestRegistry lifecycle, ScheduledRequest item,
+            RequestRegistry lifecycle,
+            ScheduledRequest item,
             PrefillAdmissionResources.Member member) {
         var reservationAttempt = new PrefillReservationAttempt(item);
-        try (PrefillEndpoint.RouteCommitAdmission routeCommit = prefillEndpoint().tryBeginRouteCommitAdmission()) {
+        try (PrefillEndpoint.RouteCommitAdmission routeCommit =
+                prefillEndpoint().tryBeginRouteCommitAdmission()) {
             if (routeCommit == null) {
                 return PlacementResult.rejected(Response.error(StrategyErrorType.DISPATCH_FAILED));
             }
             try (var admission = PrefillAdmissionResources.createCommittedOwner(List.of(member))) {
                 PlacementResult.Status result = lifecycle.commitRoute(item, reservationAttempt);
                 if (result != PlacementResult.Status.SUCCESS) {
-                    return result == PlacementResult.Status.CLOSED ? PlacementResult.closed()
-                            : PlacementResult.rejected(Response.error(reservationAttempt.failure()));
+                    return result == PlacementResult.Status.CLOSED
+                            ? PlacementResult.closed()
+                            : PlacementResult.rejected(
+                                    Response.error(reservationAttempt.failure()));
                 }
-                var handoff = routeCommit.commit(List.of(item), List.of(reservationAttempt.reservation()));
+                var handoff =
+                        routeCommit.commit(
+                                List.of(item), List.of(reservationAttempt.reservation()));
                 admission.bindPrefillHandoff(handoff);
                 var claim = lifecycle.claimRouteDelivery(item, admission);
-                if (claim == null) { return PlacementResult.closed(); }
+                if (claim == null) {
+                    return PlacementResult.closed();
+                }
                 markCommitted();
-                return PlacementResult.success(new RouteDelivery(claim, handoff.precedingWork(), selection.prefillWorkMs()));
+                return PlacementResult.success(
+                        new RouteDelivery(
+                                claim, handoff.precedingWork(), selection.prefillWorkMs()));
             }
         } finally {
-            if (reservationAttempt.reservation() != null) { reservationAttempt.reservation().close(); }
+            if (reservationAttempt.reservation() != null) {
+                reservationAttempt.reservation().close();
+            }
         }
     }
 
     private PlacementKey decodePlacementKey() {
-        return PlacementKey.exact(decodeStatus().getRole(), decodeStatus().getGroup(), decodeEndpoint().ipPort());
+        return PlacementKey.exact(
+                decodeStatus().getRole(), decodeStatus().getGroup(), decodeEndpoint().ipPort());
     }
 
     /** Holds acquisition output without mixing a failed publication with capacity pressure. */
@@ -328,8 +413,9 @@ public final class RouteAdmission implements AutoCloseable {
 
         @Override
         public boolean getAsBoolean() {
-            result = prefillEndpoint().reserveUnqueuedRoute(prefillPin(), item,
-                    selection.prefillWorkMs());
+            result =
+                    prefillEndpoint()
+                            .reserveUnqueuedRoute(prefillPin(), item, selection.prefillWorkMs());
             return result.status() == PrefillState.CapacityStatus.ACQUIRED;
         }
 
@@ -338,13 +424,16 @@ public final class RouteAdmission implements AutoCloseable {
         }
 
         private StrategyErrorType failure() {
-            if (result == null) { return StrategyErrorType.REQUEST_CANCELLED; }
+            if (result == null) {
+                return StrategyErrorType.REQUEST_CANCELLED;
+            }
             return switch (result.status()) {
                 case CAPACITY_FULL -> StrategyErrorType.RESOURCE_EXHAUSTED;
                 case ENDPOINT_RETIRED -> StrategyErrorType.DISPATCH_FAILED;
                 case REQUEST_ALREADY_RESERVED, REQUEST_NOT_ACTIVE, BATCH_ID_ALREADY_RESERVED ->
                         StrategyErrorType.RESOURCE_EXHAUSTED;
-                case ACQUIRED -> throw new IllegalStateException("successful admission cannot be rejected");
+                case ACQUIRED ->
+                        throw new IllegalStateException("successful admission cannot be rejected");
             };
         }
     }
@@ -356,27 +445,40 @@ public final class RouteAdmission implements AutoCloseable {
     }
 
     private void requireProvisional() {
-        if (ownership != Ownership.PROVISIONAL) { throw new IllegalStateException("route admission already resolved"); }
+        if (ownership != Ownership.PROVISIONAL) {
+            throw new IllegalStateException("route admission already resolved");
+        }
     }
 
     @Override
     public void close() {
-        if (ownership != Ownership.PROVISIONAL) { return; }
+        if (ownership != Ownership.PROVISIONAL) {
+            return;
+        }
         ownership = Ownership.CLOSED;
         try {
-            if (decodeBinding.reservation() != null) { decodeEndpoint().release(
-                    decodeBinding.reservation(),
-                    DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK); }
+            if (decodeBinding.reservation() != null) {
+                decodeEndpoint()
+                        .release(
+                                decodeBinding.reservation(),
+                                DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            }
         } finally {
             closePins();
         }
     }
 
     private void closePins() {
-        try (var prefill = prefillPin(); var decode = decodePin()) { }
+        try (var prefill = prefillPin();
+                var decode = decodePin()) {}
     }
 
-    private record Selection(PrefillEndpoint prefillEndpoint, WorkerEndpoint.GenerationPin prefillPin,
-                             ServerStatus prefillStatus, long prefillPlacementVersion, long prefillWorkMs,
-                             WorkerEndpoint.GenerationPin decodePin, long decodePlacementVersion) { }
+    private record Selection(
+            PrefillEndpoint prefillEndpoint,
+            WorkerEndpoint.GenerationPin prefillPin,
+            ServerStatus prefillStatus,
+            long prefillPlacementVersion,
+            long prefillWorkMs,
+            WorkerEndpoint.GenerationPin decodePin,
+            long decodePlacementVersion) {}
 }

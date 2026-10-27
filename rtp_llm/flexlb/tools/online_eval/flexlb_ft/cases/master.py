@@ -374,10 +374,7 @@ def coldstart_burst(ctx: CaseContext):
         max_share = (max(dist.values()) / n_ok) if n_ok else 1.0
 
         success_rate = ok / 20 * 100.0
-        passed = (
-            ok >= 16  # >=80% success + no permanent eviction
-            and final_ok
-        )
+        passed = ok >= 16 and final_ok  # >=80% success + no permanent eviction
         return passed, (
             f"burst_ok={ok}/20 ({success_rate:.0f}%), "
             f"dead_samples={dead_samples}/{len(samples)}, final={final}, "

@@ -37,13 +37,15 @@ class MasterTargetRouterTest {
     private static final String TARGET_B = "127.0.0.1:18085";
 
     private static FlexlbServiceGrpc.FlexlbServiceBlockingStub stub() {
-        return mock(FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
+        return mock(
+                FlexlbServiceGrpc.FlexlbServiceBlockingStub.class,
                 withSettings().defaultAnswer(org.mockito.Answers.RETURNS_SELF));
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request() {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(42L).build();
+                .setRequestId(42L)
+                .build();
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB response(int code) {
@@ -57,9 +59,11 @@ class MasterTargetRouterTest {
     private static MasterTargetRouter router(
             FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA,
             FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB) {
-        return new MasterTargetRouter(List.of(TARGET_A, TARGET_B),
-                List.of(new FlexlbServiceGrpc.FlexlbServiceBlockingStub[]{stubA},
-                        new FlexlbServiceGrpc.FlexlbServiceBlockingStub[]{stubB}));
+        return new MasterTargetRouter(
+                List.of(TARGET_A, TARGET_B),
+                List.of(
+                        new FlexlbServiceGrpc.FlexlbServiceBlockingStub[] {stubA},
+                        new FlexlbServiceGrpc.FlexlbServiceBlockingStub[] {stubB}));
     }
 
     @Test
@@ -83,8 +87,7 @@ class MasterTargetRouterTest {
     void transportFailureRetriesSameRequestOnBackupAndSwitchesSticky() throws Exception {
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
-        when(stubA.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
         when(stubB.schedule(any())).thenReturn(response(200));
         MasterTargetRouter router = router(stubA, stubB);
 
@@ -105,8 +108,7 @@ class MasterTargetRouterTest {
     void stickySwitchSurvivesSubsequentRequests() throws Exception {
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
-        when(stubA.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
         when(stubB.schedule(any())).thenReturn(response(200));
         MasterTargetRouter router = router(stubA, stubB);
 
@@ -124,10 +126,8 @@ class MasterTargetRouterTest {
     void allTargetsUnavailableYieldsTransportOutcome() throws Exception {
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
-        when(stubA.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
-        when(stubB.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
+        when(stubB.schedule(any())).thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
         MasterTargetRouter router = router(stubA, stubB);
 
         MasterTargetRouter.ScheduleOutcome outcome = router.schedule(request(), 1000L);
@@ -146,8 +146,7 @@ class MasterTargetRouterTest {
     void deadlineExceededIsTerminalNoRetryNoSwitch() throws Exception {
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
-        when(stubA.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.DEADLINE_EXCEEDED));
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.DEADLINE_EXCEEDED));
         MasterTargetRouter router = router(stubA, stubB);
 
         MasterTargetRouter.ScheduleOutcome outcome = router.schedule(request(), 1000L);
@@ -184,8 +183,7 @@ class MasterTargetRouterTest {
     void otherGrpcStatusIsBusinessNoRetry() throws Exception {
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
-        when(stubA.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.INTERNAL));
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.INTERNAL));
         MasterTargetRouter router = router(stubA, stubB);
 
         MasterTargetRouter.ScheduleOutcome outcome = router.schedule(request(), 1000L);
@@ -230,10 +228,8 @@ class MasterTargetRouterTest {
         // kind is deadline.
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubA = stub();
         FlexlbServiceGrpc.FlexlbServiceBlockingStub stubB = stub();
-        when(stubA.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
-        when(stubB.schedule(any()))
-                .thenThrow(new StatusRuntimeException(Status.DEADLINE_EXCEEDED));
+        when(stubA.schedule(any())).thenThrow(new StatusRuntimeException(Status.UNAVAILABLE));
+        when(stubB.schedule(any())).thenThrow(new StatusRuntimeException(Status.DEADLINE_EXCEEDED));
         MasterTargetRouter router = router(stubA, stubB);
 
         MasterTargetRouter.ScheduleOutcome outcome = router.schedule(request(), 1000L);
@@ -248,43 +244,53 @@ class MasterTargetRouterTest {
 
     @Test
     void classifyThrowableMapsGrpcCodes() {
-        assertEquals("transport", MasterTargetRouter.classifyThrowable(
-                new StatusRuntimeException(Status.UNAVAILABLE)));
-        assertEquals("deadline", MasterTargetRouter.classifyThrowable(
-                new StatusRuntimeException(Status.DEADLINE_EXCEEDED)));
-        assertEquals("business", MasterTargetRouter.classifyThrowable(
-                new StatusRuntimeException(Status.INTERNAL)));
-        assertEquals("business", MasterTargetRouter.classifyThrowable(
-                new RuntimeException("non-grpc")));
+        assertEquals(
+                "transport",
+                MasterTargetRouter.classifyThrowable(
+                        new StatusRuntimeException(Status.UNAVAILABLE)));
+        assertEquals(
+                "deadline",
+                MasterTargetRouter.classifyThrowable(
+                        new StatusRuntimeException(Status.DEADLINE_EXCEEDED)));
+        assertEquals(
+                "business",
+                MasterTargetRouter.classifyThrowable(new StatusRuntimeException(Status.INTERNAL)));
+        assertEquals(
+                "business", MasterTargetRouter.classifyThrowable(new RuntimeException("non-grpc")));
     }
 
     // ---- GRPC_TARGETS config contract ----
 
     @Test
     void parseGrpcTargetsSplitsTrimsAndDedups() {
-        assertEquals(List.of("127.0.0.1:18082", "127.0.0.2:18085"),
-                JavaLoadClient.Config.parseGrpcTargets(
-                        " 127.0.0.1:18082 , 127.0.0.2:18085 "));
-        assertEquals(List.of("127.0.0.1:18082"),
+        assertEquals(
+                List.of("127.0.0.1:18082", "127.0.0.2:18085"),
+                JavaLoadClient.Config.parseGrpcTargets(" 127.0.0.1:18082 , 127.0.0.2:18085 "));
+        assertEquals(
+                List.of("127.0.0.1:18082"),
                 JavaLoadClient.Config.parseGrpcTargets("127.0.0.1:18082,127.0.0.1:18082"));
-        assertEquals(List.of("a:1", "b:2"),
-                JavaLoadClient.Config.parseGrpcTargets("a:1,,b:2,"));
+        assertEquals(List.of("a:1", "b:2"), JavaLoadClient.Config.parseGrpcTargets("a:1,,b:2,"));
     }
 
     @Test
     void parseGrpcTargetsFailsFastOnGarbage() {
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> JavaLoadClient.Config.parseGrpcTargets("no-port"));
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> JavaLoadClient.Config.parseGrpcTargets("host:abc"));
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> JavaLoadClient.Config.parseGrpcTargets("host:0"));
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> JavaLoadClient.Config.parseGrpcTargets("host:70000"));
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(
+                IllegalArgumentException.class,
                 () -> JavaLoadClient.Config.parseGrpcTargets(",:80"));
-        assertThrows(IllegalArgumentException.class,
-                () -> JavaLoadClient.Config.parseGrpcTargets(",,"));
+        assertThrows(
+                IllegalArgumentException.class, () -> JavaLoadClient.Config.parseGrpcTargets(",,"));
     }
 
     // ---- per-request row schema (additive fields) ----
@@ -298,19 +304,35 @@ class MasterTargetRouterTest {
         result.failover = true;
         result.errorKind = "transport";
 
-        com.fasterxml.jackson.databind.node.ObjectNode node =
-                JavaLoadClient.perRequestNode(result);
+        com.fasterxml.jackson.databind.node.ObjectNode node = JavaLoadClient.perRequestNode(result);
 
         assertEquals("failed", node.get("route_path").asText());
         assertEquals(TARGET_B, node.get("master_target").asText());
         assertTrue(node.get("failover").asBoolean());
         assertEquals("transport", node.get("error_kind").asText());
         // Additive-only: the pre-existing fields are all still present.
-        for (String key : List.of("rid", "trace_id", "request_id", "ts", "input_len",
-                "output_len", "status", "schedule_ms", "sched_done_epoch_ms", "ttft_ms",
-                "total_ms", "enqueued_by_master", "prefill", "decode", "error",
-                "route_path", "wall_clock_ts", "send_due_epoch_ms", "send_start_epoch_ms",
-                "pacing_lag_ms")) {
+        for (String key :
+                List.of(
+                        "rid",
+                        "trace_id",
+                        "request_id",
+                        "ts",
+                        "input_len",
+                        "output_len",
+                        "status",
+                        "schedule_ms",
+                        "sched_done_epoch_ms",
+                        "ttft_ms",
+                        "total_ms",
+                        "enqueued_by_master",
+                        "prefill",
+                        "decode",
+                        "error",
+                        "route_path",
+                        "wall_clock_ts",
+                        "send_due_epoch_ms",
+                        "send_start_epoch_ms",
+                        "pacing_lag_ms")) {
             assertTrue(node.has(key), "missing legacy field: " + key);
         }
     }
@@ -320,8 +342,7 @@ class MasterTargetRouterTest {
         // A synthetic row (collector timeout) never touched the router: the
         // new fields serialize with neutral defaults instead of nulls.
         JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
-        com.fasterxml.jackson.databind.node.ObjectNode node =
-                JavaLoadClient.perRequestNode(result);
+        com.fasterxml.jackson.databind.node.ObjectNode node = JavaLoadClient.perRequestNode(result);
         assertEquals("", node.get("master_target").asText());
         assertFalse(node.get("failover").asBoolean());
         assertEquals("none", node.get("error_kind").asText());

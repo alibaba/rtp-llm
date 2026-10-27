@@ -64,8 +64,7 @@ class DecodeDoneLogLineTest {
 
     private static final int BASE_PORT = 63500;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -73,11 +72,14 @@ class DecodeDoneLogLineTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(2, runnable -> {
-            Thread thread = new Thread(runnable, "decode-done-log-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        2,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "decode-done-log-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         nextPortOffset = 0;
     }
@@ -116,15 +118,16 @@ class DecodeDoneLogLineTest {
                             new LinkedBlockingQueue[rids.length];
             for (int i = 0; i < rids.length; i++) {
                 queues[i] = new LinkedBlockingQueue<>();
-                assertTrue(invokeScheduleDecodeCompletion(
-                        decode, shapeOf(model, rids[i], 10, outputLens[i]), -1, queues[i]),
+                assertTrue(
+                        invokeScheduleDecodeCompletion(
+                                decode, shapeOf(model, rids[i], 10, outputLens[i]), -1, queues[i]),
                         "request " + rids[i] + " must be admitted");
             }
             for (LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue : queues) {
-                EngineRpcService.GenerateOutputsPB frame =
-                        queue.poll(10, TimeUnit.SECONDS);
+                EngineRpcService.GenerateOutputsPB frame = queue.poll(10, TimeUnit.SECONDS);
                 assertNotNull(frame, "terminal frame must arrive within 10s");
-                assertTrue(frame.getFlattenOutput().getFinished(0),
+                assertTrue(
+                        frame.getFlattenOutput().getFinished(0),
                         "frame must be the terminal frame");
             }
         } finally {
@@ -138,7 +141,8 @@ class DecodeDoneLogLineTest {
         String capturedLog = captured.toString(StandardCharsets.UTF_8);
         assertFalse(
                 capturedLog.contains("mock_decode_done"),
-                "stdout must not carry the legacy mock_decode_done trace line, got: " + capturedLog);
+                "stdout must not carry the legacy mock_decode_done trace line, got: "
+                        + capturedLog);
 
         List<JsonNode> rows = new ArrayList<>();
         for (String line : Files.readAllLines(eventsFile, StandardCharsets.UTF_8)) {
@@ -146,18 +150,30 @@ class DecodeDoneLogLineTest {
                 rows.add(MAPPER.readTree(line));
             }
         }
-        assertEquals(3, rows.size(),
-                "exactly one decode_done event row per completed stream");
+        assertEquals(3, rows.size(), "exactly one decode_done event row per completed stream");
 
         Map<Long, JsonNode> byRid = new LinkedHashMap<>();
         for (JsonNode row : rows) {
-            assertEquals("decode_done", row.path("event").asText(),
+            assertEquals(
+                    "decode_done",
+                    row.path("event").asText(),
                     "row must carry event=decode_done: " + row);
             // Exact schema contract — keep in sync with aggregate_canvas_run.py.
-            for (String key : new String[] {
-                    "event", "rid", "engine_name", "batch_id", "engine_arrival_ms",
-                    "decode_start_ms", "decode_done_ms", "exec_ms", "batch_size",
-                    "output_len", "kv_used_tokens", "cancelled"}) {
+            for (String key :
+                    new String[] {
+                        "event",
+                        "rid",
+                        "engine_name",
+                        "batch_id",
+                        "engine_arrival_ms",
+                        "decode_start_ms",
+                        "decode_done_ms",
+                        "exec_ms",
+                        "batch_size",
+                        "output_len",
+                        "kv_used_tokens",
+                        "cancelled"
+                    }) {
                 assertTrue(row.has(key), "row must carry the key " + key + ": " + row);
             }
             byRid.put(row.get("rid").asLong(), row);
@@ -173,12 +189,21 @@ class DecodeDoneLogLineTest {
             long startMs = row.get("decode_start_ms").asLong();
             long doneMs = row.get("decode_done_ms").asLong();
             for (long stamp : new long[] {arrivalMs, startMs, doneMs}) {
-                assertTrue(stamp >= beforeMs - 1 && stamp <= afterMs + 1,
+                assertTrue(
+                        stamp >= beforeMs - 1 && stamp <= afterMs + 1,
                         "epoch-ms stamps must be wall-clock timestamps inside the test"
-                                + " window [" + beforeMs + ", " + afterMs + "], got " + stamp
-                                + " (row: " + row + ")");
+                                + " window ["
+                                + beforeMs
+                                + ", "
+                                + afterMs
+                                + "], got "
+                                + stamp
+                                + " (row: "
+                                + row
+                                + ")");
             }
-            assertTrue(arrivalMs <= startMs && startMs <= doneMs,
+            assertTrue(
+                    arrivalMs <= startMs && startMs <= doneMs,
                     "arrival <= start <= done must hold: " + row);
 
             long execMs = row.get("exec_ms").asLong();
@@ -189,16 +214,21 @@ class DecodeDoneLogLineTest {
             // strongest possible contract (decodeModel() runs sleep_scale=0.1
             // so the wall span of e.g. 2 booked 2ms steps is a few ms,
             // covered by the [beforeMs, afterMs] window assertions above).
-            assertEquals(doneMs - startMs, execMs,
-                    "exec_ms must be the done−start wall span: " + row);
+            assertEquals(
+                    doneMs - startMs, execMs, "exec_ms must be the done−start wall span: " + row);
 
-            assertTrue(row.get("batch_size").asInt() >= 1,
+            assertTrue(
+                    row.get("batch_size").asInt() >= 1,
                     "batch_size must count this stream at the terminal step, got "
                             + row.get("batch_size"));
 
-            assertEquals(expectedOutputLens[i], row.get("output_len").asInt(),
+            assertEquals(
+                    expectedOutputLens[i],
+                    row.get("output_len").asInt(),
                     "output_len must echo the stream's output token budget");
-            assertEquals(false, row.get("cancelled").asBoolean(),
+            assertEquals(
+                    false,
+                    row.get("cancelled").asBoolean(),
                     "normal completion must log cancelled=false");
         }
     }
@@ -208,22 +238,33 @@ class DecodeDoneLogLineTest {
     private JavaMockEngineCluster.FastRpcService newDecodeService(
             MockPerformanceModel model, int decodeMaxConcurrency) {
         int port = BASE_PORT + nextPortOffset++;
-        JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                "decode-done-log-" + port, "127.0.0.1", "decode",
-                EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                port, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats(), 10_000_000L, decodeMaxConcurrency);
+        JavaMockEngineCluster.FastRpcService service =
+                new JavaMockEngineCluster.FastRpcService(
+                        "decode-done-log-" + port,
+                        "127.0.0.1",
+                        "decode",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                        port,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        new JavaMockEngineCluster.ClusterStats(),
+                        10_000_000L,
+                        decodeMaxConcurrency);
         services.put(port, service);
         return service;
     }
 
     private static MockPerformanceModel.RequestShape shapeOf(
             MockPerformanceModel model, long requestId, int inputTokens, int outputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(outputTokens)
-                        .build());
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(outputTokens)
+                                        .build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -236,11 +277,12 @@ class DecodeDoneLogLineTest {
             long batchId,
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
             throws Exception {
-        Method method = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                "scheduleDecodeCompletion",
-                MockPerformanceModel.RequestShape.class,
-                long.class,
-                LinkedBlockingQueue.class);
+        Method method =
+                JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
+                        "scheduleDecodeCompletion",
+                        MockPerformanceModel.RequestShape.class,
+                        long.class,
+                        LinkedBlockingQueue.class);
         method.setAccessible(true);
         return (Boolean) method.invoke(service, shape, batchId, responseQueue);
     }

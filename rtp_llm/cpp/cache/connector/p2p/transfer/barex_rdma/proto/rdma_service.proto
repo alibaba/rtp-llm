@@ -1,0 +1,61 @@
+syntax = "proto2";
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+package rdma_transfer;
+
+enum RdmaTransferErrorCodePB {
+    RDMA_TRANSFER_NONE_ERROR       = 0;
+    RDMA_TRANSFER_UNKNOWN_ERROR    = 1;
+    RDMA_TRANSFER_RDMA_FAILED      = 2;
+    RDMA_TRANSFER_BUFFER_MISMATCH  = 3;
+    // Context waited too long for a matching recv task (deadline exceeded on receiver side)
+    RDMA_TRANSFER_CONTEXT_TIMEOUT  = 4;
+    // Matching recv task was already cancelled before the transfer RPC arrived
+    RDMA_TRANSFER_TASK_CANCELLED   = 5;
+}
+
+message RdmaNicRKey {
+    optional uint32 nicid = 1;
+    optional uint32 rkey  = 2;
+}
+
+message RdmaBlockBufferAddrInfo {
+    optional uint64 addr = 1;
+    repeated RdmaNicRKey nic_rkeys = 2;
+}
+
+// RDMA mode: memory address and rkeys for remote RDMA Read
+message RdmaBlockBufferInfo {
+    optional uint32              len       = 1;
+    optional RdmaBlockBufferAddrInfo rdma_info = 2;
+}
+
+message RdmaCacheKeyBlockBufferInfo {
+    optional int64 key = 1;
+    repeated RdmaBlockBufferInfo blocks = 2;
+}
+
+// unique_key = base_key + "_" + layer_id + "_" + remote_partition_id
+// server_rdma_ip/port: Prefill side RDMA server address for Decode to pull from
+message RdmaLayerBlockTransferRequest {
+    repeated RdmaCacheKeyBlockBufferInfo blocks           = 1;
+    optional string                      unique_key       = 2;
+    optional string                      server_rdma_ip   = 3;
+    optional uint32                      server_rdma_port = 4;
+    optional int64                       deadline_ms      = 5;
+}
+
+message RdmaLayerBlockTransferResponse {
+    optional RdmaTransferErrorCodePB error_code    = 1;
+    optional string                  error_message = 2;
+}
+
+service RdmaTransferService {
+    option (arpc.global_service_id) = 10011;
+
+    rpc transfer(RdmaLayerBlockTransferRequest) returns (RdmaLayerBlockTransferResponse) {
+        option (arpc.local_method_id) = 10012;
+    }
+}

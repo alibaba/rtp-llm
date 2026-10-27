@@ -22,15 +22,30 @@ public class GracefulLifecycleReporter {
     }
 
     public void reportHealthCheckOffline(long durationMs) {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "health_check_offline", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        TYPE_TAG,
+                        "health_check_offline",
+                        DURATION_MS_TAG,
+                        String.valueOf(durationMs)),
+                1);
     }
 
     public void reportZkNodeOffline(long durationMs) {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "zk_node_offline", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        TYPE_TAG, "zk_node_offline", DURATION_MS_TAG, String.valueOf(durationMs)),
+                1);
     }
 
     public void reportShutdownComplete(long durationMs) {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "shutdown_complete", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        TYPE_TAG, "shutdown_complete", DURATION_MS_TAG, String.valueOf(durationMs)),
+                1);
     }
 
     public void reportProcessOk() {
@@ -38,14 +53,26 @@ public class GracefulLifecycleReporter {
     }
 
     public void reportZkNodeOnline(long durationMs) {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "zk_node_online", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        TYPE_TAG, "zk_node_online", DURATION_MS_TAG, String.valueOf(durationMs)),
+                1);
     }
 
     public void reportWarmerComplete(long durationMs) {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "warmer_complete", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        TYPE_TAG, "warmer_complete", DURATION_MS_TAG, String.valueOf(durationMs)),
+                1);
     }
 
     public void reportOnlineComplete(long durationMs) {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "online_complete", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        TYPE_TAG, "online_complete", DURATION_MS_TAG, String.valueOf(durationMs)),
+                1);
     }
 }

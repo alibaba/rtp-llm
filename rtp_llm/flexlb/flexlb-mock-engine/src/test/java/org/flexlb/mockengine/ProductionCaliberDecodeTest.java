@@ -47,20 +47,23 @@ class ProductionCaliberDecodeTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63800;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
-    private final Map<Integer, JavaMockEngineCluster.FastRpcService> services = new ConcurrentHashMap<>();
+    private final Map<Integer, JavaMockEngineCluster.FastRpcService> services =
+            new ConcurrentHashMap<>();
     private int nextPortOffset;
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(8, runnable -> {
-            Thread thread = new Thread(runnable, "production-caliber-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        8,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "production-caliber-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
     }
 
     @AfterEach
@@ -96,11 +99,14 @@ class ProductionCaliberDecodeTest {
 
     @Test
     void perTokenMsIsRemovedAndFailsFast() {
-        IllegalStateException ex = assertThrows(IllegalStateException.class,
-                () -> model(Map.of("per_token_ms", 45.0)));
-        assertTrue(ex.getMessage().contains("per_token_ms is removed"),
+        IllegalStateException ex =
+                assertThrows(
+                        IllegalStateException.class, () -> model(Map.of("per_token_ms", 45.0)));
+        assertTrue(
+                ex.getMessage().contains("per_token_ms is removed"),
                 "migration hint must name per_token_ms: " + ex.getMessage());
-        assertTrue(ex.getMessage().contains("per STEP"),
+        assertTrue(
+                ex.getMessage().contains("per STEP"),
                 "migration hint must point at the per-step caliber: " + ex.getMessage());
     }
 
@@ -109,29 +115,33 @@ class ProductionCaliberDecodeTest {
         Map<String, Object> conflicting = new LinkedHashMap<>();
         conflicting.put("step_ms_by_batch", List.of(List.of(1, 5.0)));
         conflicting.put("step_base_ms", 10.0);
-        IllegalStateException ex = assertThrows(IllegalStateException.class,
-                () -> model(conflicting));
-        assertTrue(ex.getMessage().contains("mutually exclusive"),
+        IllegalStateException ex =
+                assertThrows(IllegalStateException.class, () -> model(conflicting));
+        assertTrue(
+                ex.getMessage().contains("mutually exclusive"),
                 "conflict must be explicit: " + ex.getMessage());
     }
 
     @Test
     void invalidTokensPerStepFailsFast() {
-        IllegalStateException ex = assertThrows(IllegalStateException.class,
-                () -> model(Map.of("tokens_per_step", 0.0)));
-        assertTrue(ex.getMessage().contains("tokens_per_step must be > 0"),
+        IllegalStateException ex =
+                assertThrows(
+                        IllegalStateException.class, () -> model(Map.of("tokens_per_step", 0.0)));
+        assertTrue(
+                ex.getMessage().contains("tokens_per_step must be > 0"),
                 "reason must be named: " + ex.getMessage());
     }
 
     @Test
     void explicitCoefficientsOverrideTheFitAndTheCurveBeatsTheLinearDefault() throws Exception {
-        MockPerformanceModel linear = model(Map.of("step_base_ms", 10.0, "step_per_running_ms", 1.0));
+        MockPerformanceModel linear =
+                model(Map.of("step_base_ms", 10.0, "step_per_running_ms", 1.0));
         assertEquals(15L, linear.decodeStepDelayMs(5), "10 + 1×5");
         MockPerformanceModel curve = model(Map.of("step_ms_by_batch", List.of(List.of(1, 5.0))));
         assertEquals(5L, curve.decodeStepDelayMs(1), "declared curve wins over the linear default");
         // tokens_per_step stays global across both step-latency sources.
-        MockPerformanceModel curveFold = model(Map.of(
-                "tokens_per_step", 4.0, "step_ms_by_batch", List.of(List.of(1, 5.0))));
+        MockPerformanceModel curveFold =
+                model(Map.of("tokens_per_step", 4.0, "step_ms_by_batch", List.of(List.of(1, 5.0))));
         assertEquals(3, curveFold.decodeSteps(10), "ceil(10/4)");
         assertEquals(2.6, model(Map.of()).tokensPerStep(), 1e-9);
     }
@@ -185,12 +195,19 @@ class ProductionCaliberDecodeTest {
         Map<String, Object> decode = new LinkedHashMap<>();
         decode.put("scale", 1.0);
         decode.putAll(decodeExtra);
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", decode));
+        MAPPER.writeValue(
+                performance.toFile(),
+                Map.of(
+                        "block_size",
+                        1024,
+                        "sleep_scale",
+                        1.0,
+                        "jitter_pct",
+                        0.0,
+                        "prefill",
+                        Map.of("scale", 1.0),
+                        "decode",
+                        decode));
         MockMasterConfig.writeWithPrefillExpression(master, "10");
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
@@ -204,56 +221,73 @@ class ProductionCaliberDecodeTest {
     private double drainRate(int streams, int outputLen) throws Exception {
         MockPerformanceModel model = model(Map.of());
         int port = BASE_PORT + nextPortOffset++;
-        JavaMockEngineCluster.FastRpcService decode = new JavaMockEngineCluster.FastRpcService(
-                "production-caliber-" + port, "127.0.0.1", "decode",
-                EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                // KV pool decoupled from the throughput anchors: the full-batch
-                // anchor runs 128 concurrent streams, each holding ≥1 block;
-                // a 100-block pool breaching its 5% reserve would — since
-                // decode-KV failure became request-terminal (20260903) — fail
-                // streams this anchor expects to run. Block-pool admission is
-                // covered by dedicated tests, not by these rate anchors.
-                port, services, scheduler, model, 6144,
-                new JavaMockEngineCluster.ClusterStats(),
-                10_000_000L, 128);
+        JavaMockEngineCluster.FastRpcService decode =
+                new JavaMockEngineCluster.FastRpcService(
+                        "production-caliber-" + port,
+                        "127.0.0.1",
+                        "decode",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                        // KV pool decoupled from the throughput anchors: the full-batch
+                        // anchor runs 128 concurrent streams, each holding ≥1 block;
+                        // a 100-block pool breaching its 5% reserve would — since
+                        // decode-KV failure became request-terminal (20260903) — fail
+                        // streams this anchor expects to run. Block-pool admission is
+                        // covered by dedicated tests, not by these rate anchors.
+                        port,
+                        services,
+                        scheduler,
+                        model,
+                        6144,
+                        new JavaMockEngineCluster.ClusterStats(),
+                        10_000_000L,
+                        128);
         services.put(port, decode);
 
         @SuppressWarnings("unchecked")
         LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>[] queues =
-                (LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>[]) new LinkedBlockingQueue[streams];
+                (LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>[])
+                        new LinkedBlockingQueue[streams];
         long start = System.nanoTime();
         for (int i = 0; i < streams; i++) {
             queues[i] = new LinkedBlockingQueue<>();
-            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1_000L + i, 10, outputLen), -1, queues[i]),
+            assertTrue(
+                    invokeScheduleDecodeCompletion(
+                            decode, shapeOf(model, 1_000L + i, 10, outputLen), -1, queues[i]),
                     "stream " + i + " must be admitted (cap 128)");
         }
         long tokens = (long) streams * outputLen;
         for (int i = 0; i < streams; i++) {
             EngineRpcService.GenerateOutputsPB frame = queues[i].poll(30, TimeUnit.SECONDS);
-            assertTrue(frame != null && frame.getFlattenOutput().getFinished(0),
+            assertTrue(
+                    frame != null && frame.getFlattenOutput().getFinished(0),
                     "terminal frame for stream " + i + " must arrive");
         }
         double elapsedSec = (System.nanoTime() - start) / 1e9;
         double tokPerSec = tokens / elapsedSec;
-        System.out.printf("[%d streams x %d tokens] %.0f tok/s in %.2fs%n",
+        System.out.printf(
+                "[%d streams x %d tokens] %.0f tok/s in %.2fs%n",
                 streams, outputLen, tokPerSec, elapsedSec);
         decode.checkLeakDrain(0L);
         return tokPerSec;
     }
 
     private static void assertWithinBand(double actual, double anchor, double band, String label) {
-        assertTrue(actual >= anchor * (1 - band) && actual <= anchor * (1 + band),
-                String.format("%s: %.0f tok/s outside production anchor %.0f ±%.0f%%",
+        assertTrue(
+                actual >= anchor * (1 - band) && actual <= anchor * (1 + band),
+                String.format(
+                        "%s: %.0f tok/s outside production anchor %.0f ±%.0f%%",
                         label, actual, anchor, band * 100));
     }
 
     private static MockPerformanceModel.RequestShape shapeOf(
             MockPerformanceModel model, long requestId, int inputTokens, int outputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(outputTokens)
-                        .build());
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(outputTokens)
+                                        .build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -266,11 +300,12 @@ class ProductionCaliberDecodeTest {
             long batchId,
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
             throws Exception {
-        Method method = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                "scheduleDecodeCompletion",
-                MockPerformanceModel.RequestShape.class,
-                long.class,
-                LinkedBlockingQueue.class);
+        Method method =
+                JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
+                        "scheduleDecodeCompletion",
+                        MockPerformanceModel.RequestShape.class,
+                        long.class,
+                        LinkedBlockingQueue.class);
         method.setAccessible(true);
         return (Boolean) method.invoke(service, shape, batchId, responseQueue);
     }

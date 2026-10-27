@@ -58,12 +58,15 @@ public:
 private:
     bool                                                validMatch(std::vector<TreeNode*>&            path,
                                                                    std::vector<bool>&                 candidate_valid,
-                                                                   const std::function<bool(size_t)>& valid_prefix,
-                                                                   bool                               skip_linear) const;
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
-                                                                                  size_t  matched_device_blocks,
-                                                                                  int64_t access_time_us,
-                                                                                  bool    skip_linear) const;
+    bool                 validMatch(std::vector<TreeNode*>&            path,
+                                   std::vector<bool>&                 candidate_valid,
+                                   const std::function<bool(size_t)>& valid_prefix,
+                                   bool                               skip_linear) const;
+    void                 collectReuseTimeSnapshots(TreeNode*                                            node,
+                                                   size_t                                               group_set_id,
+                                                   uint64_t                                             access_seq,
+                                                   int64_t                                              access_time_us,
+                                                   std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots);
     BlockTreeMatchResult                                createMatchResult(std::vector<TreeNode*>&            path,
                                                                           const CacheKeysType&               cache_keys,
                                                                           const std::function<bool(size_t)>& valid_prefix,

@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRequestLogger.h"
 
 namespace rtp_llm {
 
@@ -51,6 +52,8 @@ public:
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
 
 protected:
+    std::unique_ptr<PrefillRequestLogger> request_logger_;
+
     // Shared with the derived batch server (each batch slot reuses these).
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     grpc::Status finishStream(PrefillGenerateContext& prefill_context);

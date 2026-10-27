@@ -29,9 +29,7 @@ public interface EngineCancelChannel {
      * identically (the intent may still have landed; release stays gated on
      * the WorkerStatus report).
      */
-    CompletableFuture<CancelAck> cancel(CancelTarget target,
-                                        long requestId,
-                                        long timeoutMs);
+    CompletableFuture<CancelAck> cancel(CancelTarget target, long requestId, long timeoutMs);
 
     /**
      * Local delivery outcome. ACCEPTED and NOT_FOUND come from the engine
@@ -52,5 +50,4 @@ public interface EngineCancelChannel {
         /** Transport-layer failure (RPC error/timeout, or unroutable cancel). */
         FAILED
     }
-
 }

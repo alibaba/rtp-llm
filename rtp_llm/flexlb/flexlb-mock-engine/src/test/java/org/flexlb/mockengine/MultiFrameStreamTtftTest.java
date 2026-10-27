@@ -52,11 +52,11 @@ class MultiFrameStreamTtftTest {
 
     private static final int BASE_PORT = 62600;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
-    private final Map<Integer, JavaMockEngineCluster.FastRpcService> services = new ConcurrentHashMap<>();
+    private final Map<Integer, JavaMockEngineCluster.FastRpcService> services =
+            new ConcurrentHashMap<>();
     private JavaMockEngineCluster.FastRpcService prefill;
     private JavaMockEngineCluster.FastRpcService decode;
 
@@ -77,15 +77,19 @@ class MultiFrameStreamTtftTest {
         startCluster("100", 50.0);
         long requestId = 1;
 
-        EngineRpcService.EnqueueBatchResponsePB ack = enqueue(prefill,
-                batch(7000, slot(0, inputWithDecode(requestId, 10, decode.getGrpcPort()))));
+        EngineRpcService.EnqueueBatchResponsePB ack =
+                enqueue(
+                        prefill,
+                        batch(7000, slot(0, inputWithDecode(requestId, 10, decode.getGrpcPort()))));
         assertEquals(1, ack.getSuccessesCount(), "request must be admitted");
         assertEquals(0, ack.getErrorsCount());
 
         CollectedStream stream = fetch(prefill, requestId, 10_000);
 
         assertNull(stream.error.get(), "stream must not error");
-        assertEquals(2, stream.frames.size(),
+        assertEquals(
+                2,
+                stream.frames.size(),
                 "fetch_response must deliver BOTH frames, got " + stream.frames.size());
         assertFalseFrame(stream.frames.get(0), "frame 0 must be the prefill first-token frame");
         assertTrueFrame(stream.frames.get(1), "frame 1 must be the decode terminal frame");
@@ -98,11 +102,13 @@ class MultiFrameStreamTtftTest {
         startCluster("100", 50.0);
         long requestId = 2;
 
-        CollectedStream stream = generate(prefill,
-                inputWithDecode(requestId, 10, decode.getGrpcPort()), 10_000);
+        CollectedStream stream =
+                generate(prefill, inputWithDecode(requestId, 10, decode.getGrpcPort()), 10_000);
 
         assertNull(stream.error.get(), "stream must not error");
-        assertEquals(2, stream.frames.size(),
+        assertEquals(
+                2,
+                stream.frames.size(),
                 "generate_stream must deliver BOTH frames, got " + stream.frames.size());
         assertFalseFrame(stream.frames.get(0), "frame 0 must be the prefill first-token frame");
         assertTrueFrame(stream.frames.get(1), "frame 1 must be the decode terminal frame");
@@ -121,8 +127,10 @@ class MultiFrameStreamTtftTest {
         decode.setResponsePollTimeoutMs(150);
         long requestId = 3;
 
-        EngineRpcService.EnqueueBatchResponsePB ack = enqueue(prefill,
-                batch(7001, slot(0, inputWithDecode(requestId, 10, decode.getGrpcPort()))));
+        EngineRpcService.EnqueueBatchResponsePB ack =
+                enqueue(
+                        prefill,
+                        batch(7001, slot(0, inputWithDecode(requestId, 10, decode.getGrpcPort()))));
         assertEquals(1, ack.getSuccessesCount());
 
         CollectedStream stream = fetch(prefill, requestId, 10_000);
@@ -131,7 +139,9 @@ class MultiFrameStreamTtftTest {
         // own empty_response detection (zero frames + onCompleted) and its
         // terminalNanos==null fallback for truncated streams.
         assertNull(stream.error.get(), "timeout must complete the stream, not error it");
-        assertEquals(1, stream.frames.size(),
+        assertEquals(
+                1,
+                stream.frames.size(),
                 "only the first-token frame may arrive before the injected timeout");
         assertFalseFrame(stream.frames.get(0), "the delivered frame is the first-token frame");
     }
@@ -172,9 +182,13 @@ class MultiFrameStreamTtftTest {
         // Guard against scheduling noise: decode is 400 ms, so the gap must be
         // at least 100 ms — far above any timer resolution ambiguity.
         long gapMs = TimeUnit.NANOSECONDS.toMillis(e2eNanos - ttftNanos);
-        assertTrue(e2eNanos > ttftNanos,
-                "terminal frame must be strictly AFTER first-token frame (ttft < e2e), gap=" + gapMs + "ms");
-        assertTrue(gapMs >= 100,
+        assertTrue(
+                e2eNanos > ttftNanos,
+                "terminal frame must be strictly AFTER first-token frame (ttft < e2e), gap="
+                        + gapMs
+                        + "ms");
+        assertTrue(
+                gapMs >= 100,
                 "frame gap must reflect real decode execution (~400ms), got " + gapMs + "ms");
     }
 
@@ -183,41 +197,71 @@ class MultiFrameStreamTtftTest {
     private void startCluster(String prefillFormulaMs, double decodeStepMs) throws IOException {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        new com.fasterxml.jackson.databind.ObjectMapper().writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0,
-                        "tokens_per_step", 1.0,
-                        "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
+        new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValue(
+                        performance.toFile(),
+                        Map.of(
+                                "block_size",
+                                1024,
+                                "sleep_scale",
+                                1.0,
+                                "jitter_pct",
+                                0.0,
+                                "prefill",
+                                Map.of("scale", 1.0),
+                                "decode",
+                                Map.of(
+                                        "scale",
+                                        1.0,
+                                        "tokens_per_step",
+                                        1.0,
+                                        "step_ms_by_batch",
+                                        List.of(List.of(1, decodeStepMs)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillFormulaMs);
-        MockPerformanceModel model = MockPerformanceModel.load(performance.toString(), master.toString());
+        MockPerformanceModel model =
+                MockPerformanceModel.load(performance.toString(), master.toString());
 
-        prefill = new JavaMockEngineCluster.FastRpcService(
-                "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                BASE_PORT, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats());
+        prefill =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        BASE_PORT,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        new JavaMockEngineCluster.ClusterStats());
         services.put(BASE_PORT, prefill);
-        decode = new JavaMockEngineCluster.FastRpcService(
-                "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                BASE_PORT + 1, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats());
+        decode =
+                new JavaMockEngineCluster.FastRpcService(
+                        "decode",
+                        EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                        BASE_PORT + 1,
+                        services,
+                        scheduler,
+                        model,
+                        100,
+                        new JavaMockEngineCluster.ClusterStats());
         services.put(BASE_PORT + 1, decode);
     }
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
             long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(8)
-                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                                .setRoleStr("DECODE")
-                                .setGrpcPort(decodePort)
-                                .build())
-                        .build());
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(8)
+                                        .addRoleAddrs(
+                                                EngineRpcService.RoleAddrPB.newBuilder()
+                                                        .setRole(
+                                                                EngineRpcService.RoleAddrPB.RoleType
+                                                                        .DECODE)
+                                                        .setRoleStr("DECODE")
+                                                        .setGrpcPort(decodePort)
+                                                        .build())
+                                        .build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -229,9 +273,10 @@ class MultiFrameStreamTtftTest {
         EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
                 EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
         for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
+            slot.addRequests(
+                    EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
+                            .setInput(input)
+                            .build());
         }
         return slot.build();
     }
@@ -250,23 +295,25 @@ class MultiFrameStreamTtftTest {
         AtomicReference<EngineRpcService.EnqueueBatchResponsePB> response = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch latch = new CountDownLatch(1);
-        service.enqueueBatch(request, new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.EnqueueBatchResponsePB value) {
-                response.set(value);
-            }
+        service.enqueueBatch(
+                request,
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(EngineRpcService.EnqueueBatchResponsePB value) {
+                        response.set(value);
+                    }
 
-            @Override
-            public void onError(Throwable t) {
-                error.set(t);
-                latch.countDown();
-            }
+                    @Override
+                    public void onError(Throwable t) {
+                        error.set(t);
+                        latch.countDown();
+                    }
 
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
+                    @Override
+                    public void onCompleted() {
+                        latch.countDown();
+                    }
+                });
         try {
             assertTrue(latch.await(10, TimeUnit.SECONDS), "enqueueBatch must ack");
             assertNull(error.get(), "enqueueBatch must not error");
@@ -277,50 +324,61 @@ class MultiFrameStreamTtftTest {
         }
     }
 
-    private record CollectedStream(List<EngineRpcService.GenerateOutputsPB> frames,
-                                   List<Long> frameNanos,
-                                   AtomicReference<Throwable> error) {
-    }
+    private record CollectedStream(
+            List<EngineRpcService.GenerateOutputsPB> frames,
+            List<Long> frameNanos,
+            AtomicReference<Throwable> error) {}
 
-    private static CollectedStream collect(Consumer<StreamObserver<EngineRpcService.GenerateOutputsPB>> invoke,
-                                           long awaitMs) throws InterruptedException {
+    private static CollectedStream collect(
+            Consumer<StreamObserver<EngineRpcService.GenerateOutputsPB>> invoke, long awaitMs)
+            throws InterruptedException {
         List<EngineRpcService.GenerateOutputsPB> frames = new CopyOnWriteArrayList<>();
         List<Long> frameNanos = new CopyOnWriteArrayList<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch terminal = new CountDownLatch(1);
-        invoke.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.GenerateOutputsPB value) {
-                frames.add(value);
-                frameNanos.add(System.nanoTime());
-            }
+        invoke.accept(
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(EngineRpcService.GenerateOutputsPB value) {
+                        frames.add(value);
+                        frameNanos.add(System.nanoTime());
+                    }
 
-            @Override
-            public void onError(Throwable t) {
-                error.set(t);
-                terminal.countDown();
-            }
+                    @Override
+                    public void onError(Throwable t) {
+                        error.set(t);
+                        terminal.countDown();
+                    }
 
-            @Override
-            public void onCompleted() {
-                terminal.countDown();
-            }
-        });
-        assertTrue(terminal.await(awaitMs, TimeUnit.MILLISECONDS),
+                    @Override
+                    public void onCompleted() {
+                        terminal.countDown();
+                    }
+                });
+        assertTrue(
+                terminal.await(awaitMs, TimeUnit.MILLISECONDS),
                 "stream must terminate (completed or error) within " + awaitMs + "ms");
         return new CollectedStream(new ArrayList<>(frames), new ArrayList<>(frameNanos), error);
     }
 
-    private static CollectedStream fetch(JavaMockEngineCluster.FastRpcService service,
-                                         long requestId, long awaitMs) throws InterruptedException {
-        return collect(observer -> service.fetchResponse(
-                EngineRpcService.FetchRequestPB.newBuilder().setRequestId(requestId).build(),
-                observer), awaitMs);
+    private static CollectedStream fetch(
+            JavaMockEngineCluster.FastRpcService service, long requestId, long awaitMs)
+            throws InterruptedException {
+        return collect(
+                observer ->
+                        service.fetchResponse(
+                                EngineRpcService.FetchRequestPB.newBuilder()
+                                        .setRequestId(requestId)
+                                        .build(),
+                                observer),
+                awaitMs);
     }
 
-    private static CollectedStream generate(JavaMockEngineCluster.FastRpcService service,
-                                            EngineRpcService.GenerateInputPB input,
-                                            long awaitMs) throws InterruptedException {
+    private static CollectedStream generate(
+            JavaMockEngineCluster.FastRpcService service,
+            EngineRpcService.GenerateInputPB input,
+            long awaitMs)
+            throws InterruptedException {
         return collect(observer -> service.generateStreamCall(input, observer), awaitMs);
     }
 }
