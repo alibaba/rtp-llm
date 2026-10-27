@@ -212,6 +212,12 @@ public final class PrefillState {
             var members = new ArrayList<RequestEntry>(items.size());
             for (var route : items) {
                 var entry = state.requests.get(route.requestId());
+                if (!direct
+                        && (entry == null
+                                || entry.route != route
+                                || entry.ownership != OwnershipStage.QUEUED)) {
+                    return null;
+                }
                 checkState(
                         entry != null
                                 && entry.route == route
@@ -1121,7 +1127,7 @@ public final class PrefillState {
                 if (entry == null || entry.route != route) {
                     return Release.NONE;
                 }
-                if (entry.ownership == OwnershipStage.DIRECT_RESERVED) {
+                if (entry.ownership != OwnershipStage.COMMITTED) {
                     preparation = entry.reservation;
                 }
             }
@@ -1154,13 +1160,14 @@ public final class PrefillState {
                 preparation.originalOwner = null;
                 if (entry != null) {
                     entry.reservation = null;
-                    if (entry.ownership == OwnershipStage.DIRECT_RESERVED) {
+                    if (route != null || entry.ownership == OwnershipStage.DIRECT_RESERVED) {
                         removeEntry(entry);
                     }
                 }
                 kind =
-                        RequestRelease
-                                .RESERVED; // A queue preparation never consumes its waiting seat.
+                        route != null && entry.ownership == OwnershipStage.QUEUED
+                                ? RequestRelease.QUEUED
+                                : RequestRelease.RESERVED;
             } else if (entry != null) {
                 if (entry.batch != null) {
                     entry.batch.lastObservedAtMs =

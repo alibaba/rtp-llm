@@ -27,7 +27,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
-import static org.flexlb.balance.scheduler.ContextResult.EndToken;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Granted;
@@ -727,13 +726,17 @@ class RequestLifetimeTest {
         // An old wake-up still consumes its exact version after matching activity renews the
         // deadline.
         recordPrefill(context, false, exact.atMs() - 1L);
+        var pendingEnd = context.snapshot().pendingEnd();
         var update = context.recordDeadline(exact, exact.atMs(), null);
-        assertNull(update.after().pendingEnd(), "identity consumption must not expire the request");
+        assertSame(
+                pendingEnd,
+                update.after().pendingEnd(),
+                "identity consumption must not change the existing end cause");
         return update;
     }
 
     private static void finishInactivity(RequestContext context, long nowMs) {
-        var terminal = (EndToken) ((Granted<?>) context.beginClose(null, nowMs)).value();
+        var terminal = RequestCleanupPassTest.ended(context.beginClose(null, nowMs));
         SchedulerTestSupport.settleTerminalFixture(context, terminal);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
         assertEquals(RequestState.Phase.TIMED_OUT, RequestState.from(context.snapshot()).state());
@@ -760,15 +763,15 @@ class RequestLifetimeTest {
         }
         long now = context.snapshot().lastWorkerAtMs();
         var claim =
-                (DeliveryClaim)
+                (ContextResult.DeliveryFacts)
                         ((Granted<?>)
-                                        context.beginDelivery(
+                                        context.prepareDelivery(
                                                 context.snapshot().route(),
                                                 DeliveryClaimKind.BATCH_ENQUEUE,
                                                 1L,
                                                 now))
                                 .value();
-        context.commitDelivery(claim, true, now);
+        context.publishDelivery(claim);
     }
 
     private static void acknowledge(RequestContext context) {
@@ -832,8 +835,7 @@ class RequestLifetimeTest {
                     new CancellationFacts(
                             reason,
                             org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED,
-                            detail,
-                            null));
+                            detail));
         } else {
             context.requestCancel(
                     new Cancellation(

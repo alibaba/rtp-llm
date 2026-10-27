@@ -27,7 +27,7 @@ public class PlanningBench {
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq);
     static FormulaPredictor model;
-    static RequestTimeEstimation.DeliveryProjection policy;
+    static org.flexlb.config.DispatcherConfig.Type policy;
 
     static GroupPlanner.Constraints constraints(int size) {
         return new GroupPlanner.Constraints(size, 1_000_000, 2_000_000, 700, 700);
@@ -49,7 +49,7 @@ public class PlanningBench {
         // INCREMENTAL_BEGIN
         var batch = model.newBatchPrediction();
         var selected =
-                GroupPlanner.selectWithPrediction(
+                GroupPlanner.FIXED_WINDOW.select(
                         items,
                         constraints(size),
                         (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));
@@ -85,7 +85,7 @@ public class PlanningBench {
 
     public static void main(String[] args) throws Exception {
         model = new FormulaPredictor(Files.readString(Path.of(args[0])));
-        policy = RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        policy = org.flexlb.config.DispatcherConfig.Type.BATCH;
         for (int size : new int[] {1, 8, 32, 64}) {
             var inputs = new ArrayList<List<GroupPlanner.Item>>();
             for (int i = 0; i < 64; i++) inputs.add(items(size, i));
@@ -100,7 +100,7 @@ public class PlanningBench {
                                 new QueueSnapshot(
                                         1000,
                                         true,
-                                        org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                                         ORDER,
                                         constraints(64),
                                         items(depth, i),

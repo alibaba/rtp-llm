@@ -1,15 +1,12 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static org.flexlb.balance.scheduler.ContextResult.Blocked;
-import static org.flexlb.balance.scheduler.ContextResult.Blocker;
-import static org.flexlb.balance.scheduler.ContextResult.CancelEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.Claim;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
@@ -20,7 +17,6 @@ import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.GrantValue;
 import static org.flexlb.balance.scheduler.ContextResult.Granted;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
-import static org.flexlb.balance.scheduler.ContextResult.ProgressKind;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.Rejected;
 import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
@@ -28,41 +24,32 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/**
- * Stale release results never contribute proof to a subsequent exact operation.
- */
+/** Closing records physical proof monotonically; execution is serialized by Scheduler. */
 class RequestCleanupPassTest {
     @Test
-    void staleCompletionCannotSettleAnOutstandingRelease() {
+    void partialCompletionRetainsProofAndCannotRewriteAnArchivedRequest() {
         RequestContext context = endingContext(7301L);
-        var first = granted(context.beginSettlement());
+        assertNotNull(context.releaseReason());
         assertEquals(
-                UpdateKind.APPLIED,
-                context.completeClose(first, released(true, false), 1002L).kind());
-        var second = granted(context.beginSettlement());
-        assertTrue(second.prefillSettled());
-        assertFalse(second.decodeSettled());
-        var stale = context.completeClose(first, released(true, true), 1003L);
-        assertEquals(UpdateKind.STALE, stale.kind());
-        assertSame(stale.before(), stale.after());
-        var blocked = assertInstanceOf(Blocked.class, context.beginSettlement());
-        assertEquals(Blocker.CLOSE_IN_PROGRESS, blocked.blocker());
-        context.completeClose(second, released(true, false), 1004L);
-        var third = granted(context.beginSettlement());
-        assertFalse(third.decodeSettled(), "the stale operation cannot prove Decode release");
-        var closed = context.completeClose(third, released(true, true), 1005L);
+                UpdateKind.APPLIED, context.completeClose(released(true, false), 1002L).kind());
+        assertTrue(context.snapshot().close().prefillSettled());
+        assertFalse(context.snapshot().close().decodeSettled());
+        context.completeClose(released(false, false), 1004L);
+        assertTrue(
+                context.snapshot().close().prefillSettled(),
+                "completed physical proof is monotonic");
+        assertFalse(context.snapshot().close().decodeSettled());
+        var closed = context.completeClose(released(true, true), 1005L);
         assertEquals(Phase.CLOSED, closed.after().phase());
         assertNotNull(closed.after().terminalRecord());
         assertNull(context.snapshot().route());
-        assertEquals(
-                UpdateKind.STALE, context.completeClose(third, released(true, true), 1006L).kind());
+        assertEquals(UpdateKind.STALE, context.completeClose(released(true, true), 1006L).kind());
         assertSame(closed.after().terminalRecord(), context.snapshot().terminalRecord());
     }
 
@@ -70,37 +57,38 @@ class RequestCleanupPassTest {
         return ((Granted<T>) assertInstanceOf(Granted.class, claim)).value();
     }
 
+    static ContextResult.End ended(ContextResult.Update update) {
+        assertNotNull(update.after().outcome());
+        return update.after().outcome();
+    }
+
     static CloseProgress released(boolean prefill, boolean decode) {
-        return new CloseProgress(ProgressKind.RELEASE, prefill, decode, false, false);
+        return new CloseProgress(false, prefill, decode, false, false);
     }
 
     static RequestContext endingContext(long id) {
         var context = openContext(id);
-        var terminal =
-                granted(
-                        context.beginClose(
-                                new EndEvidence(
-                                        context.snapshot().route(),
-                                        EndKind.FAILURE,
-                                        null,
-                                        false,
-                                        0L,
-                                        StrategyErrorType.DISPATCH_FAILED,
-                                        "cleanup required",
-                                        false,
-                                        false),
-                                1001L));
-        context.completeClose(
-                terminal,
-                new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, true, true),
-                1001L);
+        ended(
+                context.beginClose(
+                        new EndEvidence(
+                                context.snapshot().route(),
+                                EndKind.FAILURE,
+                                null,
+                                false,
+                                0L,
+                                StrategyErrorType.DISPATCH_FAILED,
+                                "cleanup required",
+                                false,
+                                false),
+                        1001L));
+        context.completeClose(new CloseProgress(true, false, false, true, true), 1001L);
         return context;
     }
 
     @Test
     void completedRollbackAllowsAnotherRouteInTheSamePlacementScope() {
-        var context = new RequestContext(SchedulingTestConfig.newConfig());
-        context.register("990", 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(990L, 1000L, 100_000L, 10_000L);
         var operation = granted(context.beginPlacement(null));
         var first = route(context, 990L);
         granted(context.bindPlacement(operation, first, PublicationResult.PREPARED));
@@ -124,25 +112,19 @@ class RequestCleanupPassTest {
 
     @Test
     void samePlacementRollbackKeepsCancellationWithoutTheDiscardedRouteIdentity() {
-        var context = new RequestContext(SchedulingTestConfig.newConfig());
-        context.register("991", 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(991L, 1000L, 100_000L, 10_000L);
         var operation = granted(context.beginPlacement(null));
         var route = route(context, 991L);
         granted(context.bindPlacement(operation, route, PublicationResult.PREPARED));
-        var cancellation =
-                granted(
-                        context.requestCancel(
-                                new Cancellation(
-                                        0L,
-                                        CancelReason.CLIENT_CANCELLED,
-                                        false,
-                                        1001L,
-                                        StrategyErrorType.REQUEST_CANCELLED,
-                                        "original cancellation")));
-        context.completeCancel(
-                cancellation,
-                new CancelEvidence(CancelEvidenceKind.LOCAL_WITHDRAWN, false, false),
-                1002L);
+        context.requestCancel(
+                new Cancellation(
+                        0L,
+                        CancelReason.CLIENT_CANCELLED,
+                        false,
+                        1001L,
+                        StrategyErrorType.REQUEST_CANCELLED,
+                        "original cancellation"));
         assertSame(route, context.snapshot().placement().pendingTerminal().route());
         granted(context.bindPlacement(operation, route, PublicationResult.ROLLBACK_COMPLETED));
         context.completePlacement(operation, PublicationResult.PUBLISHED, 1003L);
@@ -150,12 +132,9 @@ class RequestCleanupPassTest {
                 context.snapshot().pendingEnd().route(),
                 "completed rollback detaches only this scope's old identity");
         assertEquals("original cancellation", context.snapshot().pendingEnd().detail());
-        var end = granted(context.beginClose(context.snapshot().pendingEnd(), 1004L));
+        ended(context.beginClose(context.snapshot().pendingEnd(), 1004L));
         assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().outcome().phase());
-        context.completeClose(
-                end,
-                new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, true, true),
-                1005L);
+        context.completeClose(new CloseProgress(true, false, false, true, true), 1005L);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
         assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellation().reason());
     }
@@ -179,35 +158,36 @@ class RequestCleanupPassTest {
         assertFalse(context.snapshot().preparedDelivery());
         assertInstanceOf(
                 Rejected.class,
-                context.beginDelivery(route, DeliveryClaimKind.BATCH_ENQUEUE, 1L, 1002L));
+                context.prepareDelivery(route, DeliveryClaimKind.BATCH_ENQUEUE, 1L, 1002L));
         assertNull(context.snapshot().delivery());
     }
 
     @Test
     void realAdmissionFailureSupersedesUnclaimedShutdownEvidence() {
-        var context = new RequestContext(SchedulingTestConfig.newConfig());
-        context.register("993", 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(993L, 1000L, 100_000L, 10_000L);
         var placement = granted(context.beginPlacement(null));
         var route = route(context, 993L);
         granted(context.bindPlacement(placement, route, PublicationResult.PREPARED));
-        assertInstanceOf(
-                Blocked.class,
+        assertNull(
                 context.beginClose(
-                        new EndEvidence(
-                                route,
-                                EndKind.SHUTDOWN,
-                                null,
-                                false,
-                                0L,
-                                StrategyErrorType.DISPATCH_FAILED,
-                                "shutdown",
-                                false,
-                                false),
-                        1001L));
+                                new EndEvidence(
+                                        route,
+                                        EndKind.SHUTDOWN,
+                                        null,
+                                        false,
+                                        0L,
+                                        StrategyErrorType.DISPATCH_FAILED,
+                                        "shutdown",
+                                        false,
+                                        false),
+                                1001L)
+                        .after()
+                        .outcome());
         assertNull(context.snapshot().outcome());
         context.completePlacement(placement, PublicationResult.FAILED, 1002L);
         assertNull(context.snapshot().pendingEnd());
-        granted(
+        ended(
                 context.beginClose(
                         new EndEvidence(
                                 route,
@@ -227,33 +207,29 @@ class RequestCleanupPassTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void lateAcquisitionPreservesTerminalProgressAndRequiresFreshNotificationClaim(
+    void lateAcquisitionPreservesNotificationsAndRequiresItsOwnReleaseProof(
             boolean notificationsFinished) {
-        var context = new RequestContext(SchedulingTestConfig.newConfig());
-        context.register("994", 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(994L, 1000L, 100_000L, 10_000L);
         var placement = granted(context.beginPlacement(null));
         var originalRoute = route(context, 994L);
         granted(context.bindPlacement(placement, originalRoute, PublicationResult.PREPARED));
-        var terminal =
-                granted(
-                        context.beginClose(
-                                new EndEvidence(
-                                        originalRoute,
-                                        EndKind.DELIVERY_FAILURE,
-                                        null,
-                                        false,
-                                        0L,
-                                        StrategyErrorType.DISPATCH_FAILED,
-                                        "original delivery failure",
-                                        false,
-                                        false),
-                                1001L));
+        ended(
+                context.beginClose(
+                        new EndEvidence(
+                                originalRoute,
+                                EndKind.DELIVERY_FAILURE,
+                                null,
+                                false,
+                                0L,
+                                StrategyErrorType.DISPATCH_FAILED,
+                                "original delivery failure",
+                                false,
+                                false),
+                        1001L));
         var outcome = context.snapshot().outcome();
         context.completeClose(
-                terminal,
-                new CloseProgress(
-                        ProgressKind.NOTIFICATIONS, false, false, notificationsFinished, true),
-                1002L);
+                new CloseProgress(true, false, false, notificationsFinished, true), 1002L);
         granted(
                 context.bindPlacement(
                         placement, originalRoute, PublicationResult.ROLLBACK_COMPLETED));
@@ -267,7 +243,6 @@ class RequestCleanupPassTest {
                 afterAcquisition.route(),
                 "real acquisition remains owned despite denying publication");
         assertSame(acquired, afterAcquisition.placement().acquired());
-        assertNull(afterAcquisition.close().endOperation());
         assertSame(outcome, afterAcquisition.outcome());
         assertEquals(notificationsFinished, afterAcquisition.close().notificationsDone());
         assertTrue(afterAcquisition.close().notificationsAttempted());
@@ -276,37 +251,21 @@ class RequestCleanupPassTest {
                 afterAcquisition.close().prefillSettled(),
                 "new acquisition reopens its physical proof");
         assertFalse(afterAcquisition.close().decodeSettled());
-        assertInstanceOf(
-                Blocked.class,
-                context.beginSettlement(),
-                "the producer still owns placement completion");
+        assertNull(context.releaseReason(), "the producer still owns placement completion");
         context.completePlacement(placement, PublicationResult.FAILED, 1003L);
         if (!notificationsFinished) {
-            assertEquals(
-                    UpdateKind.STALE,
-                    context.completeClose(
-                                    terminal,
-                                    new CloseProgress(
-                                            ProgressKind.NOTIFICATIONS, false, false, true, true),
-                                    1004L)
-                            .kind());
-            var continuation = granted(context.beginClose(null, 1004L));
-            assertNotSame(terminal, continuation);
-            assertSame(acquired, continuation.route());
-            context.completeClose(
-                    continuation,
-                    new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, true, true),
-                    1004L);
+            assertSame(outcome, context.beginClose(null, 1004L).after().outcome());
+            context.completeClose(new CloseProgress(true, false, false, true, true), 1004L);
         }
         assertEquals(
                 Phase.ENDING,
                 context.snapshot().phase(),
                 "old rollback cannot prove new resources released");
-        var release = granted(context.beginSettlement());
-        assertSame(acquired, release.route());
-        assertFalse(release.prefillSettled());
-        assertFalse(release.decodeSettled());
-        context.completeClose(release, released(true, true), 1005L);
+        assertNotNull(context.releaseReason());
+        assertSame(acquired, context.snapshot().route());
+        assertFalse(context.snapshot().close().prefillSettled());
+        assertFalse(context.snapshot().close().decodeSettled());
+        context.completeClose(released(true, true), 1005L);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
         assertSame(outcome, context.snapshot().outcome());
     }
@@ -314,24 +273,24 @@ class RequestCleanupPassTest {
     static RequestRoute route(RequestContext context, long id) {
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
-        when(route.requestId()).thenReturn(String.valueOf(id));
+        when(route.requestId()).thenReturn(id);
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
         when(route.decodeEp()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
+                .thenReturn(new DecodeResources.ReservationHandle(1L, id, 1L));
         return route;
     }
 
     static RequestContext openContext(long id) {
-        var context = new RequestContext(SchedulingTestConfig.newConfig());
-        context.register(String.valueOf(id), 1000L, 100_000L, 10_000L);
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(id, 1000L, 100_000L, 10_000L);
         var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
-        when(route.requestId()).thenReturn(String.valueOf(id));
+        when(route.requestId()).thenReturn(id);
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
         when(route.decodeEp()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
+                .thenReturn(new DecodeResources.ReservationHandle(1L, id, 1L));
         var placement = granted(context.beginPlacement(null));
         granted(context.bindPlacement(placement, route, PublicationResult.PREPARED));
         granted(context.bindPlacement(placement, route, PublicationResult.PUBLISHED));

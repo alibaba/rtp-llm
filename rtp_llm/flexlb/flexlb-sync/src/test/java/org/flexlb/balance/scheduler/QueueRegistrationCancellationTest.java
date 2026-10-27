@@ -11,6 +11,8 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -35,6 +37,92 @@ import static org.mockito.Mockito.when;
  * Real registration and queue lifecycle; endpoint selection is isolated by a mock router.
  */
 class QueueRegistrationCancellationTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancellationSettlesBeforeQueueStartsAndSurvivesShutdown(boolean futureCancellation)
+            throws Exception {
+        try (Fixture f = new Fixture(false)) {
+            var context = f.context(908L);
+            var future = f.queue.submit(context);
+            try {
+                if (futureCancellation) {
+                    assertTrue(future.cancel(false));
+                    assertTrue(future.isCancelled());
+                } else {
+                    f.queue.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
+                    assertEquals(
+                            StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                            future.get(2, TimeUnit.SECONDS).getCode());
+                }
+                RequestProtocolTestSupport.awaitCondition(
+                        () -> f.runtime.requests().liveRequestCount() == 0);
+            } finally {
+                f.queue.start();
+            }
+            f.queue.close();
+            assertEquals(
+                    RequestState.Phase.CANCELLED,
+                    f.runtime.requests().getRequestState(908L, 0L).state());
+            verify(f.router, never()).select(any(), nullable(String.class));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void completionBeforeSubmitEventCannotRestoreTheRequest(boolean cancel) throws Exception {
+        try (Fixture f = new Fixture();
+                var executor = Executors.newSingleThreadExecutor()) {
+            var enteringQueue = new CountDownLatch(1);
+            var continueSubmit = new CountDownLatch(1);
+            when(f.router.resolvePolicyGroup(any()))
+                    .thenAnswer(
+                            call -> {
+                                enteringQueue.countDown();
+                                RequestProtocolTestSupport.await(continueSubmit);
+                                return "g";
+                            });
+            RequestContext context = f.context(906L);
+            var submit = executor.submit(() -> f.queue.submit(context));
+            try {
+                assertTrue(enteringQueue.await(2, TimeUnit.SECONDS));
+                var future = context.data().getFuture();
+                assertTrue(
+                        cancel
+                                ? future.cancel(false)
+                                : future.completeExceptionally(
+                                        new IllegalStateException("client failed")));
+            } finally {
+                continueSubmit.countDown();
+            }
+            assertTrue(submit.get(2, TimeUnit.SECONDS).isDone());
+            f.queue.close();
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
+            verify(f.router, never()).select(any(), nullable(String.class));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void externalCompletionRemovesParkedEntryWithoutWaitingForCapacity(boolean cancel)
+            throws Exception {
+        try (Fixture f = new Fixture()) {
+            when(f.router.select(any(), nullable(String.class)))
+                    .thenReturn(
+                            PlacementResult.blocked(
+                                    new PlacementKey(
+                                            org.flexlb.dao.route.RoleType.DECODE, "g", null)));
+            var future = f.queue.submit(f.context(907L));
+            RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.queue, 1);
+            assertTrue(
+                    cancel
+                            ? future.cancel(false)
+                            : future.completeExceptionally(
+                                    new IllegalStateException("client failed")));
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> RequestProtocolTestSupport.queuedCount(f.queue) == 0);
+        }
+    }
+
     @Test
     void registrationHookRunsBeforeSelectionAndNormalRequestsStillStart() throws Exception {
         try (Fixture f = new Fixture()) {
@@ -142,6 +230,10 @@ class QueueRegistrationCancellationTest {
         final QueuedRequestScheduler queue;
 
         Fixture() {
+            this(true);
+        }
+
+        Fixture(boolean start) {
             SchedulingTestConfig.useFifoQueue(config);
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
@@ -167,7 +259,9 @@ class QueueRegistrationCancellationTest {
                             org.mockito.Mockito.mock(
                                     org.flexlb.service.TheoryCacheHitReporter.class));
             runtime.registerScheduler(queue);
-            queue.start();
+            if (start) {
+                queue.start();
+            }
         }
 
         RequestContext context(long id) {

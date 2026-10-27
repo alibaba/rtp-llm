@@ -12,7 +12,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -23,114 +22,6 @@ import java.util.function.BooleanSupplier;
  * owns request arbitration, lock checks, deadlines and ACK reporting.
  */
 final class ResponseCompletionExecutor implements AutoCloseable {
-
-    /**
-     * Reserves a close obligation before submission. The caller closes unused registrations;
-     * submit or completeNow releases accepted registrations after execution, including failure.
-     * Contains no request state or response policy.
-     */
-    private enum Phase {
-        RESERVED,
-        SUBMITTED,
-        RUNNING,
-        COMPLETED,
-        REJECTED,
-        CLOSED_COMPLETED,
-        CLOSED_REJECTED
-    }
-
-    final class CompletionRegistration {
-        private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.RESERVED);
-
-        private CompletionRegistration() {}
-
-        /**
-         * Every accepted response runs asynchronously, including executor rejection recovery.
-         */
-        void submit(BooleanSupplier operation) {
-            if (!phase.compareAndSet(Phase.RESERVED, Phase.SUBMITTED)) {
-                throw new IllegalStateException("response registration already resolved");
-            }
-            Runnable task = () -> completeNow(operation);
-            try {
-                completionWorkers.execute(task);
-            } catch (RuntimeException | Error rejected) {
-                if (phase.get() != Phase.SUBMITTED) {
-                    throw rejected;
-                }
-                try {
-                    rejectedTaskWorker.execute(task);
-                } catch (RuntimeException | Error recoveryRejected) {
-                    Throwable failure = Failures.append(rejected, recoveryRejected);
-                    if (phase.get() != Phase.SUBMITTED) {
-                        throw Failures.propagate(failure, "response submission failed");
-                    }
-                    try {
-                        emergencyWorkers.newThread(task).start();
-                    } catch (RuntimeException | Error startFailure) {
-                        if (phase.compareAndSet(Phase.SUBMITTED, Phase.REJECTED)) {
-                            close();
-                        }
-                        throw Failures.propagate(
-                                Failures.append(failure, startFailure),
-                                "response submission failed");
-                    }
-                }
-            }
-        }
-
-        /**
-         * External mutations stay synchronous; queued/recovered tasks share one execution claim.
-         */
-        boolean completeNow(BooleanSupplier operation) {
-            Phase observed;
-            do {
-                observed = phase.get();
-                if (observed != Phase.RESERVED && observed != Phase.SUBMITTED) {
-                    return false;
-                }
-            } while (!phase.compareAndSet(observed, Phase.RUNNING));
-            Boolean previous = completing.get();
-            completing.set(Boolean.TRUE);
-            try {
-                return operation.getAsBoolean();
-            } finally {
-                completing.set(previous);
-                phase.set(Phase.COMPLETED);
-                close();
-            }
-        }
-
-        boolean hasCompletionOwner() {
-            return switch (phase.get()) {
-                case SUBMITTED, RUNNING, COMPLETED, CLOSED_COMPLETED -> true;
-                default -> false;
-            };
-        }
-
-        void close() {
-            Phase observed;
-            Phase closed;
-            do {
-                observed = phase.get();
-                closed =
-                        switch (observed) {
-                            case RESERVED, REJECTED -> Phase.CLOSED_REJECTED;
-                            case COMPLETED -> Phase.CLOSED_COMPLETED;
-                            default -> null;
-                        };
-                if (closed == null) {
-                    return;
-                }
-            } while (!phase.compareAndSet(observed, closed));
-            synchronized (registrations) {
-                registrations.remove(this);
-                if (registrations.isEmpty()) {
-                    registrations.notifyAll();
-                }
-            }
-        }
-    }
 
     private final ThreadFactory emergencyWorkers =
             Thread.ofPlatform().daemon().name("response-completion-emergency-", 1).factory();
@@ -143,15 +34,11 @@ final class ResponseCompletionExecutor implements AutoCloseable {
                             .name("response-completion-recovery-", 1)
                             .factory());
 
-    /**
-     * Null while accepting registrations; otherwise the shared final close result.
-     */
+    /** Null while accepting registrations; otherwise the shared final close result. */
     private CompletableFuture<Throwable> closeResult;
 
-    /**
-     * Also serves as the monitor protecting registrations and closeResult.
-     */
-    private final Set<CompletionRegistration> registrations =
+    /** Also serves as the monitor protecting registrations and closeResult. */
+    private final Set<ResponsePublication> registrations =
             Collections.newSetFromMap(new IdentityHashMap<>());
 
     ResponseCompletionExecutor(int configuredWorkers) {
@@ -171,14 +58,57 @@ final class ResponseCompletionExecutor implements AutoCloseable {
         completionWorkers.prestartAllCoreThreads();
     }
 
-    CompletionRegistration tryRegister() {
+    boolean register(ResponsePublication publication) {
         synchronized (registrations) {
             if (closeResult != null) {
-                return null;
+                return false;
             }
-            var registration = new CompletionRegistration();
-            registrations.add(registration);
-            return registration;
+            registrations.add(publication);
+            return true;
+        }
+    }
+
+    void release(ResponsePublication publication) {
+        synchronized (registrations) {
+            registrations.remove(publication);
+            if (registrations.isEmpty()) {
+                registrations.notifyAll();
+            }
+        }
+    }
+
+    boolean invoke(BooleanSupplier operation) {
+        Boolean previous = completing.get();
+        completing.set(Boolean.TRUE);
+        try {
+            return operation.getAsBoolean();
+        } finally {
+            completing.set(previous);
+        }
+    }
+
+    void submit(ResponsePublication publication, Runnable task) {
+        try {
+            completionWorkers.execute(task);
+        } catch (RuntimeException | Error rejected) {
+            if (!publication.isSubmitted()) {
+                throw rejected;
+            }
+            try {
+                rejectedTaskWorker.execute(task);
+            } catch (RuntimeException | Error recoveryRejected) {
+                Throwable failure = Failures.append(rejected, recoveryRejected);
+                if (!publication.isSubmitted()) {
+                    throw Failures.propagate(failure, "response submission failed");
+                }
+                try {
+                    emergencyWorkers.newThread(task).start();
+                } catch (RuntimeException | Error startFailure) {
+                    publication.reject();
+                    throw Failures.propagate(
+                            Failures.append(failure, startFailure), "response submission failed");
+                }
+            }
         }
     }
 
@@ -186,9 +116,7 @@ final class ResponseCompletionExecutor implements AutoCloseable {
         return Boolean.TRUE.equals(completing.get());
     }
 
-    /**
-     * Stops registration, drains accepted completions and closes workers.
-     */
+    /** Stops registration, drains accepted completions and closes workers. */
     @Override
     public void close() {
         if (isCompletingOnCurrentThread()) {

@@ -351,8 +351,8 @@ class RequestPreemptionRegressionTest {
     private void drainResponses() throws Exception {
         SchedulerTestSupport.awaitRequestWork(scheduler.runtime);
         var drained = new CompletableFuture<Void>();
-        SchedulerTestSupport.responseCompletions(scheduler.runtime)
-                .tryRegister()
+        SchedulerTestSupport.responsePublication(
+                        SchedulerTestSupport.responseCompletions(scheduler.runtime))
                 .submit(
                         () -> {
                             drained.complete(null);

@@ -52,6 +52,60 @@ class PrefillStateSnapshotTest {
             new EndpointGenerationLifecycle(() -> {});
 
     @Test
+    void cancellingPreparedHeadRevokesItsBatchSlotAndReturnsTheHandoff() {
+        var head = item(9101L);
+        enqueue(head);
+        var pin = generation.tryAcquireHandoff();
+        var reservation = state.reserveBatch(head, 91L, 1, pin).reservation();
+        assertNotNull(reservation);
+        try {
+            var released = state.release(null, head);
+            assertSame(pin, released.generationHandoff(), "request release owns the revoked pin");
+            assertTrue(
+                    state.batchCapacityAvailable(1), "cancelled preparation cannot retain a slot");
+            assertFalse(
+                    state.release(reservation, null).released(), "late owner close is idempotent");
+            assertTrue(waitingItems().isEmpty());
+        } finally {
+            state.release(reservation, null);
+            pin.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancellationBeforeQueueCommitIsAnOwnershipConflict(boolean batch) {
+        var member = item(9102L);
+        enqueue(member);
+        var pin = generation.tryAcquireHandoff();
+        var reservation = batch ? state.reserveBatch(member, 92L, 1, pin).reservation() : null;
+        var plan =
+                new PrefillState.CommitPlan(
+                        batch ? PrefillState.CommitKind.BATCH : PrefillState.CommitKind.QUEUED,
+                        List.of(member),
+                        List.of(),
+                        reservation,
+                        new long[] {10L},
+                        null,
+                        clock.get());
+        var released = state.release(null, member);
+        if (released.generationHandoff() != null) {
+            released.generationHandoff().close();
+        }
+        lock.lock();
+        try {
+            assertNull(state.commitLocked(plan, batch ? null : pin));
+            assertEquals(0, state.progress().queueDepth());
+        } finally {
+            lock.unlock();
+            if (reservation != null) {
+                state.release(reservation, null);
+            }
+            pin.close();
+        }
+    }
+
+    @Test
     void stableAdmissionSummaryIsReusedOnlyForTheExactInputs() {
         var first = state.admissionSummary(50, 1L);
         assertSame(first, state.admissionSummary(50, 1L));
@@ -667,11 +721,9 @@ class PrefillStateSnapshotTest {
             enqueue(replacement);
         }
         try (var permit = generation.tryAcquireHandoff()) {
-            assertThrows(
-                    IllegalStateException.class,
-                    () ->
-                            EndpointTestSupport.commitQueuedRoutes(
-                                    state, List.of(first, second), new long[] {30L, 40L}, permit));
+            assertNull(
+                    EndpointTestSupport.commitQueuedRoutes(
+                            state, List.of(first, second), new long[] {30L, 40L}, permit));
         }
         assertEquals(replaced ? List.of(first, replacement) : List.of(first), waitingItems());
         assertEquals(replaced ? 2L : 1L, state.admissionSummary(0, 0L).occupiedRequests());
@@ -737,14 +789,17 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void releasingQueuedBatchHeadLeavesPreparationToItsTransaction() {
+    void releasingQueuedBatchHeadRevokesPreparationBeforeItsTransactionReturns() {
         RequestRoute head = item(1);
         enqueue(head);
         var batch = state.reserveBatch(head, 11L, 1, generation.tryAcquireHandoff()).reservation();
         try (var preparation = EndpointTestSupport.preparation(batch)) {
-            assertEquals(PrefillState.RequestRelease.QUEUED, state.release(null, head).kind());
+            var release = state.release(null, head);
+            assertEquals(PrefillState.RequestRelease.QUEUED, release.kind());
+            assertNotNull(release.generationHandoff());
+            release.generationHandoff().close();
             assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
-            assertEquals(1, state.captureQueueCounters().batchSlots());
+            assertEquals(0, state.captureQueueCounters().batchSlots());
             assertEquals(PrefillState.RequestRelease.NONE, state.release(null, head).kind());
         }
         assertEquals(0, state.captureQueueCounters().batchSlots());
@@ -1013,11 +1068,9 @@ class PrefillStateSnapshotTest {
         enqueue(replacement);
         assertEquals(PrefillState.RequestRelease.NONE, state.release(null, first).kind());
         try (var permit = generation.tryAcquireHandoff()) {
-            assertThrows(
-                    IllegalStateException.class,
-                    () ->
-                            EndpointTestSupport.commitQueuedRoutes(
-                                    state, List.of(first), new long[] {999L}, permit));
+            assertNull(
+                    EndpointTestSupport.commitQueuedRoutes(
+                            state, List.of(first), new long[] {999L}, permit));
         }
         assertEquals(List.of(replacement), waitingItems());
         assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());

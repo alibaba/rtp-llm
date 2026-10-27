@@ -1255,6 +1255,7 @@ class DecodeAdmissionProtocolTest {
         AbstractRequestScheduler requests = mock(AbstractRequestScheduler.class);
         org.springframework.test.util.ReflectionTestUtils.setField(requests, "runtime", runtime);
         when(requests.onPreemption(any(), any())).thenReturn(true);
+        SchedulerTestSupport.useRealCancelReply(requests);
         DecodeEndpoint endpoint =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
         WorkerStatus status = mock(WorkerStatus.class);

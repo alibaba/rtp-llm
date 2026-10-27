@@ -410,9 +410,7 @@ class RequestInactivityTest {
                             old.executionFinished(),
                             old.prefillProof(),
                             old.decodeProof(),
-                            old.transferred(),
-                            past,
-                            old.acknowledgedAtMs());
+                            past);
             org.springframework.test.util.ReflectionTestUtils.setField(
                     requestContext, "delivery", aged);
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(

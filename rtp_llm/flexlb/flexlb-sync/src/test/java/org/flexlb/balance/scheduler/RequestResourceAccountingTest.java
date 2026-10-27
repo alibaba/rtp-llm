@@ -108,15 +108,7 @@ class RequestResourceAccountingTest {
         when(prefill.release(null, item)).thenThrow(releaseFailure);
         var first =
                 AbstractRequestScheduler.releaseResources(
-                        new ContextResult.ClosePermit(
-                                context,
-                                1L,
-                                item,
-                                DecodeResources.ReleaseReason.NOT_SENT,
-                                false,
-                                false,
-                                false,
-                                false));
+                        item, DecodeResources.ReleaseReason.NOT_SENT, false, false);
         assertFalse(first.prefillSettled());
         assertTrue(first.decodeSettled());
         assertSame(releaseFailure, first.failure());
@@ -126,15 +118,10 @@ class RequestResourceAccountingTest {
         org.mockito.Mockito.doReturn(true).when(prefill).release(null, item);
         var retry =
                 AbstractRequestScheduler.releaseResources(
-                        new ContextResult.ClosePermit(
-                                context,
-                                1L,
-                                item,
-                                DecodeResources.ReleaseReason.NOT_SENT,
-                                first.prefillSettled(),
-                                first.decodeSettled(),
-                                false,
-                                false));
+                        item,
+                        DecodeResources.ReleaseReason.NOT_SENT,
+                        first.prefillSettled(),
+                        first.decodeSettled());
         assertTrue(retry.prefillSettled());
         assertTrue(retry.decodeSettled());
         assertNull(retry.failure());

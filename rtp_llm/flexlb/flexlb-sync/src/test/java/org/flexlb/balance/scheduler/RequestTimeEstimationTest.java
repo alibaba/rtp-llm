@@ -7,6 +7,7 @@ import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -29,10 +30,49 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Canonical frozen-snapshot route timeline and candidate contract.
- */
+/** Canonical frozen-snapshot route timeline and candidate contract. */
 class RequestTimeEstimationTest {
+
+    @Test
+    void collectionWindowDoesNotChangeKnownWorkOrNonlinearBatchCost() {
+        var evaluator =
+                evaluator(
+                        (tokens, hits) -> tokens,
+                        items ->
+                                items.stream()
+                                        .mapToLong(PrefillBatchFeatures.Item::seqLen)
+                                        .max()
+                                        .orElse(0L));
+        var committed =
+                work(
+                        List.of(
+                                new WorkSnapshot.RequestWork(
+                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 7L)),
+                        List.of(
+                                new WorkSnapshot.BatchWork(
+                                        List.of(2L, 3L),
+                                        WorkSnapshot.Phase.ENGINE_QUEUED,
+                                        OptionalLong.of(11L))),
+                        0L);
+        var active = List.of(item(4L, 50, 1L, 10L), item(5L, 50, 2L, 20L), item(6L, 50, 3L, 30L));
+        for (long windowMs : new long[] {0L, 20L, 300L}) {
+            var snapshot = queue(false, constraints(2, windowMs), active);
+            // [10,20] precedes the probe's [30,5] batch; committed work is counted once.
+            assertModeled(
+                    project(snapshot, committed, evaluator, probe(99L, 50, 5L, 0L), BATCH), 68L);
+            assertModeled(
+                    project(snapshot, committed, evaluator, probe(99L, 50, 5L, 0L), ROUTE), 83L);
+            // A partial final group contributes execution cost without a new collection wait.
+            assertModeled(
+                    project(
+                            queue(false, constraints(2, windowMs), active.subList(0, 2)),
+                            committed,
+                            evaluator,
+                            probe(99L, 50, 5L, 0L),
+                            BATCH),
+                    43L);
+        }
+    }
 
     @Test
     void disabledExecutionBudgetDoesNotConstructAnUnusedPrefixPredictor() {
@@ -62,13 +102,13 @@ class RequestTimeEstimationTest {
                                 item(1L, 50, 1L, 10L),
                                 item(2L, 50, 2L, 10L),
                                 item(3L, 50, 3L, 10L)));
-        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (org.flexlb.config.DispatcherConfig.Type delivery : List.of(BATCH, ROUTE)) {
             assertModeled(
                     project(
                             snapshot,
                             noCommittedWork(),
                             evaluator,
-                            probe("99", 50, 20L, 0L),
+                            probe(99L, 50, 20L, 0L),
                             delivery),
                     50L);
         }
@@ -100,13 +140,13 @@ class RequestTimeEstimationTest {
                         precedingMs += 10L;
                     }
                 }
-                for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+                for (org.flexlb.config.DispatcherConfig.Type delivery : List.of(BATCH, ROUTE)) {
                     var result =
                             project(
                                     queue(true, limits, active),
                                     noCommittedWork(),
                                     TOKEN_EVALUATOR,
-                                    probe("99", 101 - 2 * position, 7L, 0L),
+                                    probe(99L, 101 - 2 * position, 7L, 0L),
                                     delivery);
                     assertModeled(result, precedingMs + 7L);
                 }
@@ -115,7 +155,7 @@ class RequestTimeEstimationTest {
     }
 
     @Test
-    void expiryOnBothSidesOfProbeDuringCollectionKeepsItsLogicalPosition() {
+    void liveMembersOnBothSidesOfProbeKeepTheirBatchAndRouteCosts() {
         QueueSnapshot snapshot =
                 queue(
                         true,
@@ -129,29 +169,29 @@ class RequestTimeEstimationTest {
                                 item(6L, 90, 6L, 600L, NOW_MS + 10L),
                                 item(7L, 80, 7L, 50L),
                                 item(8L, 60, 8L, 700L, NOW_MS + 5L)));
-        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (org.flexlb.config.DispatcherConfig.Type delivery : List.of(BATCH, ROUTE)) {
             assertModeled(
                     project(
                             snapshot,
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe("99", 70, 80L, 0L),
+                            probe(99L, 70, 80L, 0L),
                             delivery),
-                    159L);
+                    745L);
         }
     }
 
     @Test
-    void emptyQueueUsesTheSameWindowAndBudgetReadinessAsLiveGrouping() {
-        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+    void emptyQueueCostDoesNotIncludeWindowOrReadinessBudget() {
+        for (org.flexlb.config.DispatcherConfig.Type delivery : List.of(BATCH, ROUTE)) {
             var waiting =
                     project(
                             queue(false, constraints(4, 30L), List.of()),
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe("99", 50, 20L, 0L),
+                            probe(99L, 50, 20L, 0L),
                             delivery);
-            assertModeled(waiting, 50L);
+            assertModeled(waiting, 20L);
             var capped =
                     project(
                             queue(
@@ -161,7 +201,7 @@ class RequestTimeEstimationTest {
                                     List.of()),
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe("99", 50, 20L, 0L),
+                            probe(99L, 50, 20L, 0L),
                             delivery);
             assertModeled(capped, 20L);
         }
@@ -170,13 +210,13 @@ class RequestTimeEstimationTest {
     @Test
     void emptyQueueCannotProjectDeliveryBeyondAvailableKv() {
         var limits = new GroupPlanner.Constraints(4, Long.MAX_VALUE, 19L, 0L, 30L);
-        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (org.flexlb.config.DispatcherConfig.Type delivery : List.of(BATCH, ROUTE)) {
             var result =
                     project(
                             queue(false, limits, List.of()),
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe("99", 50, 20L, 0L),
+                            probe(99L, 50, 20L, 0L),
                             delivery);
             assertEquals(Candidate.State.BLOCKED, result.state());
             assertEquals("PREFILL_KV_CAPACITY", result.detail());
@@ -185,12 +225,12 @@ class RequestTimeEstimationTest {
     }
 
     @Test
-    void committedWorkOverlapsCollectionWindow() {
+    void committedWorkIsCountedBeforeTheIncomingBatch() {
         WorkSnapshot committed =
                 work(
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        "1", WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
+                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
                         List.of(),
                         0L);
 
@@ -199,7 +239,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(4, 30L), List.of()),
                         committed,
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 120L);
@@ -213,7 +253,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(1, 30L), List.of()),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 20L);
@@ -228,10 +268,10 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(2, 30L), active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         BATCH);
 
-        assertModeled(result, 50L);
+        assertModeled(result, 40L);
     }
 
     @Test
@@ -239,15 +279,14 @@ class RequestTimeEstimationTest {
         WorkSnapshot committed =
                 work(
                         List.of(
+                                new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.COMMITTED, 10L),
                                 new WorkSnapshot.RequestWork(
-                                        "1", WorkSnapshot.Phase.COMMITTED, 10L),
+                                        2L, WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
                                 new WorkSnapshot.RequestWork(
-                                        "2", WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
-                                new WorkSnapshot.RequestWork(
-                                        "3", WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                                        3L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of("4", "5"),
+                                        List.of(4L, 5L),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.of(40L))),
                         0L);
@@ -257,7 +296,7 @@ class RequestTimeEstimationTest {
                         queue(false, false, constraints(1, 0L), List.of(), null),
                         committed,
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
 
         assertModeled(result, 120L);
@@ -277,7 +316,7 @@ class RequestTimeEstimationTest {
     @Test
     void fifoAndPriorityPlaceProbeInDifferentDecisionGroups() {
         List<GroupPlanner.Item> active = List.of(item(1L, 100, 1L, 10L), item(2L, 10, 2L, 100L));
-        RequestTimeEstimationTestSupport.Probe probe = probe("99", 90, 20L, 0L);
+        Probe probe = probe(99L, 90, 20L, 0L);
 
         Candidate fifo =
                 project(
@@ -310,7 +349,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(3, 0L), active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 90, 20L, 0L),
+                        probe(99L, 90, 20L, 0L),
                         BATCH);
 
         assertModeled(result, 30L);
@@ -325,7 +364,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(3, 0L), active),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 90, 20L, 0L),
+                        probe(99L, 90, 20L, 0L),
                         ROUTE);
 
         assertModeled(result, 30L);
@@ -333,12 +372,8 @@ class RequestTimeEstimationTest {
 
     @Test
     void endpointCacheHitChangesServiceAndCandidateMetadata() {
-        RequestTimeEstimationTestSupport.Probe coldProbe =
-                new RequestTimeEstimationTestSupport.Probe(
-                        "99", 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
-        RequestTimeEstimationTestSupport.Probe warmProbe =
-                new RequestTimeEstimationTestSupport.Probe(
-                        "100", 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
+        Probe coldProbe = new Probe(99L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
+        Probe warmProbe = new Probe(100L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
 
         Candidate cold =
                 project(
@@ -379,7 +414,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         noCommittedWork(),
                         failing,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNAVAILABLE, result.state());
@@ -399,7 +434,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         noCommittedWork(),
                         invalid,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
 
         assertInvalidPrediction(result);
@@ -417,7 +452,7 @@ class RequestTimeEstimationTest {
                             queue(true, constraints(1, 0L), List.of()),
                             noCommittedWork(),
                             invalid,
-                            probe("99", 50, 20L, 0L),
+                            probe(99L, 50, 20L, 0L),
                             BATCH);
 
             assertInvalidPrediction(result);
@@ -436,7 +471,7 @@ class RequestTimeEstimationTest {
                         queue(true, predictionBounded, List.of()),
                         noCommittedWork(),
                         invalid,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         BATCH);
 
         assertInvalidPrediction(result);
@@ -449,7 +484,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         work(List.of(), List.of(), 1L),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, candidate.state());
@@ -466,7 +501,7 @@ class RequestTimeEstimationTest {
                         List.of(),
                         List.of(
                                 new WorkSnapshot.BatchWork(
-                                        List.of("1"),
+                                        List.of(1L),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.empty())),
                         0L);
@@ -476,7 +511,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of()),
                         unknown,
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNMODELED_ENGINE_WORK, result.state());
@@ -491,7 +526,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(1, 0L), List.of(item(1L, 50, 1L, 100L, 0L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
 
         assertModeled(result, 20L);
@@ -500,22 +535,20 @@ class RequestTimeEstimationTest {
     }
 
     @Test
-    void probeExpiringExactlyAtCollectionDeadlineIsNotDispatched() {
+    void futureCollectionDeadlineDoesNotRejectAnUnexpiredProbe() {
         Candidate result =
                 project(
                         queue(false, constraints(4, 30L), List.of()),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
+                        probe(99L, 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
                         BATCH);
 
-        assertEquals(Candidate.State.UNAVAILABLE, result.state());
-        assertEquals("INCOMING_EXPIRED_BEFORE_DISPATCH", result.detail());
-        assertFalse(result.selectable());
+        assertModeled(result, 20L);
     }
 
     @Test
-    void existingMemberExpiringInsideWindowIsRemovedBeforeService() {
+    void memberStillAliveAtCaptureRemainsInThePredictedBatch() {
         Candidate result =
                 project(
                         queue(
@@ -524,113 +557,53 @@ class RequestTimeEstimationTest {
                                 List.of(item(1L, 50, 1L, 10L, NOW_MS + 10L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         BATCH);
 
-        assertModeled(result, 50L);
+        assertModeled(result, 30L);
         assertEquals(
-                Candidate.InitialHeadDisposition.TERMINAL_PRUNED, result.initialHeadDisposition());
+                Candidate.InitialHeadDisposition.BEFORE_PROBE, result.initialHeadDisposition());
     }
 
     @Test
-    void collectionWaitReusesPredictionUntilExpiryOrBudgetChangesTheDecision() {
-        AtomicInteger planningCalls = new AtomicInteger();
-        AtomicInteger predictionCalls = new AtomicInteger();
-        RequestTimeEstimation.DeliveryProjection counted =
-                new RequestTimeEstimation.DeliveryProjection() {
-                    @Override
-                    public long singletonCompletionOffsetMs(
-                            long seqLen,
-                            long hitCache,
-                            RequestTimeEstimation.Predictions predictions) {
-                        return ROUTE.singletonCompletionOffsetMs(seqLen, hitCache, predictions);
-                    }
-
-                    @Override
-                    public RequestTimeEstimation.GroupPlanning planning(
-                            RequestTimeEstimation.Predictions predictions) {
-                        planningCalls.incrementAndGet();
-                        RequestTimeEstimation.GroupPlanning delegate = ROUTE.planning(predictions);
-                        return (items, index) -> {
+    void frozenGroupPredictionDoesNotAdvanceToFutureExpiry() {
+        for (int variant = 0; variant < 4; variant++) {
+            AtomicInteger predictionCalls = new AtomicInteger();
+            var evaluator =
+                    new PrefillTimePredictor.Evaluator() {
+                        public long estimateMs(long tokens, long hit) {
                             predictionCalls.incrementAndGet();
-                            return delegate.durationMs(items, index);
-                        };
-                    }
+                            return TOKEN_EVALUATOR.estimateMs(tokens, hit);
+                        }
 
-                    @Override
-                    public long completionOffsetMs(
-                            List<GroupPlanner.Item> items,
-                            int memberIndex,
-                            RequestTimeEstimation.Predictions predictions,
-                            RequestTimeEstimation.GroupPlanning planning) {
-                        return ROUTE.completionOffsetMs(items, memberIndex, predictions, planning);
-                    }
-                };
-        List<GroupPlanner.Item> active = List.of(item(1L, 50, 1L, 10L));
-
-        Candidate waited =
-                project(
-                        queue(
-                                false,
-                                new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 31L, 30L),
-                                active),
-                        noCommittedWork(),
-                        TOKEN_EVALUATOR,
-                        probe("99", 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
-                        counted);
-        assertModeled(waited, 59L);
-        assertEquals(1, planningCalls.get());
-        assertEquals(
-                2, predictionCalls.get(), "the frozen group is predicted once across the wait");
-
-        planningCalls.set(0);
-        predictionCalls.set(0);
-        Candidate expiredPrefix =
-                project(
-                        queue(
-                                false,
-                                new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 31L, 30L),
-                                List.of(item(0L, 50, 0L, 10L, NOW_MS), active.getFirst())),
-                        noCommittedWork(),
-                        TOKEN_EVALUATOR,
-                        probe("99", 50, NOW_MS, NOW_MS + 30L, 20L, 0L),
-                        counted);
-        assertModeled(expiredPrefix, 59L);
-        assertEquals(
-                1,
-                planningCalls.get(),
-                "an already expired prefix does not change the waiting group");
-        assertEquals(2, predictionCalls.get(), "the surviving frozen group is predicted once");
-
-        planningCalls.set(0);
-        predictionCalls.set(0);
-        Candidate expired =
-                project(
-                        queue(
-                                false,
-                                new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 31L, 30L),
-                                active),
-                        noCommittedWork(),
-                        TOKEN_EVALUATOR,
-                        probe("99", 50, NOW_MS, NOW_MS + 29L, 20L, 0L),
-                        counted);
-        assertEquals(Candidate.State.UNAVAILABLE, expired.state());
-        assertEquals("INCOMING_EXPIRED_BEFORE_DISPATCH", expired.detail());
-        assertEquals(1, planningCalls.get());
-
-        planningCalls.set(0);
-        Candidate budgetReady =
-                project(
-                        queue(
-                                false,
-                                new GroupPlanner.Constraints(3, 1_000_000L, 1_000_000L, 30L, 30L),
-                                active),
-                        noCommittedWork(),
-                        TOKEN_EVALUATOR,
-                        probe("99", 50, NOW_MS, NOW_MS + 29L, 20L, 0L),
-                        counted);
-        assertModeled(budgetReady, 30L);
-        assertEquals(1, planningCalls.get());
+                        public double predictBatchMs(PrefillBatchFeatures features) {
+                            throw new AssertionError("NON_BATCH must use individual durations");
+                        }
+                    };
+            var head = item(1L, 50, 1L, 10L);
+            var active =
+                    variant == 1 ? List.of(item(0L, 50, 0L, 10L, NOW_MS), head) : List.of(head);
+            var result =
+                    project(
+                            queue(
+                                    false,
+                                    new GroupPlanner.Constraints(
+                                            3,
+                                            1_000_000L,
+                                            1_000_000L,
+                                            variant == 3 ? 30L : 31L,
+                                            30L),
+                                    active),
+                            noCommittedWork(),
+                            evaluator,
+                            probe(99L, 50, NOW_MS, NOW_MS + (variant >= 2 ? 29L : 30L), 20L, 0L),
+                            ROUTE);
+            assertModeled(result, 30L);
+            assertEquals(
+                    3,
+                    predictionCalls.get(),
+                    "one incoming estimate, one head, one probe; completion reuses the prefix");
+        }
     }
 
     @Test
@@ -673,10 +646,9 @@ class RequestTimeEstimationTest {
                             return PrefillTimePredictor.Evaluator.super.newBatchPrediction();
                         }
                     };
-            // The remaining probe opens its own window at NOW_MS after the full prefix is consumed.
             assertModeled(
-                    project(snapshot, noCommittedWork(), counted, probe("99", 90, 20L, 0L), BATCH),
-                    snapshot == blockedSuffix ? 59L : 50L);
+                    project(snapshot, noCommittedWork(), counted, probe(99L, 90, 20L, 0L), BATCH),
+                    snapshot == blockedSuffix ? 30L : 22L);
             assertEquals(
                     snapshot == blockedSuffix ? 1 : 2,
                     planningSessions.get(),
@@ -685,7 +657,7 @@ class RequestTimeEstimationTest {
     }
 
     @Test
-    void rejectedTailExpiryRebuildsTheBatchBeforeDispatch() {
+    void unexpiredOversizedTailKeepsItsOwnBatchBeforeTheProbe() {
         var snapshot =
                 queue(
                         true,
@@ -704,12 +676,12 @@ class RequestTimeEstimationTest {
                                         .orElse(0L));
 
         assertModeled(
-                project(snapshot, noCommittedWork(), nonlinear, probe("99", 70, 20L, 0L), BATCH),
-                49L);
+                project(snapshot, noCommittedWork(), nonlinear, probe(99L, 70, 20L, 0L), BATCH),
+                130L);
     }
 
     @Test
-    void expirySkipsDeliveredPrefixAndRemovesInterleavedWaitingMembers() {
+    void futureExpiryDoesNotEraseKnownWorkInLaterGroups() {
         QueueSnapshot snapshot =
                 queue(
                         false,
@@ -724,18 +696,17 @@ class RequestTimeEstimationTest {
                                 item(7L, 50, 7L, 50L),
                                 item(8L, 50, 8L, 700L, NOW_MS + 5L)));
 
-        for (RequestTimeEstimation.DeliveryProjection delivery : List.of(BATCH, ROUTE)) {
+        for (org.flexlb.config.DispatcherConfig.Type delivery : List.of(BATCH, ROUTE)) {
             Candidate result =
                     project(
                             snapshot,
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe("99", 50, 80L, 0L),
+                            probe(99L, 50, 80L, 0L),
                             delivery);
 
-            // The full first group takes 15 ms. The remaining group waits until
-            // 29 ms, drops requests 6 and 8, then executes requests 7 and 99.
-            assertModeled(result, 159L);
+            // Both groups are alive at capture: 15 ms followed by 600 + 50 + 700 + 80 ms.
+            assertModeled(result, 1445L);
             assertEquals(
                     Candidate.InitialHeadDisposition.BEFORE_PROBE, result.initialHeadDisposition());
         }
@@ -750,14 +721,14 @@ class RequestTimeEstimationTest {
                         queue(false, strict, List.of(item(1L, 50, 1L, 100L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
         Candidate invalidProbe =
                 project(
                         queue(false, strict, List.of()),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("100", 50, 100L, 0L),
+                        probe(100L, 50, 100L, 0L),
                         ROUTE);
 
         assertModeled(afterInvalidHead, 120L);
@@ -777,7 +748,7 @@ class RequestTimeEstimationTest {
                                 List.of(item(1L, 100, 1L, 10L), item(2L, 10, 2L, 999L))),
                         noCommittedWork(),
                         suffixFailingSingleEvaluator(),
-                        probe("99", 90, 20L, 0L),
+                        probe(99L, 90, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.MODELED, result.state());
@@ -792,7 +763,7 @@ class RequestTimeEstimationTest {
                         queue(true, constraints(1, 0L), List.of(item(1L, 10, 1L, 999L))),
                         noCommittedWork(),
                         suffixFailingBatchEvaluator(),
-                        probe("99", 90, 20L, 0L),
+                        probe(99L, 90, 20L, 0L),
                         BATCH);
 
         assertEquals(Candidate.State.MODELED, result.state());
@@ -805,10 +776,8 @@ class RequestTimeEstimationTest {
         GroupPlanner.Constraints splitByComputeShape =
                 new GroupPlanner.Constraints(2, 150L, 1_000_000L, 0L, 30L);
         QueueSnapshot snapshot = queue(true, splitByComputeShape, List.of(expiringSuffix));
-        RequestTimeEstimationTestSupport.Probe probe =
-                probe("99", 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
-        RequestTimeEstimation.Candidate result =
-                project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
+        Probe probe = probe(99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
+        Candidate result = project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
 
         assertModeled(result, 20L);
     }
@@ -823,7 +792,7 @@ class RequestTimeEstimationTest {
                         queue(true, kvLimited, List.of(item(1L, 10, 1L, 100L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 100, 20L, 0L),
+                        probe(99L, 100, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.MODELED, result.state());
@@ -838,7 +807,7 @@ class RequestTimeEstimationTest {
                         queue(false, constraints(1, 0L), List.of(item(99L, 50, 1L, 20L))),
                         noCommittedWork(),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
         Candidate committed =
                 project(
@@ -846,11 +815,11 @@ class RequestTimeEstimationTest {
                         work(
                                 List.of(
                                         new WorkSnapshot.RequestWork(
-                                                "99", WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
+                                                99L, WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
                                 List.of(),
                                 0L),
                         TOKEN_EVALUATOR,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         ROUTE);
 
         assertEquals(Candidate.State.UNAVAILABLE, active.state());
@@ -884,7 +853,7 @@ class RequestTimeEstimationTest {
                                 List.of()),
                         noCommittedWork(),
                         evaluator,
-                        probe("99", 50, 20L, 0L),
+                        probe(99L, 50, 20L, 0L),
                         BATCH);
 
         assertEquals(20L, result.projectedTtftMsValue());
@@ -910,7 +879,7 @@ class RequestTimeEstimationTest {
                         false,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 500L, 0L),
                         List.of());
-        RequestTimeEstimationTestSupport.Probe probe = probe("100", 50, 20L, 0L);
+        Probe probe = probe(100L, 50, 20L, 0L);
 
         assertTrue(project(empty, noCommittedWork(), first, probe, BATCH).selectable());
         assertTrue(project(empty, noCommittedWork(), second, probe, BATCH).selectable());

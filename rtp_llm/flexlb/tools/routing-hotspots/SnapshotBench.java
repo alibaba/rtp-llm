@@ -31,13 +31,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static org.mockito.Mockito.mock;
 
-/**
- * Same source on both revisions; includes real PrefillQueueRunner snapshot capture.
- */
+/** Same source on both revisions; includes real PrefillQueueRunner snapshot capture. */
 public class SnapshotBench {
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
     static volatile long sink;
@@ -45,10 +42,13 @@ public class SnapshotBench {
     static DeliveryDispatcher strategy;
     static final RequestTimeEstimationTestSupport.Probe PROBE =
             new RequestTimeEstimationTestSupport.Probe(
-                    String.valueOf(Long.MAX_VALUE), 0, 1, Long.MAX_VALUE, 2048, 0, 0);
+                    Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(
-            PrefillEndpoint endpoint, PrefillState state, ReentrantLock lock, RequestRoute member) {
+            PrefillEndpoint endpoint,
+            PrefillState state,
+            PrefillState.QueueGuard lock,
+            RequestRoute member) {
         void changeMembership() {
             lock.lock();
             try {
@@ -66,12 +66,7 @@ public class SnapshotBench {
     record Sample(long ns, long cpu, long bytes, long checksum) {}
 
     static RequestRoute request(FlexlbConfig config, long id, int priority, long tokens) {
-        var request =
-                Request.builder()
-                        .requestId(String.valueOf(id))
-                        .seqLen(tokens)
-                        .rawPriority(priority)
-                        .build();
+        var request = Request.builder().requestId(id).seqLen(tokens).rawPriority(priority).build();
         var context = new RequestContext(config);
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
@@ -110,9 +105,7 @@ public class SnapshotBench {
                         mock(DeliveryMetricsReporter.class),
                         new PlacementAvailability());
         var state = endpoint.ownership;
-        Field lockField = PrefillState.class.getDeclaredField("lock");
-        lockField.setAccessible(true);
-        var lock = (ReentrantLock) lockField.get(state);
+        var lock = state.queueGuard();
         var enableQueue =
                 PrefillState.class.getDeclaredMethod("enableQueueLocked", Comparator.class);
         enableQueue.setAccessible(true);
@@ -158,11 +151,7 @@ public class SnapshotBench {
                 if (project)
                     checksum +=
                             RequestTimeEstimationTestSupport.project(
-                                            inputs,
-                                            PROBE,
-                                            model,
-                                            org.flexlb.balance.projection.RequestTimeEstimation
-                                                    .forDelivery(strategy.mode()))
+                                            inputs, PROBE, model, strategy.mode())
                                     .projectedTtftMsValue();
             }
         }

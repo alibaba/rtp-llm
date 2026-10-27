@@ -63,17 +63,17 @@ class PrefillQueueRunnerSchedulingTest {
     }
 
     @Test
-    void projectionConstraintsRequireTheSharedOwnershipLock() {
+    void admissionBlockRequiresTheSharedOwnershipLock() {
         PrefillQueueRunner runtime =
                 runningRuntime(
                         singleConfig(),
                         mock(PrefillEndpoint.class),
                         SchedulerTestSupport.dispatcher());
-        assertThrows(IllegalStateException.class, runtime::planningViewLocked);
+        assertThrows(IllegalStateException.class, runtime::admissionBlockLocked);
         var lock = PrefillQueueRunnerTestSupport.state(runtime).queueGuard();
         lock.lock();
         try {
-            assertEquals(1, runtime.planningViewLocked().constraints().maxRequests());
+            assertNull(runtime.admissionBlockLocked());
         } finally {
             lock.unlock();
         }
@@ -622,7 +622,7 @@ class PrefillQueueRunnerSchedulingTest {
                             attempts.incrementAndGet();
                             if (!endpoint.ownership.requestCapacityAvailable(1, 1)) {
                                 waiting.countDown();
-                                return CapacityBoundary.deliveryUnavailable(
+                                return CapacityBoundary.unavailable(
                                         CapacityBoundary.Resource.PREFILL_REQUEST);
                             }
                             resumed.countDown();
@@ -666,8 +666,8 @@ class PrefillQueueRunnerSchedulingTest {
         assertNull(
                 inputs.queue().admissionBlock().semantics(),
                 "batch capacity waits must not impose publication restrictions");
-        RequestTimeEstimation.DeliveryProjection projection =
-                RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        org.flexlb.config.DispatcherConfig.Type projection =
+                org.flexlb.config.DispatcherConfig.Type.BATCH;
         RequestTimeEstimation.Candidate candidate =
                 RequestTimeEstimationTestSupport.project(
                         inputs,
@@ -903,7 +903,7 @@ class PrefillQueueRunnerSchedulingTest {
                     delivery.groupPredictionEntered.await(2, TimeUnit.SECONDS),
                     runtime.getLatestQueueWaitSnapshot().toString());
 
-            assertTrue(runtime.control(revoked, PrefillQueueRunner.Control.REMOVE));
+            assertTrue(runtime.removeQueued(revoked));
             delivery.allowGroupPrediction.countDown();
             await(delivery.nextDecisionStarted);
 
@@ -1124,14 +1124,8 @@ class PrefillQueueRunnerSchedulingTest {
             var boundary =
                     resource == CapacityBoundary.Resource.PREFILL_REQUEST
                                     || resource == CapacityBoundary.Resource.PREFILL_BATCH
-                            ? CapacityBoundary.deliveryUnavailable(resource)
-                            : CapacityBoundary.unavailable(
-                                    resource,
-                                    new RequestTimeEstimation.AdmissionBlockSemantics(
-                                            "TEST_CAPACITY",
-                                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
-                                            "TEST_CAPACITY",
-                                            RoleType.PREFILL));
+                            ? CapacityBoundary.unavailable(resource)
+                            : CapacityBoundary.unavailable(resource);
             bindings.put(boundary, availability);
             return boundary;
         }

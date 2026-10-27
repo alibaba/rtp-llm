@@ -4,19 +4,19 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.planner.GroupingPolicy;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -28,8 +28,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -68,8 +68,8 @@ class CostBasedPrefillStrategyBlockerTest {
                         new QueueSnapshot(
                                 0L,
                                 true,
-                                GroupingPolicy.FIXED_WINDOW,
-                                Comparator.comparing(GroupPlanner.Item::requestId),
+                                GroupPlanner.FIXED_WINDOW,
+                                Comparator.comparingLong(GroupPlanner.Item::requestId),
                                 new GroupPlanner.Constraints(1, Long.MAX_VALUE, 0L, 0L, 0L),
                                 List.of(),
                                 null),
@@ -79,13 +79,19 @@ class CostBasedPrefillStrategyBlockerTest {
             var projectedWorkers = new AtomicInteger();
             var directory = mock(EndpointRegistry.class);
             var cache = mock(CacheAwareService.class);
-            when(cache.findMatchingEngines(any()))
-                    .thenReturn(
-                            org.flexlb.cache.domain.CacheMatchResult.empty(
-                                    org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC));
+            when(cache.findMatchingEngines(any(), any(), any()))
+                    .thenAnswer(
+                            invocation -> {
+                                assertEquals(expected, invocation.getArgument(2));
+                                return Map.of();
+                            });
             var strategy =
                     new CostBasedPrefillStrategy(
-                            directory, cache, mock(EngineHealthReporter.class));
+                            directory,
+                            cache,
+                            mock(EngineHealthReporter.class),
+                            mock(CacheMetricsReporter.class),
+                            SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()));
             var entries = new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
             for (int index = 0; index < shape.length(); index++) {
                 char kind = shape.charAt(index);
@@ -115,9 +121,7 @@ class CostBasedPrefillStrategyBlockerTest {
                 org.springframework.test.util.ReflectionTestUtils.setField(
                         endpoint, "predictor", new FormulaPredictor("sum(computeTokens)"));
                 org.springframework.test.util.ReflectionTestUtils.setField(
-                        endpoint,
-                        "deliveryProjection",
-                        RequestTimeEstimation.forDelivery(DispatcherConfig.Type.BATCH));
+                        endpoint, "deliveryMode", DispatcherConfig.Type.BATCH);
                 entries.add(new EndpointRegistry.PrefillRoutingEntry("worker-" + index, endpoint));
             }
             var frozen = List.copyOf(entries);
@@ -125,7 +129,7 @@ class CostBasedPrefillStrategyBlockerTest {
             var result =
                     StrategyTestSupport.select(
                             strategy,
-                            Request.builder().requestId("99").seqLen(100L).build(),
+                            Request.builder().requestId(99L).seqLen(100L).build(),
                             SchedulingMetadata.explicit(50, Long.MAX_VALUE),
                             role,
                             group);
@@ -139,13 +143,7 @@ class CostBasedPrefillStrategyBlockerTest {
             if (expected.isEmpty()) {
                 verifyNoInteractions(cache);
             } else {
-                verify(cache)
-                        .findMatchingEngines(
-                                org.mockito.ArgumentMatchers.argThat(
-                                        query ->
-                                                query.roleType() == role
-                                                        && java.util.Objects.equals(
-                                                                query.group(), group)));
+                verify(cache).findMatchingEngines(any(), eq(role), any());
             }
             for (int index = 0; index < shape.length(); index++) {
                 if (shape.charAt(index) == 'O') {
@@ -153,16 +151,5 @@ class CostBasedPrefillStrategyBlockerTest {
                 }
             }
         }
-    }
-
-    @Test
-    void everyRegisteredEndpointMustProveTheSameBlocker() {
-        assertNull(CostBasedPrefillStrategy.provenPoolWideBlocker(Map.of(RoleType.DECODE, 3), 4));
-        assertNull(
-                CostBasedPrefillStrategy.provenPoolWideBlocker(
-                        Map.of(RoleType.DECODE, 2, RoleType.PREFILL, 2), 4));
-        assertEquals(
-                RoleType.DECODE,
-                CostBasedPrefillStrategy.provenPoolWideBlocker(Map.of(RoleType.DECODE, 4), 4));
     }
 }

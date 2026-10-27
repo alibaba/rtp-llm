@@ -197,10 +197,7 @@ class PrefillEndpointTest {
             assertTrue(EndpointTestSupport.offer(routeEndpoint, queued));
             assertEquals(1, routeEndpoint.ownership.progress().queueDepth());
 
-            assertTrue(
-                    routeEndpoint.control(
-                            queued,
-                            org.flexlb.balance.scheduler.PrefillQueueRunner.Control.REMOVE));
+            assertTrue(routeEndpoint.removeQueued(queued));
             assertEquals(0, routeEndpoint.ownership.progress().queueDepth());
         } finally {
             routeEndpoint.close();
@@ -1561,10 +1558,7 @@ class PrefillEndpointTest {
             RequestRoute active =
                     createRequestRoute(handoffEndpoint, String.valueOf(requestId), 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
-            assertTrue(
-                    handoffEndpoint.control(
-                            active,
-                            org.flexlb.balance.scheduler.PrefillQueueRunner.Control.REMOVE));
+            assertTrue(handoffEndpoint.removeQueued(active));
             registerDirect(handoffEndpoint, requestId, 100L);
 
             assertEquals(

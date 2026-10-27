@@ -22,9 +22,9 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
+import static org.flexlb.balance.scheduler.ContextResult.End;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EndToken;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Granted;
@@ -295,7 +295,7 @@ final class RequestProtocolTestSupport {
                 context.requestCancel(
                         new Cancellation(
                                 0L, reason, false, System.currentTimeMillis(), null, detail));
-        return claim instanceof Granted<?>;
+        return claim.kind() == ContextResult.UpdateKind.APPLIED;
     }
 
     /**
@@ -557,49 +557,16 @@ final class RequestProtocolTestSupport {
         return all;
     }
 
-    static EndToken claimTerminal(
-            AbstractRequestScheduler scheduler,
-            RequestContext context,
-            TerminalOutcome outcome,
-            Response response,
-            boolean publish) {
-        EndKind kind =
-                outcome.phase() == RequestState.Phase.TIMED_OUT
-                        ? EndKind.INACTIVITY
-                        : EndKind.FRONTEND;
-        if (outcome.phase() == RequestState.Phase.CANCELLED
-                && context.snapshot().cancellation() == null) {
-            context.requestCancel(
-                    new Cancellation(
-                            0L,
-                            CancelReason.CLIENT_CANCELLED,
-                            false,
-                            System.currentTimeMillis(),
-                            StrategyErrorType.REQUEST_CANCELLED,
-                            outcome.detail()));
-        }
-        var claim =
-                context.beginClose(
-                        new EndEvidence(
+    static End endFixture(RequestContext context, EndKind kind, String detail) {
+        return context.beginClose(
+                        EndEvidence.failure(
                                 context.snapshot().route(),
                                 kind,
-                                null,
-                                outcome.phase() == RequestState.Phase.COMPLETED,
-                                0L,
-                                response == null
-                                        ? StrategyErrorType.DISPATCH_FAILED
-                                        : java.util.Arrays.stream(StrategyErrorType.values())
-                                                .filter(
-                                                        value ->
-                                                                value.getErrorCode()
-                                                                        == response.getCode())
-                                                .findFirst()
-                                                .orElse(StrategyErrorType.DISPATCH_FAILED),
-                                outcome.detail(),
-                                false,
-                                false),
-                        System.currentTimeMillis());
-        return claim instanceof Granted<EndToken> granted ? granted.value() : null;
+                                StrategyErrorType.DISPATCH_FAILED,
+                                detail),
+                        System.currentTimeMillis())
+                .after()
+                .outcome();
     }
 
     private RequestProtocolTestSupport() {}

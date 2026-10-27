@@ -24,6 +24,6 @@ public class MetricsCardinalityConfig {
 
     @Bean
     public MeterFilter removeEngineTagsFilter() {
-        return MeterFilter.ignoreTags("engineIp");
+        return MeterFilter.ignoreTags("engineIp", "enginePort");
     }
 }

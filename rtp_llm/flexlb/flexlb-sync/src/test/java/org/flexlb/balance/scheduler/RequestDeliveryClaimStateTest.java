@@ -10,8 +10,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.flexlb.balance.scheduler.ContextResult.Abandonment;
-import static org.flexlb.balance.scheduler.ContextResult.Blocked;
-import static org.flexlb.balance.scheduler.ContextResult.Blocker;
 import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
 import static org.flexlb.balance.scheduler.ContextResult.CleanupAcknowledgement;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
@@ -20,7 +18,6 @@ import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
-import static org.flexlb.balance.scheduler.ContextResult.ProgressKind;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.Rejected;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
@@ -39,6 +36,30 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class RequestDeliveryClaimStateTest {
+    @Test
+    void deliveryPreparationDoesNotPublishUntransferredOwnership() {
+        var context = new RequestContext(mock(FlexlbConfig.class));
+        context.register(7503L, 1000L, 100_000L, 10_000L);
+        var route = mock(RequestRoute.class);
+        when(route.requestId()).thenReturn(7503L);
+        when(route.ctx()).thenReturn(context);
+        var placement = RequestCleanupPassTest.granted(context.beginPlacement(null));
+        RequestCleanupPassTest.granted(
+                context.bindPlacement(placement, route, PublicationResult.PREPARED));
+        RequestCleanupPassTest.granted(
+                context.bindPlacement(placement, route, PublicationResult.PUBLISHED));
+        context.completePlacement(placement, PublicationResult.PUBLISHED, 1000L);
+        var before = context.snapshot();
+        var delivery =
+                RequestCleanupPassTest.granted(
+                        context.prepareDelivery(
+                                route, DeliveryClaimKind.BATCH_ENQUEUE, 12L, 1001L));
+        assertSame(before, context.snapshot());
+        assertNull(context.snapshot().delivery());
+        context.publishDelivery(delivery);
+        assertSame(delivery.identity(), context.snapshot().delivery().identity());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void engineCompletionCannotCloseRoutePublicationBeforeTerminalEffects(boolean fusion) {
@@ -59,16 +80,11 @@ class RequestDeliveryClaimStateTest {
         assertFalse(
                 context.snapshot().deliveryReleasable(),
                 "execution evidence does not close the route sender");
-        var terminal =
-                RequestCleanupPassTest.granted(
-                        context.beginClose(observed.after().pendingEnd(), 1003L));
+        RequestCleanupPassTest.ended(context.beginClose(observed.after().pendingEnd(), 1003L));
         assertFalse(
                 context.snapshot().deliveryReleasable(),
                 "terminal ownership precedes sender closure");
-        context.completeClose(
-                terminal,
-                new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, true, true),
-                1004L);
+        context.completeClose(new CloseProgress(true, false, false, true, true), 1004L);
         assertTrue(context.snapshot().deliveryReleasable());
         assertNull(context.snapshot().delivery().abandonment());
         assertFalse(
@@ -79,8 +95,8 @@ class RequestDeliveryClaimStateTest {
                 context.snapshot().delivery().send(),
                 "closing route publication is not batch NOT_SENT proof");
         if (context.snapshot().phase() != Phase.CLOSED) {
-            var release = RequestCleanupPassTest.granted(context.beginSettlement());
-            assertNotEquals(DecodeResources.ReleaseReason.NOT_SENT, release.releaseReason());
+            assertNotNull(context.releaseReason());
+            assertNotEquals(DecodeResources.ReleaseReason.NOT_SENT, context.releaseReason());
         } else {
             assertNotNull(
                     context.snapshot().terminalRecord(),
@@ -103,11 +119,9 @@ class RequestDeliveryClaimStateTest {
         assertTrue(update.after().deliveryReleasable());
         assertNull(update.after().outcome(), "publisher capacity precedes freezing the failure");
         var terminal =
-                RequestCleanupPassTest.granted(
+                RequestCleanupPassTest.ended(
                         context.beginClose(update.after().pendingEnd(), 1003L));
-        assertEquals(
-                DecodeResources.ReleaseReason.NOT_SENT,
-                RequestCleanupPassTest.granted(context.beginSettlement()).releaseReason());
+        assertEquals(DecodeResources.ReleaseReason.NOT_SENT, context.releaseReason());
         assertFalse(context.snapshot().delivery().acknowledged());
         assertInstanceOf(Rejected.class, context.beginSend(fixture.delivery(), 1004L));
         var duplicate =
@@ -187,7 +201,7 @@ class RequestDeliveryClaimStateTest {
                         0L,
                         null,
                         1003L));
-        RequestCleanupPassTest.granted(context.beginClose(context.snapshot().pendingEnd(), 1004L));
+        RequestCleanupPassTest.ended(context.beginClose(context.snapshot().pendingEnd(), 1004L));
         assertFalse(
                 context.snapshot().deliveryReleasable(),
                 "worker completion still awaits sender exit");
@@ -201,9 +215,7 @@ class RequestDeliveryClaimStateTest {
         assertNull(
                 context.snapshot().delivery().abandonment(),
                 "completed execution needs no new remote proof");
-        assertEquals(
-                DecodeResources.ReleaseReason.COUNTERPART_FINISHED,
-                RequestCleanupPassTest.granted(context.beginSettlement()).releaseReason());
+        assertEquals(DecodeResources.ReleaseReason.COUNTERPART_FINISHED, context.releaseReason());
     }
 
     @ParameterizedTest
@@ -221,13 +233,8 @@ class RequestDeliveryClaimStateTest {
                         failed ? 42L : 0L,
                         null,
                         1003L));
-        var terminal =
-                RequestCleanupPassTest.granted(
-                        context.beginClose(context.snapshot().pendingEnd(), 1004L));
-        context.completeClose(
-                terminal,
-                new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, true, true),
-                1005L);
+        RequestCleanupPassTest.ended(context.beginClose(context.snapshot().pendingEnd(), 1004L));
+        context.completeClose(new CloseProgress(true, false, false, true, true), 1005L);
         if (failed) {
             context.recordDeliveryResult(
                     new CleanupAcknowledgement(
@@ -239,14 +246,12 @@ class RequestDeliveryClaimStateTest {
                 "physical worker proof does not exit the sender");
         assertNull(context.snapshot().terminalRecord());
         assertFalse(context.snapshot().deliveryReleasable());
-        var wait = assertInstanceOf(Blocked.class, context.beginSettlement());
-        assertEquals(Blocker.SENDER, wait.blocker());
+        assertNull(context.releaseReason());
         context.recordDeliveryResult(
                 new TransportResult(fixture.delivery(), DeliveryResult.delivered(), 1006L));
         assertTrue(context.snapshot().deliveryReleasable());
-        var release = RequestCleanupPassTest.granted(context.beginSettlement());
-        context.completeClose(
-                release, new CloseProgress(ProgressKind.RELEASE, true, true, false, false), 1007L);
+        assertNotNull(context.releaseReason());
+        context.completeClose(new CloseProgress(false, true, true, false, false), 1007L);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
         assertEquals(
                 failed ? RequestState.Phase.FAILED : RequestState.Phase.COMPLETED,
@@ -291,12 +296,8 @@ class RequestDeliveryClaimStateTest {
                 uncertain ? SendState.UNKNOWN : SendState.DELIVERED,
                 context.snapshot().delivery().send());
         assertEquals("logical failure", context.snapshot().pendingEnd().detail());
-        RequestCleanupPassTest.granted(context.beginClose(context.snapshot().pendingEnd(), 1005L));
-        var waiting = assertInstanceOf(Blocked.class, context.beginSettlement());
-        assertEquals(
-                Blocker.RELEASE_PROOF,
-                waiting.blocker(),
-                "logical failure does not fabricate NOT_SENT proof");
+        RequestCleanupPassTest.ended(context.beginClose(context.snapshot().pendingEnd(), 1005L));
+        assertNull(context.releaseReason(), "logical failure does not fabricate NOT_SENT proof");
     }
 
     static Fixture fixture(DeliveryClaimKind kind, boolean fusion) {
@@ -322,13 +323,13 @@ class RequestDeliveryClaimStateTest {
         context.completePlacement(placement, PublicationResult.PUBLISHED, 1000L);
         var delivery =
                 RequestCleanupPassTest.granted(
-                        context.beginDelivery(
+                        context.prepareDelivery(
                                 route,
                                 kind,
                                 kind == DeliveryClaimKind.BATCH_ENQUEUE ? 11L : 0L,
                                 1001L));
-        context.commitDelivery(delivery, true, 1001L);
-        return new Fixture(context, route, prefill, decode, reservation, delivery);
+        context.publishDelivery(delivery);
+        return new Fixture(context, route, prefill, decode, reservation, delivery.identity());
     }
 
     record Fixture(

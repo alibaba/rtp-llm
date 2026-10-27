@@ -18,6 +18,7 @@ import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.PriorityOrdering;
@@ -29,16 +30,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Predicate;
+import java.util.function.LongPredicate;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
-    /**
-     * Exact plan commit; only the accepted handoff transfers generation ownership to the sender.
-     */
+    /** Exact plan commit; only the accepted handoff transfers generation ownership to the sender. */
     public PrefillState.CommittedHandoff commit(PrefillState.CommitPlan plan) {
         var lock = ownership.queueGuard();
         lock.lock();
@@ -81,17 +80,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private static final PrefillTimePredictor.Evaluator DEFAULT_BATCH_PREDICTOR =
             new FormulaPredictor(new RoutingConfig.ExecutionTimeEstimatorConfig().getExpression());
+    private static final GroupPlanner.Constraints DIRECT_CONSTRAINTS =
+            new GroupPlanner.Constraints(1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L);
 
     public final PrefillTimePredictor predictor;
 
     public final long requestLimit;
-    private final long fallbackBatchTokenCapacity;
 
     private volatile PrefillQueueRunner queueRunner;
-    private java.util.function.Supplier<FlexlbConfig> configSupplier;
+    // Guarded by ownership.queueGuard(); policy exists before the execution thread starts.
+    private QueueExecutionSettings queueSettings;
     private final DeliveryDispatcher dispatcher;
     private final DispatcherConfig.Type dispatcherType;
-    public final RequestTimeEstimation.DeliveryProjection deliveryProjection;
+    public final DispatcherConfig.Type deliveryMode;
     private volatile Comparator<GroupPlanner.Item> projectionOrder;
     private volatile ProjectionSource projectionSource;
 
@@ -106,7 +107,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             right.requestId());
     private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparing(GroupPlanner.Item::requestId);
+                    .thenComparingLong(GroupPlanner.Item::requestId);
 
     public final PrefillState ownership;
 
@@ -121,7 +122,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
             DeliveryMetricsReporter reporter,
             PlacementAvailability placementAvailability) {
         super(status);
-        fallbackBatchTokenCapacity = config.getFallbackBatchTokenCapacity();
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.placementAvailability =
                 java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
@@ -132,11 +132,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         : new FormulaPredictor(estimator.getExpression());
         this.dispatcher = dispatcher;
         this.dispatcherType = config.getDispatcher().getType();
+        this.queueSettings = config.isQueue() ? QueueExecutionSettings.capture(config) : null;
         this.requestLimit =
                 config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                         ? config.getDispatcher().getMaxInflightPerPrefillWorker()
                         : 0L;
-        this.deliveryProjection = RequestTimeEstimation.forDelivery(dispatcher.mode());
+        this.deliveryMode = dispatcher.mode();
         this.projectionOrder =
                 config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.ownership =
@@ -146,47 +147,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         System::currentTimeMillis);
     }
 
-    PrefillEndpoint(
-            WorkerStatus status,
-            java.util.function.Supplier<FlexlbConfig> configSupplier,
-            DeliveryDispatcher dispatcher,
-            DeliveryMetricsReporter reporter,
-            PlacementAvailability placementAvailability) {
-        this(status, configSupplier.get(), dispatcher, reporter, placementAvailability);
-        this.configSupplier = java.util.Objects.requireNonNull(configSupplier, "configSupplier");
-    }
-
-    public long collectionWindowMs(long startupWindowMs) {
-        if (configSupplier == null) {
-            return startupWindowMs;
-        }
-        FlexlbConfig current = configSupplier.get();
-        return current.isQueue()
-                ? Math.max(0L, current.decisionPolicy().getMaxCollectionWaitMs())
-                : startupWindowMs;
-    }
-
-    /**
-     * Captured under ownership.queueGuard(); the shared result is built without that lock.
-     */
+    /** Captured under ownership.queueGuard(); the shared result is built without that lock. */
     private final class ProjectionSource {
         private final PrefillState.Progress version;
         private PrefillState.Snapshot ownership;
         private final GroupPlanner.Constraints constraints;
         private final AdmissionBlock admissionBlock;
         private final boolean queueEnabled;
-        private final org.flexlb.balance.planner.GroupingPolicy grouping;
+        private final org.flexlb.balance.planner.GroupPlanner grouping;
         private final Comparator<GroupPlanner.Item> capturedOrder;
         private volatile RequestTimeEstimation.Inputs materialized;
 
-        private ProjectionSource(
-                PrefillState.Snapshot ownership, PrefillQueueRunner.PlanningView planning) {
+        private ProjectionSource(PrefillState.Snapshot ownership, AdmissionBlock admissionBlock) {
             this.version = ownership.version();
             this.ownership = ownership;
-            this.constraints = planning.constraints();
-            this.admissionBlock = planning.block();
-            this.queueEnabled = queueRunner != null;
-            this.grouping = planning.grouping();
+            this.constraints =
+                    queueSettings == null
+                            ? DIRECT_CONSTRAINTS
+                            : queueSettings.constraints(getStatus().committedEngineObservation());
+            this.admissionBlock = admissionBlock;
+            this.queueEnabled = queueSettings != null;
+            this.grouping = queueSettings == null ? null : queueSettings.groupingPolicy();
             this.capturedOrder = projectionOrder;
         }
 
@@ -219,32 +200,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    private long currentCollectionWindowMs() {
-        return queueRunner == null ? 0L : queueRunner.collectionWindowMs();
-    }
-
     public RequestTimeEstimation.Inputs captureRouteProjectionInputs() {
         ProjectionSource source = projectionSource;
-        if (source == null
-                || (source.version != ownership.progress()
-                        || source.constraints.collectionWindowMs()
-                                != currentCollectionWindowMs())) {
+        if (source == null || source.version != ownership.progress()) {
             ownership.queueGuard().lock();
             try {
                 source = projectionSource;
-                if (source == null
-                        || (source.version != ownership.progress()
-                                || source.constraints.collectionWindowMs()
-                                        != currentCollectionWindowMs())) {
-                    var planning =
-                            queueRunner == null
-                                    ? new PrefillQueueRunner.PlanningView(
-                                            null,
-                                            new GroupPlanner.Constraints(
-                                                    1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L),
-                                            null)
-                                    : queueRunner.planningViewLocked();
-                    source = new ProjectionSource(ownership.snapshotLocked(), planning);
+                if (source == null || source.version != ownership.progress()) {
+                    var block = queueRunner == null ? null : queueRunner.admissionBlockLocked();
+                    source = new ProjectionSource(ownership.snapshotLocked(), block);
                     projectionSource = source;
                 }
             } finally {
@@ -283,6 +247,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             : PrefillQueueRunner.FIFO_QUEUE_ORDER);
             PrefillQueueRunner newRunner =
                     new PrefillQueueRunner(ipPort(), this, settings, dispatcher, ownership);
+            queueSettings = settings;
             projectionOrder =
                     settings.priorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
             projectionSource = null;
@@ -293,15 +258,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
+    /**
+     * Read the last scheduling decision without traversing or locking the queue.
+     */
+    /** Latest wait state from this endpoint's queue runner; not a per-request failure cause. */
     public enum Signal {
         CAPACITY,
         INPUT,
         PLACEMENT
     }
 
-    /**
-     * INPUT changes planning facts; CAPACITY also wakes placement; PLACEMENT only publishes that edge.
-     */
+    /** INPUT changes planning facts; CAPACITY also wakes placement; PLACEMENT only publishes that edge. */
     public void signal(Signal kind) {
         try {
             if (kind != Signal.PLACEMENT) {
@@ -330,8 +297,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    public boolean control(RequestRoute exact, PrefillQueueRunner.Control kind) {
-        return queueRunner != null && queueRunner.control(exact, kind);
+    public boolean removeQueued(RequestRoute exact) {
+        return queueRunner != null && queueRunner.removeQueued(exact);
     }
 
     public Map<String, Object> getLatestQueueWaitSnapshot() {
@@ -415,9 +382,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return ownership.reserveUnqueuedRoute(route, predictedMs, requestLimit);
     }
 
-    /**
-     * The ledger supplies facts; generation cleanup and notifications run after unlocking.
-     */
+    /** The ledger supplies facts; generation cleanup and notifications run after unlocking. */
     public boolean release(PrefillState.Reservation preparation, RequestRoute exact) {
         var released = ownership.release(preparation, exact);
         if (!released.released()) {
@@ -457,9 +422,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 "Private Prefill candidate produced locally-owned request statuses");
     }
 
-    /**
-     * Keep ordinary reduction/publication in one lock; predict a shrunk batch outside it.
-     */
+    /** Keep ordinary reduction/publication in one lock; predict a shrunk batch outside it. */
     private PrefillState.StatusReconciliation reduceStatus(
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation,
@@ -499,22 +462,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             var before = ws.committedEngineObservation();
                             var after = observation.engine();
                             inputsChanged =
-                                    PrefillQueueRunner.schedulingCapacity(
+                                    QueueExecutionSettings.schedulingCapacity(
                                                             before,
-                                                            PrefillQueueRunner.PlanningResource
-                                                                    .TOKENS,
-                                                            fallbackBatchTokenCapacity)
-                                                    != PrefillQueueRunner.schedulingCapacity(
+                                                            QueueExecutionSettings.PlanningResource
+                                                                    .TOKENS)
+                                                    != QueueExecutionSettings.schedulingCapacity(
                                                             after,
-                                                            PrefillQueueRunner.PlanningResource
-                                                                    .TOKENS,
-                                                            fallbackBatchTokenCapacity)
-                                            || PrefillQueueRunner.schedulingCapacity(
+                                                            QueueExecutionSettings.PlanningResource
+                                                                    .TOKENS)
+                                            || QueueExecutionSettings.schedulingCapacity(
                                                             before,
-                                                            PrefillQueueRunner.PlanningResource.KV)
-                                                    != PrefillQueueRunner.schedulingCapacity(
+                                                            QueueExecutionSettings.PlanningResource
+                                                                    .KV)
+                                                    != QueueExecutionSettings.schedulingCapacity(
                                                             after,
-                                                            PrefillQueueRunner.PlanningResource.KV);
+                                                            QueueExecutionSettings.PlanningResource
+                                                                    .KV);
                         }
                         if (prepared != null) {
                             ws.publishPreparedStatus(prepared);
@@ -655,7 +618,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Evict endpoint orphans while retaining IDs still registered by the scheduler.
      */
-    public int evictExpiredInflight(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
+    public int evictExpiredInflight(long ttlMs, LongPredicate retainForSchedulerCleanup) {
         var orphanCandidates = new java.util.HashSet<RequestRoute>();
         for (RequestRoute route : ownership.cleanupCandidates()) {
             if (!retainForSchedulerCleanup.test(route.requestId())) {
@@ -685,26 +648,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.SchedulerRuntime}.
      */
     public void reportBatchMetrics(DeliveryMetricsReporter reporter) {
-        String role = getStatus().getRole().name();
-        String engineIp = getStatus().getMetricIpPort();
         int queueSize = ownership.progress().queueDepth();
-        reporter.reportBatcherQueueSize(role, engineIp, queueSize);
+        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), queueSize);
         // Priority-bucketed batch queue length — single-report with priority tag.
         // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
         Map<Integer, Integer> sizeByPriority =
                 queueRunner == null ? Map.of() : queueRunner.queueSizeByPriority();
         if (sizeByPriority.isEmpty()) {
-            reporter.reportBatcherQueueDepthByPriority(role, engineIp, 0, 0);
+            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), 0, 0);
         } else {
             sizeByPriority.forEach(
                     (priority, size) ->
                             reporter.reportBatcherQueueDepthByPriority(
-                                    role, engineIp, priority, size));
+                                    RoleType.PREFILL.name(), getIp(), priority, size));
         }
-        var stats = ownership.stats();
-        reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
-        reporter.reportInflightRequestCount(role, engineIp, stats.inflightRequests());
-        reporter.reportInflightMaxAgeMs(role, engineIp, stats.maxObservedAgeMs());
+        reporter.reportPrefillInflight(getIp(), ownership.stats());
     }
 
     private Throwable reportBatchCompletions(

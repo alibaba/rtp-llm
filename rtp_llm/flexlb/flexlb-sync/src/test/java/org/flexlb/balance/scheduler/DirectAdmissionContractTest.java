@@ -402,7 +402,7 @@ class DirectAdmissionContractTest {
                                             claim,
                                             CancelReason.CLIENT_CANCELLED,
                                             System.currentTimeMillis()));
-                    fixture.requests.requestCleanup(claim.item().ctx());
+                    fixture.requests.scheduleClose(claim.item().ctx());
                 }
             }
         }

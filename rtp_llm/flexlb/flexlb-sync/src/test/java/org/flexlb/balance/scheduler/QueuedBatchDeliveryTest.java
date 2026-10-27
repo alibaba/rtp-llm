@@ -1041,10 +1041,11 @@ class QueuedBatchDeliveryTest {
             assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
             for (int i = 0; i < candidates.size(); i++) {
                 if (!batch) {
-                    assertEquals(i < overtaken, candidates.get(i).future().isDone());
                     if (i < overtaken) {
-                        var response = candidates.get(i).future().get();
+                        var response = candidates.get(i).future().get(2, TimeUnit.SECONDS);
                         assertTrue(response.isSuccess(), response.toString());
+                    } else {
+                        assertFalse(candidates.get(i).future().isDone());
                     }
                 }
                 var resources = candidates.get(i).decodeEp().resourceSnapshot();

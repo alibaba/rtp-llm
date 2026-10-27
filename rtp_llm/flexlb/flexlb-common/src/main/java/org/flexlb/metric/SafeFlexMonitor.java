@@ -81,6 +81,15 @@ public final class SafeFlexMonitor implements FlexMonitor {
     }
 
     @Override
+    public void removeGauge(String name, FlexMetricTags tags) {
+        try {
+            delegate.removeGauge(name, tags);
+        } catch (Throwable failure) {
+            logFailure(name, failure);
+        }
+    }
+
+    @Override
     public void close() {
         try {
             delegate.close();

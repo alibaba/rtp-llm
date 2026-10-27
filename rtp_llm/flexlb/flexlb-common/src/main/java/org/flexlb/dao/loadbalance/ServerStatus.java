@@ -1,28 +1,17 @@
 package org.flexlb.dao.loadbalance;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.AccessLevel;
 import lombok.Data;
-import lombok.EqualsAndHashCode;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.ToString;
-import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.CommonUtils;
 
-import java.util.List;
-
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
-    /**
-     * Exact ViT endpoint generation retained across routing and status copies.
-     */
+    /** Exact ViT endpoint generation retained across routing and status copies. */
     @JsonProperty("worker_generation")
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private long workerGeneration;
@@ -39,45 +28,10 @@ public class ServerStatus {
     @JsonProperty("grpc_port")
     private int grpcPort;
 
-    @JsonProperty("preempt_request_ids")
-    private List<String> preemptRequestIds = List.of();
-
-    public void setPreemptRequestIds(List<String> preemptRequestIds) {
-        this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
-    }
-
     @JsonProperty("dp_rank")
     private long dpRank;
 
-    /**
-     * Selected logical engine index exposed in the schedule response. This field is present
-     * when a physical frontend owns multiple logical engines and omitted when there is only
-     * one engine.
-     */
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    @JsonProperty("engine_index")
-    private Integer engineIndex;
-
-    /**
-     * Selected logical engine index used only inside FlexLB. Unlike {@link #engineIndex}, this
-     * value is always available, including {@code 0} for a single-engine frontend, so routing
-     * and rollback can address the exact logical worker.
-     */
-    @JsonIgnore
-    @Setter(AccessLevel.NONE)
-    private int routingEngineIndex;
-
-    @JsonIgnore
-    @Setter(AccessLevel.NONE)
-    private int routingMultiEngineNum = 1;
-
-    @JsonIgnore
-    @Getter(AccessLevel.NONE)
-    @Setter(AccessLevel.NONE)
-    @EqualsAndHashCode.Exclude
-    @ToString.Exclude
-    private WorkerIdentity workerIdentity = new WorkerIdentity(null, 0, 0);
-
+    /** Selection-time known work cost in ms, excluding collection and transport waits. */
     @JsonProperty("prefill_time")
     private long prefillTime;
 
@@ -88,7 +42,7 @@ public class ServerStatus {
     private DebugInfo debugInfo;
 
     @JsonProperty("request_id")
-    private String requestId;
+    private long requestId;
 
     @JsonProperty("success")
     private boolean success;
@@ -101,7 +55,7 @@ public class ServerStatus {
 
     public static ServerStatus forWorker(
             RoleType role,
-            String requestId,
+            long requestId,
             WorkerStatus.TopologySnapshot topology,
             WorkerStatus.EngineObservation observation) {
         ServerStatus result = new ServerStatus();
@@ -113,7 +67,6 @@ public class ServerStatus {
         result.setHttpPort(topology.port());
         result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
         result.setDpRank(observation.dpRank());
-        result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
         return result;
     }
 
@@ -130,12 +83,7 @@ public class ServerStatus {
         copy.serverIp = source.serverIp;
         copy.httpPort = source.httpPort;
         copy.grpcPort = source.grpcPort;
-        copy.preemptRequestIds = List.copyOf(source.preemptRequestIds);
         copy.dpRank = source.dpRank;
-        copy.engineIndex = source.engineIndex;
-        copy.routingEngineIndex = source.routingEngineIndex;
-        copy.routingMultiEngineNum = source.routingMultiEngineNum;
-        copy.workerIdentity = source.workerIdentity;
         copy.prefillTime = source.prefillTime;
         copy.group = source.group;
         copy.workerGeneration = source.workerGeneration;
@@ -145,58 +93,5 @@ public class ServerStatus {
         copy.code = source.code;
         copy.message = source.message;
         return copy;
-    }
-
-    /**
-     * Sets the selected engine identity for internal routing and the schedule wire response.
-     * Single-engine routes keep the internal {@code @0} identity but omit the wire field.
-     */
-    public void setSelectedEngineIndex(int selectedEngineIndex, int multiEngineNum) {
-        if (multiEngineNum < 1
-                || selectedEngineIndex < 0
-                || selectedEngineIndex >= multiEngineNum) {
-            throw new IllegalArgumentException(
-                    "selected engine index must be in [0, multiEngineNum)");
-        }
-        routingEngineIndex = selectedEngineIndex;
-        routingMultiEngineNum = multiEngineNum;
-        engineIndex = multiEngineNum > 1 ? selectedEngineIndex : null;
-        refreshWorkerIdentity();
-    }
-
-    /**
-     * Returns the logical worker count used to derive the schedule response.
-     */
-    @JsonIgnore
-    public int getRoutingMultiEngineNum() {
-        return routingMultiEngineNum;
-    }
-
-    /**
-     * Returns the internal logical worker identity in {@code ip:port@engineIndex} format.
-     * The index identifies one independently routable engine behind the physical frontend.
-     */
-    @JsonIgnore
-    public String getLogicalIpPort() {
-        return workerIdentity.getLogicalIpPort();
-    }
-
-    @JsonIgnore
-    public String getMetricIpPort() {
-        return workerIdentity.getMetricIpPort(routingMultiEngineNum);
-    }
-
-    public void setServerIp(String serverIp) {
-        this.serverIp = serverIp;
-        refreshWorkerIdentity();
-    }
-
-    public void setHttpPort(int httpPort) {
-        this.httpPort = httpPort;
-        refreshWorkerIdentity();
-    }
-
-    private void refreshWorkerIdentity() {
-        workerIdentity = new WorkerIdentity(serverIp, httpPort, routingEngineIndex);
     }
 }
