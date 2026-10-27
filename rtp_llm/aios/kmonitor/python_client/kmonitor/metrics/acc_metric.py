@@ -29,9 +29,10 @@ class AccMetric(MetricBase):
     def __init__(self, *args):
         super(AccMetric, self).__init__(*args)
         self.last_report_time: float = time.time()
-        self.tag_value_map: Dict[int, ValueAggregation] = {
-            hash(frozenset(self.tags.items())): ValueAggregation(self.tags)
-        }
+        # Registering an unused counter must not emit zeros that collide with
+        # another process's samples. After the first report, keep emitting zeros
+        # for that tag set so an active QPS series still returns to zero.
+        self.tag_value_map: Dict[int, ValueAggregation] = {}
         self.lock = Lock()
 
     def report(self, value: float = 1, tags: Dict[str, str] = {}) -> None:
