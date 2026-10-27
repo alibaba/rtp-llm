@@ -12,8 +12,8 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient.CancelReply;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient.CancelReply;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Failures;
@@ -73,13 +73,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     protected final SchedulerRuntime runtime;
     protected final DecodeResources.AdmissionCapacity decodeAdmissionCapacity;
     protected final boolean queued;
-    private final RecentCacheKeyTraceReporter cacheTrace;
+    private final TheoryCacheHitReporter cacheTrace;
 
     protected AbstractRequestScheduler(
             SchedulerRuntime runtime,
             FlexlbConfig config,
             DecodeResources.AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter cacheTrace) {
+            TheoryCacheHitReporter cacheTrace) {
         this.runtime = Objects.requireNonNull(runtime);
         requests = runtime.requests();
         queued = Objects.requireNonNull(config).isQueue();

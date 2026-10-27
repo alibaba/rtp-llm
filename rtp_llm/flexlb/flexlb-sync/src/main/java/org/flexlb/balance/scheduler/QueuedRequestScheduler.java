@@ -10,7 +10,7 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
@@ -109,7 +109,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             SchedulerRuntime runtime,
             PlacementAvailability availability,
             DecodeResources.AdmissionCapacity capacity,
-            RecentCacheKeyTraceReporter traceReporter) {
+            TheoryCacheHitReporter traceReporter) {
         super(runtime, config, capacity, traceReporter);
         this.queueSettings = QueueExecutionSettings.capture(config);
         this.router = Objects.requireNonNull(router, "router");
