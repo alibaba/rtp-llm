@@ -1025,11 +1025,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     const auto ref_type              = is_connector ? DeviceBlockRefType::PD_CONNECTOR : DeviceBlockRefType::REQUEST;
     auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
     auto       deleter               = [self = shared_from_this(), ref_type](KVCacheResource* resource) {
-        if (ref_type == DeviceBlockRefType::REQUEST) {
-            self->decrKVCacheRef(*resource);
-        } else {
-            self->decrKVCacheRef(*resource, ref_type);
-        }
+        self->decrKVCacheRef(*resource, ref_type);
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
@@ -1089,10 +1085,6 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
             .assign(std::move(selected_blocks[static_cast<size_t>(group_id)]));
     }
     return selected_resource;
-}
-
-void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
-    decrKVCacheRef(kvcache_resource, DeviceBlockRefType::REQUEST);
 }
 
 void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type) {

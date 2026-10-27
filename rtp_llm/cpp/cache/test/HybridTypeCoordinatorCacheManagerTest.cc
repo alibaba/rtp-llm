@@ -1980,7 +1980,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ReferenceIdentityMismatchDoesNotMu
     resource.mutableBlockIds("unexpected").assign(full_blocks);
 
     EXPECT_ANY_THROW(allocator->incrKVCacheRef(resource, {100}));
-    EXPECT_ANY_THROW(allocator->decrKVCacheRef(resource));
+    EXPECT_ANY_THROW(allocator->decrKVCacheRef(resource, DeviceBlockRefType::REQUEST));
     EXPECT_EQ(linear_pool->refCount(linear_blocks.front()), linear_ref);
     EXPECT_EQ(full_pool->refCount(full_blocks.front()), full_ref);
 
