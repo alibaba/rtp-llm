@@ -15,7 +15,7 @@ namespace rtp_llm {
 
 namespace kvcm {
 
-std::string genLocationSpecName(int tp_rank, const std::string& group_name);
+std::string genLocationSpecName(int tp_rank, const std::string& group_name, const std::string& model_name = {});
 
 struct LocationSpecUnitView {
     LocationSpecUnitView(const kv_cache_manager::LocationSpecUnit& unit): spec_name(unit.spec_name), uri(unit.uri) {}
@@ -94,7 +94,9 @@ public:
 
     // Build singleton and reachable aggregate location groups using the
     // canonical group-name order used by the legacy KVCM protocol.
-    bool buildLocationSpecGroups(int tp_size, LocationSpecGroups& location_spec_groups);
+    bool buildLocationSpecGroups(int                 tp_size,
+                                 LocationSpecGroups& location_spec_groups,
+                                 const std::string&  model_name = {});
 
     const SpecInfoMap& spec_info_map() const {
         return spec_name_to_info_;
