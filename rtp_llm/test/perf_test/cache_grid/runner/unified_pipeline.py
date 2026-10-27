@@ -27,6 +27,7 @@ CAPACITY_KEYS = {
     "concurrency_limit",
     "workspace_tokens",
 }
+SHARD_LOCAL_ENV_KEYS = {"CUDA_VISIBLE_DEVICES"}
 
 
 def validate_merge_inputs(paths):
@@ -86,13 +87,22 @@ def validate_merge_inputs(paths):
                 {
                     k: v
                     for k, v in env.items()
-                    if k.startswith(("DSV4_", "PREFILL_", "PERF_"))
-                    or k in ("WORLD_SIZE", "CUDA_VISIBLE_DEVICES")
+                    if k not in SHARD_LOCAL_ENV_KEYS
+                    and (
+                        k.startswith(("DSV4_", "PREFILL_", "PERF_"))
+                        or k == "WORLD_SIZE"
+                    )
                 }
             )
     if environments and any(e != environments[0] for e in environments[1:]):
         raise ValueError("effective engine environments differ across results")
-    configs = [r["run_config"] for r in records]
+    configs = [copy.deepcopy(r["run_config"]) for r in records]
+    for config in configs:
+        engine = config.get("engine", {})
+        environment = engine.get("environment", {}) if isinstance(engine, dict) else {}
+        if isinstance(environment, dict):
+            for name in SHARD_LOCAL_ENV_KEYS:
+                environment.pop(name, None)
     # Unknown effective differences are rejected, rather than guessed equivalent.
     if len(configs) > 1 and any(c != configs[0] for c in configs[1:]):
 

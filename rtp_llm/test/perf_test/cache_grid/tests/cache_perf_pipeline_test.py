@@ -635,6 +635,51 @@ class CachePerfPipelineTest(unittest.TestCase):
             [1048576, 2097152],
         )
 
+    def test_shard_cuda_devices_can_differ(self):
+        from rtp_llm.test.perf_test.cache_grid.runner.unified_pipeline import (
+            validate_merge_inputs,
+        )
+
+        paths = []
+        for name, devices in (("shard_00", "1"), ("shard_01", "3")):
+            destination = self.root / name
+            destination.mkdir()
+            path = destination / "cache_grid_results.json"
+            environment = {
+                "CUDA_VISIBLE_DEVICES": devices,
+                "WORLD_SIZE": "1",
+            }
+            path.write_text(
+                json.dumps(
+                    {
+                        "profile": {
+                            "schema_version": 1,
+                            "engine": {"model_type": "qwen_2"},
+                        },
+                        "run_config": {
+                            "engine": {"environment": environment},
+                        },
+                    }
+                )
+            )
+            (destination / "cache_perf_launch.json").write_text(
+                json.dumps({"env": environment})
+            )
+            paths.append(path)
+
+        try:
+            records, _ = validate_merge_inputs(paths)
+        except ValueError as error:
+            self.fail(f"shard-local CUDA devices prevented merge: {error}")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            [
+                record["run_config"]["engine"]["environment"]["CUDA_VISIBLE_DEVICES"]
+                for record in records
+            ],
+            ["1", "3"],
+        )
+
     def test_bazel_runfiles_prefix_differences_can_be_merged(self):
         from rtp_llm.test.perf_test.cache_grid.runner.unified_pipeline import (
             validate_merge_inputs,

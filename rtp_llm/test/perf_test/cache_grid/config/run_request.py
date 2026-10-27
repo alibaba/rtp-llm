@@ -7,7 +7,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Mapping, Sequence, Set
+from typing import Any, Dict, Mapping, Optional, Sequence, Set
 
 from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
     ProfileError,
@@ -73,6 +73,7 @@ class ResolvedRunRequest:
     runtime_env: Dict[str, str]
     world_size: int
     gpu_count: int
+    explicit_ep_size: Optional[int]
 
 
 class _ObjectPairs(list):
@@ -318,6 +319,7 @@ def resolve_run_request(
         runtime_env=runtime_env,
         world_size=world_size,
         gpu_count=world_size,
+        explicit_ep_size=topology["ep"] if "ep" in raw_topology else None,
     )
 
 
@@ -341,7 +343,7 @@ def to_prepare_namespace(
         tokenizer_path=resolved.model["tokenizer"],
         tp_size=topology["tp"],
         dp_size=topology["dp"],
-        ep_size=topology["ep"],
+        ep_size=resolved.explicit_ep_size,
         pp_size=topology["pp"],
         world_size=resolved.world_size,
         engine_setting=[f"{key}={value}" for key, value in engine_settings.items()],

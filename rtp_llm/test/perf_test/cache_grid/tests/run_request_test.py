@@ -403,6 +403,29 @@ class RunRequestTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, f"model.{field}"):
                         self.resolve(model_json=json.dumps(raw))
 
+    def test_adapter_omits_ep_size_when_ep_is_not_requested(self):
+        resolved = self.resolve()
+        bundle = ci.build_input_artifacts(
+            request.to_prepare_namespace(
+                resolved, inputs_dir=Path("inputs"), configs=("cuda13",)
+            )
+        )
+
+        self.assertNotIn("ep_size", bundle["profile_payload"]["engine"])
+        self.assertEqual(resolved.engine_env["EP_SIZE"], "1")
+
+    def test_adapter_preserves_explicit_ep_size_one(self):
+        model = json.loads(MODEL)
+        model["topology"] = {"ep": 1}
+        resolved = self.resolve(model_json=json.dumps(model))
+        bundle = ci.build_input_artifacts(
+            request.to_prepare_namespace(
+                resolved, inputs_dir=Path("inputs"), configs=("cuda13",)
+            )
+        )
+
+        self.assertEqual(bundle["profile_payload"]["engine"]["ep_size"], 1)
+
     def test_adapter_generates_default_random_cache_slices(self):
         resolved = self.resolve()
         bundle = ci.build_input_artifacts(
@@ -449,7 +472,6 @@ class RunRequestTest(unittest.TestCase):
                         "world_size",
                         "tp_size",
                         "dp_size",
-                        "pp_size",
                         "ep_size",
                     )
                 },
@@ -457,10 +479,10 @@ class RunRequestTest(unittest.TestCase):
                     "world_size": 8,
                     "tp_size": 2,
                     "dp_size": 2,
-                    "pp_size": 2,
                     "ep_size": 4,
                 },
             )
+            self.assertNotIn("pp_size", profile["engine"])
             self.assertEqual(profile["engine"]["kernel_seq_size_per_block"], 128)
             self.assertEqual(profile["engine"]["max_batch_tokens_size"], 8192)
             self.assertEqual(profile["engine"]["max_context_batch_size"], 2)

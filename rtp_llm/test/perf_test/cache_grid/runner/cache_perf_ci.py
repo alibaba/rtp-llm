@@ -146,8 +146,6 @@ def build_input_artifacts(args: argparse.Namespace) -> Dict[str, Any]:
     }
     if args.ep_size is not None:
         sizes["ep_size"] = args.ep_size
-    if args.pp_size is not None:
-        sizes["pp_size"] = args.pp_size
     if any(value <= 0 for value in sizes.values()):
         raise ValueError("topology sizes must be positive")
     engine = _settings(
