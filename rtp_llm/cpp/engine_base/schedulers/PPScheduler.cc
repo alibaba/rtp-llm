@@ -477,13 +477,13 @@ bool PPScheduler::waitPredicate() {
 absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     RTP_LLM_PROFILE_FUNCTION();
     unique_lock<mutex> lock(lock_);
+    auto               timeout = std::chrono::milliseconds::max();
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty()) {
-        cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+        timeout = std::chrono::milliseconds(10);
     } else if (!waiting_streams_.empty()) {
-        cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
-    } else {
-        cond_.wait(lock, [this] { return waitPredicate(); });
+        timeout = std::chrono::milliseconds(100);
     }
+    scheduler_sync_state_->wait(lock, [this] { return waitPredicate(); }, timeout);
 
     schedule_trigger_ = false;
     finished_request_ids_.clear();

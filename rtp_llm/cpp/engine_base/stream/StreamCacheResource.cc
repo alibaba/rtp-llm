@@ -851,6 +851,15 @@ size_t StreamCacheResource::treeCoveredBlockNum() const {
     return load_context->matchedBlocks();
 }
 
+bool StreamCacheResource::onAllocatorLoadDone(std::function<void()> callback) {
+    const auto context = allocator_load_context_;
+    if (!context || !callback) {
+        return false;
+    }
+    context->onDone([callback = std::move(callback)](ErrorInfo) { callback(); });
+    return true;
+}
+
 bool StreamCacheResource::loadCacheDone() {
     bool allocator_completed = false;
     if (allocator_load_context_) {
