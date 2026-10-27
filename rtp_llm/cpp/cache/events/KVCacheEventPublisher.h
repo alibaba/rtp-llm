@@ -29,10 +29,12 @@ enum class PublisherState {
 static_assert(static_cast<int>(PublisherState::STOPPED) == 7);
 
 struct PublisherStatus {
-    PublisherState state          = PublisherState::DISABLED;
-    size_t         queue_size     = 0;
-    uint64_t       accepted_count = 0;
-    uint64_t       dropped_count  = 0;
+    PublisherState state               = PublisherState::DISABLED;
+    size_t         queue_size          = 0;
+    uint64_t       accepted_count      = 0;
+    uint64_t       dropped_count       = 0;
+    uint64_t       queue_full_count    = 0;
+    uint64_t       report_failed_count = 0;
 };
 
 // Cache mutation points depend only on this interface. Concrete publishers,
