@@ -39,6 +39,19 @@ py_test(
 )
 
 py_test(
+    name = "test_gdn_ba_gating",
+    srcs = [
+        "test_gdn_ba_gating.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
     name = "test_gdn_block_prefill_rocm",
     srcs = ["test_gdn_block_prefill.py"],
     main = "test_gdn_block_prefill.py",
