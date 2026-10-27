@@ -16,6 +16,11 @@ from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     FlexlbScheduleRequestPB,
+    FlexlbScheduleResponsePB,
+)
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
+    FlexlbServiceServicer,
+    add_FlexlbServiceServicer_to_server,
 )
 from rtp_llm.server.master_client import SUCCESS_CODE, MasterClient
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -239,6 +244,93 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.is_ok)
         self.assertEqual(request_id, send.call_args.args[1].request_id)
         self.assertEqual("", send.call_args.args[1].request_id_str)
+    async def test_deadline_retains_shared_channel_and_cancels_only_pd_admission(self):
+        for vit_only in (False, True):
+            with self.subTest(vit_only=vit_only):
+                channel = mock.Mock(close=mock.AsyncMock())
+                target = self.client._get_grpc_target("127.0.0.1:7001")
+                self.client._channels[target] = channel
+                stub = _FakeStub(error=_rpc_error(grpc.StatusCode.DEADLINE_EXCEEDED))
+                with mock.patch(
+                    "rtp_llm.server.master_client.FlexlbServiceStub", return_value=stub
+                ), mock.patch(
+                    "rtp_llm.server.master_client.start_client_span",
+                    return_value=(None, None),
+                ):
+                    with self.assertRaises(FtRuntimeException):
+                        await self.client._send_schedule_request(
+                            "127.0.0.1:7001",
+                            FlexlbScheduleRequestPB(vit_route_only=vit_only),
+                            1.0,
+                            42,
+                        )
+                channel.close.assert_not_awaited()
+                self.assertIs(channel, self.client._get_channel(target))
+                self.assertEqual(len(stub.cancel_reasons), 0 if vit_only else 1)
+        await self.client.close()
+
+    async def test_real_rpc_deadline_does_not_cancel_peer_on_same_channel(self):
+        peer_entered = asyncio.Event()
+        release_peer = asyncio.Event()
+
+        class Service(FlexlbServiceServicer):
+            async def Schedule(self, request, context):
+                if request.request_id == 1:
+                    await asyncio.Event().wait()
+                if request.request_id == 2:
+                    peer_entered.set()
+                    await release_peer.wait()
+                return FlexlbScheduleResponsePB(code=SUCCESS_CODE, success=True)
+
+        server = grpc.aio.server()
+        add_FlexlbServiceServicer_to_server(Service(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        target = f"127.0.0.1:{port}"
+        tasks = []
+        try:
+            with mock.patch.object(
+                self.client, "_get_grpc_target", return_value=target
+            ), mock.patch(
+                "rtp_llm.server.master_client.start_client_span",
+                return_value=(None, None),
+            ):
+                peer = asyncio.create_task(
+                    self.client._send_schedule_request(
+                        target,
+                        FlexlbScheduleRequestPB(request_id=2, vit_route_only=True),
+                        5,
+                        2,
+                    )
+                )
+                tasks.append(peer)
+                await asyncio.wait_for(peer_entered.wait(), 3)
+                original_channel = self.client._get_channel(target)
+                with self.assertRaises(FtRuntimeException):
+                    await self.client._send_schedule_request(
+                        target,
+                        FlexlbScheduleRequestPB(request_id=1, vit_route_only=True),
+                        0.05,
+                        1,
+                    )
+                self.assertIs(original_channel, self.client._get_channel(target))
+                release_peer.set()
+                self.assertEqual((await asyncio.wait_for(peer, 3)).code, SUCCESS_CODE)
+                response = await self.client._send_schedule_request(
+                    target,
+                    FlexlbScheduleRequestPB(request_id=3, vit_route_only=True),
+                    2,
+                    3,
+                )
+                self.assertEqual(response.code, SUCCESS_CODE)
+        finally:
+            release_peer.set()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self.client.close()
+            await server.stop(None)
 
 
 if __name__ == "__main__":

@@ -252,6 +252,31 @@ class EndpointRegistryRoleTest {
     }
 
     @Test
+    void vit_routing_directory_tracks_publication_replacement_retirement_and_close() {
+        String address = "127.0.0.1:8080";
+        WorkerStatus firstStatus = status(RoleType.VIT, 8080);
+        WorkerEndpoint first = EndpointTestSupport.publishEndpoint(
+                registry, RoleType.VIT, address, firstStatus);
+        var original = registry.vitRoutingSnapshot();
+        assertEquals(1, original.size());
+        assertSame(first, original.getFirst().endpoint());
+        assertSame(original, registry.vitRoutingSnapshot());
+        assertThrows(UnsupportedOperationException.class, () -> original.clear());
+        retire(RoleType.VIT, address, firstStatus);
+        assertTrue(registry.vitRoutingSnapshot().isEmpty());
+        WorkerEndpoint replacement = EndpointTestSupport.publishEndpoint(
+                registry, RoleType.VIT, address, status(RoleType.VIT, 8080));
+        assertSame(first, original.getFirst().endpoint());
+        assertSame(replacement, registry.vitRoutingSnapshot().getFirst().endpoint());
+        try (var pin = registry.capture(RoleType.VIT, address)) {
+            assertNotNull(pin);
+            assertNotSame(original.getFirst().endpoint(), pin.endpoint());
+        }
+        registry.close();
+        assertTrue(registry.vitRoutingSnapshot().isEmpty());
+    }
+
+    @Test
     void should_not_remove_new_generation_with_expired_status() {
         String ipPort = "127.0.0.1:8080";
         WorkerStatus expired = status(RoleType.VIT, 8080);

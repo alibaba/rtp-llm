@@ -134,6 +134,25 @@ class _FakeInputPB:
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
+    async def test_vit_deadline_uses_existing_request_budget_and_explicit_cap(self):
+        for explicit, expected in ((None, 3.0), (0.2, 0.2), (5.0, 3.0)):
+            with self.subTest(explicit=explicit):
+                client = _CaptureMasterClient()
+                await client.get_backend_role_addrs(
+                    [], 1024, _FakeInput(), 99, vit_only=True, timeout_s=explicit
+                )
+                self.assertEqual(client.calls[0]["timeout_s"], expected)
+                self.assertEqual(client.calls[0]["request_pb"].generate_timeout, 3000)
+                await client.close()
+
+    async def test_vit_deadline_falls_back_to_master_default(self):
+        request = _FakeInput()
+        request.generate_config.ttft_timeout_ms = -1
+        client = _CaptureMasterClient()
+        await client.get_backend_role_addrs([], 1024, request, 99, vit_only=True)
+        self.assertEqual(client.calls[0]["timeout_s"], 3600.0)
+        await client.close()
+
     def test_python_reason_enum_matches_schedule_wire_values(self):
         self.assertEqual(
             int(AdmissionRejectReason.UNSPECIFIED),
