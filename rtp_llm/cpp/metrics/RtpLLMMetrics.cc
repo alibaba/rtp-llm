@@ -848,8 +848,8 @@ bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheInsertMetricsCollector* collector) {
     kmonitor::MetricsTags hard_stop_tags = tags ? *tags : kmonitor::MetricsTags{};
-    hard_stop_tags.AddTag("existing_tier", collector->existing_tier);
-    hard_stop_tags.AddTag("transfer_state", collector->transfer_state);
+    hard_stop_tags.AddTag("tier", collector->tier);
+    hard_stop_tags.AddTag("operation", collector->operation);
     insert_hard_stop_qps_metric->Report(&hard_stop_tags, 1);
 }
 
