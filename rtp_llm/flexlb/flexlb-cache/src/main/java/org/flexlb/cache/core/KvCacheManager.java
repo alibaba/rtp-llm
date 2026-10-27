@@ -117,8 +117,16 @@ public class KvCacheManager {
         if (engineIpPort == null) {
             return;
         }
+        // The caller holds the retiring generation's lock, excluding cache
+        // updates and replacement publication for this address. Reuse its
+        // local keys instead of scanning the entire fleet under the global
+        // index lock. Each removal releases that lock so healthy workers can
+        // continue publishing cache updates during a large retirement.
+        // Keep the local view until every removal succeeds so cleanup can retry.
+        for (Long block : engineLocalView.getEngineCacheBlocks(engineIpPort)) {
+            globalCacheIndex.removeCacheBlock(engineIpPort, block);
+        }
         engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(),
                 globalCacheIndex.totalMappings());
