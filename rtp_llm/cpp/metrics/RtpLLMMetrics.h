@@ -1243,8 +1243,8 @@ private:
 
 class RtpLLMCacheInsertMetricsCollector final {
 public:
-    std::string existing_tier;
-    std::string transfer_state;
+    std::string tier;
+    std::string operation;
 };
 
 class RtpLLMCacheInsertMetrics: public kmonitor::MetricsGroup {
