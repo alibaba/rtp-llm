@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 import torch
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 try:
     import triton
@@ -234,35 +235,39 @@ def fused_pack_mega_moe_inputs(
         else 1
     )
     grid = (pack_programs, triton.cdiv(D, 128))
-    _pack_mega_moe_inputs_optimized_kernel[grid](
-        x,
-        weights,
-        indices,
-        out_fp8,
-        out_sf,
-        out_weights,
-        out_indices,
-        out_shared_sf if out_shared_sf is not None else out_sf,
-        T,
-        D,
-        topk,
-        x.stride(0),
-        weights.stride(0),
-        indices.stride(0),
-        out_fp8.stride(0),
-        out_sf.stride(0),
-        out_weights.stride(0),
-        out_indices.stride(0),
-        out_shared_sf.stride(0) if out_shared_sf is not None else 0,
-        out_shared_sf.stride(1) if out_shared_sf is not None else 0,
-        1.0e-4,
-        fp8_max,
-        BLOCK_M=block_m,
-        BLOCK_K=block_k,
-        HAS_SHARED_SF=out_shared_sf is not None,
-        SHARED_BLOCK_M=shared_block_m,
-        SHARED_ALIGNED_BLOCK_M=aligned_shared_block_m,
-        SHARED_ACTIVE_ROWS=active_shared_rows,
-        SHARED_ZERO_ROWS=shared_zero_rows,
+    _cpu_launch.launch(
+        _pack_mega_moe_inputs_optimized_kernel,
+        grid,
+        (
+            x,
+            weights,
+            indices,
+            out_fp8,
+            out_sf,
+            out_weights,
+            out_indices,
+            out_shared_sf if out_shared_sf is not None else out_sf,
+            T,
+            D,
+            topk,
+            x.stride(0),
+            weights.stride(0),
+            indices.stride(0),
+            out_fp8.stride(0),
+            out_sf.stride(0),
+            out_weights.stride(0),
+            out_indices.stride(0),
+            out_shared_sf.stride(0) if out_shared_sf is not None else 0,
+            out_shared_sf.stride(1) if out_shared_sf is not None else 0,
+            1.0e-4,
+            fp8_max,
+            block_m,
+            block_k,
+            out_shared_sf is not None,
+            shared_block_m,
+            aligned_shared_block_m,
+            active_shared_rows,
+            shared_zero_rows,
+        ),
         num_warps=4,
     )

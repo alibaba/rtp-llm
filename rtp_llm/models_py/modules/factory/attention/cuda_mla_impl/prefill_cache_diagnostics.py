@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 
 
 class PrefillCacheDiagnostics:
@@ -65,9 +66,7 @@ class PrefillCacheDiagnostics:
         self.row["prefill_topk_backend"] = os.environ.get(
             "GLM5_PREFILL_INDEXER_TOPK_BACKEND", "dsv4_per_row"
         )
-        self.row["indexer_fused_topk"] = (
-            os.environ.get("RTP_INDEXER_FUSED_TOPK", "0") == "1"
-        )
+        self.row["indexer_fused_topk"] = _prefill_optimization.ENABLED
         self.op = op
         self.capture = None
         control = self.root / "prefill_indexer_capture.json"

@@ -10,12 +10,13 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.pynccl_cp import (
     all_gather,
-    enabled as cp_opt_enabled,
 )
+from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
 @triton.jit
@@ -141,6 +142,18 @@ def _next_power_of_2(n: int) -> int:
     return n + 1
 
 
+_pack_kernels = {}
+
+
+@triton.jit(do_not_specialize=["N"])
+def _pack_payload_kernel(K, S, OUT, N, KW: tl.constexpr, SW: tl.constexpr):
+    p = tl.program_id(0).to(tl.int64) * 1024 + tl.arange(0, 1024)
+    row, col = p // (KW + SW), p % (KW + SW)
+    k = tl.load(K + row * KW + col, (row < N) & (col < KW), other=0)
+    scale = tl.load(S + row * SW + col - KW, (row < N) & (col >= KW), other=0)
+    tl.store(OUT + p, tl.where(col < KW, k, scale), row < N)
+
+
 def _pack_indexer_k_payload(
     local_k_quant: torch.Tensor,
     local_k_scale: torch.Tensor,
@@ -174,8 +187,28 @@ def _pack_indexer_k_payload(
         dtype=torch.uint8,
         device=local_k_quant.device,
     )
-    packed[:, :q_cols].copy_(local_q_bytes)
-    packed[:, q_cols:].copy_(local_s_bytes)
+    if _prefill_optimization.ENABLED and local_q_bytes.is_cuda:
+        if rows:
+            args = (local_q_bytes, local_s_bytes, packed, rows, q_cols, s_cols)
+            key = (
+                local_q_bytes.device.index,
+                q_cols,
+                s_cols,
+                local_q_bytes.data_ptr() % 16,
+                local_s_bytes.data_ptr() % 16,
+            )
+            grid = (triton.cdiv(rows * (q_cols + s_cols), 1024), 1, 1)
+            kernel = _pack_kernels.get(key)
+            if kernel is None:
+                kernel = _pack_payload_kernel[grid](*args)
+                if len(_pack_kernels) >= 128:
+                    _pack_kernels.pop(next(iter(_pack_kernels)))
+                _pack_kernels[key] = kernel
+            else:
+                _cpu_launch.launch_compiled(kernel, grid, args)
+    else:
+        packed[:, :q_cols].copy_(local_q_bytes)
+        packed[:, q_cols:].copy_(local_s_bytes)
     return packed, q_cols, s_cols
 
 
@@ -185,15 +218,11 @@ def _all_gather_indexer_k_payload(
     group,
 ):
     """Pack K+scale and issue exactly one rank-major AllGather."""
-    local_packed, q_cols, s_cols = _pack_indexer_k_payload(
-        local_k_quant, local_k_scale
-    )
+    local_packed, q_cols, s_cols = _pack_indexer_k_payload(local_k_quant, local_k_scale)
     # This role is deliberately absent from the SYMM whitelist. Long-context
     # packed payloads can exceed a persistent window, while ordinary pynccl
     # still removes the second collective launch.
-    gathered_packed = all_gather(
-        local_packed, group=group, role="indexer_k_packed"
-    )
+    gathered_packed = all_gather(local_packed, group=group, role="indexer_k_packed")
     return gathered_packed, q_cols, s_cols
 
 
@@ -211,12 +240,8 @@ def _all_gather_indexer_k(
         )
         return gathered, None, q_cols, s_cols
 
-    gathered_k = all_gather(
-        local_k_quant, group=group, role="indexer_k_quant"
-    )
-    gathered_s = all_gather(
-        local_k_scale, group=group, role="indexer_k_scale"
-    )
+    gathered_k = all_gather(local_k_quant, group=group, role="indexer_k_quant")
+    gathered_s = all_gather(local_k_scale, group=group, role="indexer_k_scale")
     return gathered_k, gathered_s, q_cols, s_cols
 
 
@@ -268,17 +293,21 @@ def fused_copy_and_assemble_indexer_k(
         local_s = torch.empty(
             (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
         )
-        _fused_zero_scatter_kernel[(total_local_T,)](
-            actual_k_quant.view(torch.uint8),
-            actual_k_scale,
-            local_k.view(torch.uint8),
-            local_s,
-            src_for_padded,
-            head_dim,
-            scale_dim,
-            total_local_T,
-            BLOCK_K,
-            BLOCK_S,
+        _cpu_launch.launch(
+            _fused_zero_scatter_kernel,
+            (total_local_T,),
+            (
+                actual_k_quant.view(torch.uint8),
+                actual_k_scale,
+                local_k.view(torch.uint8),
+                local_s,
+                src_for_padded,
+                head_dim,
+                scale_dim,
+                total_local_T,
+                BLOCK_K,
+                BLOCK_S,
+            ),
         )
     else:
         local_k = torch.zeros(
@@ -307,28 +336,36 @@ def fused_copy_and_assemble_indexer_k(
     # Step 3: keep the existing fused local restore in both communication modes.
     restore_indices = plan.restore_indices
     if gathered_s is None:
-        _gather_restore_fused_kernel[(chunk_T,)](
-            gathered_k,
-            out_k_quant.view(torch.uint8),
-            out_k_scale,
-            restore_indices,
-            q_cols + s_cols,
-            head_dim,
-            scale_dim,
-            chunk_T,
-            BLOCK_K,
-            BLOCK_S,
+        _cpu_launch.launch(
+            _gather_restore_fused_kernel,
+            (chunk_T,),
+            (
+                gathered_k,
+                out_k_quant.view(torch.uint8),
+                out_k_scale,
+                restore_indices,
+                q_cols + s_cols,
+                head_dim,
+                scale_dim,
+                chunk_T,
+                BLOCK_K,
+                BLOCK_S,
+            ),
         )
     else:
-        _gather_restore_separate_kernel[(chunk_T,)](
-            gathered_k.view(torch.uint8),
-            gathered_s,
-            out_k_quant.view(torch.uint8),
-            out_k_scale,
-            restore_indices,
-            head_dim,
-            scale_dim,
-            chunk_T,
-            BLOCK_K,
-            BLOCK_S,
+        _cpu_launch.launch(
+            _gather_restore_separate_kernel,
+            (chunk_T,),
+            (
+                gathered_k.view(torch.uint8),
+                gathered_s,
+                out_k_quant.view(torch.uint8),
+                out_k_scale,
+                restore_indices,
+                head_dim,
+                scale_dim,
+                chunk_T,
+                BLOCK_K,
+                BLOCK_S,
+            ),
         )

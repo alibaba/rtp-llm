@@ -19,10 +19,11 @@ and transparent to callers.
 import torch
 import triton
 import triton.language as tl
-
+from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops as _cpu_ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 MAX_INREG_H = 8192
 
@@ -334,7 +335,6 @@ def _baseline_add_rmsnorm_fp8_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H."""
     import flashinfer.norm
-
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     residual.add_(hidden_states)
@@ -359,7 +359,6 @@ def _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H (dual output)."""
     import flashinfer.norm
-
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     residual.add_(hidden_states)
@@ -398,18 +397,28 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
             hidden_states, residual, weight, eps, group_size, scale_ue8m0
         )
 
-    bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=hidden_states.device)
-    fp8_out = torch.empty(
-        (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
+    allocator = (
+        _cpu_ops.native() if _cpu_ops.NATIVE_ALLOC and group_size == 128 else None
     )
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=hidden_states.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if allocator is not None:
+        bf16_out, fp8_out, scale_out, _ = allocator.norm_outputs(
+            T, H, 0, hidden_states.device.index, scale_ue8m0, True
+        )
+    else:
+        bf16_out = torch.empty(
+            (T, H), dtype=torch.bfloat16, device=hidden_states.device
+        )
+        fp8_out = torch.empty(
+            (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
+        )
+        scale_out = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=hidden_states.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     if T == 0:
         return bf16_out, fp8_out, scale_out
 
@@ -418,26 +427,30 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     fp8_min = -fp8_max
     grid = (T,)
 
-    _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel[grid](
-        hidden_states,
-        residual,
-        weight,
-        bf16_out,
-        fp8_out,
-        scale_out,
-        H,
-        eps,
-        fp8_max,
-        fp8_min,
-        hidden_states.stride(0),
-        residual.stride(0),
-        bf16_out.stride(0),
-        fp8_out.stride(0),
-        scale_out.stride(0),
-        scale_out.stride(1),
-        BLOCK_N=block_n,
-        GROUP_SIZE=group_size,
-        SCALE_UE8M0=scale_ue8m0,
+    _cpu_launch.launch(
+        _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel,
+        grid,
+        (
+            hidden_states,
+            residual,
+            weight,
+            bf16_out,
+            fp8_out,
+            scale_out,
+            H,
+            eps,
+            fp8_max,
+            fp8_min,
+            hidden_states.stride(0),
+            residual.stride(0),
+            bf16_out.stride(0),
+            fp8_out.stride(0),
+            scale_out.stride(0),
+            scale_out.stride(1),
+            block_n,
+            group_size,
+            scale_ue8m0,
+        ),
         num_warps=_select_num_warps(H),
     )
     return bf16_out, fp8_out, scale_out
@@ -470,17 +483,25 @@ def fused_add_rmsnorm_fp8_quant(
             hidden_states, residual, weight, eps, group_size, scale_ue8m0
         )
 
-    fp8_out = torch.empty(
-        (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
+    allocator = (
+        _cpu_ops.native() if _cpu_ops.NATIVE_ALLOC and group_size == 128 else None
     )
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=hidden_states.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if allocator is not None:
+        _, fp8_out, scale_out, _ = allocator.norm_outputs(
+            T, H, 0, hidden_states.device.index, scale_ue8m0, False
+        )
+    else:
+        fp8_out = torch.empty(
+            (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
+        )
+        scale_out = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=hidden_states.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     if T == 0:
         return fp8_out, scale_out
 
@@ -489,24 +510,28 @@ def fused_add_rmsnorm_fp8_quant(
     fp8_min = -fp8_max
     grid = (T,)
 
-    _fused_add_rmsnorm_fp8_quant_singlepass_kernel[grid](
-        hidden_states,
-        residual,
-        weight,
-        fp8_out,
-        scale_out,
-        H,
-        eps,
-        fp8_max,
-        fp8_min,
-        hidden_states.stride(0),
-        residual.stride(0),
-        fp8_out.stride(0),
-        scale_out.stride(0),
-        scale_out.stride(1),
-        BLOCK_N=block_n,
-        GROUP_SIZE=group_size,
-        SCALE_UE8M0=scale_ue8m0,
+    _cpu_launch.launch(
+        _fused_add_rmsnorm_fp8_quant_singlepass_kernel,
+        grid,
+        (
+            hidden_states,
+            residual,
+            weight,
+            fp8_out,
+            scale_out,
+            H,
+            eps,
+            fp8_max,
+            fp8_min,
+            hidden_states.stride(0),
+            residual.stride(0),
+            fp8_out.stride(0),
+            scale_out.stride(0),
+            scale_out.stride(1),
+            block_n,
+            group_size,
+            scale_ue8m0,
+        ),
         num_warps=_select_num_warps(H),
     )
     return fp8_out, scale_out

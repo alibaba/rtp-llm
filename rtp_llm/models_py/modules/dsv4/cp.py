@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
-
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
@@ -1163,6 +1163,7 @@ def build_kv_allgather_restore_indices(
     cp_size: int,
     block_size: int,
     device: torch.device,
+    known_total: Optional[int] = None,
 ) -> torch.Tensor:
     """Compute the per-iteration restore index tensor.
 
@@ -1189,6 +1190,9 @@ def build_kv_allgather_restore_indices(
             ``cache_config.seq_size_per_block`` for the relevant pool;
             CSA/HCA/INDEXER pool block_size is uniform per pool).
       device: target device.
+      known_total: optional exact sum of per-request KV lengths, computed by
+            the host planner. The fused path uses it to avoid a synchronous
+            device scalar readback; callers must supply the matching sum.
 
     Returns:
       ``restore_indices`` ``[total_kv_len]`` int64 — applied as
@@ -1205,6 +1209,17 @@ def build_kv_allgather_restore_indices(
             f"per_req_total_kv_lens must be 1D, got shape "
             f"{tuple(per_req_total_kv_lens.shape)}"
         )
+
+    if _prefill_optimization.ENABLED:
+        from rtp_llm.models_py.triton_kernels.sparse_mla.cp_metadata import (
+            try_restore_indices,
+        )
+
+        fused = try_restore_indices(
+            per_req_total_kv_lens, cp_size, block_size, device, known_total=known_total
+        )
+        if fused is not None:
+            return fused
 
     # Vectorized formulation (mirrors branch
     # ``flashmla_sparse_cp_impl.py:565-572`` plan()).
@@ -1271,6 +1286,15 @@ def cp_padded_local_kv_lens(
     if block_size <= 0:
         raise ValueError(f"block_size must be positive, got {block_size}")
     virtual_block_size = block_size * cp_size
+    if _prefill_optimization.ENABLED:
+        from rtp_llm.models_py.triton_kernels.sparse_mla.cp_metadata import (
+            try_local_lengths,
+        )
+
+        fused = try_local_lengths(per_req_total_kv_lens, cp_size, block_size)
+        if fused is not None:
+            return fused
+
     lens = per_req_total_kv_lens.to(torch.int64)
     n_virtual_blocks = (lens + virtual_block_size - 1) // virtual_block_size
     return n_virtual_blocks * block_size
@@ -1294,6 +1318,15 @@ def cp_actual_owned_kv_lens(
         raise ValueError(f"block_size must be positive, got {block_size}")
     if cp_rank < 0 or cp_rank >= cp_size:
         raise ValueError(f"cp_rank({cp_rank}) out of range [0, {cp_size})")
+
+    if _prefill_optimization.ENABLED:
+        from rtp_llm.models_py.triton_kernels.sparse_mla.cp_metadata import (
+            try_local_lengths,
+        )
+
+        fused = try_local_lengths(per_req_total_kv_lens, cp_size, block_size, cp_rank)
+        if fused is not None:
+            return fused
 
     T = per_req_total_kv_lens.to(torch.int64)
     total_blocks = (T + block_size - 1) // block_size

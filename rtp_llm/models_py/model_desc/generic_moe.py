@@ -2,11 +2,11 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops as _cpu_ops
 from rtp_llm.models_py.model_desc.block_map import (
     cpu_layer_group_ids,
     select_block_map_for_layer,
@@ -39,6 +39,7 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
@@ -322,47 +323,94 @@ class GenericMoeLayer(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        if self.gate_chunk_rows > 0 and num_tokens > 0:
-            router_logits = fixed_m_linear(
-                self.gate, hidden_states, self.gate_chunk_rows
-            )
-        else:
-            router_logits = self.gate(
-                hidden_states
-            )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
-        router_logits_fp32 = (
-            router_logits.float()
-        )  # fuse kernel: at::native::unrolled_elementwise_kernel<direct_copy_kernel_cuda> (bf16 -> fp32 cast)
+        native_routing = None
+        if _cpu_ops.NATIVE_ROUTER:
+            from rtp_llm.models_py.modules.base.cuda.native_router import try_route
 
-        topk_weights = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        )
-        # different executor may need different topk_ids dtype
-        topk_ids_dtype = self.fused_moe.topk_ids_dtype
-        topk_ids = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=topk_ids_dtype,
-            device=hidden_states.device,
-        )
-
-        if self.correction_bias is not None:
-            assert self.group_topk is not None
-            self.group_topk(
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                scores=router_logits_fp32,
-                correction_bias=self.correction_bias,
-                n_group=self.config.moe_n_group,
-                topk_group=self.config.moe_topk_group,
-                topk=self.top_k,
-                renormalize=self.config.has_moe_norm,
-                routed_scaling_factor=self.config.routed_scaling_factor,
-            )
+            native_routing = try_route(self, hidden_states)
+        if native_routing is not None:
+            topk_weights, topk_ids = native_routing
         else:
-            # Top-K selection using C++ SelectTopkOp
-            self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            if self.gate_chunk_rows > 0 and num_tokens > 0:
+                router_logits = fixed_m_linear(
+                    self.gate, hidden_states, self.gate_chunk_rows
+                )
+            else:
+                router_logits = self.gate(
+                    hidden_states
+                )  # fuse kernel: nvjet_tst_64x8_64x16_2x4_h_bz_NNT (bf16 nn.Linear router, every layer)
+            # The fused router converts BF16 inside its first kernel. Unsupported
+            # cases still perform the original FP32 conversion in GroupTopK.
+            router_logits_fp32 = (
+                router_logits
+                if self.correction_bias is not None and _prefill_optimization.ENABLED
+                else router_logits.float()
+            )
+
+            # different executor may need different topk_ids dtype
+            topk_ids_dtype = self.fused_moe.topk_ids_dtype
+            allocator = (
+                _cpu_ops.native()
+                if _cpu_ops.NATIVE_ALLOC
+                and hidden_states.is_cuda
+                and topk_ids_dtype in (torch.int32, torch.int64)
+                else None
+            )
+            if allocator is not None:
+                topk_weights, topk_ids = allocator.router_outputs(
+                    num_tokens,
+                    self.top_k,
+                    hidden_states.device.index,
+                    topk_ids_dtype == torch.int64,
+                )
+            else:
+                topk_weights = torch.empty(
+                    (num_tokens, self.top_k),
+                    dtype=torch.float32,
+                    device=hidden_states.device,
+                )
+                topk_ids = torch.empty(
+                    (num_tokens, self.top_k),
+                    dtype=topk_ids_dtype,
+                    device=hidden_states.device,
+                )
+
+            routed = False
+            if (
+                _cpu_ops.DIRECT_ROUTER
+                and self.correction_bias is not None
+                and _cpu_ops.no_module_hooks(self.group_topk)
+            ):
+                from rtp_llm.models_py.triton_kernels.moe import router_single_group
+
+                routed = router_single_group.try_single_group_router(
+                    router_logits_fp32,
+                    self.correction_bias,
+                    topk_weights,
+                    topk_ids,
+                    self.config.moe_n_group,
+                    self.config.moe_topk_group,
+                    self.top_k,
+                    self.config.has_moe_norm,
+                    self.config.routed_scaling_factor,
+                )
+
+            if self.correction_bias is not None and not routed:
+                assert self.group_topk is not None
+                self.group_topk(
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    scores=router_logits_fp32,
+                    correction_bias=self.correction_bias,
+                    n_group=self.config.moe_n_group,
+                    topk_group=self.config.moe_topk_group,
+                    topk=self.top_k,
+                    renormalize=self.config.has_moe_norm,
+                    routed_scaling_factor=self.config.routed_scaling_factor,
+                )
+            elif self.correction_bias is None:
+                # Top-K selection using C++ SelectTopkOp
+                self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)

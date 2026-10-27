@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 import torch
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 
 try:
     cuda_ver = torch.version.cuda or ""
@@ -170,6 +171,23 @@ def _cp_sharded_slot_mapping(
             f"of tokens_per_block ({kernel_tpb})"
         )
     bpk = owner_tpb // kernel_tpb
+
+    if _prefill_optimization.ENABLED:
+        from rtp_llm.models_py.triton_kernels.sparse_mla.cp_metadata import (
+            try_slot_mapping,
+        )
+
+        fused = try_slot_mapping(
+            positions,
+            block_table_local,
+            batch_indice,
+            kernel_tpb,
+            owner_tpb,
+            cp_size,
+            cp_rank,
+        )
+        if fused is not None:
+            return fused
 
     pos = positions.to(torch.int64)
     bid = batch_indice.to(torch.int64)
@@ -580,6 +598,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.prefill_cp_size,
                 owner_tpb,
                 block_table.device,
+                known_total=(
+                    self.total_kv_len if _prefill_optimization.ENABLED else None
+                ),
             )
             self.sharded_local_kv_lens = _copy_or_replace_graph_tensor(
                 self.sharded_local_kv_lens,
@@ -902,6 +923,29 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
         gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP, role="mla_kpe")
         gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
+
+        if (
+            _prefill_optimization.ENABLED
+            and kv_cache is not None
+            and self.kv_cache_write_op.kv_cache_type == "fp8_ds_mla"
+        ):
+            from rtp_llm.models_py.triton_kernels.sparse_mla.cp_cache_fusion import (
+                try_indexed_cache_write,
+            )
+
+            slots = (
+                self.sharded_slot_mapping
+                if self.kv_cache_sharded
+                else self.mla_params.slot_mapping
+            )
+            if try_indexed_cache_write(
+                gathered_ckv,
+                gathered_k_pe,
+                self.kv_restore_unpad_indices,
+                slots,
+                _as_uint8(kv_cache.kv_cache_base),
+            ):
+                return
 
         restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
         restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
@@ -1344,7 +1388,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         q_pe = q[:, :, self.nope_head_dim :]
         if self.fmha_impl.full_rope_pos_ids is not None:
             if (
-                os.environ.get("RTP_CP_CONTIGUOUS_ROPE_KPE", "0") == "1"
+                _prefill_optimization.ENABLED
                 and k_pe.is_cuda
                 and k_pe.ndim == 2
                 and k_pe.dtype in (torch.bfloat16, torch.float16)
@@ -1381,7 +1425,6 @@ class SparseMlaCpImpl(SparseMlaImpl):
         leaving this context. Cross-layer mode owns independent future slots
         and drains at the MoE window boundary and forward cleanup instead.
         """
-        compute = torch.cuda.current_stream(q.device)
         stream = self._kv_overlap_stream
         assert stream is not None
         k_pe = self._apply_rope(q, k_pe)
@@ -1392,6 +1435,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             # would serialize the next layer's prefetch before O projection.
             yield pipeline.prepare(layer_id, kv_cache)
             return
+        compute = torch.cuda.current_stream(q.device)
         fused_kv = self.fmha_impl._allocate_fused_kv()
         # Pack before releasing independent compute. Otherwise Q BMM can use
         # every SM while packing is still queued, delaying NCCL until Q ends.

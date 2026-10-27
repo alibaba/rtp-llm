@@ -42,7 +42,7 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [":cutlass_moe_config"],
+    data = [":cutlass_moe_config", "kernels/cuda/prefill_cpu_ops.cc"],
     deps = [
         ":utils",
         ":tile_kernels_mhc",
@@ -128,7 +128,8 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
+    data = ["kernels/cuda/prefill_cpu_ops.cc"],
 )
 
 py_library(

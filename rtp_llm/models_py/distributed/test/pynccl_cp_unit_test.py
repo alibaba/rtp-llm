@@ -4,11 +4,51 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-
 from rtp_llm.models_py.distributed import pynccl_cp
 
 
 class PyncclCPUnitTest(unittest.TestCase):
+    def test_raw_stream_pointer_reads_each_call_and_device(self):
+        with patch.object(pynccl_cp, "_CPU_PATH", True), patch.object(
+            pynccl_cp, "_GET_RAW_STREAM", side_effect=[0x3000, 0x4000, 0x5000]
+        ) as raw, patch.object(pynccl_cp.torch.cuda, "current_stream") as wrapped:
+            self.assertEqual(
+                pynccl_cp._current_stream_ptr(torch.device("cuda", 1)), 0x3000
+            )
+            self.assertEqual(
+                pynccl_cp._current_stream_ptr(torch.device("cuda", 1)), 0x4000
+            )
+            self.assertEqual(
+                pynccl_cp._current_stream_ptr(torch.device("cuda", 2)), 0x5000
+            )
+        self.assertEqual([call.args[0] for call in raw.call_args_list], [1, 1, 2])
+        wrapped.assert_not_called()
+
+    def test_raw_stream_pointer_missing_api_falls_back(self):
+        with patch.object(pynccl_cp, "_CPU_PATH", True), patch.object(
+            pynccl_cp, "_GET_RAW_STREAM", None
+        ), patch.object(
+            pynccl_cp.torch.cuda,
+            "current_stream",
+            return_value=SimpleNamespace(cuda_stream=7),
+        ):
+            self.assertEqual(pynccl_cp._current_stream_ptr(torch.device("cuda", 0)), 7)
+
+    def test_raw_stream_retains_symmetric_buffer_owner_check(self):
+        process_group = object()
+        with patch.dict(pynccl_cp._SYMM_ROLE_STREAMS, {}, clear=True), patch.object(
+            pynccl_cp, "_comm_key", return_value=(1, 0)
+        ):
+            self.assertTrue(
+                pynccl_cp._symm_stream_allowed("mla_ckv", 12, process_group, None)
+            )
+            self.assertTrue(
+                pynccl_cp._symm_stream_allowed("mla_ckv", 12, process_group, None)
+            )
+            self.assertFalse(
+                pynccl_cp._symm_stream_allowed("mla_ckv", 13, process_group, None)
+            )
+
     def test_all_gather_into_tensor_uses_torch_fallback_when_disabled(self):
         output = object()
         input_tensor = object()
@@ -19,9 +59,7 @@ class PyncclCPUnitTest(unittest.TestCase):
             pynccl_cp,
             "_resolve_process_group",
             return_value=process_group,
-        ), patch.object(
-            pynccl_cp.dist, "all_gather_into_tensor"
-        ) as torch_all_gather:
+        ), patch.object(pynccl_cp.dist, "all_gather_into_tensor") as torch_all_gather:
             pynccl_cp.all_gather_into_tensor(
                 output,
                 input_tensor,
@@ -165,9 +203,7 @@ class PyncclCPUnitTest(unittest.TestCase):
         first_lib.destroy_comm.assert_called_once_with(first_comm)
         second_lib.destroy_comm.assert_called_once_with(second_comm)
         first_lib.window_deregister.assert_called_once_with(first_comm, first_window)
-        second_lib.window_deregister.assert_called_once_with(
-            second_comm, second_window
-        )
+        second_lib.window_deregister.assert_called_once_with(second_comm, second_window)
 
     def test_master_switch_controls_optimization_stack(self):
         with patch.object(pynccl_cp, "_OPT_ENABLED", True):
@@ -184,9 +220,7 @@ class PyncclCPUnitTest(unittest.TestCase):
 
         with patch.object(pynccl_cp, "_OPT_ENABLED", True), patch.object(
             pynccl_cp, "_resolve_process_group", return_value=process_group
-        ), patch.object(
-            pynccl_cp, "_world_size", return_value=4
-        ), patch.object(
+        ), patch.object(pynccl_cp, "_world_size", return_value=4), patch.object(
             pynccl_cp, "_symm_output", return_value=output
         ) as symm_output, patch.object(
             pynccl_cp.torch.cuda, "current_stream", return_value=stream

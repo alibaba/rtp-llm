@@ -3,7 +3,7 @@ from unittest import TestCase, main
 from unittest.mock import patch
 
 import torch
-
+from rtp_llm.models_py import prefill_optimization
 from rtp_llm.models_py.modules.base.cuda.indexer_launch_fusion import try_write_topk
 from rtp_llm.models_py.modules.base.cuda.indexer_op import _write_prefill_topk
 
@@ -26,7 +26,7 @@ def reference_topk(
 class IndexerLaunchFusionTest(TestCase):
     def setUp(self) -> None:
         self.assertTrue(torch.cuda.is_available(), "This target requires an NVIDIA GPU")
-        env = patch.dict(os.environ, {"RTP_INDEXER_FUSED_TOPK": "1"})
+        env = patch.object(prefill_optimization, "ENABLED", True)
         env.start()
         self.addCleanup(env.stop)
 
@@ -76,16 +76,17 @@ class IndexerLaunchFusionTest(TestCase):
                 -7, 100000, (rows, width), device="cuda", dtype=torch.int32
             )
             offsets = torch.arange(rows, device="cuda", dtype=torch.int64) * 100001
-            for canonicalize in ("0", "1"):
-                with patch.dict(
-                    os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": canonicalize}
-                ):
+            for standalone_flag in ("0", "1"):
+                with patch.dict(os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}):
                     expected = torch.empty_like(x)
-                    with patch.dict(os.environ, {"RTP_INDEXER_FUSED_TOPK": "0"}):
+                    with patch.object(prefill_optimization, "ENABLED", False):
                         _write_prefill_topk(x, offsets, expected)
                     output = torch.empty_like(x)
 
-                    _write_prefill_topk(x, offsets, output)
+                    with patch.dict(
+                        os.environ, {"DSV4_INDEXER_TOPK_CANONICALIZE": standalone_flag}
+                    ):
+                        _write_prefill_topk(x, offsets, output)
 
                     self.assertTrue(torch.equal(output, expected))
 
