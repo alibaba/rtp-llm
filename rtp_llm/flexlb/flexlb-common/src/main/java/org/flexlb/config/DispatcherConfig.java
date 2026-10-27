@@ -16,7 +16,7 @@ public final class DispatcherConfig {
         NON_BATCH
     }
 
-    private Type type = Type.BATCH;
+    private Type type = Type.NON_BATCH;
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;

@@ -20,13 +20,22 @@ class SloConfigTest {
         assertEquals(200, c.getWorkerRegistry().getHealth().getStatusRpcTimeoutMs());
         assertEquals(500, c.getWorkerRegistry().getHealth().getStatusStaleAfterMs());
         assertEquals(200, c.getWorkerRegistry().getHealth().getCleanupIntervalMs());
-        assertTrue(c.isFixedWindowDecision());
-        assertEquals(20, c.decisionPolicy().getMaxCollectionWaitMs());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, c.getDispatcher().getType());
+        assertFalse(c.getDispatcher().requiresGenerateInput());
+        assertEquals(DecisionPolicyConfig.Type.SINGLE, c.decisionPolicy().getType());
     }
     @Test void nonBatchNeedsOnlyTransportSelection() {
         var c = ConfigService.parse("{\"ttftSloMs\":100,\"dispatcher\":{\"type\":\"NON_BATCH\"}}");
         assertEquals(DecisionPolicyConfig.Type.SINGLE, c.decisionPolicy().getType());
         assertEquals(200, c.resolveExpiresAtMs(0));
+    }
+    @Test void explicitBatchRetainsCollectionPolicy() {
+        var c = ConfigService.parse("{\"ttftSloMs\":3000,\"dispatcher\":{\"type\":\"BATCH\"}}");
+        assertEquals(DispatcherConfig.Type.BATCH, c.getDispatcher().getType());
+        assertTrue(c.getDispatcher().requiresGenerateInput());
+        assertTrue(c.isFixedWindowDecision());
+        assertEquals(20, c.decisionPolicy().getMaxCollectionWaitMs());
+        assertEquals(2700, c.decisionPolicy().getMaxPredictedExecutionMs());
     }
     @ParameterizedTest @ValueSource(strings={"0", "-1", "null", "1.5", "\"3000\"", "9223372036854775807"})
     void rejectsInvalidTargets(String value) {
@@ -39,7 +48,7 @@ class SloConfigTest {
         assertThrows(ConfigValidationException.class, () -> ConfigService.parse("{\"ttftSloMs\":3000,"+field+"}"));
     }
     @Test void subMillisecondCollectionAndOverflowBoundaryRemainFinite() {
-        var c=ConfigService.parse("{\"ttftSloMs\":1}");
+        var c=ConfigService.parse("{\"ttftSloMs\":1,\"dispatcher\":{\"type\":\"BATCH\"}}");
         assertEquals(0, c.decisionPolicy().getMaxCollectionWaitMs());
         assertEquals(1, c.decisionPolicy().getMaxPredictedExecutionMs());
         long largest=Long.MAX_VALUE / 4;
