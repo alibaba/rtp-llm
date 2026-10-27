@@ -326,7 +326,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
-        reporter.reportDecodeAdmission(ipPort(), resourceSnapshot());
+        if (reporter.isDecodeAdmissionEnabled()) {
+            reporter.reportDecodeAdmission(ipPort(), state.admissionMetrics());
+        }
     }
 
     public enum CapacityEdge { DISPATCH, PLACEMENT, BOTH }

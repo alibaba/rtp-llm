@@ -79,6 +79,12 @@ public final class SafeFlexMonitor implements FlexMonitor {
     }
 
     @Override
+    public boolean isEnabled(String metricName) {
+        try { return delegate.isEnabled(metricName); }
+        catch (Throwable failure) { logFailure(metricName, failure); return false; }
+    }
+
+    @Override
     public void close() {
         try {
             delegate.close();

@@ -60,6 +60,7 @@ final class DecodeState {
     private final ResourceUsage queuedUsage = new ResourceUsage();
     private final ResourceUsage dispatchUsage = new ResourceUsage();
     private volatile int confirmedEngineOwnedCount;
+    private int runningCount;
     private volatile long priorityPreemptionHeldKv;
     private volatile long priorityPreemptionHeldExpectedKv;
     private volatile long admissionVersion;
@@ -203,6 +204,8 @@ final class DecodeState {
         dispatchUsage.adjust((nextDispatching ? 1 : 0) - (dispatching ? 1 : 0),
                 (nextDispatching ? hard : 0L) - (dispatching ? hard : 0L),
                 (nextDispatching ? expected : 0L) - (dispatching ? expected : 0L));
+        runningCount += (next == DecodeTaskPhase.RUNNING ? 1 : 0)
+                - (request.phase == DecodeTaskPhase.RUNNING ? 1 : 0);
         confirmedEngineOwnedCount += (next != null && next.isEngineConfirmed() ? 1 : 0) - (reserved ? 0 : 1);
         if (reserved && next != null && next.isEngineConfirmed()) {
             request.kvTokens = Math.max(0L, engineKv);
@@ -605,6 +608,7 @@ final class DecodeState {
             reservedUsage.reset();
             queuedUsage.reset();
             confirmedEngineOwnedCount = 0;
+            runningCount = 0;
             preemptionAttempts.clear();
             priorityPreemptionHeldKv = 0L;
             priorityPreemptionHeldExpectedKv = 0L;
@@ -728,6 +732,15 @@ final class DecodeState {
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    DecodeResources.AdmissionMetrics admissionMetrics() {
+        admissionLock.lock();
+        try {
+            var routing = routingView(status.getIpPort());
+            return new DecodeResources.AdmissionMetrics(reservedUsage.requests, runningCount,
+                    confirmedEngineOwnedCount - runningCount, routing.inflightHardKv(), routing.engineLoad());
+        } finally { admissionLock.unlock(); }
     }
 
     ResourceSnapshot resourceSnapshot() {

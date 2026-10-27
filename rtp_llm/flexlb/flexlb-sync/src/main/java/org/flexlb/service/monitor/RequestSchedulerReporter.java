@@ -1,7 +1,7 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
+import org.flexlb.balance.endpoint.DecodeResources.AdmissionMetrics;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -174,12 +174,20 @@ public class RequestSchedulerReporter {
     }
 
     /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
-    public void reportDecodeAdmission(String endpoint, ResourceSnapshot view) {
+    public boolean isDecodeAdmissionEnabled() {
+        return monitor.isEnabled(AUTO_TPM_DECODE_RESERVED_COUNT)
+                || monitor.isEnabled(AUTO_TPM_DECODE_SHADOW_KV_RESERVED)
+                || monitor.isEnabled(AUTO_TPM_DECODE_RUNNING_COUNT)
+                || monitor.isEnabled(AUTO_TPM_DECODE_ACCEPTED_COUNT)
+                || monitor.isEnabled(AUTO_TPM_DECODE_ENGINE_LOAD);
+    }
+
+    public void reportDecodeAdmission(String endpoint, AdmissionMetrics view) {
         FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
         monitor.report(AUTO_TPM_DECODE_RESERVED_COUNT, tags, view.reservedCount());
-        monitor.report(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, tags, view.routing().inflightHardKv());
+        monitor.report(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, tags, view.inflightHardKv());
         monitor.report(AUTO_TPM_DECODE_RUNNING_COUNT, tags, view.runningCount());
         monitor.report(AUTO_TPM_DECODE_ACCEPTED_COUNT, tags, view.acceptedCount());
-        monitor.report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, view.routing().engineLoad());
+        monitor.report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, view.engineLoad());
     }
 }

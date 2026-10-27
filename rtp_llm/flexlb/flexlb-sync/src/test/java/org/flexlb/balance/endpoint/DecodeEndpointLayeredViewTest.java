@@ -1,9 +1,8 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
-import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.master.TaskInfo;
@@ -12,9 +11,9 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -24,25 +23,24 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RESERVED_COUNT;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_SHADOW_KV_RESERVED;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RUNNING_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_ACCEPTED_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_ENGINE_LOAD;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RESERVED_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RUNNING_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_SHADOW_KV_RESERVED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 /**
  * Phase 5 tests for the decode layered view: calibrate splits confirmed
@@ -65,6 +63,27 @@ class DecodeEndpointLayeredViewTest {
                 RoleType.DECODE, "10.0.0.1", 8080, 8081);
         endpoint = EndpointTestSupport.decode(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         updateStatus(Map.of(), Map.of(), 20_000);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void scalarMetricsMatchIndependentRequestSnapshot() {
+        var state = (DecodeState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "state");
+        var metrics = state.admissionMetrics();
+        var reference = endpoint.resourceSnapshot();
+        assertEquals(reference.reservedCount(), metrics.reservedCount());
+        assertEquals(reference.acceptedCount(), metrics.acceptedCount());
+        assertEquals(reference.runningCount(), metrics.runningCount());
+        assertEquals(reference.routing().inflightHardKv(), metrics.inflightHardKv());
+        assertEquals(reference.routing().engineLoad(), metrics.engineLoad());
+    }
+
+    @Test
+    void disabledMetricsNeverReadTheAdmissionLedger() {
+        var state = org.mockito.Mockito.spy((DecodeState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "state"));
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "state", state);
+        endpoint.reportAdmissionMetrics(new RequestSchedulerReporter(org.flexlb.metric.NoOpFlexMonitor.getInstance()));
+        org.mockito.Mockito.verify(state, org.mockito.Mockito.never()).admissionMetrics();
+        org.mockito.Mockito.verify(state, org.mockito.Mockito.never()).resourceSnapshot();
     }
 
     // ==================== calibrate: layer split + inheritance ====================
@@ -162,6 +181,7 @@ class DecodeEndpointLayeredViewTest {
                 "2", runningTask(2L, TaskPhase.RUNNING, 256)), null, 10_000);
         reserve(3L, 300, 308, 50);
         FlexMonitor monitor = mock(FlexMonitor.class);
+        when(monitor.isEnabled(AUTO_TPM_DECODE_RESERVED_COUNT)).thenReturn(true);
 
         endpoint.reportAdmissionMetrics(new RequestSchedulerReporter(monitor));
 
@@ -171,6 +191,7 @@ class DecodeEndpointLayeredViewTest {
         verify(monitor).report(AUTO_TPM_DECODE_RUNNING_COUNT, tags, 1.0);
         verify(monitor).report(AUTO_TPM_DECODE_ACCEPTED_COUNT, tags, 1.0);
         verify(monitor).report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, 3.0);
+        verify(monitor).isEnabled(AUTO_TPM_DECODE_RESERVED_COUNT);
         verifyNoMoreInteractions(monitor);
     }
 
