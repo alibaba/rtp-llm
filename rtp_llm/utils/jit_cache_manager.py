@@ -33,6 +33,10 @@ from rtp_llm.utils.jit_cache_env import (
 )
 
 SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
+# Floor between early (dirty-driven) sync-loop wakeups: publish leaves the
+# dirty flag set while a peer holds the flock, so the re-wake cadence needs a
+# bound to stay polite instead of spinning.
+EARLY_WAKE_MIN_GAP_S = 1.0
 RTP_JIT_VERSION, CUDA, ROCM = "v2", "cuda", "rocm"
 LOCKS_DIR, STAGING_DIR = ".locks", ".staging"
 # Fixed path: build artifacts embed absolute paths, so relocating voids snapshots; opt out via --manage_jit_cache.
@@ -222,6 +226,24 @@ def _prepare_shared_root(root: Path) -> None:
             raise OSError(f"shared ACL unavailable for {root}")
 
 
+# watchdog 6 watches IN_OPEN and IN_CLOSE_NOWRITE, so a handler also sees
+# reads: "opened" and "closed_no_write". Neither changes anything a snapshot
+# could capture ("closed" is IN_CLOSE_WRITE -- a writer just finished -- and
+# "modified" is IN_MODIFY), and answering reads here was self-exciting: the
+# deep_gemm branch of on_any_event opens watched files, so every read event
+# re-entered the handler with two more of its own. One spinning reader grew
+# that to 23.36M inotify events and 8.2GB of inotify_buffer DEBUG lines per
+# side in 30 minutes (deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm,
+# 2026-10-26), starving model load and JIT compilation until the smoke
+# watchdog killed the case. Reads are skipped whole.
+READ_EVENT_TYPES = frozenset({"opened", "closed_no_write"})
+# watchdog.observers.inotify_buffer logs one DEBUG line per raw inotify
+# event; even a healthy build tree emits thousands. The manager starts the
+# observer, so it caps that logger where the observer starts; errors stay
+# visible at WARNING and above.
+NOISY_WATCHDOG_LOGGERS = ("watchdog.observers.inotify_buffer",)
+
+
 @lru_cache(maxsize=1)  # a second call must not read the env this one exports
 def setup_jit_cache_env() -> Scope | None:
     try:
@@ -256,6 +278,8 @@ class JitCacheManager(FileSystemEventHandler):
 
     def on_any_event(self, event) -> None:
         if event.is_directory or self._stop.is_set():
+            return
+        if event.event_type in READ_EVENT_TYPES:
             return
         path = Path(event.dest_path if event.event_type == "moved" else event.src_path)
         for item in self.scope.components:
@@ -325,6 +349,13 @@ class JitCacheManager(FileSystemEventHandler):
 
     def _start_watch(self) -> bool:
         try:
+            # RTP_JIT_WATCHDOG_DEBUG=1 keeps the raw inotify event DEBUG
+            # stream available for incident diagnosis (event loss /
+            # IN_Q_OVERFLOW blind spots); every enabled component's rules
+            # would still gate the handler, only the log volume returns.
+            if os.environ.get("RTP_JIT_WATCHDOG_DEBUG", "0") != "1":
+                for name in NOISY_WATCHDOG_LOGGERS:
+                    logging.getLogger(name).setLevel(logging.WARNING)
             self._observer = Observer()
             for item in self.scope.components:
                 item.local_dir.mkdir(parents=True, exist_ok=True)
@@ -376,7 +407,20 @@ class JitCacheManager(FileSystemEventHandler):
 
     def _sync_loop(self) -> None:
         while True:
-            stopping = self._stop.wait(SYNC_POLL_S)
+            # Wake as soon as a write-side event marks the scope dirty instead
+            # of idling the full SYNC_POLL_S: consumers waiting for a snapshot
+            # (smoke cases polling for the publish) previously sat out up to
+            # two minutes after the last artifact landed. The timed wait
+            # remains the blind-spot fallback -- publish rescans and re-marks
+            # dirty when the tree moved under the watcher.
+            woke = self._dirty.wait(SYNC_POLL_S)
+            stopping = self._stop.wait(EARLY_WAKE_MIN_GAP_S if woke else 0)
+            if stopping:
+                # stop() nudges _dirty purely to interrupt this sleep; that
+                # nudge is not pending work. Clear it so the final publish
+                # below is content-driven -- a real diff re-marks the flag
+                # inside publish_pending_snapshot and still uploads.
+                self._dirty.clear()
             try:
                 self.publish_pending_snapshot()
             except Exception:
@@ -395,6 +439,10 @@ class JitCacheManager(FileSystemEventHandler):
     def stop(self) -> None:
         """Idempotent and retryable, because the store's own close() is both."""
         self._stop.set()
+        # The sync loop sleeps on _dirty, not _stop: without this nudge an
+        # idle manager takes up to SYNC_POLL_S to notice the stop, blowing
+        # the STOP_TIMEOUT_S join in _cleanup during process teardown.
+        self._dirty.set()
         if self._observer:
             self._observer.stop()
         cleanup = Thread(

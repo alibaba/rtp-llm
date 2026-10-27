@@ -1,5 +1,6 @@
 import contextlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -347,6 +348,48 @@ class StoreTest(JitCacheTestBase):
             (restored.staging / "deep_gemm/cache/hash/.committed").stat().st_mtime_ns,
             marker.stat().st_mtime_ns,
         )
+
+    def test_deep_gemm_read_events_never_reenter_the_watcher(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "local" / "deep_gemm",
+        )
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        for rel, payload in (
+            ("cache/hash/kernel.cu", b"source"),
+            ("cache/hash/kernel.cubin", b"binary"),
+            ("cache/hash/meta.json", b"{}"),
+            ("cache/hash/.committed", b""),
+        ):
+            path = component.local_dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        meta = component.local_dir / "cache" / "hash" / "meta.json"
+        # A reader polling meta.json for compile completion must stay inert:
+        # answering read events re-entered the handler via deepjit_entry_files'
+        # own opens and self-excited the observer into a 23M-event/30min loop.
+        for event_type in ("opened", "closed_no_write"):
+            with self.subTest(event_type=event_type), mock.patch.object(
+                jit, "deepjit_entry_files"
+            ) as validate:
+                manager.on_any_event(
+                    types.SimpleNamespace(
+                        is_directory=False, event_type=event_type, src_path=str(meta)
+                    )
+                )
+                validate.assert_not_called()
+                self.assertFalse(manager._dirty.is_set())
+        # The write-side counterpart still validates and wakes the publisher.
+        with mock.patch.object(jit, "deepjit_entry_files") as validate:
+            manager.on_any_event(
+                types.SimpleNamespace(
+                    is_directory=False, event_type="closed", src_path=str(meta)
+                )
+            )
+            validate.assert_called_once()
+            self.assertTrue(manager._dirty.is_set())
 
     def test_publish_keeps_immutable_generations(self):
         snap_store, expected = self.make_store(), {}
@@ -975,6 +1018,35 @@ class ScopeTest(JitCacheTestBase):
         ) as logs:
             self.assertIsNone(jit._accelerator_scope("cuda", "12.8"))
         self.assertIn("mixed GPU architectures", "\n".join(logs.output))
+
+
+class WatchLoggingTest(JitCacheTestBase):
+    """The inotify flood logger pin, deliberately NOT behind the ACL gate:
+    it is a pure logging behavior with no filesystem capability need."""
+
+    def setUp(self):
+        super().setUp()
+        self.managers = []
+        self.addCleanup(lambda: [manager.stop() for manager in self.managers])
+
+    def make_scope(self):
+        with _fake_probes():
+            return jit.setup_jit_cache_env()
+
+    def make_manager(self, scope, remote="remote"):
+        (self.root / remote).mkdir(parents=True, exist_ok=True)
+        manager = jit.JitCacheManager(scope, str(self.root / remote))
+        self.managers.append(manager)
+        return manager
+
+    def test_start_watch_pins_the_watchdog_event_flood_logger(self):
+        noisy = logging.getLogger("watchdog.observers.inotify_buffer")
+        saved, noisy.level = noisy.level, logging.DEBUG
+        self.addCleanup(noisy.setLevel, saved)
+        scope = self.make_scope()
+        manager = self.make_manager(scope)
+        self.assertTrue(manager.bootstrap(timeout_s=30))
+        self.assertEqual(noisy.level, logging.WARNING)
 
 
 @requires_shared_acl
