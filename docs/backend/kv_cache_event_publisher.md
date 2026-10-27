@@ -10,10 +10,11 @@ Events describe logical cache keys, not physical block indices. Reusable compone
 Each component requires a complete, IDLE, non-detached DEVICE GroupSet.
 Deleting a component preserves the others. Duplicate puts and LRU touches do not produce events.
 
-For DeepSeek V4.1, `global_kv_1`, `global_kv_2`, and `indexer_kv` share one HBM spec `F` only when all three are eligible
-for publication and belong to the same FULL GroupSet. `global_kv_1` represents that GroupSet for registration, ADD/DELETE,
+For DeepSeek V4.1, `hca_kv`, `csa_kv`, and `indexer_kv` share one HBM spec `F` only when all three are eligible
+for publication and belong to the same FULL GroupSet. `hca_kv` represents that GroupSet for registration, ADD/DELETE,
 and snapshots; BTC still checks every member, so an incomplete or evicted GroupSet withdraws `F`. Otherwise these tags
-retain their individual `F0`/`F1`/`F2` specs. Other components keep their existing publication behavior.
+retain their individual `F0`/`F1`/`F2` specs. The legacy `global_kv_1`/`global_kv_2` pool tags remain supported with the
+same mapping. Other components keep their existing publication behavior.
 
 Cache mutations only attempt a bounded non-blocking enqueue; network I/O runs on publisher workers. Queue overflow
 and ordinary request failures do not trigger snapshots. Publishing is fail-open and never gates readiness or inference.
@@ -47,7 +48,13 @@ server and add it to the Instance Group's `event_report_storage_candidates`.
 
 Instance registrations must match the published schema and token stride. The `F0`/`F1`/`F2` to `F` change is a schema
 change: rollout requires a new HBM Instance ID or an explicit migration of the existing registration and metadata.
-Remote payload specs (`F0_TP<n>`/`F1_TP<n>`/`F2_TP<n>`) and the remote-cache Instance ID are unchanged.
+Runtime pool names and Remote group names retain the attention-type naming: `hca_kv`/`csa_kv` and
+`Fhca_kv`/`Fcsa_kv`, including their aggregate group names. These groups use the original specs
+`F0_TP<n>`/`F1_TP<n>`; indexer and state specs remain `F2_TP<n>`/`S3_TP<n>`/`S4_TP<n>`.
+The automatic remote-cache Instance ID includes both specs and groups, so retaining the renamed groups can change
+that ID relative to an instance registered with `Fglobal_kv_1`/`Fglobal_kv_2` groups.
+This pool-name compatibility mapping applies to the `DeepSeekV41` and `DeepSeekV41DSpark` model names supplied by
+ModelFactory. Other models, including DeepSeek V4, retain their existing mappings.
 Consumers must check FULL history and SWA windows before reuse.
 
 ## Configuration
