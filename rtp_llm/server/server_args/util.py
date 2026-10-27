@@ -1,4 +1,5 @@
 import argparse
+import math
 
 from rtp_llm.ops import CPRotateMethod
 
@@ -13,6 +14,18 @@ def str2bool(v):
     if v.lower() in ("no", "false", "f", "0", "off"):
         return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def str2finite_float(v):
+    if v is None:
+        return None
+    try:
+        value = float(v)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"finite float value expected, got {v!r}.")
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"finite float value expected, got {v!r}.")
+    return value
 
 
 def str2_cp_rotate_method(value):

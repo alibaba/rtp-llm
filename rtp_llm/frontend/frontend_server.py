@@ -223,12 +223,17 @@ class FrontendServer(object):
                 grpc_config=self.py_env_configs.grpc_config,
                 server_config=self.py_env_configs.server_config,
                 tokenizer=self._frontend_worker.tokenizer,
+                embedding_config=self.py_env_configs.embedding_config,
             )
             self.is_embedding = True
 
     async def close(self):
-        if self._frontend_worker is not None:
-            await self._frontend_worker.close()
+        try:
+            if self._embedding_endpoint is not None:
+                await self._embedding_endpoint.close()
+        finally:
+            if self._frontend_worker is not None:
+                await self._frontend_worker.close()
 
     def stop(self):
         if self._frontend_worker is not None:

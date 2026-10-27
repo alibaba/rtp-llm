@@ -895,5 +895,67 @@ class Int8AllReduceFp16ScaleConfigTest(TestCase):
         self.assertEqual(error.exception.code, 2)
 
 
+class EmbeddingRerankerConfigTest(TestCase):
+    def setUp(self):
+        self.device_env = {
+            name: os.environ[name]
+            for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES")
+            if name in os.environ
+        }
+
+    def _setup_args(self, env, args):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, {**self.device_env, **env}, clear=True):
+            return setup_args(["--model_type", "qwen_3", *args]).embedding_config
+
+    def test_defaults(self):
+        config = self._setup_args({}, [])
+        self.assertIs(config.embedding_share_grpc_channel, True)
+        self.assertIs(config.embedding_grpc_keepalive, False)
+        self.assertIsNone(config.embedding_rpc_timeout_s)
+
+    def test_env_and_cli_precedence(self):
+        env = {
+            "RTP_LLM_EMBEDDING_SHARE_CHANNEL": "0",
+            "RTP_LLM_EMBEDDING_GRPC_KEEPALIVE": "1",
+            "RTP_LLM_EMBEDDING_RPC_TIMEOUT_S": "12.5",
+        }
+        config = self._setup_args(env, [])
+        self.assertIs(config.embedding_share_grpc_channel, False)
+        self.assertIs(config.embedding_grpc_keepalive, True)
+        self.assertEqual(config.embedding_rpc_timeout_s, 12.5)
+
+        config = self._setup_args(
+            env,
+            [
+                "--embedding_share_grpc_channel",
+                "true",
+                "--embedding_grpc_keepalive",
+                "false",
+                "--embedding_rpc_timeout_s",
+                "0",
+            ],
+        )
+        self.assertIs(config.embedding_share_grpc_channel, True)
+        self.assertIs(config.embedding_grpc_keepalive, False)
+        self.assertEqual(config.embedding_rpc_timeout_s, 0.0)
+
+    def _assert_rejected(self, env, args):
+        with patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+            self._setup_args(env, args)
+        self.assertEqual(error.exception.code, 2)
+
+    def test_invalid_rpc_timeout_is_rejected(self):
+        for value in ("nan", "inf", "-inf", "abc"):
+            with self.subTest(source="cli", value=value):
+                self._assert_rejected({}, [f"--embedding_rpc_timeout_s={value}"])
+            with self.subTest(source="env", value=value):
+                self._assert_rejected(
+                    {"RTP_LLM_EMBEDDING_RPC_TIMEOUT_S": value},
+                    ["--embedding_share_grpc_channel", "true"],
+                )
+
+
 if __name__ == "__main__":
     main()
