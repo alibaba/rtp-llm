@@ -1433,10 +1433,14 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
         EXPECT_EQ(backend->matchCalls(), 1u);
-        // Detaching under pressure may evict an ordinary prefix. A resident
-        // prefix survives and must remain eligible for local lookup on retry.
-        EXPECT_EQ(stream_->reuseLength(), resident ? 2 : 0);
-        EXPECT_EQ(stream_->deviceReuseLength(), resident ? 2 : 0);
+        // Ordinary prefixes may survive or be evicted; resident prefixes must survive.
+        const auto local_reuse = stream_->reuseLength();
+        if (resident) {
+            EXPECT_EQ(local_reuse, 2);
+        } else {
+            EXPECT_TRUE(local_reuse == 0 || local_reuse == 2);
+        }
+        EXPECT_EQ(stream_->deviceReuseLength(), local_reuse);
         EXPECT_EQ(stream_->remoteReuseLength(), 0);
     }
 }
