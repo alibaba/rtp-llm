@@ -107,3 +107,45 @@ def test_java_extension_compiles_without_python_interface_changes(case_data, com
     case_data['phases'][0]['steps'][0]['check']['args']['threshold'] = '4'
     with pytest.raises(ConfigError, match='integer'):
         compile_data(case_data, catalog=registry)
+
+
+@pytest.mark.parametrize('output', [
+    0, 128,
+    {'distribution':'uniform', 'min':64, 'max':256, 'seed':42},
+    {'distribution':'normal', 'mean':128, 'stddev':32, 'min':1, 'max':512, 'seed':42},
+    {'distribution':'lognormal', 'mu':4.5, 'sigma':0.8, 'min':1, 'max':2048, 'seed':42},
+    {'distribution':'choice', 'values':[64,128,512], 'seed':42},
+    {'distribution':'choice', 'values':[64,128,512], 'weights':[0,2,1], 'seed':42},
+])
+def test_output_distributions_compile_from_java_schema(case_data, compile_data, output):
+    prepare = case_data['phases'][0]['steps'][0]['call']['args']['input']['prepare']
+    prepare['output_tokens'] = output
+    result = compile_data(case_data).phases[0].steps[0].args['input']['prepare']
+    assert result['output_tokens'] == output
+    assert result['priority'] == 1
+
+
+@pytest.mark.parametrize('output', [
+    -1, 1.5, True, '128', 2**31,
+    {'distribution':'uniform', 'min':256, 'max':64, 'seed':42},
+    {'distribution':'uniform', 'min':1, 'max':64},
+    {'distribution':'uniform', 'min':1.5, 'max':64, 'seed':42},
+    {'distribution':'uniform', 'min':1, 'max':64, 'seed':2**63},
+    {'distribution':'normal', 'mean':128, 'stddev':-1, 'min':1, 'max':512, 'seed':42},
+    {'distribution':'normal', 'mean':float('nan'), 'stddev':1, 'min':1, 'max':512, 'seed':42},
+    {'distribution':'normal', 'mean':128, 'stddev':1, 'seed':42},
+    {'distribution':'normal', 'mean':128, 'stddev':1, 'min':1, 'max':512, 'seed':42, 'sigma':1},
+    {'distribution':'lognormal', 'mu':float('inf'), 'sigma':1, 'min':1, 'max':512, 'seed':42},
+    {'distribution':'lognormal', 'mu':4.5, 'sigma':-1, 'min':1, 'max':512, 'seed':42},
+    {'distribution':'choice', 'values':[], 'seed':42},
+    {'distribution':'choice', 'values':[64,-1], 'seed':42},
+    {'distribution':'choice', 'values':[64,128], 'weights':[1], 'seed':42},
+    {'distribution':'choice', 'values':[64,128], 'weights':[0,0], 'seed':42},
+    {'distribution':'choice', 'values':[64,128], 'weights':[-1,2], 'seed':42},
+    {'distribution':'choice', 'values':[64,128], 'weights':[float('inf'),2], 'seed':42},
+    {'distribution':'unknown', 'seed':42},
+])
+def test_invalid_output_distributions_fail_before_execution(case_data, compile_data, output):
+    case_data['phases'][0]['steps'][0]['call']['args']['input']['prepare']['output_tokens'] = output
+    with pytest.raises(ConfigError, match='no matching parameter variant'):
+        compile_data(case_data)

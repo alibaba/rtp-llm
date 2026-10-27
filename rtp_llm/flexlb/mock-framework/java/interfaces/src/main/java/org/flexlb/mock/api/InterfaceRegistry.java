@@ -58,6 +58,35 @@ public final class InterfaceRegistry {
         if (c == boolean.class || c == Boolean.class) return Map.of("type", "boolean");
         if (c == Types.Duration.class) return Map.of("type", "duration");
         if (c == Types.TimeRange.class) return Map.of("type", "range");
+        if (c.isSealed()) {
+            List<Map<String, Object>> variants = new ArrayList<>();
+            for (Class<?> subtype : c.getPermittedSubclasses()) {
+                Variant variant = subtype.getAnnotation(Variant.class);
+                if (variant == null || !subtype.isRecord())
+                    throw new IllegalArgumentException("Sealed variant needs a record and @Variant: " + subtype);
+                Map<String, Object> spec = new LinkedHashMap<>(schema(subtype));
+                if (variant.scalar()) {
+                    if (subtype.getRecordComponents().length != 1)
+                        throw new IllegalArgumentException("Scalar variant must have one field");
+                    @SuppressWarnings("unchecked")
+                    var properties = (Map<String, Map<String, Object>>) spec.get("properties");
+                    variants.add(properties.values().iterator().next());
+                } else {
+                    @SuppressWarnings("unchecked")
+                    var properties = new TreeMap<>((Map<String, Object>) spec.get("properties"));
+                    if (variant.value().isBlank() || properties.containsKey("distribution"))
+                        throw new IllegalArgumentException("Invalid distribution variant: " + subtype);
+                    properties.put("distribution", Map.of("type", "string", "enum", List.of(variant.value())));
+                    spec.put("properties", properties);
+                    @SuppressWarnings("unchecked")
+                    var required = new ArrayList<>((List<String>) spec.get("required"));
+                    required.add("distribution");
+                    spec.put("required", required);
+                    variants.add(spec);
+                }
+            }
+            return Map.of("type", "union", "variants", variants);
+        }
         if (c.isEnum()) return Map.of("type", "string", "enum",
                 Arrays.stream(c.getEnumConstants()).map(Object::toString).toList());
         if (!c.isRecord()) throw new IllegalArgumentException("Unsupported API type: " + type);
@@ -70,10 +99,30 @@ public final class InterfaceRegistry {
             if (annotation != null) {
                 if (!Double.isNaN(annotation.minimum())) spec.put("minimum", annotation.minimum());
                 if (annotation.ranges().length > 0) spec.put("ranges", List.of(annotation.ranges()));
+                if (annotation.minItems() > 0) spec.put("minItems", annotation.minItems());
+                if (!Double.isNaN(annotation.itemMinimum())) {
+                    if (!"array".equals(spec.get("type")))
+                        throw new IllegalArgumentException("itemMinimum requires an array: " + field);
+                    @SuppressWarnings("unchecked")
+                    var item = new LinkedHashMap<>((Map<String, Object>) spec.get("items"));
+                    item.put("minimum", annotation.itemMinimum());
+                    spec.put("items", item);
+                }
             }
             fields.put(field.getName(), spec);
         }
-        return Map.of("type", "object", "name", c.getSimpleName(), "properties", fields,
-                "required", required, "additionalProperties", false);
+        Map<String, Object> result = new LinkedHashMap<>(Map.of("type", "object", "name", c.getSimpleName(),
+                "properties", fields, "required", required, "additionalProperties", false));
+        Checks checks = c.getAnnotation(Checks.class);
+        if (checks != null) {
+            List<Object> rules = new ArrayList<>();
+            for (Checks.Check check : checks.value()) {
+                if (!fields.keySet().containsAll(List.of(check.fields())))
+                    throw new IllegalArgumentException("Constraint names unknown fields in " + c);
+                rules.add(Map.of("rule", check.rule().name(), "fields", List.of(check.fields())));
+            }
+            result.put("checks", rules);
+        }
+        return result;
     }
 }

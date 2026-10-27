@@ -48,4 +48,11 @@ class InterfaceRegistryTest {
     @Test void serializesControlCharactersInCatalog() {
         assertEquals("\"a\\\"\\n\\u0001\"", CatalogMain.json("a\"\n\u0001"));
     }
+
+    @Test void exportsOutputDistributionVariantsAndTheirConstraints() {
+        String catalog = CatalogMain.json(InterfaceRegistry.standard().get("client/traffic/run"));
+        for (String value : new String[]{"uniform", "normal", "lognormal", "choice", "same_length", "positive_sum"})
+            assertTrue(catalog.contains("\"" + value + "\""), value);
+        assertTrue(catalog.contains("\"bits\":64")); // Seed is an int64, not a float.
+    }
 }

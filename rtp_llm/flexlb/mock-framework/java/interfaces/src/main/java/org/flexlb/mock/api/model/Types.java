@@ -40,7 +40,7 @@ public final class Types {
     public record Ttft(Stat stat, @Argument(ranges={"all", "latest", "interval"}) TimeRange range) {}
     public record Promql(String promql) {}
     public record Prepare(
-        @Argument(optional=true, minimum=0) Integer output_tokens,
+        @Argument(optional=true) OutputTokens output_tokens,
         @Argument(optional=true) Integer priority) {}
     public record Input(String trace, @Argument(optional=true) Prepare prepare) {}
     public record Arrival(ArrivalMode mode,

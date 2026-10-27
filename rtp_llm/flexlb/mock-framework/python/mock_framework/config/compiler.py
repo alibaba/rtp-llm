@@ -13,11 +13,40 @@ _ID = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def _compatible(source, expected):
+    if expected.get('type') == 'union':
+        return any(_compatible(source, variant) for variant in expected['variants'])
     if source.get('type') != expected.get('type'):
         return source.get('type') == 'integer' and expected.get('type') == 'number'
     if expected.get('name'):
         return source.get('name') == expected['name']
     return True
+
+
+def _checks(value, schema, where):
+    def has_reference(item):
+        if isinstance(item, Reference):
+            return True
+        if isinstance(item, (list, tuple)):
+            return any(has_reference(child) for child in item)
+        return False
+
+    for check in schema.get('checks', ()):
+        if any(field not in value for field in check['fields']):
+            continue
+        values = [value[field] for field in check['fields']]
+        if any(has_reference(item) for item in values):
+            continue  # Actual resolved arguments must also be validated by the component.
+        rule = check['rule']
+        if rule == 'ordered':
+            valid = values[0] <= values[1]
+        elif rule == 'same_length':
+            valid = len(values[0]) == len(values[1])
+        elif rule == 'positive_sum':
+            valid = any(item > 0 for item in values[0])
+        else:
+            raise ConfigError(f'Unknown catalog constraint: {rule}')
+        if not valid:
+            raise ConfigError(f'{where}: constraint {rule} failed for {check["fields"]}')
 
 
 def _reference(value, schema, previous):
@@ -41,6 +70,14 @@ def _value(value, schema, previous, where):
     if isinstance(value, dict) and 'ref' in value:
         return _reference(value, schema, previous)
     kind = schema['type']
+    if kind == 'union':
+        errors = []
+        for variant in schema['variants']:
+            try:
+                return _value(value, variant, previous, where)
+            except ConfigError as error:
+                errors.append(str(error))
+        raise ConfigError(f'{where}: no matching parameter variant: ' + '; '.join(errors))
     if kind == 'object':
         if 'values' in schema:
             if not isinstance(value, dict):
@@ -48,10 +85,14 @@ def _value(value, schema, previous, where):
             return {k: _value(v, schema['values'], previous, where + '.' + k) for k, v in value.items()}
         props = schema.get('properties', {})
         fields(value, props, schema.get('required', ()), where=where)
-        return {k: _value(v, props[k], previous, where + '.' + k) for k, v in value.items()}
+        result = {k: _value(v, props[k], previous, where + '.' + k) for k, v in value.items()}
+        _checks(result, schema, where)
+        return result
     if kind == 'array':
         if not isinstance(value, list):
             raise ConfigError(f'{where}: expected list')
+        if len(value) < schema.get('minItems', 0):
+            raise ConfigError(f'{where}: too few items')
         return [_value(v, schema['items'], previous, where) for v in value]
     if kind == 'range':
         choices = schema.get('ranges', ())
