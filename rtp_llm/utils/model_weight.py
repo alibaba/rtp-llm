@@ -1155,6 +1155,9 @@ class W:
     # global
     embedding = "embedding"
     lm_head = "lm_head"
+    lm_head_s = "lm_head.scale"
+    lm_head_s2 = "lm_head.scale_2"
+    lm_head_i_s = "lm_head.input_scale"
     lm_head_b = "lm_head_b"
     prefix_w = "transformer.prefix_encoder.embedding.weight"
     pre_decoder_ln_gamma = "pre_decoder_layernorm.gamma"

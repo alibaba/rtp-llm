@@ -5,6 +5,8 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.modelopt_mixed import ModelOptMixedPrecisionConfig
+from rtp_llm.config.quant_config import ModelOptFp4Config
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
@@ -38,6 +40,17 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
+
+
+class _MoeModelConfigView:
+    """Expose an expert-local quant config without copying a pybind ModelConfig."""
+
+    def __init__(self, model_config: ModelConfig, quant_config):
+        self._model_config = model_config
+        self.quant_config = quant_config
+
+    def __getattr__(self, name):
+        return getattr(self._model_config, name)
 
 
 class GenericMoeLayer(nn.Module):
@@ -80,11 +93,29 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
+        moe_model_config = config
+        moe_quant_config = quant_config
+        if isinstance(quant_config, ModelOptMixedPrecisionConfig):
+            # Mixed recipes describe individual modules. Select the routed
+            # expert backend from the loaded expert tensors, while keeping the
+            # original config for the gate and shared dense expert.
+            expert_dtypes = {weights[name].dtype for name in (W.moe_w1, W.moe_w2)}
+            if expert_dtypes == {torch.bfloat16}:
+                moe_quant_config = None
+            elif expert_dtypes == {torch.uint8}:
+                moe_quant_config = ModelOptFp4Config(
+                    bits=4, group_size=16, is_quanted=True
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported mixed ModelOpt MoE expert dtypes: {expert_dtypes}"
+                )
+            moe_model_config = _MoeModelConfigView(config, moe_quant_config)
         config_adapter = MoEConfigAdapter(
-            model_config=config,
+            model_config=moe_model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
-            quant_config=quant_config,
+            quant_config=moe_quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)

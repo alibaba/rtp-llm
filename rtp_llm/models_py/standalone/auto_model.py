@@ -258,8 +258,11 @@ class AutoModel:
         self, model_outputs: PyModelOutputs, sampling_params: dict = None
     ) -> torch.Tensor:
         hidden_states = model_outputs.hidden_states[-1:, :]
-        logits = torch.matmul(
-            hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()
-        ).to(torch.float32)
+        if self.lm_head_weight.dtype == torch.uint8:
+            logits = self.model.compute_quantized_logits(hidden_states).float()
+        else:
+            logits = torch.matmul(
+                hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()
+            ).to(torch.float32)
         next_token_id = torch.argmax(logits, dim=-1)
         return next_token_id

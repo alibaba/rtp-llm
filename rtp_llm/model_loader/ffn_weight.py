@@ -469,7 +469,9 @@ class MoeAtomicWeight(AtomicWeight):
                         ckpt_weight.merge_fun(
                             [
                                 x.to(device)
-                                for x in tensor_source.load_tensor(name, convert_type)
+                                for x in self._load_tensor(
+                                    tensor_source, name, convert_type
+                                )
                             ]
                         )
                     )
@@ -570,7 +572,10 @@ class MoeAtomicWeight(AtomicWeight):
                 for slot, expert in enumerate(experts):
                     name = self._ckpt_name(weight, layer_id, expert)
                     where = (*((expert,) if is_stacked else ()), *read_slice)
-                    loaded = database.load_tensor_slice(name, where, dtype)
+                    loaded = database.load_tensor_slice(
+                        name, where, None if self.reject_quantized_raw else dtype
+                    )
+                    self._check_raw_dtype(loaded, name)
                     if read_full_expert:
                         loaded = loaded[shard_slice].contiguous()
                     output[slot].narrow(split_dim, dst, shard_size).copy_(loaded)
@@ -592,7 +597,9 @@ class MoeAtomicWeight(AtomicWeight):
         if first_name is not None and name == first_name:
             return name, first_tensor
         try:
-            t = ckpt_weight.merge_fun(tensor_source.load_tensor(name, convert_type))
+            t = ckpt_weight.merge_fun(
+                self._load_tensor(tensor_source, name, convert_type)
+            )
             return name, t
         except Exception as e:
             logging.error(f"加载 {name} 失败，完整堆栈:\n{traceback.format_exc()}")

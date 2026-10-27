@@ -9,7 +9,10 @@ namespace rtp_llm {
 static const std::unordered_set<int> kValidGroupSizes = {16, 32, 64, 128};
 
 void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int64_t group_size) {
-    if (quant_method == "gptq") {
+    if (quant_method == "none") {
+        *this = QuantAlgo();
+        return;
+    } else if (quant_method == "gptq") {
         quant_method_ = GptQ;
         weight_bits_  = bits;
         group_size_   = group_size;

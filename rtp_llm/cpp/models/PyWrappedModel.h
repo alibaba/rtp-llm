@@ -96,6 +96,7 @@ private:
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
+    torch::Tensor   computeQuantizedLogits(const torch::Tensor& hidden);
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
                                       const bool            has_context_request,
                                       const bool            need_all_logits,
@@ -132,6 +133,7 @@ private:
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
     py::object py_forward_method_;
+    py::object py_lm_head_method_;
     py::object held_attn_pyobj_;
     bool       enable_cuda_graph_{false};
     bool       is_prefill_cuda_graph_mode_{false};
@@ -246,6 +248,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                      dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                       "forward";
     py_forward_method_             = py_model_.attr(forward_method);
+    if (weights_.lm_head && weights_.lm_head->kernel.dtype() == torch::kUInt8) {
+        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "compute_quantized_logits"),
+                                "Packed LM head requires Python compute_quantized_logits");
+        py_lm_head_method_ = py_model_.attr("compute_quantized_logits");
+    }
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
     const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
                                              || py_model_class_name == "DeepSeekV4MtpModel"

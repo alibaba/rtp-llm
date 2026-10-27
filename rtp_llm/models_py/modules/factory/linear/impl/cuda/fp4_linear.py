@@ -41,7 +41,10 @@ class CudaFp4GEMMLinear(LinearBase):
 
         # Check quantization method
         quant_method = quant_config.get_method()
-        return quant_method == "modelopt_fp4"
+        return (
+            quant_method in ("modelopt_fp4", "modelopt_mixed")
+            and weight.dtype == torch.uint8
+        )
 
     @torch.inference_mode()
     def __init__(

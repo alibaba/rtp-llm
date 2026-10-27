@@ -3,6 +3,23 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "quantized_lm_head_test",
+    srcs = ["quantized_lm_head_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "quantized_lm_head_test_sm120",
+    srcs = ["quantized_lm_head_test.py"],
+    main = "quantized_lm_head_test.py",
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+)
+
+py_test(
     name = "generic_moe_allreduce_test",
     srcs = ["generic_moe_allreduce_test.py"],
     deps = py_test_deps + [
@@ -12,6 +29,19 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "generic_moe_allreduce_test_sm120",
+    srcs = ["generic_moe_allreduce_test.py"],
+    main = "generic_moe_allreduce_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
 )
 
 py_test(

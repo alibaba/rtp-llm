@@ -66,6 +66,33 @@ py_test(
 )
 
 cc_library(
+    name = "pywrapped_model_lm_head_test_lib",
+    srcs = ["PyWrappedModelLmHeadTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+    ] + torch_deps(),
+    alwayslink = True,
+)
+
+cc_binary(
+    name = "th_pywrapped_model_lm_head_test",
+    srcs = ["//:rtp_compute_ops"],
+    deps = [":pywrapped_model_lm_head_test_lib"],
+    linkshared = 1,
+)
+
+py_test(
+    name = "pywrapped_model_lm_head_test",
+    srcs = ["pywrapped_model_lm_head_test.py"],
+    data = [":th_pywrapped_model_lm_head_test"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_library(
     name = "pywrapped_model_cache_store_integration_test_lib",
     srcs = ["PyWrappedModelCacheStoreIntegrationTest.cc"],
     alwayslink = True,

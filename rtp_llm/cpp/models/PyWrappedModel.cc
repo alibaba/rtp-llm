@@ -141,6 +141,7 @@ PyWrappedModel::~PyWrappedModel() {
         py::gil_scoped_acquire gil;
         held_attn_pyobj_   = py::object();
         py_forward_method_ = py::object();
+        py_lm_head_method_ = py::object();
         // Always release py_model_ since it's always initialized now
         py_model_.release();
         if (graph_runner_ != nullptr) {
@@ -956,6 +957,18 @@ torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input
     return transposed;
 }
 
+torch::Tensor PyWrappedModel::computeQuantizedLogits(const torch::Tensor& hidden) {
+    py::gil_scoped_acquire gil;
+    auto logits = py_lm_head_method_(hidden).cast<torch::Tensor>();
+    RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2 && logits.size(0) == hidden.size(0)
+                                && logits.size(1) == weights_.lm_head->kernel.size(0)
+                                && logits.scalar_type() == torch::kBFloat16
+                                && logits.device() == hidden.device(),
+                            "Quantized LM head must return BF16 local logits "
+                            "[rows, local_vocab] on the hidden device");
+    return logits;
+}
+
 GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   const bool            has_context_request,
                                                   const bool            need_all_logits,
@@ -1058,6 +1071,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor logits;
         {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
+            if (py_lm_head_method_) {
+                logits = computeQuantizedLogits(last_hidden);
+            } else
 #if USING_CUDA
             if (lm_head->kernel.dtype() == torch::kBFloat16) {
                 logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
@@ -1082,6 +1098,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                     logits.dim() > 1 ? logits.size(1) : -1);
             logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
         }
+        // Keep native BF16 logits through TP communication, then promote for sampling.
+        logits = logits.to(torch::kFloat32);
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1119,6 +1137,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     torch::Tensor logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
+        if (py_lm_head_method_) {
+            logits = computeQuantizedLogits(last_hidden);
+        } else
 #if USING_CUDA
         if (lm_head->kernel.dtype() == torch::kBFloat16) {
             logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
@@ -1135,6 +1156,13 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
     }
+    if (description_.output_vocab_size > 0) {
+        RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
+                                    && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
+                                "output vocabulary gathered width mismatch");
+        logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
+    }
+    logits = logits.to(torch::kFloat32);
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
