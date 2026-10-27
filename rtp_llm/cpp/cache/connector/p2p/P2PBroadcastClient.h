@@ -21,7 +21,7 @@ public:
 
     explicit P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
                                 int64_t                         cancel_broadcast_timeout_ms = 1000);
-    ~P2PBroadcastClient() = default;
+    virtual ~P2PBroadcastClient() = default;
 
 public:
     /// @brief 初始化 RPC 连接池和 BroadcastManager
@@ -155,7 +155,7 @@ public:
                                                          P2PConnectorBroadcastType type,
                                                          int64_t                   transfer_deadline_ms,
                                                          int64_t                   control_timeout_ms);
-    std::shared_ptr<TpBroadcastResult>
+    virtual std::shared_ptr<TpBroadcastResult>
     queryLeaseStatusAsync(const std::string& unique_key, P2PConnectorBroadcastType operation, int64_t poll_timeout_ms);
     static LeaseStatusResult leaseStatus(const std::shared_ptr<TpBroadcastResult>& result);
 

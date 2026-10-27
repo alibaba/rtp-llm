@@ -441,10 +441,25 @@ TEST_F(P2PBroadcastClientTest, PrefillBroadcastSendsRemainingTransferBudget) {
     }
 }
 
-TEST_F(P2PBroadcastClientTest, SenderLeaseQueriesAreNotSupported) {
-    EXPECT_EQ(client_->queryLeaseStatusAsync("sender", WRITE, 100), nullptr);
+TEST_F(P2PBroadcastClientTest, WritebackLeaseQueriesPreserveOperation) {
     for (const auto& server : servers_) {
-        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+        server->service()->setLeaseStatus(true, 1, 1, true);
+    }
+    for (const auto operation : {WRITE, HANDLE_WRITE}) {
+        auto result = client_->queryLeaseStatusAsync("writeback", operation, 1000);
+        ASSERT_NE(result, nullptr);
+        ASSERT_TRUE(result->waitDone(1000, false));
+        EXPECT_TRUE(P2PBroadcastClient::leaseStatus(result).allStopped());
+        for (const auto& server : servers_) {
+            const auto request = server->service()->getLastBroadcastTpRequest();
+            EXPECT_EQ(request.type(), QUERY_LEASE_STATUS);
+            EXPECT_EQ(request.lease_operation(), operation);
+            EXPECT_EQ(request.unique_key(), "writeback");
+        }
+    }
+    EXPECT_EQ(client_->queryLeaseStatusAsync("writeback", READ, 1000), nullptr);
+    for (const auto& server : servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 2);
     }
 }
 

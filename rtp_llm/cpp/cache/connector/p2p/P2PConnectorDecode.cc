@@ -258,26 +258,43 @@ bool P2PConnectorDecode::cancelReadPerRank(const std::string& unique_key,
     return ret;
 }
 
-bool P2PConnectorDecode::queryLeaseStatusPerRank(const std::string& unique_key, FunctionResponsePB& response) {
-    bool sealed       = true;
+bool P2PConnectorDecode::queryLeaseStatusPerRank(const std::string&        unique_key,
+                                               P2PConnectorBroadcastType operation,
+                                               FunctionResponsePB&       response) {
+    response.mutable_p2p_response()->Clear();
+    bool sealed       = false;
     int  started_ops  = 0;
     int  finished_ops = 0;
-    bool stopped      = true;
+    bool stopped      = false;
+    bool found        = false;
 
-    const bool found = read_worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
-    // Missing leases are deliberately reported stopped; the worker checks the
-    // registration fence under the same lock before returning not-found.
+    if (operation == READ) {
+        found = read_worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+        // Missing leases are deliberately reported stopped; the worker checks the
+        // registration fence under the same lock before returning not-found.
+    } else if (operation == WRITE) {
+        found = write_worker_
+                && write_worker_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
+        if (!found) {
+            setP2PResponse(
+                response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "unknown write task"));
+            return false;
+        }
+    } else {
+        setP2PResponse(response, ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid lease operation"));
+        return false;
+    }
 
-    auto* p2p_response = response.mutable_p2p_response();
-    p2p_response->set_error_code(ErrorCodePB::NONE_ERROR);
-    auto* lease_status = p2p_response->mutable_lease_status();
+    setP2PResponseOk(response);
+    auto* lease_status = response.mutable_p2p_response()->mutable_lease_status();
     lease_status->set_sealed(sealed);
     lease_status->set_started_ops(started_ops);
     lease_status->set_finished_ops(finished_ops);
     lease_status->set_stopped(stopped);
 
-    RTP_LLM_LOG_DEBUG("executeQueryLeaseStatus: unique_key=%s found=%d sealed=%d started=%d finished=%d stopped=%d",
+    RTP_LLM_LOG_DEBUG("executeQueryLeaseStatus: unique_key=%s operation=%d found=%d sealed=%d started=%d finished=%d stopped=%d",
                       unique_key.c_str(),
+                      operation,
                       found,
                       sealed,
                       started_ops,
@@ -324,7 +341,7 @@ bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& re
     const auto reject = [&](const std::string& message) {
         P2PConnector::setP2PResponse(response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, message));
         if (write_worker_) {
-            write_worker_->cancelWrite(request.unique_key(), currentTimeMs() + config_.worker_config.load_cache_timeout_ms, true);
+            write_worker_->cancelWrite(request.unique_key(), currentTimeMs() + config_.worker_config.load_cache_timeout_ms);
         }
         return false;
     };
@@ -374,7 +391,7 @@ bool P2PConnectorDecode::writePerRank(const P2PConnectorBroadcastTpRequestPB& re
     const auto error =
         write_worker_->write(request.request_id(), request.unique_key(), deadline_ms, plan);
     if (error.hasError()) {
-        write_worker_->cancelWrite(request.unique_key(), deadline_ms, true);
+        write_worker_->cancelWrite(request.unique_key(), deadline_ms);
     }
     P2PConnector::setP2PResponse(response, error);
     return error.ok();
@@ -388,7 +405,7 @@ bool P2PConnectorDecode::cancelWritePerRank(const std::string& unique_key,
             response, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "decode writeback disabled"));
         return false;
     }
-    const bool ret = write_worker_->cancelWrite(unique_key, currentTimeMs() + config_.worker_config.load_cache_timeout_ms, true);
+    const bool ret = write_worker_->cancelWrite(unique_key, currentTimeMs() + config_.worker_config.load_cache_timeout_ms);
     P2PConnector::setP2PResponse(
         response,
         ret ? ErrorInfo::OkStatus() :

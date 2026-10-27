@@ -47,6 +47,14 @@ void WriteTaskGroup::watchTask(const std::string& key, const transfer::IKVCacheR
         });
 }
 
+void WriteTaskGroup::queryLeaseStatus(bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
+    std::lock_guard<std::mutex> lock(mutex);
+    sealed       = lease->isSealed();
+    started_ops  = lease->startedOps();
+    finished_ops = lease->finishedOps();
+    stopped      = lease->isStopped();
+}
+
 ErrorInfo WriteTaskGroup::waitDone() {
     std::unique_lock<std::mutex> lock(mutex);
     const auto deadline = std::chrono::steady_clock::time_point(std::chrono::milliseconds(stop_at_ms));
@@ -63,11 +71,6 @@ ErrorInfo WriteTaskGroup::waitDone() {
         cancel();
     }
     return result;
-}
-
-void WriteTaskGroup::waitStopped() {
-    std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [this]() { return lease->isStopped(); });
 }
 
 void WriteTaskGroup::releaseStoppedTasks() {

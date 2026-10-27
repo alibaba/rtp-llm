@@ -20,7 +20,9 @@ public:
                     const P2PWorkerRoutePlan& worker_plan);
     std::shared_ptr<p2p_internal::WriteTaskGroup>
     holdSourceResource(const std::string& unique_key, int64_t deadline_ms, KVCacheResourcePtr source_resource);
-    bool cancelWrite(const std::string& unique_key, int64_t deadline_ms, bool wait_stopped = false);
+    bool cancelWrite(const std::string& unique_key, int64_t deadline_ms);
+    bool queryLeaseStatus(
+        const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
 
 private:
     void cleanup();

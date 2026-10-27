@@ -19,11 +19,16 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillWrite.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -78,13 +83,15 @@ peerResult(ErrorCode error = ErrorCode::NONE_ERROR, bool stopped = true, int cou
 
 void confirmSourceStopped(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context) {
     auto call = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    call->response.mutable_p2p_response();
+    auto* lease = call->response.mutable_p2p_response()->mutable_lease_status();
+    lease->set_sealed(true);
+    lease->set_stopped(true);
     auto result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
         std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{call});
     result->finishRank(0, true);
     {
         std::lock_guard<std::mutex> lock(context->mutex_);
-        context->control_result_ = result;
+        context->lease_result_ = result;
     }
     context->checkCancelDone();
 }
@@ -96,6 +103,79 @@ bool receiveDone(const std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteReq
 bool receiveSuccess(const std::shared_ptr<P2PSchedulerPrefillWrite::PrefillWriteRequest>& state) {
     return !state->resourceHoldPending() && state->errorInfo().ok();
 }
+
+class RejectingWriteControlPool: public autil::ThreadPool {
+public:
+    RejectingWriteControlPool(): autil::ThreadPool(1, 8, nullptr, "RejectWriteControl") {}
+
+    ERROR_TYPE pushWorkItem(autil::WorkItem* item, bool blocked = true) override {
+        if (reject_submissions) {
+            ++rejections;
+            return ERROR_POOL_QUEUE_FULL;
+        }
+        return autil::ThreadPool::pushWorkItem(item, blocked);
+    }
+
+    std::atomic<bool> reject_submissions{false};
+    std::atomic<int>  rejections{0};
+};
+
+class LeaseQueryFaultClient: public P2PBroadcastClient {
+public:
+    using P2PBroadcastClient::P2PBroadcastClient;
+    std::atomic<int> failure_mode{0};
+    std::atomic<int> failures{0};
+    std::function<void()> before_query;
+
+    std::shared_ptr<TpBroadcastResult>
+    queryLeaseStatusAsync(const std::string& key, P2PConnectorBroadcastType operation, int64_t timeout_ms) override {
+        if (before_query)
+            before_query();
+        const auto mode = failure_mode.load();
+        if (mode != 0) {
+            ++failures;
+            if (mode == 2)
+                throw std::runtime_error("injected lease query submission failure");
+            return nullptr;
+        }
+        return P2PBroadcastClient::queryLeaseStatusAsync(key, operation, timeout_ms);
+    }
+};
+
+class SchedulerWriteReceiver: public transfer::IKVCacheReceiver {
+public:
+    bool regMem(const BlockInfo&, uint64_t = 0) override {
+        return true;
+    }
+    transfer::IKVCacheRecvTaskPtr recv(const transfer::RecvRequest& request) override {
+        auto task = tasks_.addTask(request.unique_key, request.block_info, request.deadline_ms);
+        if (task && task->startTransfer()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            active_.push_back(task);
+        }
+        return task;
+    }
+    void stealTask(const std::string& key) override {
+        tasks_.stealTask(key);
+    }
+    transfer::IKVCacheRecvTaskPtr getTask(const std::string& key) override {
+        return tasks_.getTask(key);
+    }
+    void finish() {
+        std::vector<std::shared_ptr<transfer::TransferTask>> active;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            active.swap(active_);
+        }
+        for (const auto& task : active)
+            task->notifyDone(false, transfer::TransferErrorCode::CANCELLED, "physical transfer stopped");
+    }
+
+private:
+    transfer::TransferTaskStore                          tasks_;
+    std::mutex                                           mutex_;
+    std::vector<std::shared_ptr<transfer::TransferTask>> active_;
+};
 
 class WriteSchedulerService: public RpcService::Service {
 public:
@@ -109,6 +189,8 @@ public:
     std::atomic<int>     start_delay_ms{0};
     std::atomic<int>     starts{0}, cancels{0}, handshakes{0}, lease_queries{0};
     std::atomic<int64_t> control_deadline_ms{0};
+
+    std::function<void(const FunctionRequestPB&, FunctionResponsePB&)> execute_write;
 
     grpc::Status StartWriteBack(grpc::ServerContext*                   context,
                             const P2PConnectorStartWriteBackRequestPB* request,
@@ -134,6 +216,16 @@ public:
                                  const FunctionRequestPB* request,
                                  FunctionResponsePB*      response) override {
         const auto& input = request->p2p_request();
+        if (execute_write) {
+            if (input.type() == HANDLE_WRITE)
+                ++starts;
+            else if (input.type() == CANCEL_HANDLE_WRITE)
+                ++cancels;
+            else if (input.type() == QUERY_LEASE_STATUS)
+                ++lease_queries;
+            execute_write(*request, *response);
+            return grpc::Status::OK;
+        }
         if (input.type() == CANCEL_HANDLE_WRITE) {
             control_deadline_ms.store(
                 std::chrono::duration_cast<std::chrono::milliseconds>(context->deadline().time_since_epoch()).count());
@@ -183,12 +275,6 @@ public:
             if (input.type() == CANCEL_WRITE) {
                 if (!state.started) {
                     state.stopped = true;
-                }
-                while (!state.stopped && !context->IsCancelled()) {
-                    cv_.wait_for(lock, std::chrono::milliseconds(2));
-                }
-                if (context->IsCancelled()) {
-                    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "cancel stop confirmation expired");
                 }
                 if (!omit_status) {
                     response->mutable_p2p_response();
@@ -304,9 +390,6 @@ protected:
         }
         completeAll(true);
         decode_.reset();
-        for (const auto& worker : decode_workers_) {
-            EXPECT_EQ(worker.lease_queries, 0);
-        }
         prefill_.reset();
         for (auto& server : servers_) {
             server->Shutdown();
@@ -724,13 +807,45 @@ TEST_F(P2PConnectorWriteSchedulerTest, SenderRouteSelectionRejectsIncompleteKeyB
     EXPECT_TRUE(prefill_->selectSendRoutes(input, receive_routes, send_routes).hasError());
 }
 
+TEST_F(P2PConnectorWriteSchedulerTest, WritebackBudgetIsIndependentOfGenerationDeadline) {
+    prefill_workers_[0].handshake = [](const auto&, auto& response, auto) { response.set_stopped(true); };
+    for (const auto& [writeback_timeout, load_timeout] :
+         std::vector<std::pair<int64_t, int64_t>>{{2000, 4000}, {4000, 2000}}) {
+        decode_.reset();
+        decode_config_.p2p_writeback_timeout_ms = writeback_timeout;
+        decode_config_.load_cache_timeout_ms   = load_timeout;
+        createDecode();
+        for (const int64_t generation_remaining : {-1000, 100, 10000, 0}) {
+            SCOPED_TRACE(std::to_string(writeback_timeout) + ":" + std::to_string(generation_remaining));
+            routing_.unique_key = "independent-budget-" + std::to_string(writeback_timeout) + "-"
+                                  + std::to_string(generation_remaining);
+            routing_.deadline_ms = generation_remaining == 0 ? 0 : currentTimeMs() + generation_remaining;
+            auto                           resource = source();
+            std::weak_ptr<KVCacheResource> owner    = resource;
+            const auto before_ms = currentTimeMs();
+            auto context = asyncWrite(std::move(resource));
+            const auto after_ms = currentTimeMs();
+            ASSERT_NE(context, nullptr);
+            const auto budget = std::min(writeback_timeout, load_timeout);
+            EXPECT_GE(context->deadline_ms_, before_ms + budget);
+            EXPECT_LE(context->deadline_ms_, after_ms + budget);
+            ASSERT_TRUE(await([&] { return context->done() && owner.expired(); }));
+            EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
+            const auto handshake = prefill_workers_[0].lastHandshake();
+            EXPECT_EQ(handshake.unique_key(), routing_.unique_key);
+            EXPECT_GT(handshake.timeout_ms(), 0);
+            EXPECT_LE(handshake.timeout_ms(), budget);
+        }
+    }
+}
+
 TEST_F(P2PConnectorWriteSchedulerTest, StartWriteBackSendsRemainingBudgetInsteadOfAnAbsoluteDeadline) {
     DecodeWriteHelper helper;
     auto input = request();
     const auto deadline_ms = currentTimeMs() + 2000;
     auto result = helper.write(routing_.prefill_addr.first, routing_.prefill_addr.second, input, deadline_ms);
     ASSERT_NE(result, nullptr);
-    ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 1; }));
+    ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
     EXPECT_FALSE(result->done());
     completeAll();
     ASSERT_TRUE(result->waitDone(2000, false));
@@ -910,15 +1025,19 @@ TEST_F(P2PConnectorWriteSchedulerTest, OutOfRangeKvReserveRatioFailsInit) {
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, KvReadyBoundaryCapsCompleteTokenKeys) {
+    decode_workers_[0].start_delay_ms = 20;
     kv_ready_token_count_ = 8;
     auto context          = asyncWrite(source());
     ASSERT_NE(context, nullptr);
-    ASSERT_TRUE(await([&]() { return decode_workers_[1].starts == 1; }));
+    ASSERT_TRUE(await([&]() { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
     const auto handshake = prefill_workers_[0].lastHandshake();
     EXPECT_EQ(handshake.token_ids_size(), 13);
     ASSERT_EQ(handshake.cache_keys_size(), 2);
     EXPECT_EQ(handshake.cache_keys(1), keys_[1]);
-    EXPECT_EQ(decode_workers_[0].lastStart().routes(0).layer_blocks(0).cache_keys_size(), 1);
+    const auto sent = decode_workers_[0].lastStart();
+    ASSERT_EQ(sent.routes_size(), 1);
+    ASSERT_GT(sent.routes(0).layer_blocks_size(), 0);
+    EXPECT_EQ(sent.routes(0).layer_blocks(0).cache_keys_size(), 1);
     completeAll();
     ASSERT_TRUE(await([&]() { return context->done() && prefill_->inflightContextCount() == 0; }));
     EXPECT_TRUE(context->success());
@@ -1117,6 +1236,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadFailureCancelsReceiveAndDoesNotP
     EXPECT_FALSE(pool->isAllocated(blocks[1]));
     EXPECT_FALSE(pool->isAllocated(blocks[2]));
     EXPECT_EQ(pool->refCount(blocks[0]), 1u);
+    ASSERT_TRUE(await([&] { return !context->resourceHoldPending(); }));
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, CancellationKeepsResourceUntilLocalLoadAlsoStops) {
@@ -1709,8 +1829,8 @@ TEST_F(P2PConnectorWriteSchedulerTest, FailedSendCallbackRetainsSourceWhileRemot
     prefill_workers_[1].completeAll(false);
     ASSERT_TRUE(await([&]() { return !context->resourceHoldPending() && weak.expired(); }));
     EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 1u);
-    EXPECT_EQ(decode_workers_[0].lease_queries, 0);
-    EXPECT_EQ(decode_workers_[1].lease_queries, 0);
+    EXPECT_GT(decode_workers_[0].lease_queries, 0);
+    EXPECT_GT(decode_workers_[1].lease_queries, 0);
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, WorkerStartRpcTimeoutStillConfirmsBothSidesStopped) {
@@ -1761,6 +1881,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeStartWriteBackFencesLateStart
 
 TEST_F(P2PConnectorWriteSchedulerTest, RegistrationBarrierChecksEveryRankAndRejectsLateReady) {
     prefill_workers_[1].registered = [](const auto&) { return ErrorInfo::OkStatus(); };
+    decode_workers_[1].start_delay_ms = 20;
     auto                             input = request();
     P2PConnectorStartWriteBackResponsePB response;
     auto handling = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
@@ -1778,11 +1899,73 @@ TEST_F(P2PConnectorWriteSchedulerTest, RegistrationBarrierChecksEveryRankAndReje
     EXPECT_EQ(decode_workers_[0].starts, 0);
     registration.set_plan_digest(registration.plan_digest() - 1);
     EXPECT_TRUE(prefill_->workerRegistered(registration).ok());
-    EXPECT_TRUE(await([&] { return decode_workers_[0].starts == 1; }));
+    EXPECT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
     completeAll();
     handling.get();
     EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_TRUE(prefill_->workerRegistered(registration).hasError());
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, CancelAcknowledgmentNeedsValidStoppedLeasesFromEverySender) {
+    int releases = 0;
+    auto resource = std::make_shared<KVCacheResource>();
+    std::weak_ptr<KVCacheResource> owner = resource;
+    auto context = makeWriteContext(std::move(resource), "cancel-is-not-stop", currentTimeMs() + 4000,
+                                    nullptr, 100, 100, [&] { ++releases; });
+    ASSERT_TRUE(context->beginKickoff());
+    ASSERT_TRUE(context->beginPeerCall({}));
+    context->cancel();
+    context->peer_stopped_ = true;
+    auto cancel_call = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
+    auto* cancel_lease = cancel_call->response.mutable_p2p_response()->mutable_lease_status();
+    cancel_lease->set_sealed(true);
+    cancel_lease->set_stopped(true);
+    auto cancel_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
+        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{cancel_call});
+    cancel_result->finishRank(0, true);
+    context->control_result_ = cancel_result;
+    context->checkCancelDone();
+    EXPECT_TRUE(context->worker_cancelled_);
+    EXPECT_FALSE(context->transfer_stopped_);
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(owner.expired());
+    EXPECT_EQ(releases, 0);
+    for (const auto failure : {"active", "missing", "invalid", "rpc_failed", "timeout", "stopped"}) {
+        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>> calls;
+        for (int rank = 0; rank < 2; ++rank) {
+            auto call = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
+            auto* lease = call->response.mutable_p2p_response()->mutable_lease_status();
+            lease->set_sealed(true);
+            lease->set_started_ops(1);
+            lease->set_finished_ops(1);
+            lease->set_stopped(true);
+            calls.push_back(std::move(call));
+        }
+        const std::string status = failure;
+        auto* lease = calls.back()->response.mutable_p2p_response()->mutable_lease_status();
+        if (status == "active" || status == "invalid") {
+            lease->set_finished_ops(0);
+            lease->set_stopped(status == "invalid");
+        }
+        if (status == "missing")
+            calls.back()->response.mutable_p2p_response()->clear_lease_status();
+        auto result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(calls);
+        result->finishRank(0, true);
+        if (status == "rpc_failed" || status == "timeout")
+            calls.back()->status =
+                grpc::Status(status == "timeout" ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::UNAVAILABLE,
+                             "lease failed");
+        result->finishRank(1, status != "rpc_failed" && status != "timeout");
+        context->worker_cancelled_ = true;
+        context->lease_result_     = result;
+        context->checkCancelDone();
+        EXPECT_EQ(context->worker_cancelled_, status == "active" || status == "stopped") << status;
+        EXPECT_EQ(context->resourceHoldPending(), status != "stopped") << status;
+        EXPECT_EQ(owner.expired(), status == "stopped") << status;
+        EXPECT_EQ(releases, status == "stopped" ? 1 : 0) << status;
+    }
+    confirmSourceStopped(context);
+    EXPECT_EQ(releases, 1);
 }
 
 TEST(P2PConnectorAsyncWriteContextTest, CheckerDoesNotCompleteQueuedOrStartingRequest) {
@@ -1822,6 +2005,257 @@ TEST(P2PConnectorAsyncWriteContextTest, CompletionCallbacksRunOnceOutsideStateLo
     context->cancel();
     context->onDone({});
     EXPECT_EQ(callback_count, 2);
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, ThrowingCompletionCallbacksDoNotStopRemainingCallbacks) {
+    auto write = makeWriteContext(nullptr, "throwing-done", currentTimeMs() + 4000, nullptr, 100, 1000);
+    auto read = std::make_shared<P2PConnectorAsyncReadContext>(
+        nullptr, "throwing-read-done", nullptr, 1000);
+    for (const std::shared_ptr<AsyncContext>& context : {std::static_pointer_cast<AsyncContext>(write),
+                                                        std::static_pointer_cast<AsyncContext>(read)}) {
+        int completed = 0;
+        context->onDone([](ErrorInfo) { throw std::runtime_error("callback failure"); });
+        context->onDone([](ErrorInfo) { throw 1; });
+        context->onDone([&](ErrorInfo) { ++completed; });
+        if (context == write)
+            write->finishWithoutTransfer();
+        else
+            read->markStartFailed(ErrorInfo(ErrorCode::INVALID_PARAMS, "test"));
+        EXPECT_EQ(completed, 1);
+        EXPECT_NO_THROW(context->onDone([](ErrorInfo) { throw std::runtime_error("late callback failure"); }));
+        context->onDone([&](ErrorInfo) { ++completed; });
+        EXPECT_EQ(completed, 2);
+    }
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, ReleaseCallbackMayReenterAndKeepsHoldUntilCleanupCompletes) {
+    std::promise<void> entered;
+    std::promise<void> resume;
+    auto gate = resume.get_future().share();
+    int release_count = 0;
+    std::shared_ptr<P2PConnectorAsyncWriteContext> context;
+    context = makeWriteContext(nullptr, "reentrant-release", currentTimeMs() + 4000, nullptr, 100, 1000, [&] {
+        ++release_count;
+        EXPECT_FALSE(context->done());
+        EXPECT_TRUE(context->resourceHoldPending());
+        context->checkDone();
+        context->cancel();
+        context->onDone([&](ErrorInfo error) {
+            EXPECT_TRUE(error.ok());
+            EXPECT_FALSE(context->resourceHoldPending());
+        });
+        entered.set_value();
+        gate.wait();
+    });
+    auto finishing = std::async(std::launch::async, [&] { context->finishWithoutTransfer(); });
+    EXPECT_EQ(entered.get_future().wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(context->done());
+    context->checkDone();
+    context->cancel();
+    resume.set_value();
+    finishing.get();
+    EXPECT_TRUE(context->success());
+    EXPECT_FALSE(context->resourceHoldPending());
+    EXPECT_EQ(release_count, 1);
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, FailedReleaseRetainsOwnershipAndRetriesBeforeReportingReleased) {
+    auto source = std::make_shared<KVCacheResource>();
+    std::weak_ptr<KVCacheResource> weak = source;
+    int attempts = 0;
+    int done_callbacks = 0;
+    auto context = std::make_shared<P2PConnectorAsyncWriteContext>(
+        "retry-release", currentTimeMs() + 4000, nullptr, 100, 1000,
+        [source = std::move(source), &attempts]() mutable {
+            if (++attempts == 1)
+                throw std::runtime_error("release failure");
+            source.reset();
+        });
+    context->onDone([&](ErrorInfo) { ++done_callbacks; });
+    EXPECT_NO_THROW(context->finishWithoutTransfer());
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(weak.expired());
+    EXPECT_EQ(done_callbacks, 0);
+    context->checkDone();
+    EXPECT_TRUE(context->success());
+    EXPECT_FALSE(context->resourceHoldPending());
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(attempts, 2);
+    EXPECT_EQ(done_callbacks, 1);
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, PeerRejectionSurvivesCleanupButDoesNotReplaceEarlierTimeout) {
+    for (const bool timeout_first : {false, true}) {
+        auto context = makeWriteContext(nullptr, "peer-rejection", currentTimeMs() + 4000, nullptr, 100, 1000);
+        ASSERT_TRUE(context->beginKickoff());
+        ASSERT_TRUE(context->beginPeerCall({}));
+        auto call = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
+        call->response.set_error_code(transErrorCodeToRPC(ErrorCode::MALLOC_FAILED));
+        call->response.set_stopped(true);
+        auto result = std::make_shared<DecodeWriteHelper::Result>(
+            std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{call});
+        context->setPeerCallResult(result);
+        if (timeout_first)
+            context->cancel(ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "earlier timeout"));
+        result->finishRank(0, true);
+        context->checkDone();
+        confirmSourceStopped(context);
+        EXPECT_FALSE(context->resourceHoldPending());
+        EXPECT_EQ(context->errorInfo().code(), timeout_first ? ErrorCode::GENERATE_TIMEOUT : ErrorCode::MALLOC_FAILED);
+    }
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, SuccessResponseWithoutStopProofRetainsSource) {
+    auto context = makeWriteContext(nullptr, "unstopped-peer", currentTimeMs() + 4000, nullptr, 100, 1000);
+    ASSERT_TRUE(context->beginKickoff());
+    ASSERT_TRUE(context->beginPeerCall({}));
+    auto call = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
+    auto result = std::make_shared<DecodeWriteHelper::Result>(
+        std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{call});
+    context->setPeerCallResult(result);
+    result->finishRank(0, true);
+    context->checkDone();
+    EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    auto stopped = peerResult();
+    context->setPeerCallResult(stopped);
+    stopped->finishRank(0, true);
+    context->checkDone();
+    EXPECT_FALSE(context->resourceHoldPending());
+    EXPECT_FALSE(context->success());
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, RpcFailureKeepsOriginalError) {
+    for (const auto status : {grpc::StatusCode::DEADLINE_EXCEEDED, grpc::StatusCode::CANCELLED}) {
+        auto context = makeWriteContext(nullptr, "rpc-first-error", currentTimeMs() + 4000, nullptr, 100, 1000);
+        ASSERT_TRUE(context->beginKickoff());
+        ASSERT_TRUE(context->beginPeerCall({}));
+        auto call = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
+        call->status = grpc::Status(status, "original transport failure");
+        auto result = std::make_shared<DecodeWriteHelper::Result>(
+            std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{call});
+        context->setPeerCallResult(result);
+        result->finishRank(0, true);
+        const auto expected = result->firstError().error;
+        ASSERT_TRUE(expected.hasError());
+        context->checkDone();
+        EXPECT_EQ(context->errorInfo().code(), expected.code());
+        EXPECT_EQ(context->errorInfo().ToString(), expected.ToString());
+        EXPECT_TRUE(context->resourceHoldPending());
+        auto stopped = peerResult();
+        context->setPeerCallResult(stopped);
+        stopped->finishRank(0, true);
+        context->checkDone();
+        EXPECT_FALSE(context->resourceHoldPending());
+        EXPECT_EQ(context->errorInfo().ToString(), expected.ToString());
+    }
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, OnlyUnimplementedStartProvesPeerNeverStartedAndStillRequiresLocalStop) {
+    for (const bool start : {true, false}) {
+        for (const auto code : {grpc::StatusCode::UNIMPLEMENTED, grpc::StatusCode::UNAVAILABLE,
+                                grpc::StatusCode::INTERNAL, grpc::StatusCode::UNKNOWN,
+                                grpc::StatusCode::DEADLINE_EXCEEDED, grpc::StatusCode::CANCELLED,
+                                grpc::StatusCode::INVALID_ARGUMENT, grpc::StatusCode::RESOURCE_EXHAUSTED}) {
+            SCOPED_TRACE(std::to_string(start) + ":" + std::to_string(code));
+            auto resource = std::make_shared<KVCacheResource>();
+            std::weak_ptr<KVCacheResource> owner = resource;
+            int releases = 0;
+            auto context = makeWriteContext(std::move(resource), "legacy-peer", currentTimeMs() + 60000,
+                                            nullptr, 100, 1000, [&] { ++releases; });
+            ASSERT_TRUE(context->beginKickoff());
+            ASSERT_TRUE(context->beginPeerCall({}));
+            if (start) {
+                auto call = std::make_shared<DecodeWriteHelper::Result::WorkerRpcContext>();
+                call->status = grpc::Status(code, "grpc_code=12 is not a stop proof");
+                auto result = std::make_shared<DecodeWriteHelper::Result>(
+                    std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{call});
+                context->setPeerCallResult(result);
+                context->checkDone();
+                EXPECT_FALSE(context->peer_stopped_);
+                result->finishRank(0, true);
+                context->checkDone();
+            } else {
+                context->cancel();
+                auto call = std::make_shared<DecodeWriteHelper::CancelResult::WorkerRpcContext>();
+                call->status = grpc::Status(code, "grpc_code=12 is not a stop proof");
+                auto result = std::make_shared<DecodeWriteHelper::CancelResult>(
+                    std::vector<std::shared_ptr<DecodeWriteHelper::CancelResult::WorkerRpcContext>>{call});
+                context->peer_cancel_result_ = result;
+                context->checkCancelDone();
+                EXPECT_FALSE(context->peer_stopped_);
+                result->finishRank(0, true);
+                context->checkCancelDone();
+            }
+            const bool peer_never_started = start && code == grpc::StatusCode::UNIMPLEMENTED;
+            EXPECT_EQ(context->peer_stopped_, peer_never_started);
+            EXPECT_FALSE(context->transfer_stopped_);
+            EXPECT_TRUE(context->resourceHoldPending());
+            EXPECT_FALSE(owner.expired());
+            EXPECT_EQ(releases, 0);
+            confirmSourceStopped(context);
+            EXPECT_EQ(owner.expired(), peer_never_started);
+            EXPECT_EQ(releases, peer_never_started ? 1 : 0);
+            if (!peer_never_started) {
+                EXPECT_TRUE(context->resourceHoldPending());
+                auto stopped = peerResult();
+                context->setPeerCallResult(stopped);
+                stopped->finishRank(0, true);
+                context->checkDone();
+            }
+            context->checkDone();
+            context->checkCancelDone();
+            confirmSourceStopped(context);
+            EXPECT_FALSE(context->resourceHoldPending());
+            EXPECT_TRUE(owner.expired());
+            EXPECT_EQ(releases, 1);
+        }
+    }
+}
+
+TEST(P2PConnectorAsyncWriteContextTest, CancelUnimplementedRetainsSourceAfterInflightOrAcceptedStart) {
+    for (const bool accepted : {false, true}) {
+        SCOPED_TRACE(accepted);
+        auto                           resource = std::make_shared<KVCacheResource>();
+        std::weak_ptr<KVCacheResource> owner    = resource;
+        int                            releases = 0;
+        auto                           context  = makeWriteContext(
+            std::move(resource), "cancel-incompatible", currentTimeMs() + 60000, nullptr, 100, 1000, [&] {
+                ++releases;
+            });
+        ASSERT_TRUE(context->beginKickoff());
+        ASSERT_TRUE(context->beginPeerCall({}));
+        auto start = peerResult(ErrorCode::NONE_ERROR, false, 1);
+        context->setPeerCallResult(start);
+        if (accepted)
+            start->finishRank(0, true);
+        context->checkDone();
+        context->cancel();
+        auto call      = std::make_shared<DecodeWriteHelper::CancelResult::WorkerRpcContext>();
+        call->status   = grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "cancel route is incompatible");
+        auto cancelled = std::make_shared<DecodeWriteHelper::CancelResult>(
+            std::vector<std::shared_ptr<DecodeWriteHelper::CancelResult::WorkerRpcContext>>{call});
+        cancelled->finishRank(0, true);
+        context->peer_cancel_result_ = cancelled;
+        context->checkCancelDone();
+        confirmSourceStopped(context);
+        EXPECT_FALSE(context->peer_stopped_);
+        EXPECT_TRUE(context->resourceHoldPending());
+        EXPECT_FALSE(owner.expired());
+        EXPECT_EQ(releases, 0);
+        auto stopped = peerResult();
+        context->setPeerCallResult(stopped);
+        stopped->finishRank(0, true);
+        context->checkDone();
+        EXPECT_FALSE(context->resourceHoldPending());
+        EXPECT_TRUE(owner.expired());
+        context->checkCancelDone();
+        context->cancel();
+        EXPECT_EQ(releases, 1);
+    }
 }
 
 TEST(P2PConnectorAsyncWriteContextTest, CancellationNotifiesBeforeResourceHoldIsReleased) {
@@ -2024,6 +2458,355 @@ TEST_F(P2PConnectorWriteSchedulerTest, MissingWorkerLeaseStatusRetainsTargetsUnt
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
 }
 
+TEST_F(P2PConnectorWriteSchedulerTest, ReceiverQuerySubmissionFailuresRepeatCancellationBeforeReleasingTargets) {
+    auto client = std::make_shared<LeaseQueryFaultClient>(prefill_addrs_, 100);
+    ASSERT_TRUE(client->init());
+    prefill_.reset();
+    prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, client);
+    ASSERT_TRUE(prefill_->init());
+    for (auto& worker : prefill_workers_)
+        worker.fail_start = true;
+    for (const auto mode : {1, 2}) {
+        SCOPED_TRACE(mode);
+        auto input = request();
+        input.set_unique_key("receiver-query-submission-" + std::to_string(mode));
+        const auto                           free_before    = allocator_->freeBlocksNum();
+        const auto                           queries_before = prefill_workers_[0].lease_queries.load();
+        P2PConnectorStartWriteBackResponsePB response;
+        auto call    = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
+        auto cleanup = std::shared_ptr<void>(nullptr, [&](void*) {
+            client->failure_mode = 0;
+            completeAll();
+        });
+        ASSERT_TRUE(await([&] { return prefill_workers_[0].lease_queries > queries_before; }));
+        const auto cancels_before  = prefill_workers_[0].cancels.load();
+        const auto failures_before = client->failures.load();
+        client->failure_mode       = mode;
+        ASSERT_TRUE(await([&] { return client->failures > failures_before; }));
+        EXPECT_TRUE(await([&] { return prefill_workers_[0].cancels > cancels_before; }));
+        EXPECT_EQ(call.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+        EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
+        client->failure_mode = 0;
+        completeAll();
+        ASSERT_EQ(call.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        call.get();
+        EXPECT_TRUE(response.stopped());
+        EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, SenderQuerySubmissionFailuresClearCancelConfirmationAndRetry) {
+    auto client = std::make_shared<LeaseQueryFaultClient>(decode_addrs_, 100);
+    ASSERT_TRUE(client->init());
+    auto pool = std::make_shared<autil::ThreadPool>(1, 8, nullptr, "QueryFailureControl");
+    ASSERT_TRUE(pool->start());
+    for (const auto scenario : {0, 1, 2, 3}) {
+        SCOPED_TRACE(scenario);
+        const auto                     mode              = scenario / 2 + 1;
+        const bool                     already_cancelled = scenario % 2 != 0;
+        auto                           resource          = source();
+        std::weak_ptr<KVCacheResource> owner             = resource;
+        std::atomic<int>               releases{0};
+        auto                           context = makeWriteContext(std::move(resource),
+                                        "sender-query-submission-" + std::to_string(scenario),
+                                        currentTimeMs() + 4000,
+                                        client,
+                                        100,
+                                        100,
+                                        [&] { ++releases; });
+        ASSERT_TRUE(context->beginKickoff());
+        ASSERT_TRUE(context->beginPeerCall({}));
+        context->cancel();
+        context->peer_stopped_     = true;
+        context->worker_cancelled_ = already_cancelled;
+        const auto cancels_before  = decode_workers_[0].cancels.load();
+        const auto failures_before = client->failures.load();
+        client->failure_mode       = mode;
+        context->runControl(pool);
+        ASSERT_TRUE(await([&] {
+            std::lock_guard<std::mutex> lock(context->mutex_);
+            return !context->control_submitting_ && client->failures > failures_before;
+        }));
+        context->checkCancelDone();
+        EXPECT_FALSE(context->worker_cancelled_);
+        EXPECT_TRUE(context->resourceHoldPending());
+        EXPECT_FALSE(owner.expired());
+        EXPECT_EQ(releases, 0);
+        if (!already_cancelled) {
+            EXPECT_TRUE(await([&] { return decode_workers_[0].cancels > cancels_before; }));
+        }
+        const auto cancels_after_failure = decode_workers_[0].cancels.load();
+        EXPECT_EQ(cancels_after_failure - cancels_before, already_cancelled ? 0 : 1);
+        client->failure_mode = 0;
+        EXPECT_TRUE(await([&] {
+            context->checkCancelDone();
+            context->runControl(pool);
+            return !context->resourceHoldPending();
+        }));
+        EXPECT_GT(decode_workers_[0].cancels, cancels_after_failure);
+        EXPECT_TRUE(owner.expired());
+        EXPECT_EQ(releases, 1);
+        context->checkCancelDone();
+        context->cancel();
+        EXPECT_EQ(releases, 1);
+    }
+    pool->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, ReceiverQueryQueueRejectionRepeatsConfirmedCancelAndRetainsTargetsUntilStop) {
+    auto client = std::make_shared<LeaseQueryFaultClient>(prefill_addrs_, 100);
+    ASSERT_TRUE(client->init());
+    auto pool = std::make_shared<RejectingWriteControlPool>();
+    ASSERT_TRUE(pool->start());
+    auto reject_queries  = std::make_shared<std::atomic<bool>>(true);
+    client->before_query = [pool, reject_queries] {
+        if (*reject_queries)
+            pool->reject_submissions = true;
+    };
+    prefill_.reset();
+    prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, client);
+    ASSERT_TRUE(prefill_->init());
+    prefill_->control_pool_->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
+    prefill_->control_pool_ = pool;
+    for (auto& worker : prefill_workers_)
+        worker.fail_start = true;
+    auto input = request();
+    input.set_unique_key("receiver-query-queue-rejection");
+    const auto                           free_before = allocator_->freeBlocksNum();
+    P2PConnectorStartWriteBackResponsePB response;
+    auto call    = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
+    auto cleanup = std::shared_ptr<void>(nullptr, [&](void*) {
+        *reject_queries          = false;
+        pool->reject_submissions = false;
+        completeAll();
+    });
+    ASSERT_TRUE(await([&] { return pool->rejections > 0; }));
+    ASSERT_GT(prefill_workers_[0].cancels, 0);
+    ASSERT_GT(prefill_workers_[0].lease_queries, 0);
+    auto state = prefill_->findRequest(input.unique_key());
+    ASSERT_NE(state, nullptr);
+    std::weak_ptr<KVCacheResource> owner;
+    {
+        std::lock_guard<std::mutex> lock(prefill_->requests_mutex_);
+        owner = prefill_->retained_resources_.at(input.unique_key());
+    }
+    EXPECT_FALSE(owner.expired());
+    EXPECT_TRUE(state->resourceHoldPending());
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
+    const auto cancels_before = prefill_workers_[0].cancels.load();
+    *reject_queries           = false;
+    pool->reject_submissions  = false;
+    ASSERT_TRUE(await([&] { return prefill_workers_[0].cancels > cancels_before; }));
+    EXPECT_FALSE(owner.expired());
+    EXPECT_TRUE(state->resourceHoldPending());
+    prefill_workers_[0].completeAll();
+    const auto queries_before = prefill_workers_[1].lease_queries.load();
+    ASSERT_TRUE(await([&] { return prefill_workers_[1].lease_queries > queries_before; }));
+    EXPECT_FALSE(owner.expired());
+    EXPECT_TRUE(state->resourceHoldPending());
+    EXPECT_EQ(call.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
+    completeAll();
+    ASSERT_EQ(call.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    call.get();
+    EXPECT_TRUE(response.stopped());
+    EXPECT_TRUE(owner.expired());
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+    P2PConnectorCancelWriteBackRequestPB cancel;
+    cancel.set_unique_key(input.unique_key());
+    cancel.set_deadline_ms(input.deadline_ms());
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        prefill_->cancelWrite(cancel, response);
+        prefill_->checkRetainedResources();
+        EXPECT_TRUE(response.stopped());
+        EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, SenderQueryQueueRejectionRepeatsConfirmedCancelAndReleasesSourceOnce) {
+    const std::string key      = "sender-query-queue-rejection";
+    const auto        deadline = currentTimeMs() + 4000;
+    for (auto& worker : decode_workers_)
+        worker.fail_start = true;
+    P2PBroadcastClient::BroadcastParams params;
+    params.unique_key          = key;
+    params.type                = WRITE;
+    params.deadline_ms         = deadline;
+    params.request_deadline_ms = deadline;
+    auto started               = decode_client_->broadcast(std::move(params));
+    ASSERT_NE(started, nullptr);
+    ASSERT_TRUE(await([&] { return started->done(); }, 1000));
+    auto pool = std::make_shared<RejectingWriteControlPool>();
+    ASSERT_TRUE(pool->start());
+    auto                           resource = source();
+    std::weak_ptr<KVCacheResource> owner    = resource;
+    std::atomic<int>               releases{0};
+    auto context = makeWriteContext(std::move(resource), key, deadline, decode_client_, 100, 100, [&] { ++releases; });
+    auto cleanup = std::shared_ptr<void>(nullptr, [&](void*) {
+        pool->reject_submissions = false;
+        completeAll();
+        pool->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
+    });
+    ASSERT_TRUE(context->beginKickoff());
+    ASSERT_TRUE(context->beginPeerCall({}));
+    context->cancel();
+    context->peer_stopped_ = true;
+    ASSERT_TRUE(await([&] {
+        context->checkCancelDone();
+        context->runControl(pool);
+        std::lock_guard<std::mutex> lock(context->mutex_);
+        return context->worker_cancelled_ && !context->control_submitting_ && !context->lease_result_;
+    }));
+    const auto cancels_before = decode_workers_[0].cancels.load();
+    ASSERT_GT(cancels_before, 0);
+    pool->reject_submissions = true;
+    ASSERT_TRUE(await([&] {
+        context->runControl(pool);
+        return pool->rejections > 0;
+    }));
+    EXPECT_FALSE(context->worker_cancelled_);
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(owner.expired());
+    EXPECT_EQ(releases, 0);
+    pool->reject_submissions = false;
+    ASSERT_TRUE(await([&] {
+        context->checkCancelDone();
+        context->runControl(pool);
+        return decode_workers_[0].cancels > cancels_before;
+    }));
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(owner.expired());
+    EXPECT_EQ(releases, 0);
+    decode_workers_[0].completeAll();
+    const auto queries_before = decode_workers_[1].lease_queries.load();
+    ASSERT_TRUE(await([&] {
+        context->checkCancelDone();
+        context->runControl(pool);
+        return decode_workers_[1].lease_queries > queries_before;
+    }));
+    EXPECT_TRUE(context->resourceHoldPending());
+    EXPECT_FALSE(owner.expired());
+    EXPECT_EQ(releases, 0);
+    completeAll();
+    ASSERT_TRUE(await([&] {
+        context->checkCancelDone();
+        context->runControl(pool);
+        return !context->resourceHoldPending();
+    }));
+    EXPECT_TRUE(owner.expired());
+    EXPECT_EQ(releases, 1);
+    context->checkCancelDone();
+    context->cancel();
+    EXPECT_EQ(releases, 1);
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, RealReceiversRecreateCleanedLeaseAndWaitForEveryRankBeforeOneRelease) {
+    std::vector<std::shared_ptr<SchedulerWriteReceiver>> receivers;
+    std::vector<std::shared_ptr<P2PConnector>>           connectors;
+    for (int rank = 0; rank < 2; ++rank) {
+        P2PConnectorConfig config;
+        config.role_type                               = RoleType::PREFILL;
+        config.p2p_writeback_enable                    = true;
+        config.worker_config.topology                  = config_.topologyPtr();
+        config.worker_config.p2p_cancelled_keys_ttl_ms = 1;
+        auto receiver                                  = std::make_shared<SchedulerWriteReceiver>();
+        auto converter                                 = std::make_shared<LayerBlockConverterImpl>(allocator_);
+        auto connector                                 = std::make_shared<P2PConnector>(config, converter, nullptr);
+        connector->prefill_ = std::make_unique<P2PConnectorPrefill>(config, converter, nullptr);
+        connector->prefill_->write_worker_ =
+            std::make_unique<P2PWorkerPrefillWrite>(config.worker_config, converter, receiver);
+        prefill_workers_[rank].execute_write = [connector](const auto& request, auto& response) {
+            connector->executeFunction(request, response);
+        };
+        receivers.push_back(std::move(receiver));
+        connectors.push_back(std::move(connector));
+    }
+    const auto                           input       = request();
+    const auto                           free_before = allocator_->freeBlocksNum();
+    P2PConnectorStartWriteBackResponsePB response;
+    auto call    = std::async(std::launch::async, [&] { prefill_->handleWrite(input, response); });
+    auto cleanup = std::shared_ptr<void>(nullptr, [&](void*) {
+        for (const auto& receiver : receivers)
+            receiver->finish();
+    });
+    ASSERT_TRUE(await([&] { return prefill_workers_[0].lease_queries > 0 && prefill_workers_[1].lease_queries > 0; }));
+    auto                           releases = std::make_shared<std::atomic<int>>(0);
+    std::weak_ptr<KVCacheResource> owner;
+    {
+        std::lock_guard<std::mutex> lock(prefill_->requests_mutex_);
+        auto&                       retained = prefill_->retained_resources_.at(input.unique_key());
+        owner                                = retained;
+        retained = KVCacheResourcePtr(retained.get(), [resource = retained, releases](KVCacheResource*) mutable {
+            resource.reset();
+            ++*releases;
+        });
+    }
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
+    EXPECT_FALSE(owner.expired());
+    EXPECT_EQ(releases->load(), 0);
+
+    receivers[0]->finish();
+    auto& first  = *connectors[0]->prefill_->write_worker_;
+    bool  sealed = false, stopped = false;
+    int   started = 0, finished = 0;
+    ASSERT_TRUE(first.queryLeaseStatus(input.unique_key(), sealed, started, finished, stopped));
+    EXPECT_TRUE(stopped);
+    EXPECT_GT(started, 0);
+    EXPECT_EQ(started, finished);
+    {
+        std::lock_guard<std::mutex> lock(first.mutex_);
+        const auto                  group = first.groups_.at(input.unique_key());
+        std::lock_guard<std::mutex> group_lock(group->mutex);
+        group->stop_at_ms = P2PNotification::nowMs() - first.config_.p2p_cancelled_keys_ttl_ms - 1;
+    }
+    first.cleanup();
+    ASSERT_FALSE(first.queryLeaseStatus(input.unique_key(), sealed, started, finished, stopped));
+    const auto cancels_before = prefill_workers_[0].cancels.load();
+    ASSERT_TRUE(await([&] {
+        return prefill_workers_[0].cancels > cancels_before
+               && first.queryLeaseStatus(input.unique_key(), sealed, started, finished, stopped);
+    }));
+    ASSERT_TRUE(first.queryLeaseStatus(input.unique_key(), sealed, started, finished, stopped));
+    EXPECT_TRUE(sealed);
+    EXPECT_TRUE(stopped);
+    EXPECT_EQ(started, 0);
+    EXPECT_EQ(finished, 0);
+    auto& second = *connectors[1]->prefill_->write_worker_;
+    ASSERT_TRUE(second.queryLeaseStatus(input.unique_key(), sealed, started, finished, stopped));
+    EXPECT_TRUE(sealed);
+    EXPECT_FALSE(stopped);
+    EXPECT_GT(started, finished);
+    EXPECT_EQ(call.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(prefill_->inflightContextCount(), 1u);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before - 2);
+    EXPECT_FALSE(owner.expired());
+    EXPECT_EQ(releases->load(), 0);
+
+    receivers[1]->finish();
+    ASSERT_EQ(call.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    call.get();
+    EXPECT_TRUE(response.stopped());
+    EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.accepted_block_count(), 0);
+    EXPECT_EQ(prefill_->inflightContextCount(), 0u);
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+    EXPECT_TRUE(owner.expired());
+    EXPECT_EQ(releases->load(), 1);
+    for (const auto& connector : connectors) {
+        auto& worker = *connector->prefill_->write_worker_;
+        worker.cleanup();
+        EXPECT_TRUE(worker.cancelWrite(input.unique_key(), currentTimeMs() + 1000));
+        EXPECT_TRUE(worker.queryLeaseStatus(input.unique_key(), sealed, started, finished, stopped));
+        EXPECT_TRUE(stopped);
+    }
+    P2PConnectorStartWriteBackResponsePB retried;
+    prefill_->handleWrite(input, retried);
+    EXPECT_TRUE(retried.stopped());
+    EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
+    EXPECT_EQ(releases->load(), 1);
+    EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 1u);
+}
+
 TEST_F(P2PConnectorWriteSchedulerTest, MissingSenderAcknowledgmentsRetainSourceUntilRecovery) {
     for (auto& worker : decode_workers_) {
         worker.omit_status = true;
@@ -2053,14 +2836,14 @@ TEST_F(P2PConnectorWriteSchedulerTest, MissingSenderAcknowledgmentsRetainSourceU
     EXPECT_TRUE(owner.expired());
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, CompletedCancelAcknowledgmentReleasesExpiredSource) {
+TEST_F(P2PConnectorWriteSchedulerTest, CompletedLeaseQueryReleasesExpiredSource) {
     completeAll(true);
     const auto deadline = currentTimeMs() + 3000;
-    auto       result   = prefill_client_->controlWriteAsync("stopped-before-grace", CANCEL_HANDLE_WRITE, deadline, 1000);
+    auto       result   = decode_client_->queryLeaseStatusAsync("stopped-before-grace", WRITE, 1000);
     ASSERT_NE(result, nullptr);
     ASSERT_TRUE(result->waitDone(2000, false));
     ASSERT_TRUE(P2PBroadcastClient::leaseStatus(result).allStopped());
-    auto context = makeWriteContext(source(), "stopped-before-grace", deadline, prefill_client_, 100, 100);
+    auto context = makeWriteContext(source(), "stopped-before-grace", deadline, decode_client_, 100, 100);
     ASSERT_TRUE(context->beginKickoff());
     ASSERT_TRUE(context->beginPeerCall({}));
     context->cancel();
@@ -2068,7 +2851,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, CompletedCancelAcknowledgmentReleasesExpi
     {
         std::lock_guard<std::mutex> lock(context->mutex_);
         context->transfer_stop_at_ms_ = P2PNotification::nowMs() - 500;
-        context->control_result_ = result;
+        context->lease_result_ = result;
     }
     context->checkCancelDone();
     EXPECT_TRUE(context->done());
@@ -2244,13 +3027,7 @@ TEST(P2PConnectorAsyncWriteContextTest, StaleCancelMustNotEraseStoppedStartWrite
     context->peer_cancel_result_ = stale_result;
     context->checkCancelDone();
     EXPECT_TRUE(context->peer_stopped_) << "stale cancellation erased the newer final stop proof";
-    auto local_call = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
-    local_call->response.mutable_p2p_response();
-    auto local_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
-        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{local_call});
-    local_result->finishRank(0, true);
-    context->control_result_ = local_result;
-    context->checkCancelDone();
+    confirmSourceStopped(context);
     EXPECT_FALSE(context->resourceHoldPending()) << "both sides stopped, but source hold is still retained";
 }
 
@@ -2290,7 +3067,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, StopKeepsCheckingWhileKickoffPoolIsBlocke
     EXPECT_EQ(stop.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
     peer->finishRank(0, true);
     EXPECT_EQ(release_result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
-    EXPECT_FALSE(context->resourceHoldPending());
+    EXPECT_TRUE(await([&] { return !context->resourceHoldPending(); }));
     unblock.reset();
     stop.get();
 }
@@ -2317,6 +3094,7 @@ TEST(P2PConnectorAsyncWriteContextTest, CheckerWakesAtDeadlineWithoutRpcCompleti
     EXPECT_TRUE(context->resourceHoldPending());
     peer->finishRank(0, true);
     ASSERT_EQ(release_result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    checker.stop();
     EXPECT_FALSE(context->resourceHoldPending());
 }
 

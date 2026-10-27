@@ -376,7 +376,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 insert_info.account_for_prefill = resource_context_.role_type == RoleType::PREFILL;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
-                if (target_tier == Tier::DEVICE && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
+                if (target_tier == Tier::DEVICE && resource_context_.cache_manager->writebackEnabled()
+                    && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
                     MetaImpl meta(false, false, "");
                     meta.fillRoutingContext(stream_);
                     resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,

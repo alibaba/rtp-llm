@@ -373,24 +373,25 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                                            P2PConnectorStartWriteBackResponsePB&      response,
                                            std::function<bool()>                  is_cancelled) {
     response.Clear();
-    const auto start_us                 = currentTimeUs();
-    const auto report                   = [&](const ErrorInfo& error, bool no_transfer) {
+    const auto start_us = currentTimeUs();
+    WriteSchedulerMetricsCollector metrics;
+    metrics.prefill = true;
+    const auto report = [&] {
         if (metrics_reporter_) {
-            WriteSchedulerMetricsCollector metrics;
-            metrics.prefill            = true;
-            metrics.error              = error;
-            metrics.no_transfer        = no_transfer;
             metrics.total_cost_time_us = currentTimeUs() - start_us;
             metrics_reporter_->report<P2PConnectorMetrics, WriteSchedulerMetricsCollector>(nullptr, &metrics);
         }
     };
     const auto reject = [&](const ErrorInfo& error) {
-        report(error, false);
         response.Clear();
         response.set_error_code(transErrorCodeToRPC(error.code()));
         response.set_error_message(error.ToString());
         const auto existing = findRequest(request.unique_key());
         response.set_stopped(!existing || !existing->resourceHoldPending());
+        metrics.error = error;
+        RTP_LLM_LOG_INFO("writeback_rejected request_id=%ld unique_key=%s error=%s",
+                         request.request_id(), request.unique_key().c_str(), error.ToString().c_str());
+        report();
     };
     const auto invalid = [&](const std::string& message) { reject(ErrorInfo(ErrorCode::INVALID_PARAMS, message)); };
     const auto now_ms  = currentTimeMs();
@@ -466,8 +467,6 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     if (!inserted)
         return reject(ErrorInfo(ErrorCode::CANCELLED, "duplicate, cancelled or stopped StartWriteBack key"));
 
-    WriteSchedulerMetricsCollector metrics;
-    metrics.prefill   = true;
     const auto notify = [weak = std::weak_ptr<PrefillWriteRequest>(state)] {
         if (const auto current = weak.lock())
             current->cv.notify_all();
@@ -562,8 +561,10 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         if (count == 0 && !load_context)
             return ErrorInfo::OkStatus();
         // Checked after admission so each pool already reflects this writeback's real per-group, per-rank demand.
-        if (!writebackKeepsKvReserve(coordinator_manager_->cacheGroups(), config_.p2p_writeback_kv_reserve_ratio))
-            return ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback would leave too few available KV blocks");
+        if (!writebackKeepsKvReserve(coordinator_manager_->cacheGroups(), config_.p2p_writeback_kv_reserve_ratio)) {
+            state->fail(ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback would leave too few available KV blocks"));
+            return state->errorInfo();
+        }
         P2PBroadcastClient::RankRoutes routes(transfer_addrs_.size());
         P2PBroadcastClient::RankRoutes send_routes;
         if (count > 0) {
@@ -677,6 +678,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                 if (control_result)
                     control_result->setProgressCallback(notify);
                 else {
+                    cancel_confirmed = false;
                     RTP_LLM_LOG_WARNING("writeback receive stop control failed, unique_key=%s: %s",
                                         unique_key.c_str(),
                                         failure.c_str());
@@ -686,8 +688,8 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
             }
             if (control_result && control_result->done()) {
                 const auto status = P2PBroadcastClient::leaseStatus(control_result);
+                cancel_confirmed = status.success;
                 if (status.success) {
-                    cancel_confirmed = true;
                     receive_stopped  = receive_stopped || status.allStopped();
                 }
                 control_result.reset();
@@ -711,8 +713,9 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                     },
                     notify);
                 if (!control_submission.valid()) {
-                    next_control_ms = P2PNotification::nowMs() + interval_ms;
-                    interval_ms = std::min(interval_ms * 2, kControlMaxIntervalMs);
+                    cancel_confirmed = false;
+                    next_control_ms  = P2PNotification::nowMs() + interval_ms;
+                    interval_ms      = std::min(interval_ms * 2, kControlMaxIntervalMs);
                 }
             }
             pause();
@@ -745,8 +748,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     metrics.error              = error;
     metrics.total_cost_time_us = currentTimeUs() - start_us;
     metrics.hold_time_us       = metrics.total_cost_time_us;
-    if (metrics_reporter_)
-        metrics_reporter_->report<P2PConnectorMetrics, WriteSchedulerMetricsCollector>(nullptr, &metrics);
+    report();
 }
 
 }  // namespace rtp_llm

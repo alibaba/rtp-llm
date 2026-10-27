@@ -660,6 +660,17 @@ TEST_F(BroadcastManagerTest, WorkerNum) {
     EXPECT_EQ(manager_->workerNum(), 2u);
 }
 
+TEST(BroadcastFirstErrorTest, RpcStatusCodeIsOnlyAvailableAfterCompletion) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto call = std::make_shared<Result::WorkerRpcContext>();
+    call->status = grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "legacy handler");
+    auto result = std::make_shared<Result>(std::vector<std::shared_ptr<Result::WorkerRpcContext>>{call});
+    EXPECT_EQ(result->rpcStatusCode(0), grpc::StatusCode::UNKNOWN);
+    result->finishRank(0, true);
+    EXPECT_EQ(result->rpcStatusCode(0), grpc::StatusCode::UNIMPLEMENTED);
+    EXPECT_EQ(result->rpcStatusCode(1), grpc::StatusCode::UNKNOWN);
+}
+
 TEST(BroadcastFirstErrorTest, FirstRankFailureIsAvailableBeforeOtherRanksFinish) {
     using Result   = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
     auto a         = std::make_shared<Result::WorkerRpcContext>();
