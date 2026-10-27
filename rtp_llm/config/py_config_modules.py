@@ -463,13 +463,15 @@ class EmbeddingConfig:
         self.embedding_share_grpc_channel: bool = True
         self.embedding_grpc_keepalive: bool = False
         self.embedding_rpc_timeout_s: Optional[float] = None
+        self.qwen3_reranker_fixed_head: bool = True
 
     def to_string(self):
         return (
             f"embedding_model: {self.embedding_model}\n"
             f"embedding_share_grpc_channel: {self.embedding_share_grpc_channel}\n"
             f"embedding_grpc_keepalive: {self.embedding_grpc_keepalive}\n"
-            f"embedding_rpc_timeout_s: {self.embedding_rpc_timeout_s}"
+            f"embedding_rpc_timeout_s: {self.embedding_rpc_timeout_s}\n"
+            f"qwen3_reranker_fixed_head: {self.qwen3_reranker_fixed_head}"
         )
 
 
