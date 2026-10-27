@@ -250,4 +250,4 @@ def compile_case(path: str | Path, registry: Registry, *, shared_root: str | Pat
             steps.append(compiled)
         phases.append(Phase(phase_id, phase['describe'], phase['timeout'], tuple(steps)))
     view = asset(raw['view']) if 'view' in raw else None
-    return CompiledCase(case_id, describe, name, path.parent, environment, tuple(phases), view)
+    return CompiledCase(case_id, describe, name, path.parent, environment, tuple(phases), view, path)

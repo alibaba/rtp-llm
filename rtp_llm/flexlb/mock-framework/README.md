@@ -1,11 +1,13 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。当前可用入口是配置编译：不启动组件、不执行门禁、不读取请求数据，也不访问Prometheus。运行器、RTP Mock接入、多JVM Client和正式历史查看服务不由编译入口模拟完成。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP Mock业务适配、多JVM Client播放、指标采集和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
 - `python/mock_framework/config/`：YAML读取、配置检查、点分参数展开、步骤编译。
 - `java/interfaces/`：组件接口的唯一权威定义、公共类型和清单生成。
+- `python/mock_framework/execution/`：本地进程初始化、顺序执行、HTTP调用、门禁比较、收尾和运行记录。
+- `java/runtime/`：将接口实现绑定为HTTP端点，按接口清单校验参数与回执，提供单次调用上下文。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
 - `scripts/`：构建和验证入口。
 
@@ -77,3 +79,37 @@ Java Client实现时应基于seed和稳定逻辑请求身份生成每个请求�
 编译器根据清单校验参数和返回引用，不为新接口修改parser/compiler。Java方法必须有一个record参数，即使无参数也使用`Types.None`；同名接口和不支持的类型在生成清单时失败。完全新增一组Java API时在`InterfaceRegistry.standard()`登记其接口类。
 
 跨语言扩展测试覆盖Java新增方法→生成参数和返回类型→Python直接编译调用及错误类型拒绝；它只验证接口扩展和配置编译，不替代网络调用、Engine行为或性能验收。
+
+## 本地执行底座
+
+```sh
+uv run --locked mock-case run <case目录>/case.yaml \
+  --catalog build/interfaces.json \
+  --launch <启动配方.yaml> \
+  --output <新的运行目录>
+```
+
+启动配方是开发接线配置，不放入case业务区域，也不新增一套业务接口定义。当前需要组件提供可启动入口；框架没有默认的RTP或Client业务启动配方。
+
+```yaml
+components:
+  master:
+    command: [<Java21可执行文件>, -cp, <组件classpath>, <组件入口类>]
+    cwd: <组件工作目录>
+    startup_timeout: 30s
+    env: {}
+bindings:
+  master/: master-0
+```
+
+配方为environment中每类组件启动replicas个独立进程，编号为`<组件>-<从0开始的序号>`；compute作为配置传入，不独立启动。command是argv数组，不经过shell。cwd相对启动配方解析。组件从`MOCK_CONFIG_FILE`读取本实例配置和完整environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR`提供实例身份、角色与输出目录。`MOCK_READY_FILE`由组件初始化并绑定API后，通过`ApiServer.publishReady`原子发布，端口由系统分配。启动超时或提前退出都失败并回收已启动进程。
+
+bindings按最长接口前缀指定处理该接口的进程，运行前检查每个步骤都有绑定。该映射指定一个接口实现的入口，不执行副本指标求和或流量分片；Client组的协调和聚合由后续Client实现承担。当前本地启动器不落实CPU、内存或heap限制，配置这些限制时直接拒绝执行，避免把未落实的资源配置当作已生效。
+
+Java组件初始化后调用`new ApiServer(address).bind(MasterApi.class, implementation).start()`，Engine和Client同理。服务器依据同一Java接口生成的schema检查参数与返回值；Optional参数缺省传null，非法值不会通过Jackson自动转换成另一种类型。组件可在方法内读取`InvocationContext.current()`，取得run模式、固定queryTime、解析后的观测范围和超时预算。后台模式仍须由组件启动实际活动并返回启动回执，HTTP服务器不替组件虚构后台执行。接口实现处理业务，Python处理expect。
+
+所有步骤按顺序执行。phase使用单调时钟计算总预算，call的within不能超过剩余阶段时间。进程退出、调用异常、空查询或门禁失败都会中止后续步骤并收尾。动作不自动重试；超时记录结果可能未知。收尾对当前运行拥有的进程组先TERM、再KILL，主动取消同样执行收尾。这是进程回收，业务Client的stop/drain、请求记录刷盘和采集器收尾需在对应组件接入时实现。
+
+每次读取固定query_time；`latest`记录查询点，`[-60s, 0s]`解析为明确起止时间，`all`取唯一发流回执中的started_at到当前查询时刻。原始PromQL不解析内部窗口，记录单点查询和全部返回样本，所有样本必须满足expect，空结果为ERROR。集合eq忽略顺序，拒绝重复身份；Master的Engine集合逐个比较，空Master结果不能通过门禁。
+
+运行目录不覆盖已有目录，保存原始case、编译配置、启动配方、接口清单、代码版本与工作区差异、组件配置和日志、phase/step时间线、门禁实际值及范围、最终结果。PASS表示所执行步骤通过，FAIL表示门禁不满足，ERROR表示执行或数据异常，CANCELLED表示取消；清理异常不能得到PASS。当前尚不产生业务指标或逐请求记录，正式报告的数据保留由后续采集接入完成。测试中的TransportProbe只用于验证真实JVM进程及网络链路，不实现Engine或压测行为。

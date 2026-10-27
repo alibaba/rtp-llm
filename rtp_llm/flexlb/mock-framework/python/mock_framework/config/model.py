@@ -50,3 +50,4 @@ class CompiledCase:
     environment: dict[str, Any]
     phases: tuple[Phase, ...]
     view: Path | None
+    source: Path
