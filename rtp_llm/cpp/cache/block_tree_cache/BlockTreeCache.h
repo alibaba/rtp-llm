@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -44,6 +45,11 @@ struct BlockTreeCacheConfig {
     TierWatermark watermark_device;
     TierWatermark watermark_host;
     TierWatermark watermark_disk;
+    // Unset overrides inherit the per-tier watermarks above. An explicit {0, 0}
+    // disables watermark eviction only for FULL; on-demand reclamation is unchanged.
+    std::optional<TierWatermark> full_watermark_device;
+    std::optional<TierWatermark> full_watermark_host;
+    std::optional<TierWatermark> full_watermark_disk;
 
     // ---- Per-tier eviction policy ----
     EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
@@ -98,6 +104,19 @@ struct BlockTreeCacheConfig {
                 return watermark_disk;
             default:
                 return {};
+        }
+    }
+
+    std::optional<TierWatermark> fullWatermarkForTier(Tier tier) const {
+        switch (tier) {
+            case Tier::DEVICE:
+                return full_watermark_device;
+            case Tier::HOST:
+                return full_watermark_host;
+            case Tier::DISK:
+                return full_watermark_disk;
+            default:
+                return std::nullopt;
         }
     }
 };

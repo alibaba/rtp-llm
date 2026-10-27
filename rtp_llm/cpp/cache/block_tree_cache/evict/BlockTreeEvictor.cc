@@ -582,8 +582,16 @@ size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier targe
     return std::numeric_limits<size_t>::max();
 }
 
-void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark) {
+void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                         tier,
+                                                        const TierWatermark&         tier_watermark,
+                                                        std::optional<TierWatermark> full_watermark) {
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        const TierWatermark& watermark = group_set->groupType() == CacheGroupType::FULL && full_watermark.has_value() ?
+                                             *full_watermark :
+                                             tier_watermark;
+        if (!watermark.enabled()) {
+            continue;
+        }
         const size_t initial_required_count = computeWatermarkEvictCount(*group_set, tier, watermark);
         auto&        round = heaps_[group_set->groupSetId()].watermark_rounds[static_cast<size_t>(tier)];
         if (round.required_count == 0) {
