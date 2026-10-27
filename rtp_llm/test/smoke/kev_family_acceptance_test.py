@@ -21,6 +21,11 @@ KEV_ACCEPTANCE_SMOKE_ARGS supplies additional server arguments. A single
 MagaServerManager owns startup and teardown; GPU ownership is the Bazel
 test-execution wrapper's responsibility.
 
+KEV_ACCEPTANCE_PROBABILITY_GATE defaults to strict. Set it to report for a
+system-level gate: record probability deviations without failing on tolerance,
+while preserving choice, protocol, schema and lifecycle assertions. This does
+not change the independent reference or its recorded tolerances.
+
 With KEV_ACCEPTANCE_ENDPOINT, only HTTP assertions run against that endpoint.
 The caller owns that server's lifecycle (including the final image smoke);
 the test neither starts nor stops it. Its actual launch configuration/image
@@ -88,6 +93,12 @@ class KevFamilyAcceptanceTest(unittest.TestCase):
         self.assertTrue(math.isfinite(self.tolerance) and 0 <= self.tolerance < 1)
         self.same_choice = reference["tolerances"]["require_same_choice"]
         self.assertIs(type(self.same_choice), bool)
+        self.probability_gate = os.environ.get(
+            "KEV_ACCEPTANCE_PROBABILITY_GATE", "strict"
+        )
+        self.assertIn(self.probability_gate, ("strict", "report"))
+        self.report["probability_gate"] = self.probability_gate
+        self.report["probability_tolerance_exceedances"] = []
         self.cases = {item["name"]: item for item in reference["cases"]}
         self.assertEqual(len(self.cases), len(reference["cases"]), "duplicate cases")
         self.assertTrue({"short", "long", "changed_state"} <= self.cases.keys())
@@ -278,13 +289,19 @@ class KevFamilyAcceptanceTest(unittest.TestCase):
                 abs(p - q) for row, ref in zip(rows, expected) for p, q in zip(row, ref)
             )
             self.records[-1]["max_abs_probability_error"] = error
-            self.assertLessEqual(error, self.tolerance, label)
+            self.records[-1]["within_probability_tolerance"] = error <= self.tolerance
+            if error > self.tolerance:
+                self.report["probability_tolerance_exceedances"].append(
+                    {"case": label, "max_abs_probability_error": error}
+                )
             if self.same_choice:
                 self.assertEqual(
                     [max(range(len(row)), key=row.__getitem__) for row in rows],
                     [max(range(len(row)), key=row.__getitem__) for row in expected],
                     label,
                 )
+            if self.probability_gate == "strict":
+                self.assertLessEqual(error, self.tolerance, label)
         return rows
 
     def _case(self, name, function):
