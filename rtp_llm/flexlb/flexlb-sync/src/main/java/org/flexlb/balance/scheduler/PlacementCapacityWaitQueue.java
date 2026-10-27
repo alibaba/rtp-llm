@@ -24,6 +24,47 @@ final class PlacementCapacityWaitQueue {
     private final Map<PlacementKey, Domain> domains = new HashMap<>();
     private final Map<GlobalQueueEntry, Domain> membership = new IdentityHashMap<>();
     private final NavigableSet<Domain> ready;
+    private final Map<GlobalQueueEntry, Rescue> rescueMembership = new IdentityHashMap<>();
+    private static final Comparator<Rescue> RESCUE_ORDER = Comparator.comparingLong(Rescue::atMs)
+            .thenComparing(rescue -> rescue.entry, GlobalQueueEntry.SEQUENCE_ORDER);
+    private final Map<PlacementKey, NavigableSet<Rescue>> rescueDomains = new HashMap<>();
+    private record Rescue(GlobalQueueEntry entry, PlacementKey domain, long atMs) { }
+
+    void scheduleRescue(GlobalQueueEntry entry, PlacementKey blocker, long atMs) {
+        removeRescue(entry);
+        if (!isWaiting(entry)) { return; }
+        var rescue = new Rescue(entry, new PlacementKey(blocker.role(), blocker.group(), null), atMs);
+        rescueMembership.put(entry, rescue);
+        rescueDomains.computeIfAbsent(rescue.domain, ignored -> new TreeSet<>(RESCUE_ORDER)).add(rescue);
+    }
+
+    void resumeRescue(int budget, long nowMs, java.util.Set<PlacementKey> idleDomains,
+                      Consumer<GlobalQueueEntry> resume) {
+        var due = new java.util.PriorityQueue<Rescue>(RESCUE_ORDER);
+        for (PlacementKey domain : idleDomains) {
+            var pending = rescueDomains.get(domain);
+            if (pending != null && pending.first().atMs <= nowMs) { due.add(pending.first()); }
+        }
+        for (int examined = 0; examined < budget && !due.isEmpty(); examined++) {
+            Rescue rescue = due.poll();
+            boolean waiting = isWaiting(rescue.entry);
+            removeRescue(rescue.entry);
+            if (waiting) {
+                remove(rescue.entry, false);
+                resume.accept(rescue.entry);
+            }
+            var pending = rescueDomains.get(rescue.domain);
+            if (pending != null && pending.first().atMs <= nowMs) { due.add(pending.first()); }
+        }
+    }
+
+    private void removeRescue(GlobalQueueEntry entry) {
+        Rescue rescue = rescueMembership.remove(entry);
+        if (rescue == null) { return; }
+        var pending = rescueDomains.get(rescue.domain);
+        pending.remove(rescue);
+        if (pending.isEmpty()) { rescueDomains.remove(rescue.domain); }
+    }
 
     PlacementCapacityWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
         this.availability = Objects.requireNonNull(availability, "availability");
@@ -71,6 +112,7 @@ final class PlacementCapacityWaitQueue {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();
             GlobalQueueEntry entry = domain.entries.pollFirst();
+            removeRescue(entry);
             domain.retry = entry;
             domain.available = false;
             // Even completed entries need an owner-side cleanup opportunity.
@@ -87,9 +129,12 @@ final class PlacementCapacityWaitQueue {
         domains.clear();
         ready.clear();
         membership.clear();
+        rescueMembership.clear();
+        rescueDomains.clear();
     }
 
     private void remove(GlobalQueueEntry entry, boolean progress) {
+        removeRescue(entry);
         Domain domain = membership.remove(entry);
         if (domain == null) { return; }
         unindex(domain);

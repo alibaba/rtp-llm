@@ -7,7 +7,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlacementCapacityWaitQueueTest {
     private final PlacementAvailability availability = new PlacementAvailability();
@@ -15,6 +17,66 @@ class PlacementCapacityWaitQueueTest {
     private long sequence;
     private static final PlacementKey A = PlacementKey.exact(RoleType.PREFILL, "g", "a:8000");
     private static final PlacementKey B = PlacementKey.exact(RoleType.PREFILL, "g", "b:8000");
+
+    @Test
+    void rescueIsBoundedAndRequiresAnIdleMatchingDomain() {
+        List<GlobalQueueEntry> backlog = new ArrayList<>();
+        var group = new PlacementKey(RoleType.PREFILL, "g", null);
+        for (int i = 0; i < 10_000; i++) {
+            var entry = entry(50);
+            backlog.add(entry);
+            queue.park(entry, A, 0);
+            queue.scheduleRescue(entry, A, 100L);
+        }
+        List<GlobalQueueEntry> resumed = new ArrayList<>();
+        queue.resumeRescue(3, 99L, java.util.Set.of(group), resumed::add);
+        assertTrue(resumed.isEmpty());
+        queue.resumeRescue(3, 100L, java.util.Set.of(new PlacementKey(RoleType.PREFILL, "other", null)), resumed::add);
+        assertTrue(resumed.isEmpty());
+        queue.resumeRescue(3, 100L, java.util.Set.of(group), resumed::add);
+        assertEquals(backlog.subList(0, 3), resumed);
+        assertTrue(queue.isWaiting(backlog.getLast()));
+        assertFalse(queue.isWaiting(backlog.getFirst()));
+    }
+
+    @Test
+    void unavailableDomainsDoNotConsumeAnotherGroupsRescueBudget() {
+        for (int i = 0; i < 10_000; i++) {
+            var blocked = entry(50);
+            queue.park(blocked, A, 0);
+            queue.scheduleRescue(blocked, A, 100L);
+        }
+        var idleGroup = new PlacementKey(RoleType.PREFILL, "idle", null);
+        var eligible = entry(50);
+        queue.park(eligible, idleGroup, 0);
+        queue.scheduleRescue(eligible, idleGroup, 100L);
+        List<GlobalQueueEntry> resumed = new ArrayList<>();
+        queue.resumeRescue(1, 100L, java.util.Set.of(idleGroup), resumed::add);
+        assertEquals(List.of(eligible), resumed);
+    }
+
+    @Test
+    void capacityResumeCancellationAndReparkRemoveOldRescueTimers() {
+        var first = entry(50);
+        queue.park(first, A, 0);
+        queue.scheduleRescue(first, A, 100L);
+        queue.capacityChanged(A);
+        assertEquals(List.of(first), drain(1));
+        queue.park(first, B, 0);
+        queue.scheduleRescue(first, B, 200L);
+        List<GlobalQueueEntry> resumed = new ArrayList<>();
+        var domains = java.util.Set.of(new PlacementKey(RoleType.PREFILL, "g", null));
+        queue.resumeRescue(10, 100L, domains, resumed::add);
+        assertTrue(resumed.isEmpty());
+        queue.remove(first);
+        queue.resumeRescue(10, 200L, domains, resumed::add);
+        assertTrue(resumed.isEmpty());
+        queue.park(first, A, 0);
+        queue.scheduleRescue(first, A, 300L);
+        queue.clear();
+        queue.resumeRescue(10, 300L, domains, resumed::add);
+        assertTrue(resumed.isEmpty());
+    }
 
     @Test
     void oneCapacityEdgeDoesNotReplayAnEntireBacklog() {

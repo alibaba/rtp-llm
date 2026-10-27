@@ -5,9 +5,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult;
 import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
-import org.flexlb.balance.scheduler.AdmissionHandle;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer.PreemptionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -65,7 +64,7 @@ class GlobalQueueProgressTest {
             var evaluator = mock(org.flexlb.balance.prediction.PrefillTimePredictor.Evaluator.class);
             when(evaluator.estimateMs(anyLong(), anyLong())).thenReturn(-1L);
             var attempted = new CountDownLatch(1);
-            when(f.router.hotspotMigrationCandidates()).thenAnswer(call -> {
+            when(f.router.hotspotMigrationCandidates(org.mockito.ArgumentMatchers.anyInt())).thenAnswer(call -> {
                 attempted.countDown();
                 org.flexlb.balance.strategy.PrefillAdaptiveBudget.tokensFor(evaluator, 200);
                 return List.of();
@@ -851,8 +850,7 @@ class GlobalQueueProgressTest {
                 when(route.decodeEp()).thenReturn(decode);
                 when(decode.markQueued(any(), any())).thenReturn(org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED, false));
                 when(route.requestId()).thenReturn(id);
-                if (attempts.getAndIncrement() == 0) { admissionBlocked.add(id); }
-                else { admissionBlocked.remove(id); }
+                if (attempts.getAndIncrement() == 0) { admissionBlocked.add(id); } else { admissionBlocked.remove(id); }
             };
             return decode;
         }

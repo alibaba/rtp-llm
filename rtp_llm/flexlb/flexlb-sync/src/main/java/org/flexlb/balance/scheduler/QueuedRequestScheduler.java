@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.route.RoleType;
-
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
@@ -12,6 +10,7 @@ import org.flexlb.config.PrefillQueueSheddingConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Failures;
@@ -36,8 +35,15 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static org.flexlb.balance.scheduler.ContextResult.CancelEvidence;
+import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
+import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
+import static org.flexlb.balance.scheduler.ContextResult.EndKind;
+import static org.flexlb.balance.scheduler.ContextResult.Granted;
+import static org.flexlb.balance.scheduler.ContextResult.Phase;
+import static org.flexlb.balance.scheduler.ContextResult.PlacementToken;
+import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
-import static org.flexlb.balance.scheduler.ContextResult.*;
 
 /**
  * The single QUEUE admission owner for one FlexLB model.
@@ -71,6 +77,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final PrefillQueueSheddingConfig shedding;
     private long nextSheddingNanos;
     private long nextRescueRetryNanos;
+    private Set<PlacementKey> idleRescueDomains = Set.of();
     private long nextLocalMigrationNanos;
     private final long hardSheddingWaitMs;
     private final org.flexlb.config.RoutingConfig.HotspotRescueConfig hotspotRescue;
@@ -548,8 +555,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                             && (inFlight.size() == plannerCount || closed.get()
                                 || (!orderedQueue.hasUnscannedRequests() && !waitingRequests.hasReadyRequests()))) {
                         try {
-                            if (shedding == null && hotspotRescue == null && retiredRoutes.isEmpty()) { changed.await(); }
-                            else { changed.await(100L, TimeUnit.MILLISECONDS); break; }
+                            if (shedding == null && hotspotRescue == null && retiredRoutes.isEmpty()) { changed.await(); } else { changed.await(100L, TimeUnit.MILLISECONDS); break; }
                         }
                         catch (InterruptedException interruption) {
                             if (closed.get()) { Thread.currentThread().interrupt(); }
@@ -665,15 +671,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private List<GlobalQueueEntry> planningCandidates(int slots) {
         if (hotspotRescue != null && System.nanoTime() >= nextRescueRetryNanos) {
             nextRescueRetryNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100L);
-            long nowMs = System.currentTimeMillis();
-            for (var entry : queuedEntries.values()) {
-                if (!entry.removed && !inFlight.contains(entry) && waitingRequests.isWaiting(entry)
-                        && (hotspotRescue.getMaxInputTokens() == 0 || entry.context.data().getRequest().getSeqLen() <= hotspotRescue.getMaxInputTokens())
-                        && nowMs - entry.context.snapshot().createdAtMs() >= hotspotRescue.getMinWaitMs()) {
-                    waitingRequests.remove(entry);
-                    orderedQueue.markRequestReadyForRetry(entry);
-                }
-            }
+            waitingRequests.resumeRescue(slots, System.currentTimeMillis(), idleRescueDomains,
+                    orderedQueue::markRequestReadyForRetry);
         }
         waitingRequests.resumeReady(slots, orderedQueue::markRequestReadyForRetry);
         return orderedQueue.scanForPlanningCandidates(
@@ -861,6 +860,13 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             if (!(!plan.entry.removed && !plan.entry.context.data().getFuture().isDone())) { return true; }
             plan.entry.sheddingEstimate = plan.waitKey.role().supportsPrefill() ? plan.estimate : null;
             parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence);
+            if (parked && hotspotRescue != null && plan.waitKey.role().supportsPrefill()
+                    && (hotspotRescue.getMaxInputTokens() == 0
+                    || plan.entry.context.data().getRequest().getSeqLen() <= hotspotRescue.getMaxInputTokens())) {
+                long due = Math.max(com.google.common.math.LongMath.saturatedAdd(System.currentTimeMillis(), 100L),
+                        com.google.common.math.LongMath.saturatedAdd(plan.entry.context.snapshot().createdAtMs(), hotspotRescue.getMinWaitMs()));
+                waitingRequests.scheduleRescue(plan.entry, plan.waitKey, due);
+            }
             depth = orderedQueue.size();
             counts = orderedQueue.priorityCounts();
         } finally {
@@ -889,7 +895,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         if (hotspotRescue == null || closed.get() || System.nanoTime() < nextLocalMigrationNanos) { return; }
         nextLocalMigrationNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100L);
         List<RequestRoute> candidates;
-        try { candidates = router.hotspotMigrationCandidates(); }
+        try {
+            idleRescueDomains = router.hotspotRescueDomains();
+            candidates = router.hotspotMigrationCandidates(plannerCount);
+        }
         catch (org.flexlb.balance.prediction.InvalidPrefillPredictionException invalid) {
             // Migration is advisory: a bad estimate must not close all request admission.
             Logger.warn("Skipping hotspot migration with invalid Prefill prediction", invalid);
@@ -1157,8 +1166,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             AdmissionHandle owned = handle;
             handle = null;
             if (owned != null) {
-                if (rollbackFailure == null) { owned.finish(); }
-                else { owned.terminate(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "placement rollback failed")); }
+                if (rollbackFailure == null) { owned.finish(); } else { owned.terminate(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "placement rollback failed")); }
             }
         }
 

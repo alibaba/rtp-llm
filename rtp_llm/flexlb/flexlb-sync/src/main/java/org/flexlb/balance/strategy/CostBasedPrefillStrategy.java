@@ -5,11 +5,11 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
-import org.flexlb.balance.scheduler.PrefillQueueShedding;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
+import org.flexlb.balance.scheduler.PrefillQueueShedding;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
@@ -469,40 +469,79 @@ public class CostBasedPrefillStrategy {
                 && (endpoint.requestLimit == 0 || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit);
     }
 
-    /** Advisory capture only. Context/delivery ownership is rechecked atomically before removal. */
-    public java.util.List<RequestRoute> hotspotMigrationCandidates() {
-        if (tokenBalance == null || tokenBalance.getHotspotRescue() == null) { return java.util.List.of(); }
-        var rescue = tokenBalance.getHotspotRescue();
-        var fleet = endpointRegistry.prefillRoutingSnapshot(RoleType.PREFILL);
-        long nowMs = System.nanoTime() / 1_000_000L, wallMs = System.currentTimeMillis();
-        var idleGroups = new java.util.HashSet<String>();
-        for (var entry : fleet) {
-            var work = entry.endpoint().ownership.tokenWorkload(nowMs);
-            if (idleForRescue(entry.endpoint(), work)) {
-                idleGroups.add(entry.endpoint().getStatus().topologySnapshot().group());
-            }
-        }
-        var candidates = new java.util.ArrayList<RequestRoute>();
-        for (var entry : fleet) {
-            var endpoint = entry.endpoint();
-            if (!idleGroups.contains(endpoint.getStatus().topologySnapshot().group())
-                    || (ttftSloMs > 0 ? !sloQueueOverloaded(endpoint, wallMs) : hasTokenCapacity(endpoint))) { continue; }
-            for (var route : endpoint.ownership.captureQueue(64).items()) {
-                if ((rescue.getMaxInputTokens() == 0 || route.seqLen() <= rescue.getMaxInputTokens()) && route.decodeEp() != null
-                        && route.ctx().prefillMigrationSource() == null
-                        && wallMs - route.ctx().snapshot().createdAtMs() >= (rescue.getMinWaitMs() > 0 ? rescue.getMinWaitMs() : endpoint.serviceWindowMs * 2)
-                        && fleet.stream().anyMatch(target -> target.endpoint() != endpoint
-                                && java.util.Objects.equals(target.endpoint().getStatus().topologySnapshot().group(),
-                                        endpoint.getStatus().topologySnapshot().group())
-                                && idleForRescue(target.endpoint(), target.endpoint().ownership.tokenWorkload(nowMs))
-                                && (rescue.getMaxInputTokens() > 0 || PrefillPredictionBoundary.predictSingleRequestMs(
-                                        target.endpoint().predictor.evaluator(), route.seqLen(), 0) <= target.endpoint().serviceWindowMs / 2))) {
-                    candidates.add(route);
+    private int migrationSourceCursor;
+    private int migrationTargetCursor;
+
+    public java.util.Set<org.flexlb.balance.scheduler.PlacementKey> hotspotRescueDomains() {
+        if (tokenBalance == null || tokenBalance.getHotspotRescue() == null) { return java.util.Set.of(); }
+        var domains = new java.util.HashSet<org.flexlb.balance.scheduler.PlacementKey>();
+        long nowMs = System.nanoTime() / 1_000_000L;
+        for (var role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
+            for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
+                var endpoint = entry.endpoint();
+                if (idleForRescue(endpoint, endpoint.ownership.tokenWorkload(nowMs))) {
+                    domains.add(new org.flexlb.balance.scheduler.PlacementKey(role, endpoint.getStatus().topologySnapshot().group(), null));
+                    domains.add(org.flexlb.balance.scheduler.PlacementKey.anyGroup(role));
                 }
             }
         }
-        candidates.sort(java.util.Comparator.comparingLong(RequestRoute::seqLen).thenComparingLong(RequestRoute::enqueueSeq));
-        return candidates;
+        return domains;
+    }
+
+    private record IdleTarget(PrefillEndpoint endpoint, PrefillTimePredictor.Evaluator evaluator, long budgetMs) { }
+
+    /** Advisory capture only. Context/delivery ownership is rechecked atomically before removal. */
+    public java.util.List<RequestRoute> hotspotMigrationCandidates(int limit) {
+        if (limit <= 0 || tokenBalance == null || tokenBalance.getHotspotRescue() == null) { return List.of(); }
+        var rescue = tokenBalance.getHotspotRescue();
+        var fleet = endpointRegistry.prefillRoutingSnapshot(RoleType.PREFILL);
+        if (fleet.isEmpty()) { return List.of(); }
+        long nowMs = System.nanoTime() / 1_000_000L, wallMs = System.currentTimeMillis();
+        var idleByGroup = new java.util.HashMap<String, List<IdleTarget>>();
+        for (var entry : fleet) {
+            var endpoint = entry.endpoint();
+            if (idleForRescue(endpoint, endpoint.ownership.tokenWorkload(nowMs))) {
+                idleByGroup.computeIfAbsent(endpoint.getStatus().topologySnapshot().group(), ignored -> new ArrayList<>())
+                        .add(new IdleTarget(endpoint, endpoint.predictor.evaluator(), endpoint.serviceWindowMs / 2));
+            }
+        }
+        if (idleByGroup.isEmpty()) { return List.of(); }
+        var order = java.util.Comparator.comparingLong(RequestRoute::seqLen).thenComparingLong(RequestRoute::enqueueSeq);
+        var candidates = new java.util.PriorityQueue<RequestRoute>(Math.min(limit, 64), order.reversed());
+        int budget = (int) Math.min(Integer.MAX_VALUE, Math.max(64L, 64L * limit));
+        int sourceLimit = (int) Math.min(fleet.size(), Math.max(1L, 2L * limit));
+        int targetChecks = 0;
+        for (int examined = 0; examined < sourceLimit && budget > 0; examined++) {
+            migrationSourceCursor %= fleet.size();
+            var endpoint = fleet.get(migrationSourceCursor++).endpoint();
+            var targets = idleByGroup.get(endpoint.getStatus().topologySnapshot().group());
+            if (targets == null || (ttftSloMs > 0 ? !sloQueueOverloaded(endpoint, wallMs) : hasTokenCapacity(endpoint))) { continue; }
+            for (var route : endpoint.ownership.captureQueue(Math.min(64, budget)).items()) {
+                if (--budget <= 0) { break; }
+                if ((rescue.getMaxInputTokens() > 0 && route.seqLen() > rescue.getMaxInputTokens()) || route.decodeEp() == null
+                        || route.ctx().prefillMigrationSource() != null
+                        || wallMs - route.ctx().snapshot().createdAtMs() < (rescue.getMinWaitMs() > 0
+                        ? rescue.getMinWaitMs() : endpoint.serviceWindowMs * 2)) { continue; }
+                boolean eligible = false;
+                int start = Math.floorMod(migrationTargetCursor, targets.size());
+                for (int i = 0; i < targets.size() && budget > 0; i++) {
+                    var target = targets.get((start + i) % targets.size());
+                    budget--;
+                    targetChecks++;
+                    if (target.endpoint() != endpoint && (rescue.getMaxInputTokens() > 0
+                            || PrefillPredictionBoundary.predictSingleRequestMs(target.evaluator(), route.seqLen(), 0)
+                            <= target.budgetMs())) { eligible = true; break; }
+                }
+                if (eligible) {
+                    if (candidates.size() < limit) { candidates.add(route); }
+                    else if (order.compare(route, candidates.peek()) < 0) { candidates.poll(); candidates.add(route); }
+                }
+            }
+        }
+        migrationTargetCursor = (int) (((long) migrationTargetCursor + targetChecks) % Integer.MAX_VALUE);
+        var result = new ArrayList<>(candidates);
+        result.sort(order);
+        return result;
     }
 
     private boolean sloQueueOverloaded(PrefillEndpoint endpoint, long nowMs) {
