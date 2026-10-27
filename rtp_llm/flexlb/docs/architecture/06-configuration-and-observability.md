@@ -213,6 +213,21 @@ UniConfig / Nacos 的 v3 部分更新示例：
   理论命中 Tokens 保存在请求的异步结果中，随 worker status 反馈统一上报。
   后台任务直接读取路由完成后保持不变的请求字段；日志与指标开关在执行时从配置服务读取。
   等待队列最多容纳 100,000 个任务，满时丢弃统计样本并汇总告警，不阻塞请求线程。
+  `feedbackMaximumEntries` 默认 `100000`，必须为正整数，限制尚未收到 FINISHED 的预测关联数量。
+  Nacos 更新该值会直接调整现有关联表的容量，保留表内记录；调小容量时超出的记录可能被淘汰，
+  被淘汰请求后续的反馈无法关联，因此应按未完成请求数预留余量。例如：
+
+  ```json
+  {"observability":{"cacheHit":{"feedbackMaximumEntries":200000}}}
+  ```
+
+  `feedbackTimeoutMs` 默认 `1000`，必须为正整数，独立于 WorkerStatus 的超时参数。
+  它从关联登记或最近一次包含该请求的状态反馈开始计算；PENDING、RECEIVED、KV_ALLOCATED、RUNNING
+  均会续期，其他请求的状态不会续期。超过该时长没有匹配反馈时关联过期，后台回收；FINISHED 立即条件删除。
+  预测在选路阶段登记，等待首次反馈的排队时间也包含在内，排队较长的部署应相应调大该值。
+  Nacos 热更新直接调整现有关联的过期时长，按最近一次访问时间计算，不重建关联表；
+  调小时已超过新时长的记录会过期。
+
   `recentKeyWindow.maxKeyOccurrences` 默认 `1000000`，限制保留的唯一 key 数量；
   `durationMs` 默认 `1800000`。实际容量取配置上限与 `capacityMultiplier × Prefill 数量 × (单台总 KV Token / blockSize)`
   的较小值，`capacityMultiplier` 默认 `10`。Prefill 的最大 KV Cache 和 blockSize 相同，只读取第一台的容量；
@@ -394,7 +409,15 @@ FINISHED 缺少有效实际值时仍上报可用的理论和预测数据，实�
 实际命中 Counter 及输入 Tokens Counter 用于计算实际全局命中率。
 比较事件包含理论命中、实际命中、路由预测、KVCM 本地匹配、KVCM 本地加远端的 global 总匹配，
 以及 Local Standby 预测；差值统一为实际值减预测值。
-预测关联最多保留 100,000 条，保存期限为一小时。理论与 Local Standby 对照异步完成，
+RUNNING 反馈后保留关联，使之后的首 Token 或 FINISHED 反馈仍能补充状态 PV；
+比较事件和状态 PV 分别通过原子标记最多生成一次。
+FINISHED 在 `finally` 中按请求 key 与该次读到的关联对象条件删除，即使实际命中无效或反馈处理抛出异常也会清理，
+且不会误删同 key 后续写入的新关联。已取得关联对象的并发回调仍共享原子标记，删除不影响已启动的异步对照。
+`CacheHitFeedbackTracker` 是独立的 Spring Bean，注入 `ConfigService` 以初始化并热更新关联表容量和超时，
+`CacheAwareService` 注入同一个 Tracker 处理预测与反馈。
+预测关联上限由 `observability.cacheHit.feedbackMaximumEntries` 配置，默认 100,000 条；
+未收到 FINISHED 的记录按 `observability.cacheHit.feedbackTimeoutMs` 判断反馈静默超时，默认 1000 ms。
+持续收到该请求的活跃状态时保持关联；超时后的迟到反馈无法再关联。理论与 Local Standby 对照异步完成，
 反馈阶段各自最多等待一秒；不可用的项省略，其余指标正常输出。观测回调在 Worker 状态锁外执行。
 
 `tools/pv_request_replay/build_workbook.py` 支持 `routingDecisions` 和

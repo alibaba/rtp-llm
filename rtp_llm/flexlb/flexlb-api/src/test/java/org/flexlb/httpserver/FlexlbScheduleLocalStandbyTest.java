@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.CacheHitFeedbackTracker;
 import org.flexlb.cache.match.CacheMetadataUpdateOrchestrator;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
@@ -64,8 +65,10 @@ class FlexlbScheduleLocalStandbyTest {
         }).when(manager).addRoutedRequestBlocks(any(), any());
         LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
                 configuration, manager, metrics);
-        CacheAwareService cache = new CacheAwareService(metrics, null, null,
-                new CacheMetadataUpdateOrchestrator(configuration, null, provider));
+        CacheAwareService cache =
+                new CacheAwareService(metrics, null, new CacheHitFeedbackTracker(null, new ConfigService("""
+                        {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":100000}}}
+                        """)), new CacheMetadataUpdateOrchestrator(configuration, null, provider));
         RouteService router = mock(RouteService.class);
         CompletableFuture<Response> routed = new CompletableFuture<>();
         when(router.route(any())).thenReturn(routed);

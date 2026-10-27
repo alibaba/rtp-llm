@@ -2,10 +2,13 @@ package org.flexlb.cache.match;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Scheduler;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.ObservabilityConfig;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.master.WorkerStatus;
@@ -14,6 +17,7 @@ import org.flexlb.enums.TaskPhase;
 import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -29,15 +33,30 @@ import java.util.function.Function;
 /**
  * Bounded request/role/generation correlation, independent of scheduling ownership.
  */
-final class CacheHitFeedbackTracker {
+@Component
+public final class CacheHitFeedbackTracker {
     private static final Logger LOG = LoggerFactory.getLogger(CacheHitFeedbackTracker.class);
     private static final Logger PV = LoggerFactory.getLogger("pvLogger");
-    private final Cache<Key, Prediction> predictions = Caffeine.newBuilder()
-            .maximumSize(100_000).expireAfterWrite(Duration.ofHours(1)).build();
+    private final Cache<Key, Prediction> predictions;
     private final LocalStandbyComparisonService comparisonService;
 
-    CacheHitFeedbackTracker(LocalStandbyComparisonService comparisonService) {
+    public CacheHitFeedbackTracker(LocalStandbyComparisonService comparisonService, ConfigService configService) {
         this.comparisonService = comparisonService;
+        ObservabilityConfig.CacheHitConfig config = configService.loadBalanceConfig().getObservability().getCacheHit();
+        this.predictions = Caffeine.newBuilder()
+                .maximumSize(config.getFeedbackMaximumEntries())
+                .expireAfterAccess(Duration.ofMillis(config.getFeedbackTimeoutMs()))
+                .scheduler(Scheduler.systemScheduler())
+                .build();
+        configService.addUpdateListener(updated -> updateConfig(updated.getObservability().getCacheHit()));
+    }
+
+    private void updateConfig(ObservabilityConfig.CacheHitConfig config) {
+        predictions.policy().eviction().orElseThrow().setMaximum(config.getFeedbackMaximumEntries());
+        predictions.policy()
+                .expireAfterAccess()
+                .orElseThrow()
+                .setExpiresAfter(config.getFeedbackTimeoutMs(), TimeUnit.MILLISECONDS);
     }
 
     void track(String requestId,
@@ -87,10 +106,25 @@ final class CacheHitFeedbackTracker {
                              WorkerStatus.TaskObservation task,
                              boolean finished,
                              List<CompletableFuture<CacheHitComparisonResult>> results) {
-        Prediction prediction = predictions.getIfPresent(new Key(worker.getGenerationId(), role, task.requestId()));
+        Key key = new Key(worker.getGenerationId(), role, task.requestId());
+        Prediction prediction = predictions.getIfPresent(key);
         if (prediction == null) {
             return;
         }
+        try {
+            reportTaskFeedback(prediction, role, task, finished, results);
+        } finally {
+            if (finished) {
+                predictions.asMap().remove(key, prediction);
+            }
+        }
+    }
+
+    private void reportTaskFeedback(Prediction prediction,
+                                    RoleType role,
+                                    WorkerStatus.TaskObservation task,
+                                    boolean finished,
+                                    List<CompletableFuture<CacheHitComparisonResult>> results) {
         WorkerStatus.TaskTelemetry telemetry = task.telemetry();
         CacheHitFeedback seed = prediction.seed;
         String state = finished ? "FINISHED" : task.phase() == null ? "UNKNOWN" : task.phase().name();

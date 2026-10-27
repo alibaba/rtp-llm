@@ -22,6 +22,45 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ConfigServiceTest {
 
     @Test
+    void configuresCacheHitFeedbackTimeoutWithDefault() {
+        var defaults = JsonUtils.strictValueToTree(ConfigTestFixtures.parse("{}"));
+        assertEquals(1000L, defaults.at("/observability/cacheHit/feedbackTimeoutMs").longValue());
+        var configured = JsonUtils.strictValueToTree(ConfigTestFixtures.parse("""
+                {"observability":{"cacheHit":{"feedbackTimeoutMs":5000}}}
+                """));
+        assertEquals(5000L, configured.at("/observability/cacheHit/feedbackTimeoutMs").longValue());
+    }
+
+    @Test
+    void rejectsInvalidCacheHitFeedbackTimeout() {
+        for (String value : new String[]{"0", "-1", "1.5", "\"1000\"", "null"}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures
+                    .parse("{\"observability\":{\"cacheHit\":{\"feedbackTimeoutMs\":" + value + "}}}"), value);
+        }
+    }
+
+    @Test
+    void configuresCacheHitFeedbackCapacityWithDefault() {
+        var defaults = JsonUtils.strictValueToTree(ConfigTestFixtures.parse("{}"));
+        assertEquals(100_000L, defaults.at("/observability/cacheHit/feedbackMaximumEntries").longValue());
+
+        var configured = JsonUtils.strictValueToTree(ConfigTestFixtures.parse("""
+                {"observability":{"cacheHit":{"feedbackMaximumEntries":200000}}}
+                """));
+        assertEquals(200_000L, configured.at("/observability/cacheHit/feedbackMaximumEntries").longValue());
+    }
+
+    @Test
+    void rejectsInvalidCacheHitFeedbackCapacity() {
+        for (String value : new String[]{"0", "-1", "1.5", "\"100\"", "null"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> ConfigTestFixtures
+                            .parse("{\"observability\":{\"cacheHit\":{\"feedbackMaximumEntries\":" + value + "}}}"),
+                    value);
+        }
+    }
+
+    @Test
     void cacheMatchingTypesRoundTripWithoutExtraJsonProperties() throws Exception {
         for (CacheMatchMode type : CacheMatchMode.values()) {
             FlexlbConfig config = ConfigTestFixtures.parse("{\"cacheMatching\":{\"type\":\"" + type + "\"}}");

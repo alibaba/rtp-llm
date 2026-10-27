@@ -6,7 +6,6 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -29,11 +28,11 @@ public class CacheAwareService {
 
     public CacheAwareService(CacheMetricsReporter cacheMetricsReporter,
                              CacheMatchQueryOrchestrator queryOrchestrator,
-                             LocalStandbyComparisonService comparisonService,
+                             CacheHitFeedbackTracker feedbackTracker,
                              CacheMetadataUpdateOrchestrator updateOrchestrator) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.queryOrchestrator = queryOrchestrator;
-        this.feedbackTracker = new CacheHitFeedbackTracker(comparisonService);
+        this.feedbackTracker = feedbackTracker;
         this.updateOrchestrator = updateOrchestrator;
     }
 

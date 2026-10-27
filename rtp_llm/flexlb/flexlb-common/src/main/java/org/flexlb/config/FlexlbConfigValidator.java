@@ -337,6 +337,8 @@ public final class FlexlbConfigValidator {
         require(observability.getCacheHit() != null,
                 "observability.cacheHit", "is required");
         ObservabilityConfig.CacheHitConfig cacheHit = observability.getCacheHit();
+        positive(cacheHit.getFeedbackMaximumEntries(), "observability.cacheHit.feedbackMaximumEntries");
+        positive(cacheHit.getFeedbackTimeoutMs(), "observability.cacheHit.feedbackTimeoutMs");
         require(cacheHit.getRecentKeyWindow() != null,
                 "observability.cacheHit.recentKeyWindow", "is required");
         positive(cacheHit.getRecentKeyWindow().getDurationMs(),

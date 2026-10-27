@@ -22,6 +22,8 @@ public final class ObservabilityConfig {
     @Setter
     public static final class CacheHitConfig {
         private RecentKeyWindowConfig recentKeyWindow = new RecentKeyWindowConfig();
+        private long feedbackMaximumEntries = 100_000L;
+        private long feedbackTimeoutMs = 1000L;
         private boolean metricsEnabled = true;
         private boolean requestTraceLogEnabled;
         private TheoryLogConfig theoryLog;

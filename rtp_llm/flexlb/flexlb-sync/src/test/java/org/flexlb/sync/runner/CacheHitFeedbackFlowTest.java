@@ -12,6 +12,7 @@ import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.CacheHitFeedbackTracker;
 import org.flexlb.cache.match.CacheMatchFailoverManager;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.cache.match.CacheMetadataUpdateOrchestrator;
@@ -42,9 +43,11 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 import reactor.netty.resources.LoopResources;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -58,6 +61,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STAN
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -124,7 +128,7 @@ class CacheHitFeedbackFlowTest {
         when(failover.activeSource()).thenReturn(CacheMatchSource.KVCM);
         var query = new CacheMatchQueryOrchestrator(mock(LocalSyncCacheMatchProvider.class), kvcm, standby,
                 mock(LocalStandbyCacheManager.class), failover, comparison, cacheMetrics, cacheConfig);
-        cache = new CacheAwareService(cacheMetrics, query, comparison,
+        cache = new CacheAwareService(cacheMetrics, query, new CacheHitFeedbackTracker(comparison, configs),
                 mock(CacheMetadataUpdateOrchestrator.class));
         EngineGrpcClient engineClient = mock(EngineGrpcClient.class);
         LoopResources loops = mock(LoopResources.class);
@@ -201,6 +205,44 @@ class CacheHitFeedbackFlowTest {
         assertEquals(1000, status.path("inputTokens").asLong());
         assertEquals(996, status.path("engineInputTokens").asLong());
         assertEquals(-4, status.path("inputTokensDelta").asLong());
+    }
+
+    @Test
+    void masterPvAndCountersMatchIndependentEngineCacheHitRecords() throws Exception {
+        Map<String, EngineRpcService.TaskInfoPB> engineRecords = new LinkedHashMap<>();
+        List<Long> hits = List.of(0L, 200L, 500L, 900L);
+        for (int index = 0; index < 64; index++) {
+            String id = "engine-hit-" + index;
+            engineRecords.put(id, task(id, true, hits.get(index % hits.size())));
+        }
+        Map<String, Long> expected = new LinkedHashMap<>();
+        long version = 2;
+        for (var entry : engineRecords.entrySet()) {
+            var engineTask = entry.getValue();
+            expected.put(engineTask.getRequestIdStr(), engineTask.getPrefixLength());
+            select(entry.getKey());
+            poll(worker, engineTask, false, version++);
+            poll(worker, engineTask, true, version++);
+            poll(worker, engineTask, true, version++);
+        }
+
+        Map<String, Long> actual = new LinkedHashMap<>();
+        for (var event : events("cache_hit_comparison")) {
+            assertNull(actual.put(event.path("requestId").asText(), event.path("actualHitTokens").asLong()),
+                    "Duplicate Master comparison for one engine record");
+        }
+        assertEquals(expected, actual);
+        assertEquals(engineRecords.size(), events("prefill_worker_status").size());
+        ArgumentCaptor<Double> reportedHits = ArgumentCaptor.forClass(Double.class);
+        verify(monitor, times(engineRecords.size())).report(eq(CACHE_HIT_COMPARISON_ACTUAL_TOKENS), any(),
+                reportedHits.capture());
+        assertEquals(engineRecords.values().stream().mapToLong(EngineRpcService.TaskInfoPB::getPrefixLength).sum(),
+                reportedHits.getAllValues().stream().mapToLong(Double::longValue).sum());
+        ArgumentCaptor<Double> reportedInputs = ArgumentCaptor.forClass(Double.class);
+        verify(monitor, times(engineRecords.size())).report(eq(CACHE_HIT_COMPARISON_INPUT_TOKENS), any(),
+                reportedInputs.capture());
+        assertEquals(engineRecords.values().stream().mapToLong(EngineRpcService.TaskInfoPB::getInputLength).sum(),
+                reportedInputs.getAllValues().stream().mapToLong(Double::longValue).sum());
     }
 
     @Test

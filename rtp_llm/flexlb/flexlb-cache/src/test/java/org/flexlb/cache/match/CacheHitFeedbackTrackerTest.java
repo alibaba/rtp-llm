@@ -2,14 +2,17 @@ package org.flexlb.cache.match;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
+import com.github.benmanes.caffeine.cache.Cache;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -23,11 +26,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class CacheHitFeedbackTrackerTest {
+    private final ConfigService configService = new ConfigService("""
+            {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":100000}}}
+            """);
 
     @Test
     void failedTaskFeedbackDoesNotDiscardLaterTasks() {
@@ -37,7 +44,7 @@ class CacheHitFeedbackTrackerTest {
                 .thenReturn(feedback -> { throw new IllegalStateException("comparison failed"); });
         when(comparisonService.captureComparison("healthy", RoleType.PREFILL))
                 .thenReturn(feedback -> CompletableFuture.completedFuture(comparison(worker)));
-        CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(comparisonService);
+        CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(comparisonService, configService);
         for (String requestId : List.of("broken", "healthy")) {
             tracker.track(requestId, RoleType.PREFILL, "default", worker,
                     100, 0, CacheMatchResult.empty(CacheMatchSource.KVCM), CompletableFuture.completedFuture(null));
@@ -59,6 +66,9 @@ class CacheHitFeedbackTrackerTest {
 
         assertEquals(1, results.size());
         assertTrue(results.getFirst().isDone());
+        Cache<?, ?> associations = assertInstanceOf(Cache.class, ReflectionTestUtils.getField(tracker, "predictions"));
+        associations.cleanUp();
+        assertEquals(0, associations.estimatedSize(), "A failed Finished callback must also release its association");
     }
 
     @Test
@@ -70,7 +80,7 @@ class CacheHitFeedbackTrackerTest {
             comparisons.incrementAndGet();
             return CompletableFuture.completedFuture(comparison(worker));
         });
-        CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(comparisonService);
+        CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(comparisonService, configService);
         tracker.track("request-1", RoleType.PREFILL, "default", worker,
                 100, 0, CacheMatchResult.empty(CacheMatchSource.KVCM), CompletableFuture.completedFuture(null));
         WorkerStatus.TaskTelemetry telemetry = new WorkerStatus.TaskTelemetry(
@@ -149,7 +159,7 @@ class CacheHitFeedbackTrackerTest {
                                 feedback.predictedHitTokens() < 0 ? null
                                         : new org.flexlb.cache.domain.CacheHitComparisonResult.CachePrediction(
                                                 feedback.predictedHitTokens(), -1, -1), null, null)));
-                CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(service);
+                CacheHitFeedbackTracker tracker = new CacheHitFeedbackTracker(service, configService);
                 CompletableFuture<Long> theory = new CompletableFuture<>();
                 tracker.track("request-1", RoleType.PREFILL, "default", worker, 100, 20,
                         predictionAvailable ? CacheMatchResult.empty(CacheMatchSource.KVCM)
