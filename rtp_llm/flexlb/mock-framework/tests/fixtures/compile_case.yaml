@@ -1,0 +1,78 @@
+id: compiler_fixture
+describe: 配置编译测试，不执行发压
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config:
+      FLEXLB_CONFIG: |
+        {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}}}
+  client:
+    deployment:
+      replicas: 4
+      resources: {cpu: 4, memory: 8GiB}
+      heap: 4GiB
+    config:
+      driver.channels: 8
+  prefill:
+    engine: rtp
+    deployment: {replicas: 4}
+    config:
+      a_b_c: 128
+      cache.sync.delay_ms: 10
+phases:
+- id: measure
+  describe: 编译引用与检查
+  timeout: 120s
+  steps:
+  - call:
+      id: traffic
+      describe: 一次逻辑发压
+      interface: client/traffic/run
+      run: background
+      args:
+        input:
+          trace: datasets/example.pb.zst
+          prepare: {priority: 1}
+        playback:
+          arrival: {mode: uniform, qps: 100}
+          request_timeout: 30s
+      within: 5s
+  - call:
+      id: wait
+      describe: 等待
+      interface: runtime/wait
+      args: {duration: 30s}
+  - call:
+      id: removal
+      describe: 缩容
+      interface: engine/topology/scale_in
+      args: {role: prefill, count: 2}
+  - check:
+      id: members
+      describe: 各Master实例集合与缩容结果一致
+      interface: master/engine/get
+      args: {role: prefill}
+      expect: {eq: {ref: removal.remaining}}
+  - check:
+      id: ttft
+      describe: 全程最大TTFT
+      interface: client/requests/ttft
+      args: {stat: max, range: all}
+      expect: {lte: 2s}
+  - check:
+      id: custom
+      describe: 特殊指标
+      interface: prometheus/query
+      args: {promql: 'max_over_time(example_metric[1m])'}
+      expect: {lte: 100}
+  - call:
+      id: stop
+      describe: 停止新增
+      interface: client/traffic/stop
+  - call:
+      id: drain
+      describe: 排空
+      interface: client/traffic/drain
+      within: 40s
+view: views/default/dashboard.json

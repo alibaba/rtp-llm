@@ -1,0 +1,79 @@
+package org.flexlb.mock.api;
+
+import java.lang.reflect.*;
+import java.util.*;
+import org.flexlb.mock.api.master.MasterApi;
+import org.flexlb.mock.api.engine.EngineApi;
+import org.flexlb.mock.api.client.ClientApi;
+import org.flexlb.mock.api.metrics.PrometheusApi;
+import org.flexlb.mock.api.model.Types;
+
+/** Metadata comes from method signatures, not a parallel handwritten catalog. */
+public final class InterfaceRegistry {
+    private InterfaceRegistry() {}
+
+    public static Map<String, Object> standard() {
+        return describe(MasterApi.class, EngineApi.class, ClientApi.class, PrometheusApi.class);
+    }
+
+    public static Map<String, Object> describe(Class<?>... interfaces) {
+        Map<String, Object> result = new TreeMap<>();
+        for (Class<?> api : interfaces) {
+            if (!api.isInterface()) throw new IllegalArgumentException("Not an interface: " + api);
+            for (Method method : api.getMethods()) {
+                Endpoint endpoint = method.getAnnotation(Endpoint.class);
+                if (endpoint == null || method.getParameterCount() != 1
+                        || !method.getParameterTypes()[0].isRecord())
+                    throw new IllegalArgumentException("API method needs an endpoint and one record argument: " + method);
+                if (!endpoint.value().matches("[a-z][a-z0-9_]*(/[a-z][a-z0-9_]*)+"))
+                    throw new IllegalArgumentException("Invalid interface name: " + endpoint.value());
+                if (endpoint.background() && endpoint.kind() != Endpoint.Kind.action)
+                    throw new IllegalArgumentException("Only actions can run in background");
+                Map<String, Object> spec = new LinkedHashMap<>();
+                spec.put("kind", endpoint.kind().name());
+                spec.put("background", endpoint.background());
+                spec.put("unit", endpoint.unit());
+                spec.put("args", schema(method.getGenericParameterTypes()[0]));
+                spec.put("returns", schema(method.getGenericReturnType()));
+                if (result.putIfAbsent(endpoint.value(), spec) != null)
+                    throw new IllegalArgumentException("Duplicate interface: " + endpoint.value());
+            }
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
+    private static Map<String, Object> schema(Type type) {
+        if (type instanceof ParameterizedType p) {
+            Type[] args = p.getActualTypeArguments();
+            if (p.getRawType() == List.class) return Map.of("type", "array", "items", schema(args[0]));
+            if (p.getRawType() == Map.class && args[0] == String.class)
+                return Map.of("type", "object", "values", schema(args[1]));
+            throw new IllegalArgumentException("Unsupported generic type: " + type);
+        }
+        if (!(type instanceof Class<?> c)) throw new IllegalArgumentException("Unsupported type: " + type);
+        if (c == String.class) return Map.of("type", "string", "minLength", 1);
+        if (c == int.class || c == Integer.class || c == long.class || c == Long.class)
+            return Map.of("type", "integer", "bits", c == int.class || c == Integer.class ? 32 : 64);
+        if (c == double.class || c == Double.class) return Map.of("type", "number");
+        if (c == boolean.class || c == Boolean.class) return Map.of("type", "boolean");
+        if (c == Types.Duration.class) return Map.of("type", "duration");
+        if (c == Types.TimeRange.class) return Map.of("type", "range");
+        if (c.isEnum()) return Map.of("type", "string", "enum",
+                Arrays.stream(c.getEnumConstants()).map(Object::toString).toList());
+        if (!c.isRecord()) throw new IllegalArgumentException("Unsupported API type: " + type);
+        Map<String, Object> fields = new TreeMap<>();
+        List<String> required = new ArrayList<>();
+        for (RecordComponent field : c.getRecordComponents()) {
+            Map<String, Object> spec = new LinkedHashMap<>(schema(field.getGenericType()));
+            Argument annotation = field.getAnnotation(Argument.class);
+            if (annotation == null || !annotation.optional()) required.add(field.getName());
+            if (annotation != null) {
+                if (!Double.isNaN(annotation.minimum())) spec.put("minimum", annotation.minimum());
+                if (annotation.ranges().length > 0) spec.put("ranges", List.of(annotation.ranges()));
+            }
+            fields.put(field.getName(), spec);
+        }
+        return Map.of("type", "object", "name", c.getSimpleName(), "properties", fields,
+                "required", required, "additionalProperties", false);
+    }
+}
