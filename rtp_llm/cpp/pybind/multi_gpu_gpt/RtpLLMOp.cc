@@ -90,8 +90,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.ffn_disaggregate_config,
                                                                            base_params.vit_config,
                                                                            std::move(*gpt_weight))));
-        return std::move(
-            std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
+        return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
     }
 
     if (gen_num_per_cycle > 1 && weight_count == 1) {
@@ -139,7 +138,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         model_id++;
     }
 
-    return std::move(std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
+    return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
 };
 
 RtpLLMOp::RtpLLMOp() {}
@@ -423,7 +422,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         }
     }
     pybind11::gil_scoped_release release;
-    grpc::ServerBuilder builder;
+    grpc::ServerBuilder          builder;
     // Set large message limits as C++-level defaults (overridable via server_config from grpc_group_args.py)
     builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
     builder.AddChannelArgument(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, 1024 * 1024 * 1024);

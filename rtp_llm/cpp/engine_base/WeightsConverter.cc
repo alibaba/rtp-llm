@@ -223,8 +223,7 @@ std::unique_ptr<TensorMap> WeightsConverter::convertGlobalWeight(py::object py_g
 
 std::unique_ptr<rtp_llm::Weights> WeightsConverter::createGptWeights(py::object layer_weights,
                                                                      py::object global_weight) {
-    return std::move(
-        createGptWeights(std::move(convertLayerWeights(layer_weights)), std::move(convertGlobalWeight(global_weight))));
+    return createGptWeights(convertLayerWeights(layer_weights), convertGlobalWeight(global_weight));
 }
 
 std::unique_ptr<rtp_llm::Weights> WeightsConverter::createGptWeights(std::unique_ptr<TensorMaps> layer_weights,

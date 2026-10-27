@@ -276,15 +276,20 @@ def _get_cxx_inc_directories_impl(repository_ctx, cc, lang_is_cpp, tf_sysroot):
     result = raw_exec(repository_ctx, [cc, "-E", "-x" + lang, "-", "-v"] +
                                       sysroot)
     stderr = err_out(result)
+    if result.return_code != 0:
+        auto_configure_fail(
+            "Cannot discover {} system headers with compiler '{}':\n{}\n".format(lang, cc, stderr) +
+            "Check GCC_HOST_COMPILER_PATH (or CLANG_CUDA_COMPILER_PATH) and the compiler runtime libraries.",
+        )
     index1 = stderr.find(_INC_DIR_MARKER_BEGIN)
     if index1 == -1:
-        return []
+        auto_configure_fail("Compiler '{}' did not report a {} include search list:\n{}".format(cc, lang, stderr))
     index1 = stderr.find("\n", index1)
     if index1 == -1:
-        return []
+        auto_configure_fail("Incomplete include search list from compiler '{}':\n{}".format(cc, stderr))
     index2 = stderr.rfind("\n ")
     if index2 == -1 or index2 < index1:
-        return []
+        auto_configure_fail("Empty include search list from compiler '{}':\n{}".format(cc, stderr))
     index2 = stderr.find("\n", index2 + 1)
     if index2 == -1:
         inc_dirs = stderr[index1 + 1:]
