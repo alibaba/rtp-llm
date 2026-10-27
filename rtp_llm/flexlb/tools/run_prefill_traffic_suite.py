@@ -167,7 +167,29 @@ def make_trace(case, seed):
     return warmup, probes, calibration, trace, phases
 
 
-def master_config(dispatch, learning):
+def annotate_slo(audit, rows, slo_ms):
+    """Count deadline goodput over every arrival, not just the successful cohort."""
+    audit["ttft_slo_ms"] = slo_ms
+    for phase in audit["stages"]:
+        samples = [row for row in rows if row["stage"] == phase["stage"]]
+        within = sum(
+            row["success"] and row["ttft_s"] * 1000 <= slo_ms for row in samples
+        )
+        phase["slo_successes"] = within
+        phase["slo_goodput_fraction"] = within / len(samples)
+        phase["slo_success_fraction"] = within / phase["completed"]
+        if (
+            phase.get("allow_rejections") is False
+            and phase["ttft_p99_s"] * 1000 > slo_ms
+        ):
+            raise ValueError(f"low-load phase {phase['stage']} misses TTFT target")
+
+
+def master_config(dispatch, learning, slo_ms=None):
+    if slo_ms is not None:
+        if slo_ms <= 0:
+            raise ValueError("slo_ms must be positive")
+        return {"ttftSloMs": slo_ms, "dispatcher": {"type": dispatch}}
     decision = {"type": "SINGLE"}
     if dispatch == "BATCH":
         decision = {
@@ -232,8 +254,8 @@ def run_case(args, case):
     from runtime.network import http_post_json
 
     proto_utils.PROTO_DIR = HERE.parents[1] / "cpp/model_rpc/proto"
-    config = master_config(args.dispatch, case.get("learning", False))
-    mock_config = json.loads(json.dumps(config))
+    config = master_config(args.dispatch, case.get("learning", False), args.slo_ms)
+    mock_config = master_config(args.dispatch, False)
     del mock_config["router"]["roles"]["prefill"]["tokenBalance"]
     del mock_config["scheduler"]["prefillQueueShedding"]
     mock_config["router"]["roles"]["prefill"]["executionTimeEstimator"] = {
@@ -455,7 +477,15 @@ def run_case(args, case):
     validate_environment(
         stages, topology, json.loads((out / "final-snapshot.json").read_text())
     )
-    audit = audit_run(rows, stages, events, dispatch=args.dispatch, hard_wait_s=6.0)
+    audit = audit_run(
+        rows,
+        stages,
+        events,
+        dispatch=args.dispatch,
+        hard_wait_s=2 * args.slo_ms / 1000 if args.slo_ms else 6.0,
+    )
+    if args.slo_ms is not None:
+        annotate_slo(audit, rows, args.slo_ms)
     audit["performance"] = performance
     audit["trace_sha256"] = manifest["trace_sha256"]
     audit["status"] = "PASS"
@@ -485,6 +515,11 @@ def main():
         "--jitters", nargs="+", choices=("stable", "independent", "correlated")
     )
     parser.add_argument("--seeds", nargs="+", type=int)
+    parser.add_argument(
+        "--slo-ms",
+        type=int,
+        help="Use only this TTFT SLO and transport mode; learn all worker service times",
+    )
     parser.add_argument("--jobs", type=int, choices=(1, 2, 4), default=1)
     parser.add_argument("--run-case", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -497,6 +532,8 @@ def main():
     )
     parser.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.slo_ms is not None and args.slo_ms <= 0:
+        parser.error("--slo-ms must be positive")
     cases = load_cases(args.cases)
     if args.list:
         print(json.dumps(cases, indent=2))
@@ -572,6 +609,8 @@ def main():
                 "--seed",
                 str(seed),
             ]
+            if args.slo_ms is not None:
+                cmd.extend(["--slo-ms", str(args.slo_ms)])
             env = dict(
                 os.environ,
                 FLEXLB_FT_MASTER_HTTP_PORT=str(17480 + slot * 20),

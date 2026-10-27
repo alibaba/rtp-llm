@@ -8,7 +8,13 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from run_prefill_traffic_suite import HERE, load_cases, make_trace, master_config
+from run_prefill_traffic_suite import (
+    HERE,
+    annotate_slo,
+    load_cases,
+    make_trace,
+    master_config,
+)
 
 
 def traffic_case(**overrides):
@@ -277,6 +283,44 @@ class TraceContractTest(unittest.TestCase):
         _, _, _, trace, phases = make_trace(case, 1)
         self.assertEqual({4096}, {row["input_tokens"] for row in trace})
         self.assertEqual(4096, phases[0]["nominal_mean_compute_tokens"])
+
+    def test_slo_goodput_counts_rejections_and_late_successes(self):
+        report = {
+            "stages": [
+                {
+                    "stage": "burst",
+                    "completed": 2,
+                    "ttft_p99_s": 4,
+                    "allow_rejections": True,
+                }
+            ]
+        }
+        rows = [
+            {"stage": "burst", "success": True, "ttft_s": 1},
+            {"stage": "burst", "success": True, "ttft_s": 4},
+            {"stage": "burst", "success": False, "ttft_s": None},
+        ]
+        annotate_slo(report, rows, 3000)
+        self.assertEqual(report["stages"][0]["slo_successes"], 1)
+        self.assertEqual(report["stages"][0]["slo_goodput_fraction"], 1 / 3)
+        self.assertEqual(report["stages"][0]["slo_success_fraction"], 1 / 2)
+        report["stages"][0]["allow_rejections"] = False
+        with self.assertRaisesRegex(ValueError, "misses TTFT target"):
+            annotate_slo(report, rows, 3000)
+
+    def test_single_slo_mode_does_not_smuggle_in_manual_queue_or_capacity_settings(
+        self,
+    ):
+        for mode in ("NON_BATCH", "BATCH"):
+            self.assertEqual(
+                {"ttftSloMs": 3000, "dispatcher": {"type": mode}},
+                master_config(mode, False, 3000),
+            )
+            self.assertEqual(
+                master_config(mode, True, 3000), master_config(mode, False, 3000)
+            )
+        with self.assertRaises(ValueError):
+            master_config("BATCH", True, 0)
 
     def test_dispatch_configuration_selects_real_delivery_modes(self):
         single = master_config("NON_BATCH", False)
