@@ -2,6 +2,7 @@
 
 import random
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,6 +18,61 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_pools as pools
 
 
 class OwnedPoolHostTest(unittest.TestCase):
+    def test_segmented_path_requires_startup_kernels_before_collective(self):
+        layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
+        with self.assertRaisesRegex(RuntimeError, "startup warmup"):
+            owned.try_gather(
+                None,
+                None,
+                (600_001,),
+                None,
+                None,
+                None,
+                layout,
+                None,
+                oversized=True,
+            )
+
+    def test_segmented_plan_covers_mixed_requests_with_bounded_scratch(self):
+        for cp in (1, 2, 4):
+            for ratio in (1, 2):
+                unit = 256 // ratio
+                counts = (0, 17, 600_001, 0, 257, 1_200_003, 1)
+                for tier in (256, 512, 1024):
+                    with self.subTest(cp=cp, ratio=ratio, tier=tier), patch.object(
+                        owned, "_MAX_SCRATCH_MB", tier
+                    ):
+                        plan = owned.plan_segmented_groups(
+                            counts, cp_size=cp, owner_rows=unit
+                        )
+                        self.assertIsNotNone(plan)
+                        self.assertLessEqual(plan.temporary_bytes, tier * 1024**2)
+                        covered = [[] for _ in counts]
+                        for group in plan.groups:
+                            if group.base < 0:
+                                for request in range(group.first, group.stop):
+                                    covered[request].append((0, counts[request]))
+                            else:
+                                self.assertEqual(group.stop, group.first + 1)
+                                self.assertEqual(group.base % (cp * unit), 0)
+                                self.assertEqual(group.base % 256, 0)
+                                self.assertEqual(
+                                    group.local_rows,
+                                    max(
+                                        owned.owned_count(group.count, cp, unit, rank)
+                                        for rank in range(cp)
+                                    ),
+                                )
+                                covered[group.first].append(
+                                    (group.base, group.base + group.count)
+                                )
+                        for count, ranges in zip(counts, covered):
+                            cursor = 0
+                            for begin, end in ranges:
+                                self.assertEqual(begin, cursor)
+                                cursor = end
+                            self.assertEqual(cursor, count)
+
     def test_adaptive_scratch_uses_smallest_tier_for_fewest_groups(self):
         with patch.object(owned, "_MAX_SCRATCH_MB", 1024):
             for cp, ratio, batch, count, groups, max_mb in (
@@ -375,10 +431,12 @@ class OwnedPoolCudaTest(unittest.TestCase):
             u = 256 // ratio
             logical, requests = [], []
             for request in range(group.first, group.stop):
+                begin = max(getattr(group, "base", -1), 0)
+                end = begin + (
+                    group.count if getattr(group, "base", -1) >= 0 else counts[request]
+                )
                 selected = [
-                    j
-                    for j in range(counts[request])
-                    if j // u % cp.cp_size == cp.cp_rank
+                    j for j in range(begin, end) if j // u % cp.cp_size == cp.cp_rank
                 ]
                 logical.extend((j + 1) * ratio - 1 for j in selected)
                 requests.extend([request] * len(selected))
@@ -449,6 +507,7 @@ class OwnedPoolCudaTest(unittest.TestCase):
         dtypes=(torch.int32, torch.int64),
         token_blocks=(128, 128),
         main_storage=(1, 11),
+        segmented=False,
     ):
         ranks, host, ends = self.fixture(
             counts, cp, ratio, dtypes, token_blocks, main_storage
@@ -463,7 +522,11 @@ class OwnedPoolCudaTest(unittest.TestCase):
                 limit=limit or owned._LIMIT,
             )
 
-        plan = plan_fn(counts, cp_size=cp, owner_rows=256 // ratio)
+        plan = (
+            owned.plan_segmented_groups(counts, cp_size=cp, owner_rows=256 // ratio)
+            if segmented
+            else plan_fn(counts, cp_size=cp, owner_rows=256 // ratio)
+        )
         self.assertIsNotNone(plan)
         expected_packets = [
             self.expected_packet(ranks, counts, group) for group in plan.groups
@@ -503,9 +566,12 @@ class OwnedPoolCudaTest(unittest.TestCase):
                     )
                 )
 
-            with patch.object(owned, "plan_groups", plan_fn), patch.object(
-                owned, "_collect", collect
-            ), patch.object(
+            planner_patch = (
+                nullcontext()
+                if segmented
+                else patch.object(owned, "plan_groups", plan_fn)
+            )
+            with planner_patch, patch.object(owned, "_collect", collect), patch.object(
                 triton.runtime.jit.JITFunction,
                 "_do_compile",
                 side_effect=AssertionError("hot-path JIT"),
@@ -525,6 +591,26 @@ class OwnedPoolCudaTest(unittest.TestCase):
                     before[start : start + reference[0].shape[0]].copy_(reference[0])
                 self.assert_bits(workspace.output, before)
         return ranks, host, ends
+
+    def test_oversized_mixed_batch_uses_segments_and_preserves_output_bits(self):
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            for long_count in (580_001, 600_001):
+                for ratio in (1, 2):
+                    for direct in (False, True):
+                        with self.subTest(count=long_count, ratio=ratio, direct=direct):
+                            self.check(
+                                (0, 17, long_count, 257, 0),
+                                4,
+                                ratio,
+                                direct=direct,
+                                segmented=True,
+                            )
+
+    def test_segmented_other_cp_sizes_preserve_output_bits(self):
+        with patch.object(owned, "_MAX_SCRATCH_MB", 256):
+            for cp, count in ((1, 900_001), (2, 600_001)):
+                with self.subTest(cp=cp):
+                    self.check((17, count, 257), cp, 1, segmented=True)
 
     def test_all_owners_ratios_and_ragged_layouts(self):
         for cp in (1, 2, 4):

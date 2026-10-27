@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from math import lcm
 
 import torch
 import triton
@@ -47,6 +48,24 @@ class OwnedPlan:
     max_output_rows: int
     temporary_bytes: int
     index_output_bytes: int
+
+
+@dataclass(frozen=True)
+class OwnedSegment:
+    first: int
+    stop: int
+    rows: int
+    local_rows: int
+    base: int = -1
+    count: int = 0
+
+
+@dataclass(frozen=True)
+class SegmentedPlan:
+    groups: tuple[OwnedSegment, ...]
+    max_local_rows: int
+    max_output_rows: int
+    temporary_bytes: int
 
 
 def owned_count(count, cp_size, owner_rows, rank):
@@ -98,6 +117,85 @@ def adaptive_plan_groups(counts, *, cp_size, owner_rows):
             if len(best.groups) == 1:
                 break
     return best
+
+
+def plan_segmented_groups(counts, *, cp_size, owner_rows):
+    """Plan rank-identical bounded segments only for otherwise rejected batches."""
+    if (
+        cp_size not in (1, 2, 4)
+        or type(owner_rows) is not int
+        or owner_rows <= 0
+        or not 1 <= len(counts) <= 128
+        or any(type(count) is not int or count < 0 for count in counts)
+    ):
+        return None
+    scratch_per_local = _BYTES * (cp_size + 1 if cp_size > 1 else 1) + 16
+    alignment = lcm(cp_size * owner_rows, 256)
+    tiers = tuple(mb * 1024**2 for mb in (256, 512, 1024) if mb <= _MAX_SCRATCH_MB)
+    groups = []
+    short_first = 0
+
+    def flush_short(stop):
+        nonlocal short_first
+        if short_first < stop:
+            plan = adaptive_plan_groups(
+                counts[short_first:stop], cp_size=cp_size, owner_rows=owner_rows
+            )
+            if plan is None:
+                return False
+            groups.extend(
+                OwnedSegment(
+                    short_first + group.first,
+                    short_first + group.stop,
+                    group.rows,
+                    group.local_rows,
+                )
+                for group in plan.groups
+            )
+        short_first = stop
+        return True
+
+    for request, count in enumerate(counts):
+        if plan_groups((count,), cp_size=cp_size, owner_rows=owner_rows) is not None:
+            continue
+        if not flush_short(request):
+            return None
+        choices = []
+        for limit in tiers:
+            local_cap = limit // (scratch_per_local + _INVERSE_BYTES * cp_size)
+            chunk = local_cap * cp_size // alignment * alignment
+            if chunk:
+                choices.append(((count + chunk - 1) // chunk, limit, chunk))
+        if not choices:
+            return None
+        _, limit, chunk = min(choices)
+        for base in range(0, count, chunk):
+            segment_count = min(chunk, count - base)
+            plan = plan_groups(
+                (segment_count,), cp_size=cp_size, owner_rows=owner_rows, limit=limit
+            )
+            if plan is None:
+                return None
+            group = plan.groups[0]
+            groups.append(
+                OwnedSegment(
+                    request,
+                    request + 1,
+                    group.rows,
+                    group.local_rows,
+                    base,
+                    segment_count,
+                )
+            )
+        short_first = request + 1
+    if not flush_short(len(counts)):
+        return None
+    local = max(group.local_rows for group in groups)
+    rows = max(group.rows for group in groups)
+    scratch = scratch_per_local * local + _INVERSE_BYTES * rows
+    if scratch > tiers[-1]:
+        return None
+    return SegmentedPlan(tuple(groups), local, rows, scratch)
 
 
 @lru_cache(maxsize=128, typed=True)
@@ -154,6 +252,8 @@ def _owned(counts, U: tl.constexpr, CP: tl.constexpr, rank):
         "MS",
         "IC",
         "IS",
+        "SEGMENT_BASE",
+        "SEGMENT_COUNT",
     ]
 )
 def _owned_pool_metadata(
@@ -167,6 +267,8 @@ def _owned_pool_metadata(
     CANONICAL,
     FIRST,
     STOP,
+    SEGMENT_BASE,
+    SEGMENT_COUNT,
     ES,
     MC,
     MS,
@@ -181,10 +283,13 @@ def _owned_pool_metadata(
     RANK: tl.constexpr,
     CP_SIZE: tl.constexpr,
     DIRECT: tl.constexpr,
+    SEGMENTED: tl.constexpr,
 ):
     from_slot: tl.constexpr = OWNER // RATIO
     ids = tl.arange(0, 128)
     counts = tl.load(ends + (FIRST + ids) * ES, FIRST + ids < STOP, other=0) // RATIO
+    if SEGMENTED:
+        counts = tl.where(ids == 0, SEGMENT_COUNT, 0)
     base = tl.program_id(0) * 128
     row = base + ids
     if base < ROWS:
@@ -202,7 +307,7 @@ def _owned_pool_metadata(
         local = row - tl.gather(prefix - sizes, request, 0)
         valid = (row < ROWS) & (FIRST + lower < STOP)
         logical = (local // from_slot * CP_SIZE + RANK) * from_slot + local % from_slot
-        pos = (logical + 1) * RATIO - 1
+        pos = (logical + SEGMENT_BASE + 1) * RATIO - 1
         req = (FIRST + request).to(tl.int64)
         # Ownership is logical and independent of main/index physical pages.
         owner_block = pos // OWNER
@@ -243,6 +348,7 @@ def _owned_pool_metadata(
                 FIRST + inverse_request < STOP,
                 other=0,
             )
+            + SEGMENT_BASE
             + inverse_local
             if DIRECT
             else row
@@ -333,6 +439,10 @@ def _metadata_args(
     stop,
     layout,
     direct,
+    *,
+    segment_base=0,
+    segment_count=0,
+    segmented=False,
 ):
     ratio, owner, mtpb, itpb, rank, _, _, meb, ieb, cp = layout
     return (
@@ -346,6 +456,8 @@ def _metadata_args(
         canonical_rows,
         first,
         stop,
+        segment_base,
+        segment_count,
         ends.stride(0),
         mt.shape[1],
         mt.stride(0),
@@ -360,6 +472,7 @@ def _metadata_args(
         rank,
         cp,
         direct,
+        segmented,
     )
 
 
@@ -443,6 +556,27 @@ def warmup(layout, device, gather_fn):
     pack = _owned_pool_pack.warmup(*word_args, grid=pack_grid, num_warps=4)
     pack[pack_grid](*word_args)
     compiled.append(pack)
+    for direct in (False, True):
+        args = _metadata_args(
+            ends,
+            mt,
+            it,
+            slots,
+            inverse,
+            offsets,
+            256,
+            256,
+            0,
+            1,
+            layout,
+            direct,
+            segment_base=owner * cp,
+            segment_count=256,
+            segmented=True,
+        )
+        kernel = _owned_pool_metadata.warmup(*args, grid=(1,), num_warps=4)
+        kernel[(2, 1, 1)](*args)
+        compiled.append(kernel)
     return tuple(compiled)
 
 
@@ -495,6 +629,172 @@ def _validate_local(main, index, ends, mt, it, batch, layout):
             raise ValueError("Owned pool cache has incompatible native storage")
 
 
+def _gather_segmented(
+    main,
+    index,
+    ends,
+    seq_ends,
+    mt,
+    it,
+    layout,
+    kernels,
+    plan,
+    *,
+    workspace,
+    swa,
+    output_stream,
+):
+    from . import _v41_joint_pool as joint
+    from ._v41_prefill_indexer import PrefillIndexerKeys
+
+    ratio, _, _, _, rank, _, _, _, _, cp = layout
+    counts = tuple(end // ratio for end in ends)
+    if workspace is None and swa is not None:
+        from ._v41_prefill_kv_workspace import prepare_global_workspace
+
+        workspace = prepare_global_workspace(swa, counts, output_stream=output_stream)
+    if workspace is not None:
+        joint._validate_workspace(workspace, counts, seq_ends.device)
+        global_views = joint._split_rows(
+            workspace.output,
+            joint._row_partitions(
+                counts, workspace.global_starts, workspace.output.shape[0]
+            ),
+        )
+    device = seq_ends.device
+    send_buffer = torch.empty(
+        plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device
+    )
+    receive_buffer = (
+        torch.empty(cp * plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device)
+        if cp > 1
+        else send_buffer
+    )
+    slots = torch.empty(2 * plan.max_local_rows, dtype=torch.int64, device=device)
+    inverse = torch.empty(2 * plan.max_output_rows, dtype=torch.int64, device=device)
+    pack_words = codec._words_aligned(
+        main.data_ptr(), main.stride(0), index.data_ptr(), index.stride(0)
+    )
+    pack_tile = codec.FP4_ROWS_PER_CTA if pack_words else 1
+    result = [None] * len(ends)
+    long_outputs = {}
+    for group in plan.groups:
+        first, stop, rows, local = group.first, group.stop, group.rows, group.local_rows
+        segmented = group.base >= 0
+        if segmented and first not in long_outputs:
+            padded = triton.cdiv(counts[first], 256) * 256
+            global_keys = (
+                torch.empty((padded, 512), dtype=torch.bfloat16, device=device)
+                if workspace is None
+                else workspace.output
+            )
+            oq = torch.empty((padded, 64), dtype=torch.int8, device=device)
+            os = torch.empty(padded, dtype=torch.int32, device=device)
+            long_outputs[first] = (global_keys, oq, os)
+            result[first] = (
+                (
+                    global_keys[: counts[first]]
+                    if workspace is None
+                    else global_views[first]
+                ),
+                PrefillIndexerKeys(oq[: counts[first]], os[: counts[first]]),
+            )
+        send = send_buffer[: local * _BYTES]
+        receive = receive_buffer[: cp * local * _BYTES]
+        if local:
+            q, s, raw = joint._views(send, local)
+            with record_function_range("dsv41.prefill.pool.owned.pack"):
+                kernels[
+                    (
+                        (7 if workspace is not None else 6)
+                        if segmented
+                        else (4 if workspace is not None else 0)
+                    )
+                ][(triton.cdiv(max(local, rows), 128), 1, 1)](
+                    *_metadata_args(
+                        seq_ends,
+                        mt,
+                        it,
+                        slots,
+                        inverse,
+                        seq_ends if workspace is None else workspace.device_offsets,
+                        local,
+                        rows,
+                        first,
+                        stop,
+                        layout,
+                        workspace is not None,
+                        segment_base=max(group.base, 0),
+                        segment_count=group.count,
+                        segmented=segmented,
+                    )
+                )
+                kernels[5 if pack_words else 1][(triton.cdiv(local, pack_tile), 1, 1)](
+                    slots,
+                    main,
+                    index,
+                    q,
+                    s,
+                    raw,
+                    local,
+                    main.stride(0),
+                    index.stride(0),
+                    main.shape[1],
+                    index.shape[1],
+                )
+            with record_function_range("dsv41.prefill.pool.owned.all_gather"):
+                _collect(receive, send, cp, rank)
+        if segmented:
+            global_keys, full_q, full_s = long_outputs[first]
+            out = (
+                global_keys[group.base : group.base + rows]
+                if workspace is None
+                else global_keys
+            )
+            oq = full_q[group.base : group.base + rows]
+            os = full_s[group.base : group.base + rows]
+        else:
+            out = (
+                torch.empty((rows, 512), dtype=torch.bfloat16, device=device)
+                if workspace is None
+                else workspace.output
+            )
+            oq = torch.empty((rows, 64), dtype=torch.int8, device=device)
+            os = torch.empty(rows, dtype=torch.int32, device=device)
+        if rows:
+            with record_function_range("dsv41.prefill.pool.owned.restore"):
+                kernels[3 if workspace is not None else 2][(rows, 1, 1)](
+                    receive,
+                    inverse,
+                    out,
+                    oq,
+                    os,
+                    rows,
+                    local,
+                    workspace is not None,
+                )
+        if not segmented:
+            starts, cursor = [], 0
+            for count in counts[first:stop]:
+                starts.append(cursor)
+                cursor += triton.cdiv(count, 256) * 256
+            partitions = joint._row_partitions(counts[first:stop], starts, rows)
+            globals_by_request = (
+                joint._split_rows(out, partitions)
+                if workspace is None
+                else global_views[first:stop]
+            )
+            result[first:stop] = [
+                (g, PrefillIndexerKeys(qv, sv))
+                for g, qv, sv in zip(
+                    globals_by_request,
+                    joint._split_rows(oq, partitions),
+                    joint._split_rows(os, partitions),
+                )
+            ]
+    return result if workspace is None else workspace.publish(result)
+
+
 def try_gather(
     main,
     index,
@@ -505,6 +805,7 @@ def try_gather(
     layout,
     kernels,
     *,
+    oversized=False,
     workspace=None,
     swa=None,
     output_stream=None,
@@ -514,12 +815,31 @@ def try_gather(
 
     ratio, owner, _, _, rank, _, _, _, _, cp = layout
     counts = tuple(end // ratio for end in ends)
-    plan = adaptive_plan_groups(counts, cp_size=cp, owner_rows=owner // ratio)
+    plan = (
+        plan_segmented_groups(counts, cp_size=cp, owner_rows=owner // ratio)
+        if oversized
+        else adaptive_plan_groups(counts, cp_size=cp, owner_rows=owner // ratio)
+    )
     if plan is None:
         return None
     if kernels is None:
         raise RuntimeError("Owned pool kernels were not prepared by startup warmup")
     _validate_local(main, index, seq_ends, mt, it, len(ends), layout)
+    if oversized:
+        return _gather_segmented(
+            main,
+            index,
+            ends,
+            seq_ends,
+            mt,
+            it,
+            layout,
+            kernels,
+            plan,
+            workspace=workspace,
+            swa=swa,
+            output_stream=output_stream,
+        )
     pack_words = codec._words_aligned(
         main.data_ptr(), main.stride(0), index.data_ptr(), index.stride(0)
     )
