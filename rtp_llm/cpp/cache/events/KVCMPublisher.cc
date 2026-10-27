@@ -685,6 +685,9 @@ public:
             accepted_count_.fetch_add(1, std::memory_order_relaxed);
         } else {
             dropped_count_.fetch_add(1, std::memory_order_relaxed);
+            if (result == detail::QueuePushResult::FULL) {
+                queue_full_count_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         return detail::toPublishResult(result);
     }
@@ -739,7 +742,9 @@ public:
         return {state_.load(std::memory_order_relaxed),
                 queue_.size(),
                 accepted_count_.load(std::memory_order_relaxed),
-                dropped_count_.load(std::memory_order_relaxed)};
+                dropped_count_.load(std::memory_order_relaxed),
+                queue_full_count_.load(std::memory_order_relaxed),
+                report_failed_count_.load(std::memory_order_relaxed)};
     }
 
 private:
@@ -1082,6 +1087,7 @@ private:
                                             std::chrono::milliseconds(std::max(config_.flush_interval_ms, 1)));
                 if (!reportMutations(batch)) {
                     dropped_count_.fetch_add(batch.size(), std::memory_order_relaxed);
+                    report_failed_count_.fetch_add(batch.size(), std::memory_order_relaxed);
                     state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
                     ++consecutive_mutation_failures;
                     if ((consecutive_mutation_failures & (consecutive_mutation_failures - 1)) == 0) {
@@ -1142,6 +1148,8 @@ private:
     std::atomic<PublisherState>           state_{PublisherState::DISABLED};
     std::atomic<uint64_t>                 accepted_count_{0};
     std::atomic<uint64_t>                 dropped_count_{0};
+    std::atomic<uint64_t>                 queue_full_count_{0};
+    std::atomic<uint64_t>                 report_failed_count_{0};
     std::atomic<uint64_t>                 registration_generation_{0};
     std::atomic<uint64_t>                 next_request_id_{1};
     // Zero means this outage already consumed its registration recovery.
