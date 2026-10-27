@@ -104,13 +104,14 @@ TEST(TransferStageStateTest, HighestPriorityWinsInEitherCompletionOrderAndStillD
         state.addBatch();
         state.finishSubmitting();
         TransferResult crc(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC mismatch"), CacheCopyError::CRC_MISMATCH);
-        TransferResult rpc(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RPC failed"), CacheCopyError::RPC_FAILED);
+        TransferResult rpc(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC failed"), CacheCopyError::RPC_FAILED);
         state.completeBatch(crc_first ? crc : rpc);
         state.completeBatch(crc_first ? rpc : crc);
         EXPECT_EQ(calls, 0u);
         state.completeBatch(ErrorInfo::OkStatus());
         EXPECT_EQ(calls, 1u);
         EXPECT_EQ(result.copy_error, CacheCopyError::CRC_MISMATCH);
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
         EXPECT_EQ(result.status.ToString(), crc_first ? "CRC mismatch; RPC failed" : "RPC failed; CRC mismatch");
     }
 }
@@ -151,6 +152,27 @@ TEST(TransferStageStateTest, ConcurrentFailuresPreserveHighestPriority) {
         EXPECT_NE(result.status.ToString().find(cacheCopyErrorName(error)), std::string::npos);
     }
     EXPECT_EQ(std::count(result.status.ToString().begin(), result.status.ToString().end(), ';'), errors.size() - 1);
+}
+
+TEST(TransferStageStateTest, UnknownCompletionDominatesKnownFailuresInEitherOrder) {
+    for (bool unknown_first : {false, true}) {
+        size_t             callback_count = 0;
+        TransferStageState state([&](TransferResult result) {
+            EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+            ++callback_count;
+        });
+        state.addBatch();
+        state.addBatch();
+        state.addBatch();
+        state.finishSubmitting();
+        const ErrorInfo unknown(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timeout");
+        const ErrorInfo failed(ErrorCode::EXECUTION_EXCEPTION, "business failure");
+        state.completeBatch(unknown_first ? unknown : failed);
+        state.completeBatch(unknown_first ? failed : unknown);
+        EXPECT_EQ(callback_count, 0u);
+        state.completeBatch(ErrorInfo::OkStatus());
+        EXPECT_EQ(callback_count, 1u);
+    }
 }
 
 }  // namespace

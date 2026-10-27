@@ -1148,7 +1148,6 @@ private:
 class RtpLLMCacheEvictionMetricsCollector final {
 public:
     std::string source_tier;
-    std::string target_tier;
     std::string group_type;
     std::string trigger_type;
     int64_t     evictable_candidate_count = 0;
@@ -1161,7 +1160,6 @@ public:
     bool        report_eviction_trigger   = false;
     bool        report_eviction_blocks    = false;
     bool        report_eviction           = false;
-    bool        report_block_idletime     = false;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -1208,10 +1206,8 @@ public:
     int64_t stream_cache_disk_reuse_length   = 0;
     int64_t stream_cache_remote_reuse_length = 0;
 
-    int64_t reuse_interval_avg_ms = 0;
-    int64_t reuse_interval_max_ms = 0;
-    int64_t hit_entry_age_avg_ms  = 0;
-    int64_t hit_entry_age_max_ms  = 0;
+    std::optional<double> reuse_block_first_hit_idletime_ms;
+    double                reuse_block_hit_idletime_ms = 0;
 
     int64_t match_cost_time_us            = 0;
     int64_t load_prepare_latency_us       = 0;
@@ -1341,10 +1337,8 @@ public:
     kmonitor::MutableMetric* stream_cache_memory_reuse_length_metric = nullptr;
     kmonitor::MutableMetric* stream_cache_disk_reuse_length_metric   = nullptr;
     kmonitor::MutableMetric* stream_cache_remote_reuse_length_metric = nullptr;
-    kmonitor::MutableMetric* reuse_interval_avg_ms_metric            = nullptr;
-    kmonitor::MutableMetric* reuse_interval_max_ms_metric            = nullptr;
-    kmonitor::MutableMetric* hit_entry_age_avg_ms_metric             = nullptr;
-    kmonitor::MutableMetric* hit_entry_age_max_ms_metric             = nullptr;
+    kmonitor::MutableMetric* reuse_block_first_hit_idletime_ms_metric = nullptr;
+    kmonitor::MutableMetric* reuse_block_hit_idletime_ms_metric       = nullptr;
     kmonitor::MutableMetric* match_cost_time_us_metric               = nullptr;
     kmonitor::MutableMetric* load_qps_metric                         = nullptr;
     kmonitor::MutableMetric* load_fail_qps_metric                    = nullptr;
