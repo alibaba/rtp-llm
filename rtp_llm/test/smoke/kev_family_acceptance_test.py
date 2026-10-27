@@ -113,6 +113,16 @@ class KevFamilyAcceptanceTest(unittest.TestCase):
         if self.quantization == "PTPC":
             self.quantization = "FP8_PER_CHANNEL_COMPRESSED"
         self.assertIn(self.quantization, ("BF16", "FP8_PER_CHANNEL_COMPRESSED"))
+        reference_precision = reference.get("comparison_precision")
+        if reference_precision is not None:
+            reference_precision = reference_precision.upper()
+            if reference_precision == "PTPC":
+                reference_precision = "FP8_PER_CHANNEL_COMPRESSED"
+            self.assertEqual(
+                reference_precision,
+                self.quantization,
+                "reference tolerances belong to a different requested precision",
+            )
         reuse = _flag("KEV_ACCEPTANCE_REUSE_CACHE", "1")
         shared = _flag("KEV_ACCEPTANCE_SHARED_PREFIX", "0")
         self.assertFalse(shared == "1" and reuse == "0")

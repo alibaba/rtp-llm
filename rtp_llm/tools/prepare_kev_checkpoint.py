@@ -553,6 +553,114 @@ def _validate_export(path: Path, deps) -> None:
         raise ValueError("Exported checkpoint is missing tokenizer_config.json")
 
 
+def _validate_family_export(path: Path, deps) -> None:
+    """Validate a family export without loading its backbone tensor payloads."""
+    manifest = _json(path / "kev_config.json")
+    expected = {
+        "format_version": 1,
+        "backbone_dtype": "bfloat16",
+        "head_dtype": "float32",
+        "add_special_tokens": False,
+        "option_isolation": False,
+    }
+    if not isinstance(manifest, dict) or any(
+        type(manifest.get(key)) is not type(value) or manifest[key] != value
+        for key, value in expected.items()
+    ):
+        raise ValueError(
+            "Exported Kev family manifest differs from the supported contract"
+        )
+    for name in (
+        "hidden_size",
+        "head_dim",
+        "max_options",
+        "max_state_tokens",
+        "max_row_tokens",
+    ):
+        if type(manifest.get(name)) is not int or manifest[name] <= 0:
+            raise ValueError(f"Invalid Kev manifest {name}")
+    if manifest["max_state_tokens"] >= manifest["max_row_tokens"]:
+        raise ValueError("Kev max_row_tokens must leave room after the state")
+    if manifest.get("option_isolation", False) is not False:
+        raise ValueError("Kev row execution does not support option_isolation")
+    if (
+        not isinstance(manifest.get("base_model"), str)
+        or not manifest["base_model"].strip()
+    ):
+        raise ValueError("Invalid Kev manifest base_model")
+    for name in ("source_revision", "base_revision", "source_repo"):
+        value = manifest.get(name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"Invalid Kev manifest {name}")
+    hashes = manifest.get("source_sha256")
+    if (
+        not isinstance(hashes, dict)
+        or set(hashes) != {"head.pt"}
+        or any(
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+            for digest in hashes.values()
+        )
+    ):
+        raise ValueError("Invalid Kev source content fingerprints")
+    temperature = manifest.get("temperature")
+    if (
+        type(temperature) not in (float, int)
+        or not math.isfinite(temperature)
+        or temperature <= 0
+    ):
+        raise ValueError("Invalid Kev temperature")
+
+    config = _json(path / "config.json")
+    if (
+        not isinstance(config, dict)
+        or "text_config" in config
+        or "vision_config" in config
+    ):
+        raise ValueError("Kev family export must contain a text-only backbone config")
+    family._text_config(config)
+    hidden = manifest["hidden_size"]
+    if type(config.get("hidden_size")) is not int or config["hidden_size"] != hidden:
+        raise ValueError("Kev manifest hidden_size differs from backbone config")
+    for name in ("vocab_size", "num_hidden_layers"):
+        if type(config.get(name)) is not int or config[name] <= 0:
+            raise ValueError(f"Invalid Kev backbone {name}")
+    header, _ = _inventory(path)
+    prefix = family._text_prefix(header)
+    if set(family._wanted_keys(header, prefix)) != set(header):
+        raise ValueError("Kev family export contains non-text backbone tensors")
+    for name, info in header.items():
+        if info["dtype"] != "BF16":
+            raise ValueError(f"Kev family backbone tensor must be BF16: {name}")
+    for name, shape in (
+        (prefix + "embed_tokens.weight", [config["vocab_size"], hidden]),
+        (prefix + "norm.weight", [hidden]),
+    ):
+        if header[name]["shape"] != shape:
+            raise ValueError(f"Invalid Kev backbone tensor shape: {name}")
+    head_dim = manifest["head_dim"]
+    _validate_tensor_set(
+        _tensor_header(path / "kev_head.safetensors"),
+        {
+            "q.weight": (head_dim, hidden),
+            "q.bias": (head_dim,),
+            "k.weight": (head_dim, hidden),
+            "k.bias": (head_dim,),
+        },
+        "F32",
+    )
+    ids = manifest.get("special_token_ids")
+    if (
+        not isinstance(ids, list)
+        or any(type(value) is not int or value < 0 for value in ids)
+        or ids != family._tokenizer_ids(path, deps)
+    ):
+        raise ValueError("Kev manifest delimiter IDs differ from the tokenizer")
+    if not (path / "tokenizer_config.json").is_file():
+        raise ValueError("Exported checkpoint is missing tokenizer_config.json")
+
+
 def _cache_root(explicit) -> Path:
     if explicit is not None:
         return Path(explicit).expanduser()
@@ -684,13 +792,21 @@ def prepare_kev_checkpoint(
         # Converter outputs have no integrity sidecar; validate their manifest,
         # all tensor headers/payload sizes, and tokenizer directly.
         manifest = _json(location / "kev_config.json")
+        if not isinstance(manifest, dict):
+            raise ValueError("Exported Kev manifest must be a dictionary")
+        hashes = manifest.get("source_sha256")
         if (
             manifest.get("base_model") == reference.BASE_MODEL
             and manifest.get("hidden_size") == 2560
+            # Both exporters can retain model.language_model.*. The legacy
+            # converter fingerprints all three source files; family exports
+            # fingerprint head.pt only, regardless of their backbone prefix.
+            and isinstance(hashes, dict)
+            and set(hashes) == set(reference.SOURCE_FILES)
         ):
             _validate_export(location, deps)
         else:
-            family.validate_export(location)
+            _validate_family_export(location, deps)
         return checkpoint
     if kind == "remote":
         repo, revision = location

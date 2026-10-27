@@ -301,9 +301,7 @@ class RecognitionTest(unittest.TestCase):
                 prepare.prepare_kev_checkpoint(repo, cache_root="/cache"),
                 "/cache/kev-27b",
             )
-            prepare_family.assert_called_once_with(
-                repo, cache_root="/cache", base=None
-            )
+            prepare_family.assert_called_once_with(repo, cache_root="/cache", base=None)
 
     def test_legacy_export_keeps_original_path_and_needs_no_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,6 +310,9 @@ class RecognitionTest(unittest.TestCase):
                     {
                         "base_model": prepare.reference.BASE_MODEL,
                         "hidden_size": 2560,
+                        "source_sha256": {
+                            name: "a" * 64 for name in prepare.reference.SOURCE_FILES
+                        },
                     }
                 )
             )
@@ -323,6 +324,169 @@ class RecognitionTest(unittest.TestCase):
                 self.assertEqual(prepare.prepare_kev_checkpoint(original), original)
                 validate.assert_called_once_with(Path(directory).resolve(), deps)
                 deps.snapshot_download.assert_not_called()
+
+
+@unittest.skipIf(
+    torch is None or tokenizers is None, "CPU runtime dependencies required"
+)
+class FamilyExportValidationTest(unittest.TestCase):
+    def write_export(
+        self,
+        path,
+        model_type="qwen3",
+        base="Qwen/Qwen3-0.6B",
+        hidden=8,
+        prefix="model.",
+    ):
+        from safetensors.torch import save_file
+
+        path.mkdir()
+        tokenizer = tokenizers.Tokenizer(
+            tokenizers.models.WordLevel({"<unk>": 0}, unk_token="<unk>")
+        )
+        tokenizer.add_special_tokens(list(prepare.family.SPECIAL_TOKENS))
+        tokenizer.save(str(path / "tokenizer.json"))
+        prepare._write_json(path / "tokenizer_config.json", {})
+        manifest = {
+            "format_version": 1,
+            "hidden_size": hidden,
+            "head_dim": 4,
+            "temperature": 1.25,
+            "special_token_ids": [
+                tokenizer.token_to_id(token) for token in prepare.family.SPECIAL_TOKENS
+            ],
+            "max_options": 255,
+            "max_state_tokens": 384,
+            "max_row_tokens": 1024,
+            "base_model": base,
+            "base_revision": None,
+            "source_revision": None,
+            "source_repo": None,
+            "source_sha256": {"head.pt": "a" * 64},
+            "backbone_dtype": "bfloat16",
+            "head_dtype": "float32",
+            "add_special_tokens": False,
+            "option_isolation": False,
+        }
+        prepare._write_json(path / "kev_config.json", manifest)
+        prepare._write_json(
+            path / "config.json",
+            {
+                "model_type": model_type,
+                "hidden_size": hidden,
+                "vocab_size": 16,
+                "num_hidden_layers": 1,
+                "dtype": "bfloat16",
+            },
+        )
+        weights = {
+            prefix
+            + "embed_tokens.weight": torch.zeros(16, hidden, dtype=torch.bfloat16),
+            prefix + "norm.weight": torch.ones(hidden, dtype=torch.bfloat16),
+            prefix
+            + "layers.0.input_layernorm.weight": torch.ones(
+                hidden, dtype=torch.bfloat16
+            ),
+        }
+        save_file(weights, str(path / "model.safetensors"))
+        prepare._write_json(
+            path / "model.safetensors.index.json",
+            {
+                "weight_map": {name: "model.safetensors" for name in weights},
+            },
+        )
+        save_file(
+            {
+                "q.weight": torch.zeros(4, hidden),
+                "q.bias": torch.zeros(4),
+                "k.weight": torch.zeros(4, hidden),
+                "k.bias": torch.zeros(4),
+            },
+            str(path / "kev_head.safetensors"),
+        )
+        return manifest
+
+    def test_family_exports_pass_the_real_preparation_entrypoint(self):
+        # Actual family manifests: LoRA exports preserve either base prefix,
+        # including model.language_model.* for the same 4B base as the legacy
+        # converter. Full-weight 27B exports use model.*.
+        for model_type, base, hidden, prefix in (
+            ("qwen2", "Qwen/Qwen2.5-0.5B", 896, "model."),
+            ("qwen3", "Qwen/Qwen3-0.6B-Base", 1024, "model."),
+            ("qwen3_5_text", "Qwen/Qwen3.5-0.8B-Base", 1024, "model.language_model."),
+            (
+                "qwen3_5_text",
+                prepare.reference.BASE_MODEL,
+                2560,
+                "model.language_model.",
+            ),
+            ("qwen3", "Qwen/Qwen3-8B-Base", 4096, "model."),
+            ("qwen3_5_text", "Qwen/Qwen3.5-9B-Base", 4096, "model.language_model."),
+            ("qwen3_5_text", "Qwen/Qwen3.8-27B", 5120, "model."),
+        ):
+            with self.subTest(
+                base=base, prefix=prefix
+            ), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "export"
+                self.write_export(path, model_type, base, hidden, prefix)
+                original = str(path) + "/."
+                with patch(
+                    "huggingface_hub.snapshot_download",
+                    side_effect=AssertionError("no download"),
+                ):
+                    self.assertEqual(prepare.prepare_kev_checkpoint(original), original)
+                self.assertFalse((path / prepare.INTEGRITY_FILE).exists())
+
+    def test_family_export_rejects_inconsistent_manifest_and_tensor_metadata(self):
+        for field, value in (
+            ("head_dim", 5),
+            ("hidden_size", 9),
+            ("temperature", 0),
+            ("source_sha256", {"head.pt": "bad"}),
+            ("source_sha256", {"head.pt": "a" * 64, "adapter_config.json": "b" * 64}),
+            ("special_token_ids", [5, 4, 3, 2, 1]),
+            ("option_isolation", True),
+            ("format_version", True),
+            ("backbone_dtype", "float16"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "export"
+                manifest = self.write_export(path)
+                manifest[field] = value
+                prepare._write_json(path / "kev_config.json", manifest)
+                with self.assertRaises(ValueError):
+                    prepare.prepare_kev_checkpoint(str(path))
+
+    def test_family_export_rejects_truncated_backbone_and_non_fp32_head(self):
+        from safetensors.torch import load_file, save_file
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "export"
+            self.write_export(path)
+            head_path = path / "kev_head.safetensors"
+            head = load_file(str(head_path))
+            save_file(
+                {name: tensor.bfloat16() for name, tensor in head.items()},
+                str(head_path),
+            )
+            with self.assertRaises(ValueError):
+                prepare.prepare_kev_checkpoint(str(path))
+            save_file(head, str(head_path))
+            shard = path / "model.safetensors"
+            shard.write_bytes(shard.read_bytes()[:-1])
+            with self.assertRaisesRegex(ValueError, "payload"):
+                prepare.prepare_kev_checkpoint(str(path))
+
+    def test_family_export_rejects_index_that_disagrees_with_shard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "export"
+            self.write_export(path)
+            index_path = path / "model.safetensors.index.json"
+            index = json.loads(index_path.read_text())
+            del index["weight_map"]["model.norm.weight"]
+            prepare._write_json(index_path, index)
+            with self.assertRaisesRegex(ValueError, "index does not match"):
+                prepare.prepare_kev_checkpoint(str(path))
 
 
 class MetadataTest(unittest.TestCase):
