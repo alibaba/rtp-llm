@@ -752,6 +752,12 @@ class KVCacheConfig:
     block_tree_memory_evict_high_watermark_ratio: float
     block_tree_disk_evict_low_watermark_ratio: float
     block_tree_disk_evict_high_watermark_ratio: float
+    block_tree_full_device_evict_low_watermark_ratio: float
+    block_tree_full_device_evict_high_watermark_ratio: float
+    block_tree_full_memory_evict_low_watermark_ratio: float
+    block_tree_full_memory_evict_high_watermark_ratio: float
+    block_tree_full_disk_evict_low_watermark_ratio: float
+    block_tree_full_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     reuse_cache_tail_blocks: int

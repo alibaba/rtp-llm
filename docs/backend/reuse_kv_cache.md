@@ -47,6 +47,21 @@ blocks on demand; blocks still referenced by requests or transfers may delay phy
 Scheduler admission separately uses `RESERVE_BLOCK_RATIO` (default 5%) to preserve headroom for
 running requests to grow. This admission reserve is independent of the cache eviction watermarks.
 
+FULL cache groups can override the shared watermarks independently in each tier:
+
+| Tier | FULL low occupancy override | FULL high occupancy override |
+|------|-----------------------------|------------------------------|
+| Device | `BLOCK_TREE_FULL_DEVICE_EVICT_LOW_WATERMARK_RATIO` | `BLOCK_TREE_FULL_DEVICE_EVICT_HIGH_WATERMARK_RATIO` |
+| Memory | `BLOCK_TREE_FULL_MEMORY_EVICT_LOW_WATERMARK_RATIO` | `BLOCK_TREE_FULL_MEMORY_EVICT_HIGH_WATERMARK_RATIO` |
+| Disk | `BLOCK_TREE_FULL_DISK_EVICT_LOW_WATERMARK_RATIO` | `BLOCK_TREE_FULL_DISK_EVICT_HIGH_WATERMARK_RATIO` |
+
+Both values default to `-1`, which inherits that tier's shared watermarks. To
+override a tier, set both values with `0 < low < high <= 1`; setting both to `0`
+disables watermark eviction only for FULL in that tier. SWA and LINEAR continue
+using the shared watermarks. Partial pairs and invalid ratios are startup errors
+for enabled tiers. On-demand reclamation and cross-group eviction dependencies
+are unchanged. CLI flags use the corresponding lowercase names.
+
 All eight combinations are valid, including L2-only and L3-only deployments. Enabling a tier
 without its capacity or path settings is a startup error rather than a silent downgrade, so a
 misconfiguration never degrades quietly into a smaller cache than intended.

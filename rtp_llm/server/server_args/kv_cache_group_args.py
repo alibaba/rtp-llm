@@ -397,6 +397,17 @@ def init_kv_cache_group_args(parser, kv_cache_config):
                 default=default,
                 help=f"BlockTreeCache {tier} 淘汰水位 {boundary} 比例。",
             )
+            full_name = f"block_tree_full_{tier}_evict_{boundary}_watermark_ratio"
+            kv_cache_group.add_argument(
+                f"--{full_name}",
+                env_name=full_name.upper(),
+                bind_to=(kv_cache_config, full_name),
+                type=float,
+                default=-1.0,
+                help=f"BlockTreeCache FULL {tier} 淘汰水位 {boundary} 比例。"
+                "low/high 均为 -1 时继承共享水位，均为 0 时禁用 FULL 水位淘汰；"
+                "否则需满足 0 < low < high <= 1。",
+            )
 
     kv_cache_group.add_argument(
         "--block_tree_full_prefix_scan_interval_ms",

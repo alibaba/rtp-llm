@@ -510,6 +510,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_device_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_device_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_device_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_device_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_memory_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_memory_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_memory_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_memory_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_disk_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_disk_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_disk_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
@@ -584,7 +596,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      12,
+                                      13,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -659,11 +671,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kvcm_min_replica_count,
                                       self.kv_cache_event_snapshot_interval_ms,
                                       self.linear_pool_blocks,
-                                      self.swa_pool_blocks);
+                                      self.swa_pool_blocks,
+                                      self.block_tree_full_device_evict_low_watermark_ratio,
+                                      self.block_tree_full_device_evict_high_watermark_ratio,
+                                      self.block_tree_full_memory_evict_low_watermark_ratio,
+                                      self.block_tree_full_memory_evict_high_watermark_ratio,
+                                      self.block_tree_full_disk_evict_low_watermark_ratio,
+                                      self.block_tree_full_disk_evict_high_watermark_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 77 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
-                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 12) {
+                if (t.size() != 83 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
+                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 13) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -744,6 +762,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.kv_cache_event_snapshot_interval_ms              = t[74].cast<int>();
                 c.linear_pool_blocks                              = t[75].cast<uint32_t>();
                 c.swa_pool_blocks                                 = t[76].cast<uint32_t>();
+                c.block_tree_full_device_evict_low_watermark_ratio  = t[77].cast<double>();
+                c.block_tree_full_device_evict_high_watermark_ratio = t[78].cast<double>();
+                c.block_tree_full_memory_evict_low_watermark_ratio  = t[79].cast<double>();
+                c.block_tree_full_memory_evict_high_watermark_ratio = t[80].cast<double>();
+                c.block_tree_full_disk_evict_low_watermark_ratio    = t[81].cast<double>();
+                c.block_tree_full_disk_evict_high_watermark_ratio   = t[82].cast<double>();
                 if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                     || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
                     || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
