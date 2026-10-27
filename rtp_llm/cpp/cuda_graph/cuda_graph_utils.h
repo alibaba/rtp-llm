@@ -29,6 +29,10 @@ public:
         mtp_target_hidden_states_ = hidden_states;
     };
 
+    void setDsparkConfidenceHiddenLogits(at::Tensor hidden_logits) {
+        dspark_confidence_hidden_logits_ = hidden_logits;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -58,8 +62,10 @@ public:
         py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
         py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
+        py_model_inputs_.attention_inputs.is_packed_target_verify = inputs.attention_inputs.is_packed_target_verify;
         py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+        py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
 
         py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params =
             inputs.attention_inputs.prefill_cuda_graph_copy_params;
@@ -75,9 +81,11 @@ public:
     py::object attn_pyobj_{py::none()};
     // Opt-in backend contract: prepare/replay do not read host metadata
     // values. Cached at capture so replay does not need a Python lookup.
-    bool                     uses_device_metadata_{false};
-    at::Tensor               decoder_layer_hidden_states_;
-    at::Tensor               mtp_target_hidden_states_;
+    bool       uses_device_metadata_{false};
+    at::Tensor decoder_layer_hidden_states_;
+    at::Tensor mtp_target_hidden_states_;
+    // V4.1 confidence-head hidden contributions: FP32 [tokens, 1].
+    at::Tensor               dspark_confidence_hidden_logits_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 
@@ -94,8 +102,8 @@ public:
         (void)keep_graph;
     }
 #endif
-    at::cuda::CUDAGraph graph_;
-    CaptureMemoryHold   mem_hold_;
+    at::cuda::CUDAGraph             graph_;
+    CaptureMemoryHold               mem_hold_;
     rtp_llm::CudaGraphPrepareReplay prepare_replay_;
     rtp_llm::CudaGraphPrepareReplay metadata_replay_;
 };

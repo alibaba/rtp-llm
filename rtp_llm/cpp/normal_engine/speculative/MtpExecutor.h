@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <deque>
 #include <list>
 #include <map>
 #include <memory>
@@ -18,6 +19,7 @@
 #include "rtp_llm/cpp/normal_engine/AsyncRunner.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/DSparkAdaptiveBudget.h"
 
 namespace rtp_llm {
 
@@ -104,9 +106,10 @@ protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
     struct AcceptLenMetricsSnapshot {
-        int64_t total_accept_len        = 0;
-        int64_t total_stream_num        = 0;
-        int64_t total_propose_token_num = 0;
+        int64_t total_accept_len             = 0;
+        int64_t total_stream_num             = 0;
+        int64_t total_propose_token_num      = 0;
+        int64_t total_verify_draft_token_num = 0;
         // Per-priority accept counts derived from the same staged accept_len
         // rows as total_accept_len, so the bucket sums match it exactly.
         std::map<int32_t, int64_t> accept_len_by_priority;
@@ -140,8 +143,9 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
+    void
+    launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size, bool geometry_ready = false);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
@@ -149,15 +153,27 @@ protected:
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
     GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
-    SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
-                                      const torch::Tensor& base_logits,
-                                      const torch::Tensor& anchors);
-    void            runDSparkProposal(GptModelInputs&                                  proposal_input,
-                                      const StreamGroups&                              stream_groups,
-                                      const MtpBatchStreamProcessor::DSparkRoundState& round_state,
-                                      SamplerOutput&                                   draft_sampler_output,
-                                      int64_t&                                         model_forward_us);
-    GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    // Pre-norm hidden projection [B*gamma,1], FP32. Undefined in off mode.
+    SamplerOutput sampleDSparkDraft(const StreamGroups&  stream_groups,
+                                    const torch::Tensor& base_logits,
+                                    const torch::Tensor& anchors,
+                                    const torch::Tensor& confidence_hidden_logits = torch::Tensor());
+    struct DSparkVerifyPlan {
+        // -1 means the original full-width path, including seeded batches.
+        int64_t              draft_budget = -1;
+        std::vector<int64_t> stable_order;
+        // Adaptive observations preserve proposal row identities even if the
+        // scheduler reorders or retires streams before the D2H copy completes.
+        std::vector<int64_t>          request_ids;
+        int                           budget_per_request = -1;
+        std::shared_ptr<torch::Event> start_event;
+    };
+    DSparkVerifyPlan runDSparkProposal(GptModelInputs&                                  proposal_input,
+                                       const StreamGroups&                              stream_groups,
+                                       const MtpBatchStreamProcessor::DSparkRoundState& round_state,
+                                       SamplerOutput&                                   draft_sampler_output,
+                                       int64_t&                                         model_forward_us);
+    GptModelOutputs  runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                      const torch::Tensor&                draft_tokens,
@@ -166,7 +182,10 @@ protected:
                               torch::Event&                                accept_len_ready_event,
                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                               MtpMetricsCollector&                         metrics_collector,
-                              int64_t                                      model_forward_us);
+                              int64_t                                      model_forward_us,
+                              const torch::Tensor&                         confidence_rates         = torch::Tensor(),
+                              const torch::Tensor&                         confidence_valid_lengths = torch::Tensor(),
+                              int64_t                                      verify_draft_token_num   = -1);
     std::shared_ptr<MtpTargetLogprobs>
                  launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
                                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -200,10 +219,21 @@ protected:
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
     AcceptLenMetricsSnapshot consumePendingAcceptLenMetrics();
-    void                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
+    void                     collectPendingDecodeMetrics(MtpMetricsCollector& metrics_collector);
+    torch::Tensor            snapshotConfidenceValidLengths(const torch::Tensor&                        draft_lengths,
+                                                            const SpecLogitsVerifyRunner::LaunchResult& verify_result,
+                                                            const c10::Device&                          device,
+                                                            torch::Event&                               ready_event);
+    DSparkVerifyPlan         prepareDSparkVerifyPlan(const StreamGroups& stream_groups);
+    void                     consumeDSparkBudgetObservations();
+    void                     stageDSparkBudgetObservation(const DSparkVerifyPlan&       plan,
+                                                          const torch::Tensor&          confidence_rates,
+                                                          std::shared_ptr<torch::Event> finish_event);
+    bool                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
                                                    torch::Event&        accept_len_ready_event,
                                                    size_t               stream_count,
-                                                   std::vector<int32_t> row_priorities);
+                                                   std::vector<int32_t> row_priorities,
+                                                   int64_t              verify_draft_token_num = -1);
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -302,6 +332,27 @@ private:
     size_t        draft_vocab_size_;
     torch::Tensor dspark_markov_w1_;
     torch::Tensor dspark_markov_w2_;
+    // DeepSeek V4.1 only; proposal width stays fixed. Adaptive verification
+    // chooses the packed target/commit width independently each round.
+    std::string   dspark_confidence_mode_ = "off";
+    torch::Tensor dspark_confidence_head_;
+    // Independent sigmoid temperature; checkpoint training temperature is unknown.
+    double                                             dspark_confidence_temperature_ = 1.0;
+    int64_t                                            dspark_verify_budget_          = -1;
+    bool                                               dspark_packed_verify_          = false;
+    bool                                               dspark_seed_fallback_logged_   = false;
+    std::unique_ptr<speculative::DSparkAdaptiveBudget> dspark_adaptive_budget_;
+    struct DSparkBudgetObservation {
+        std::vector<int64_t>          request_ids;
+        int                           budget_per_request;
+        torch::Tensor                 confidence_cpu;
+        std::shared_ptr<torch::Event> start_event;
+        std::shared_ptr<torch::Event> finish_event;
+        std::shared_ptr<torch::Event> ready_event;
+    };
+    std::deque<DSparkBudgetObservation> dspark_budget_observations_;
+    int64_t                             dspark_last_budget_batch_ = -1;
+    int                                 dspark_last_budget_       = -1;
     // The two wrappers keep stable runtime roles. Ordinary MTP uses decode and
     // post-verify prefill roles; DSpARK supplies propose and commit construction
     // parameters to the same two slots.
@@ -322,17 +373,26 @@ private:
 
     torch::Tensor d2t_map_;
 
+    struct PendingAcceptLenMetrics {
+        torch::Tensor                 accept_len_sum_gpu;
+        torch::Tensor                 accept_len_sum_cpu;
+        torch::Tensor                 accept_len_rows_gpu;
+        torch::Tensor                 accept_len_rows_cpu;
+        torch::Tensor                 confidence_gpu;
+        torch::Tensor                 confidence_cpu;
+        torch::Tensor                 confidence_lengths_cpu;
+        std::vector<torch::Tensor>    host_inputs;
+        std::vector<int32_t>          row_priorities;
+        std::shared_ptr<torch::Event> ready_event;
+        int64_t                       total_stream_num             = 0;
+        int64_t                       total_propose_token_num      = 0;
+        int64_t                       total_verify_draft_token_num = 0;
+    };
     torch::Stream collect_metrics_stream_;
-    torch::Tensor metrics_accept_len_sum_gpu_;
-    torch::Tensor metrics_accept_len_sum_cpu_;
-    // Per-stream accept_len rows staged next to the scalar sum so priority
-    // buckets can be rebuilt on consume without an extra sync.
-    torch::Tensor                 metrics_accept_len_rows_gpu_;
-    torch::Tensor                 metrics_accept_len_rows_cpu_;
-    std::vector<int32_t>          metrics_accept_len_row_priorities_;
-    std::shared_ptr<torch::Event> metrics_accept_len_ready_event_;
-    int64_t                       metrics_accept_len_stream_num_        = 0;
-    int64_t                       metrics_accept_len_propose_token_num_ = 0;
+    // Keep each round's budget beside its asynchronous result. A busy metrics
+    // stream must neither block Decode nor overwrite an in-flight D2H buffer.
+    static constexpr size_t             kMaxPendingAcceptLenMetrics = 8;
+    std::deque<PendingAcceptLenMetrics> pending_accept_len_metrics_;
 
     // Records the most recent forward so an early-return step can wait for it
     // before its buffers are released, without a device-wide sync.

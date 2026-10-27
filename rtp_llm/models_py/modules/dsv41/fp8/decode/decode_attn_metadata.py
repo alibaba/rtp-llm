@@ -125,6 +125,10 @@ class DSv4DecodeAttnMetadataFP8:
 
     # ---- Cuda graph: reserved for Phase 3 (forbid_realloc, fixed addr) ----
     is_cuda_graph: bool = False
+    # Packed target rows keep a static execution shape, but real request
+    # boundaries come from these lengths and decode_cu_seq_per_req.
+    is_packed: bool = False
+    input_lengths: Optional[torch.Tensor] = None
     # Request-major validity, shared by all S queries of a request. CUDA Graph
     # preparation rewrites every entry before every replay at a stable address.
     # This is selection-only metadata, never a replacement for KV/MTP lengths.

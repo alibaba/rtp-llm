@@ -2266,6 +2266,68 @@ void MtpBatchStreamProcessor::prepareDSparkTargetVerifyModelInput(const DSparkRo
     }
 }
 
+MtpBatchStreamProcessor::DSparkPackedTargetLayout
+MtpBatchStreamProcessor::prepareDSparkPackedTargetVerifyModelInput(const DSparkRoundState& round_state,
+                                                                   GptModelInputs&         model_input,
+                                                                   const torch::Tensor&    proposals,
+                                                                   const torch::Tensor&    valid_draft_lengths,
+                                                                   int64_t                 total_draft_budget,
+                                                                   TensorHolder&           host_holder,
+                                                                   torch::Tensor*          owned_proposals) {
+    RTP_LLM_CHECK_WITH_INFO(round_state.anchors.defined() && round_state.anchors.numel() > 0,
+                            "dspark packed verify: a nonempty round is required");
+    const int64_t batch_size   = round_state.anchors.numel();
+    const int64_t verify_width = propose_step_ + 1;
+    RTP_LLM_CHECK_WITH_INFO(valid_draft_lengths.defined() && valid_draft_lengths.is_cuda()
+                                && valid_draft_lengths.scalar_type() == torch::kInt32 && valid_draft_lengths.dim() == 1
+                                && valid_draft_lengths.size(0) == batch_size && valid_draft_lengths.is_contiguous(),
+                            "dspark packed verify: valid_draft_lengths must be contiguous CUDA int32 [batch]");
+    RTP_LLM_CHECK_WITH_INFO(proposals.defined() && proposals.is_cuda()
+                                && proposals.device() == valid_draft_lengths.device()
+                                && round_state.anchors.device() == proposals.device(),
+                            "dspark packed verify: lengths, proposals and anchors must share a CUDA device");
+    RTP_LLM_CHECK_WITH_INFO(total_draft_budget >= 0 && total_draft_budget <= batch_size * propose_step_,
+                            "dspark packed verify: draft budget %ld is outside [0, %ld]",
+                            total_draft_budget,
+                            batch_size * propose_step_);
+
+    prepareDSparkTargetVerifyModelInput(round_state, model_input, proposals, host_holder, owned_proposals);
+    DSparkPackedTargetLayout result;
+    result.dense_tokens       = model_input.combo_tokens.reshape({batch_size, verify_width});
+    result.dense_position_ids = model_input.combo_position_ids;
+    if (total_draft_budget == batch_size * propose_step_) {
+        return result;
+    }
+
+    // All query lengths include the carried anchor. With a host-known budget,
+    // searchsorted has a fixed-size output and never synchronizes to discover
+    // the number of selected rows. The unique round-head planner owns the
+    // value/sum invariant; bounds keep a broken caller from indexing outside
+    // the dense source buffers without introducing a host validation copy.
+    auto query_lengths = valid_draft_lengths + 1;
+    auto query_ends    = query_lengths.cumsum(0, torch::kInt64);
+    auto query_starts  = query_ends - query_lengths;
+    auto packed_rows   = torch::arange(batch_size + total_draft_budget, proposals.options().dtype(torch::kInt64));
+    auto owners =
+        at::searchsorted(query_ends, packed_rows, /*out_int32=*/false, /*right=*/true).clamp(0, batch_size - 1);
+    auto positions         = (packed_rows - query_starts.index_select(0, owners)).clamp(0, propose_step_);
+    result.packed_to_dense = owners * verify_width + positions;
+
+    model_input.combo_tokens = model_input.combo_tokens.index_select(0, result.packed_to_dense);
+    if (result.dense_position_ids.defined() && result.dense_position_ids.numel() > 0) {
+        model_input.combo_position_ids = result.dense_position_ids.reshape({batch_size * verify_width, -1})
+                                             .index_select(0, result.packed_to_dense)
+                                             .reshape({-1});
+    }
+    if (round_state.engram_windows.defined()) {
+        model_input.engram_token_windows = model_input.engram_token_windows.index_select(0, result.packed_to_dense);
+    }
+    model_input.input_lengths           = std::move(query_lengths);
+    model_input.sequence_lengths_plus_1 = model_input.prefix_lengths + 1;
+    model_input.lm_output_indexes       = packed_rows.to(torch::kInt32);
+    return result;
+}
+
 void MtpBatchStreamProcessor::expandDSparkTargetVerifyPositionIdsFromProposal(GptModelInputs& model_input) const {
     if (!model_input.combo_position_ids.defined() || model_input.combo_position_ids.numel() == 0) {
         return;
@@ -2289,18 +2351,19 @@ void MtpBatchStreamProcessor::expandDSparkTargetVerifyPositionIdsFromProposal(Gp
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                                                 const torch::Tensor& target_features,
                                                                 size_t               batch_size) {
-    const int64_t verify_width = propose_step_ + 1;
     RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
                             "dspark decode tail: target MTP hidden buffer did not provide aux features");
-    RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == static_cast<int64_t>(batch_size) * verify_width,
-                            "dspark decode tail: aux rows %ld != batch*verify_width %ld",
+    RTP_LLM_CHECK_WITH_INFO(model_input.combo_tokens.defined() && model_input.input_lengths.defined()
+                                && model_input.input_lengths.numel() == static_cast<int64_t>(batch_size),
+                            "dspark decode tail: verify tokens/lengths must describe the current batch");
+    RTP_LLM_CHECK_WITH_INFO(target_features.dim() == 2 && target_features.size(0) == model_input.combo_tokens.numel(),
+                            "dspark decode tail: aux rows %ld != verify token rows %ld",
                             target_features.size(0),
-                            static_cast<int64_t>(batch_size) * verify_width);
+                            model_input.combo_tokens.numel());
 
-    // Dense commit reuses the target verify geometry verbatim. In particular,
-    // combo_tokens remains [anchor, p1, ..., p_gamma], independent of the
-    // rejection result; later rounds overwrite rows beyond the accepted
-    // prefix. Only the rank-local target feature tensor is rebound here.
+    // Commit reuses dense or packed target verify geometry verbatim, independent
+    // of rejection. Later rounds overwrite rows beyond the accepted prefix.
+    // Only the rank-local target feature tensor is rebound here.
     model_input.is_target_verify   = true;
     model_input.last_hidden_states = target_features;
 }

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <torch/torch.h>
+#include <algorithm>
 #include <vector>
 #include <limits>
 
@@ -745,6 +746,203 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_FinalizeDefaultsPreserve
     // Row 0: accepted at position 0 (draft==target), greedy-rejected at 1
     // -> pos=1, accept count = pos+1 = 2.
     EXPECT_EQ(acc.cpu()[0].item<int>(), 2);
+}
+
+namespace {
+
+// CPU specification oracle: categorical residual CDF and exact supplied
+// uniforms, independent of the CUDA reduction/scan and its output buffers.
+std::pair<torch::Tensor, torch::Tensor> boundedSamplingReference(const FinalizeFixture& f,
+                                                                 const torch::Tensor&   lengths,
+                                                                 bool                   finalize,
+                                                                 bool                   draft_point_mass,
+                                                                 bool                   target_point_mass) {
+    constexpr int B = FinalizeFixture::batch_size, G = FinalizeFixture::num_spec, V = FinalizeFixture::vocab_size;
+    constexpr int W     = FinalizeFixture::target_stride;
+    auto          draft = f.draft_token_ids.cpu(), target = f.target_token_ids.cpu();
+    auto          q = f.draft_probs.cpu(), p = f.target_probs.cpu(), uniforms = f.uniform_samples.cpu();
+    auto          stochastic = f.do_sample.cpu(), force = f.force_mask.cpu();
+    auto          lens         = lengths.defined() ? lengths.cpu() : torch::full({B}, G, torch::kInt32);
+    auto          ids          = torch::full({B, G + 1}, finalize ? 0 : -1, torch::kInt32);
+    auto          counts       = torch::empty({B}, torch::kInt32);
+    const auto    target_token = [&](int row, int pos) {
+        return target.data_ptr<int>()[((row * (G + 1) + pos) * W) + W - 1];
+    };
+    for (int b = 0; b < B; ++b) {
+        const int limit = std::clamp(lens.data_ptr<int>()[b], 0, G);
+        auto*     out   = ids.data_ptr<int>() + b * (G + 1);
+        if (finalize && force.data_ptr<bool>()[b]) {
+            std::copy_n(draft.data_ptr<int>() + b * G, limit, out);
+            out[limit]                = target_token(b, limit);
+            counts.data_ptr<int>()[b] = limit + 1;
+            continue;
+        }
+        int accepted = 0;
+        for (; accepted < limit; ++accepted) {
+            const int    token     = draft.data_ptr<int>()[b * G + accepted];
+            const int    target_id = target_token(b, accepted);
+            const double q_token   = draft_point_mass ? 1.0 : q.data_ptr<float>()[(b * G + accepted) * V + token];
+            const double p_token   = target_point_mass ? (token == target_id ? 1.0 : 0.0) :
+                                                         p.data_ptr<float>()[(b * (G + 1) + accepted) * V + token];
+            const double alpha     = std::min(1.0, p_token / q_token);
+            const bool   accept    = stochastic.data_ptr<bool>()[b] ?
+                                         uniforms.data_ptr<float>()[b * (G + 1) + accepted] < alpha :
+                                         token == target_id;
+            if (accept) {
+                out[accepted] = token;
+                continue;
+            }
+            if (!stochastic.data_ptr<bool>()[b]) {
+                out[accepted] = target_id;
+            } else {
+                std::vector<double> residual(V);
+                double              mass = 0.0;
+                for (int v = 0; v < V; ++v) {
+                    const double pv = target_point_mass ? (v == target_id ? 1.0 : 0.0) :
+                                                          p.data_ptr<float>()[(b * (G + 1) + accepted) * V + v];
+                    const double qv =
+                        draft_point_mass ? (v == token ? 1.0 : 0.0) : q.data_ptr<float>()[(b * G + accepted) * V + v];
+                    residual[v] = std::max(pv - qv, 0.0);
+                    mass += residual[v];
+                }
+                EXPECT_GT(mass, 0.0);
+                const double cutoff = uniforms.data_ptr<float>()[b * (G + 1) + accepted + 1] * mass;
+                double       cdf    = 0.0;
+                for (int v = 0; v < V; ++v) {
+                    cdf += residual[v];
+                    if (cdf > cutoff) {
+                        out[accepted] = v;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+        if (accepted == limit) {
+            out[limit] = target_token(b, limit);
+        }
+        counts.data_ptr<int>()[b] = accepted + 1;
+    }
+    return {ids, counts};
+}
+
+std::pair<torch::Tensor, torch::Tensor> runBoundedSampling(const FinalizeFixture& f,
+                                                           cudaStream_t           stream,
+                                                           const torch::Tensor&   lengths,
+                                                           bool                   finalize,
+                                                           bool                   draft_point_mass  = false,
+                                                           bool                   target_point_mass = false) {
+    auto lens = lengths.defined() ? lengths.to(fxIntCuda()) : torch::Tensor();
+    auto ids  = torch::full(
+        {FinalizeFixture::batch_size, FinalizeFixture::num_spec + 1}, FinalizeFixture::sentinel, fxIntCuda());
+    auto counts = torch::full({FinalizeFixture::batch_size}, FinalizeFixture::sentinel, fxIntCuda());
+    // Tensor construction uses the current torch stream; this fixture launches
+    // on a separate stream. Only the test synchronizes that setup dependency.
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto status =
+        rtp_llm::invokeRejectionSampling<float, int>(draft_point_mass ? nullptr : f.draft_probs.data_ptr<float>(),
+                                                     f.draft_token_ids.data_ptr<int>(),
+                                                     f.uniform_samples.data_ptr<float>(),
+                                                     target_point_mass ? nullptr : f.target_probs.data_ptr<float>(),
+                                                     f.target_token_ids.data_ptr<int>(),
+                                                     FinalizeFixture::target_stride,
+                                                     ids.data_ptr<int>(),
+                                                     counts.data_ptr<int>(),
+                                                     f.do_sample.data_ptr<bool>(),
+                                                     FinalizeFixture::batch_size,
+                                                     FinalizeFixture::num_spec,
+                                                     FinalizeFixture::vocab_size,
+                                                     stream,
+                                                     draft_point_mass,
+                                                     target_point_mass,
+                                                     f.force_mask.data_ptr<bool>(),
+                                                     finalize,
+                                                     lens.defined() ? lens.data_ptr<int32_t>() : nullptr);
+    EXPECT_EQ(status, cudaSuccess);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+    return {ids.cpu(), counts.cpu()};
+}
+
+}  // namespace
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedMixedLengthsMatchCpuReference) {
+    auto f = FinalizeFixture::make();
+    for (const auto& lengths :
+         {torch::tensor({0, 1, 3, 2, 3}, torch::kInt32), torch::tensor({2, 0, 1, 3, 0}, torch::kInt32)}) {
+        for (bool finalize : {false, true}) {
+            for (bool draft_point_mass : {false, true}) {
+                for (bool target_point_mass : {false, true}) {
+                    SCOPED_TRACE(finalize);
+                    SCOPED_TRACE(draft_point_mass);
+                    SCOPED_TRACE(target_point_mass);
+                    auto expected = boundedSamplingReference(f, lengths, finalize, draft_point_mass, target_point_mass);
+                    auto actual =
+                        runBoundedSampling(f, stream_, lengths, finalize, draft_point_mass, target_point_mass);
+                    EXPECT_TRUE(torch::equal(actual.first, expected.first)) << actual.first << "\n" << expected.first;
+                    EXPECT_TRUE(torch::equal(actual.second, expected.second));
+                    EXPECT_FALSE(actual.first.eq(FinalizeFixture::sentinel).any().item<bool>());
+                }
+            }
+        }
+    }
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedResidualUsesNextUniformAndDenseStride) {
+    auto f = FinalizeFixture::make();
+    // Row 3 rejects its last valid draft at position 1. q(13)=1/2,
+    // p(13)=1/8, and the residual has equal mass on tokens 3 and 4.
+    f.draft_probs[3][1].zero_();
+    f.draft_probs.index_put_({3, 1, 13}, 0.5f);
+    f.draft_probs.index_put_({3, 1, 1}, 0.25f);
+    f.draft_probs.index_put_({3, 1, 2}, 0.25f);
+    f.target_probs[3][1].zero_();
+    f.target_probs.index_put_({3, 1, 13}, 0.125f);
+    f.target_probs.index_put_({3, 1, 1}, 0.125f);
+    for (int token : {2, 3, 4}) {
+        f.target_probs.index_put_({3, 1, token}, 0.25f);
+    }
+    f.uniform_samples.index_put_({3, 1}, 0.75f);
+    f.uniform_samples.index_put_({3, 3}, 0.6f);  // unused physical final slot
+    auto lengths = torch::tensor({0, 1, 3, 2, 3}, torch::kInt32);
+    for (float residual_uniform : {0.1f, 0.9f}) {
+        f.uniform_samples.index_put_({3, 2}, residual_uniform);
+        for (bool finalize : {false, true}) {
+            auto expected = boundedSamplingReference(f, lengths, finalize, false, false);
+            auto actual   = runBoundedSampling(f, stream_, lengths, finalize);
+            EXPECT_TRUE(torch::equal(actual.first, expected.first));
+            EXPECT_TRUE(torch::equal(actual.second, expected.second));
+            EXPECT_EQ(actual.first[3][1].item<int>(), residual_uniform < 0.5f ? 3 : 4);
+            EXPECT_EQ(actual.second[3].item<int>(), 2);
+            EXPECT_EQ(actual.first[3][2].item<int>(), finalize ? 0 : -1);
+            EXPECT_EQ(actual.first[3][3].item<int>(), finalize ? 0 : -1);
+        }
+    }
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedFullWidthsPreserveLegacyBytes) {
+    auto f       = FinalizeFixture::make();
+    auto lengths = torch::full({FinalizeFixture::batch_size}, FinalizeFixture::num_spec, torch::kInt32);
+    for (bool finalize : {false, true}) {
+        for (bool draft_point_mass : {false, true}) {
+            for (bool target_point_mass : {false, true}) {
+                auto legacy  = runBoundedSampling(f, stream_, {}, finalize, draft_point_mass, target_point_mass);
+                auto bounded = runBoundedSampling(f, stream_, lengths, finalize, draft_point_mass, target_point_mass);
+                EXPECT_TRUE(torch::equal(legacy.first, bounded.first));
+                EXPECT_TRUE(torch::equal(legacy.second, bounded.second));
+            }
+        }
+    }
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedLengthsClampOnDevice) {
+    auto f       = FinalizeFixture::make();
+    auto lengths = torch::tensor({-7, 1, 999, 2, std::numeric_limits<int>::min()}, torch::kInt32);
+    for (bool finalize : {false, true}) {
+        auto expected = boundedSamplingReference(f, lengths, finalize, false, false);
+        auto actual   = runBoundedSampling(f, stream_, lengths, finalize);
+        EXPECT_TRUE(torch::equal(actual.first, expected.first));
+        EXPECT_TRUE(torch::equal(actual.second, expected.second));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

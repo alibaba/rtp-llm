@@ -57,6 +57,7 @@ public:
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        is_packed_target_verify_(graph_params.is_packed_target_verify),
         role_(graph_params.role),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
@@ -119,8 +120,8 @@ public:
         py_attn_pyobj_method_                                  = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_                                     = py_instance_.attr(forward_method_name);
         capture_mem_hold_.py_model_inputs_.expert_token_counts = graph_params.expert_token_counts;
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
@@ -157,34 +158,34 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs&                inputs,
-                                 CudaGraphState&                     state,
-                                 const AttentionInputMetadataParams* metadata = nullptr);
+    void captureDecode();
+    void capturePrefill();
+    void captureDecodeOneBatchSize(int bs);
+    void capturePrefillOneSeqLen(int seq_len);
+    void prepareInputs(const PyModelInputs&                inputs,
+                       CudaGraphState&                     state,
+                       const AttentionInputMetadataParams* metadata = nullptr);
     void prepareInputData(const PyModelInputs& inputs, CudaGraphState& state, FusedD2DCopyParams* copies = nullptr);
-    void           prepareAttentionInputs(const PyModelInputs& inputs,
-                                          CudaGraphState&      state,
-                                          bool                 skip_forward_event_sync = false) override;
-    void           prepareAttentionInputsImpl(const PyModelInputs&                inputs,
-                                              CudaGraphState&                     state,
-                                              bool                                skip_forward_event_sync,
-                                              bool                                copy_input_data,
-                                              const AttentionInputMetadataParams* metadata = nullptr);
-    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
-    bool           canRun(const PyModelInputs& inputs,
-                          CudaGraphState&      state,
-                          CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphSize(const CudaGraphState& state) const;
+    void prepareAttentionInputs(const PyModelInputs& inputs,
+                                CudaGraphState&      state,
+                                bool                 skip_forward_event_sync = false) override;
+    void prepareAttentionInputsImpl(const PyModelInputs&                inputs,
+                                    CudaGraphState&                     state,
+                                    bool                                skip_forward_event_sync,
+                                    bool                                copy_input_data,
+                                    const AttentionInputMetadataParams* metadata = nullptr);
+    void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool canRun(const PyModelInputs& inputs,
+                CudaGraphState&      state,
+                CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
+    void replayGraph(int key);
+    void replayDecode(int bs);
+    void replayPrefill(int seq_len);
+    int  getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     PyModelOutputs
-    forward(const PyModelInputs& inputs, CudaGraphState& state, const AttentionInputMetadataParams* metadata);
-    void           initCapture() override;
+         forward(const PyModelInputs& inputs, CudaGraphState& state, const AttentionInputMetadataParams* metadata);
+    void initCapture() override;
 
     bool captureSessionMayBeDirty() const override {
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
@@ -252,6 +253,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    is_packed_target_verify_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};

@@ -45,3 +45,15 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "rtp_llm_speculative_metrics_test",
+    srcs = [
+        "RtpLLMSpeculativeMetricsTest.cc",
+    ],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

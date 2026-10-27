@@ -1,4 +1,29 @@
+import argparse
+import math
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _confidence_temperature(value):
+    try:
+        temperature = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "expected a positive finite temperature"
+        ) from error
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise argparse.ArgumentTypeError("expected a positive finite temperature")
+    return temperature
+
+
+def _verify_budget(value):
+    try:
+        budget = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("expected an integer budget >= -1") from error
+    if budget < -1:
+        raise argparse.ArgumentTypeError("expected an integer budget >= -1")
+    return budget
 
 
 def init_speculative_decoding_group_args(parser, sp_config):
@@ -80,7 +105,7 @@ def init_speculative_decoding_group_args(parser, sp_config):
         bind_to=(sp_config, "gen_num_per_cycle"),
         type=int,
         default=1,
-        help="每一轮 speculative execution（推测式生成）中，最多生成多少个 token。",
+        help="每轮生成的草稿 token 数 gamma；不含 target 额外生成的 token。",
     )
 
     speculative_decoding_group.add_argument(
@@ -90,6 +115,71 @@ def init_speculative_decoding_group_args(parser, sp_config):
         type=str2bool,
         default=False,
         help="投机采样强制使用流式采样",
+    )
+
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_confidence_mode",
+        env_name="SP_DSPARK_CONFIDENCE_MODE",
+        bind_to=(sp_config, "sp_dspark_confidence_mode"),
+        type=str,
+        choices=["off", "observe", "bounded"],
+        default="off",
+        help=(
+            "DeepSeek V4.1 confidence: off disables the head; observe records "
+            "confidence without changing sampling; bounded allocates verification "
+            "budget across request prefixes."
+        ),
+    )
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_confidence_temperature",
+        env_name="SP_DSPARK_CONFIDENCE_TEMPERATURE",
+        bind_to=(sp_config, "sp_dspark_confidence_temperature"),
+        type=_confidence_temperature,
+        default=1.0,
+        help="Positive confidence sigmoid temperature, independent of token sampling temperature.",
+    )
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_verify_budget",
+        env_name="SP_DSPARK_VERIFY_BUDGET",
+        bind_to=(sp_config, "sp_dspark_verify_budget"),
+        type=_verify_budget,
+        default=-1,
+        help=(
+            "Integer draft verification budget b in [0, gamma]: each decode rank "
+            "selects b * local_batch_size positions across request prefixes, "
+            "excluding one extra target anchor row per request. -1 keeps all "
+            "gamma positions; off/observe require -1. In adaptive budget mode, "
+            "b is the cold-start budget; CUDA Graph captures all budgets from 0 to gamma."
+        ),
+    )
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_verify_mode",
+        env_name="SP_DSPARK_VERIFY_MODE",
+        bind_to=(sp_config, "sp_dspark_verify_mode"),
+        type=str,
+        choices=["dense", "packed"],
+        default="dense",
+        help=(
+            "dense computes all gamma+1 target rows per request even with a "
+            "bounded budget; packed computes selected prefixes plus anchors. "
+            "Packed requires DeepSeek V4.1 DECODE with FP8 KV cache, TP=1, "
+            "bounded confidence mode and a nonnegative budget."
+        ),
+    )
+
+    speculative_decoding_group.add_argument(
+        "--sp_dspark_verify_budget_mode",
+        env_name="SP_DSPARK_VERIFY_BUDGET_MODE",
+        bind_to=(sp_config, "sp_dspark_verify_budget_mode"),
+        type=str,
+        choices=["fixed", "adaptive"],
+        default="fixed",
+        help=(
+            "fixed uses the configured verification budget; adaptive selects "
+            "an integer average budget in [0, gamma] from historical confidence "
+            "and measured GPU round times. Adaptive requires bounded confidence, "
+            "packed verification and a nonnegative cold-start budget."
+        ),
     )
 
     speculative_decoding_group.add_argument(

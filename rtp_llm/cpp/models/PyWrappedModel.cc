@@ -113,7 +113,29 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return cuda_tensor;
 }
 
+std::optional<size_t>
+PyWrappedModel::selectDSparkGraphIndex(const torch_ext::PyAttentionInputs& attention_inputs) const {
+    if (dspark_graph_budgets_.empty() || !attention_inputs.is_target_verify || !attention_inputs.input_lengths.defined()
+        || attention_inputs.input_lengths.dim() != 1) {
+        return std::nullopt;
+    }
+    int64_t tokens = attention_inputs.total_tokens;
+    if (tokens <= 0 && !attention_inputs.input_lengths.is_cuda()
+        && attention_inputs.input_lengths.scalar_type() == torch::kInt32
+        && attention_inputs.input_lengths.is_contiguous()) {
+        const auto* lengths = attention_inputs.input_lengths.data_ptr<int32_t>();
+        tokens              = std::accumulate(lengths, lengths + attention_inputs.input_lengths.numel(), int64_t{0});
+    }
+    return selectDSparkCudaGraphBudget(dspark_graph_budgets_,
+                                       attention_inputs.is_packed_target_verify,
+                                       attention_inputs.input_lengths.size(0),
+                                       tokens);
+}
+
 GraphBase* PyWrappedModel::selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const {
+    if (const auto index = selectDSparkGraphIndex(attention_inputs)) {
+        return dspark_budget_graphs_.at(*index).runner.get();
+    }
     if (!is_prefill_cuda_graph_mode_ && attention_inputs.is_prefill && generation_prefill_graph_runner_) {
         return generation_prefill_graph_runner_.get();
     }
@@ -121,6 +143,9 @@ GraphBase* PyWrappedModel::selectGraphRunner(const torch_ext::PyAttentionInputs&
 }
 
 CudaGraphState& PyWrappedModel::selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs) {
+    if (const auto index = selectDSparkGraphIndex(attention_inputs)) {
+        return dspark_budget_graphs_.at(*index).state;
+    }
     if (!is_prefill_cuda_graph_mode_ && attention_inputs.is_prefill && generation_prefill_graph_runner_) {
         return generation_prefill_cuda_graph_state_;
     }
@@ -129,6 +154,7 @@ CudaGraphState& PyWrappedModel::selectGraphState(const torch_ext::PyAttentionInp
 
 void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     try {
+        dspark_budget_graphs_.clear();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
         // The constructor's GIL guard is still alive here; member destruction
@@ -194,6 +220,7 @@ PyWrappedModel::~PyWrappedModel() {
             hidden_state_capture_publisher_->flushAndClose();
             hidden_state_capture_publisher_.reset();
         }
+        dspark_budget_graphs_.clear();
         generation_prefill_graph_runner_.reset();
         graph_runner_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
@@ -302,12 +329,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     (void)defer_device_metadata;
 #endif
     // Calculate cu_seqlens
-    int    batch_size               = py_attn_inputs.input_lengths.size(0);
-    size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
-    size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
-    py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill       = !decode_batch_size;
-    py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    int    batch_size                      = py_attn_inputs.input_lengths.size(0);
+    size_t context_batch_size              = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size               = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype                   = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.is_prefill              = !decode_batch_size;
+    py_attn_inputs.is_target_verify        = inputs.is_target_verify;
+    py_attn_inputs.is_packed_target_verify = inputs.is_packed_target_verify;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -1013,6 +1041,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs,
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
+    state                 = CudaGraphState();
     // Device-only metadata is now produced by forward's graph input nodes.
     // Keep async CPU gathering/H2D staging, and bind the complete copy plan
     // once token/hidden tensors are available at forward.
@@ -1236,6 +1265,19 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        if (!capture_hidden_states && !inputs.warmup && !dspark_graph_budgets_.empty()
+            && py_model_inputs.attention_inputs.is_target_verify) {
+            RTP_LLM_CHECK_WITH_INFO(
+                can_run_graph,
+                "DSpARK %s CUDA graph miss: packed=%d batch=%ld query_rows=%ld. "
+                "Normal decode requires a captured budget and batch bucket; eager fallback is disabled. "
+                "Explicit random_seed requires full-width verification: use adaptive graphs or a fixed full-width "
+                "budget, rather than a smaller fixed budget.",
+                dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target",
+                py_model_inputs.attention_inputs.is_packed_target_verify,
+                py_model_inputs.attention_inputs.input_lengths.size(0),
+                py_model_inputs.input_ids.numel());
+        }
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
@@ -1252,20 +1294,34 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
+            auto forward_graph                           = [&]() {
 #if USING_CUDA
-            if (auto* cuda_runner = dynamic_cast<CudaGraphRunner*>(graph_runner)) {
-                py_model_outputs = cuda_runner->forward(
-                    py_model_inputs,
-                    graph_state,
-                    pending_attention_metadata_.cu_seqlens ? &pending_attention_metadata_ : nullptr);
-            } else {
+                if (auto* cuda_runner = dynamic_cast<CudaGraphRunner*>(graph_runner)) {
+                    return cuda_runner->forward(py_model_inputs,
+                                                graph_state,
+                                                pending_attention_metadata_.cu_seqlens ? &pending_attention_metadata_ :
+                                                                                         nullptr);
+                }
                 invokeBuildAttentionInputMetadata(pending_attention_metadata_,
                                                   cuda_graph::graphGetCurrentStream().stream());
-                py_model_outputs = graph_runner->forward(py_model_inputs, graph_state);
+#endif
+                return graph_runner->forward(py_model_inputs, graph_state);
+            };
+            if (const auto index = selectDSparkGraphIndex(py_model_inputs.attention_inputs)) {
+                const auto& budget = dspark_graph_budgets_[*index];
+                RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                    "py_model.dspark_graph(role=%s,budget=%d,batch=%d,logical_rows=%d,graph_rows=%d)",
+                    dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target",
+                    budget.budget,
+                    graph_state.current_batch_size,
+                    graph_state.seq_len_sum,
+                    graph_state.current_real_graph_bs * budget.tokensPerBatch());
+                py_model_outputs = forward_graph();
+            } else {
+                py_model_outputs = forward_graph();
             }
+#if USING_CUDA
             pending_attention_metadata_ = {};
-#else
-            py_model_outputs = graph_runner->forward(py_model_inputs, graph_state);
 #endif
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
@@ -1315,6 +1371,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto attach_mtp_target_hidden_states = [&py_model_outputs](GptModelOutputs outputs) {
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
                 outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
+            }
+            // Own this round's scalar output: graph buckets share capture storage
+            // that a later replay can overwrite after this forward returns.
+            if (py_model_outputs.dspark_confidence_hidden_logits.defined()) {
+                outputs.dspark_confidence_hidden_logits = py_model_outputs.dspark_confidence_hidden_logits.clone();
             }
             return outputs;
         };

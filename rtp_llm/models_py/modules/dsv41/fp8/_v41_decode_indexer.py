@@ -46,6 +46,7 @@ class DecodeIndexerMetadata:
 def _fused_decode_metadata_kernel(
     positions,
     table,
+    request_ids,
     lengths,
     physical_lengths,
     safe_table,
@@ -61,7 +62,11 @@ def _fused_decode_metadata_kernel(
     BLOCK: tl.constexpr,
 ):
     token = tl.program_id(0).to(tl.int64)
-    request = token // QUERY_LEN
+    request = (
+        token // QUERY_LEN
+        if request_ids is None
+        else tl.load(request_ids + token).to(tl.int64)
+    )
     length = ((tl.load(positions + token).to(tl.int64) + 1) // RATIO).to(tl.int32)
     last = tl.maximum(length - 1, 0)
     extent = (last // LOGICAL) * PHYSICAL + last % LOGICAL + 1
@@ -74,7 +79,12 @@ def _fused_decode_metadata_kernel(
     )
     blocks = tl.maximum(blocks, 0)
     tl.store(expanded_table + token * COLS + columns, blocks, columns < COLS)
-    if token % QUERY_LEN == 0:
+    if request_ids is None:
+        first = token % QUERY_LEN == 0
+    else:
+        previous = tl.load(request_ids + token - 1, token > 0, other=-1).to(tl.int64)
+        first = request != previous
+    if first:
         tl.store(safe_table + request * COLS + columns, blocks, columns < COLS)
 
 
@@ -86,6 +96,7 @@ def get_decode_metadata(
     batch_size: int,
     query_len: int,
     compress_ratio: int,
+    request_ids: torch.Tensor | None = None,
 ) -> DecodeIndexerMetadata | None:
     """Share within one forward; captured producers rerun on every graph replay.
 
@@ -98,6 +109,13 @@ def get_decode_metadata(
     """
     table, pool = keys.block_table, keys.pool
     rows = batch_size * query_len
+    if request_ids is not None and (
+        request_ids.shape != (rows,)
+        or request_ids.device != positions.device
+        or request_ids.dtype not in (torch.int32, torch.int64)
+        or not request_ids.is_contiguous()
+    ):
+        raise ValueError("Packed indexer request ids must match the query rows")
     if (
         os.environ.get("DSV41_FUSE_INDEXER_METADATA", "1") != "1"
         or os.environ.get("DSV41_REUSE_DECODE_ROPE", "1") != "1"
@@ -143,6 +161,7 @@ def get_decode_metadata(
         pool.shape[1],
         keys.capacity,
         num_sms,
+        None if request_ids is None else (request_ids.data_ptr(), request_ids.dtype),
     )
     cache = shared.setdefault("decode_indexer_metadata", {})
     cached = cache.get(key)
@@ -157,6 +176,7 @@ def get_decode_metadata(
     _fused_decode_metadata_kernel[(rows,)](
         positions,
         table,
+        request_ids,
         lengths,
         physical_lengths,
         safe_table,
@@ -180,7 +200,7 @@ def get_decode_metadata(
         safe_table,
         PagedMQAMetadata(physical_lengths, expanded_table, requests, schedule),
     )
-    cache[key] = (positions, table, result)
+    cache[key] = (positions, table, result, request_ids)
     return result
 
 
@@ -410,6 +430,7 @@ def score_decode_indexer(
     pad_invisible: bool = True,
     metadata: DecodeIndexerMetadata | None = None,
     prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    request_ids: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
     """Return [B*S,max_ctx_len], or None for an unsupported fast path.
 
@@ -471,6 +492,24 @@ def score_decode_indexer(
     )
     if not is_supported(device, block_size, h, d):
         return None
+    if request_ids is not None and metadata is None:
+        # The uncached fallback also needs real request boundaries. Expand
+        # only the tiny page table and use one query per scorer request;
+        # target model/GEMM rows stay packed. This covers disabled metadata
+        # fusion and unsupported metadata fast paths without uniform fallback.
+        block_table = block_table.index_select(0, request_ids.long())
+        context_lens = context_lens.reshape(b * s, 1)
+        weights = weights.reshape(b * s, 1, h)
+        if q is not None:
+            q = q.reshape(b * s, 1, h, d)
+        if prepared_query is not None:
+            payload, scales, prepared_weights = prepared_query
+            prepared_query = (
+                payload.reshape(b * s, 1, h, d // 2),
+                scales.reshape(b * s, 1, h),
+                prepared_weights.reshape(b * s, 1, h),
+            )
+        b, s = b * s, 1
     from ._indexer_score import fp8_fp4_paged_indexer_score
 
     if prepared_query is not None:

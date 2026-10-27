@@ -686,82 +686,81 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
-                c.reuse_cache                                     = t[2].cast<bool>();
-                c.multi_task_prompt                               = t[3].cast<std::string>();
-                c.multi_task_prompt_str                           = t[4].cast<std::string>();
-                c.multi_task_prompt_tokens =
-                    t[5].cast<std::map<std::string, std::vector<int>>>();
-                c.reserve_block_ratio                             = t[6].cast<int64_t>();
-                c.max_block_size_per_item                         = t[7].cast<int>();
-                c.memory_cache_size_mb                            = t[8].cast<int64_t>();
-                c.memory_cache_sync_timeout_ms                    = t[9].cast<int64_t>();
-                c.reuse_cache_tail_blocks                         = t[10].cast<int>();
-                c.fp8_kv_cache                                    = t[11].cast<int>();
-                c.ssm_state_dtype                                 = t[12].cast<std::string>();
-                c.kv_cache_mem_mb                                 = t[13].cast<int64_t>();
-                c.seq_size_per_block                              = t[14].cast<int>();
-                c.kernel_seq_size_per_block                       = t[15].cast<int>();
-                c.test_block_num                                  = t[16].cast<int>();
-                c.use_block_cache                                 = t[17].cast<int>();
-                c.enable_device_cache                             = t[18].cast<bool>();
-                c.enable_memory_cache                             = t[19].cast<bool>();
-                c.enable_disk_cache                               = t[20].cast<bool>();
-                c.enable_remote_cache                             = t[21].cast<bool>();
-                c.disk_cache_paths                                = t[22].cast<std::string>();
-                c.disk_cache_size_mb                              = t[23].cast<int64_t>();
-                c.disk_cache_buffered_io                          = t[24].cast<bool>();
-                c.disk_cache_sync_timeout_ms                      = t[25].cast<int64_t>();
-                c.disk_cache_staging_block_count                  = t[26].cast<int64_t>();
-                c.device_eviction_policy                          = t[27].cast<std::string>();
-                c.memory_eviction_policy                          = t[28].cast<std::string>();
-                c.disk_eviction_policy                            = t[29].cast<std::string>();
-                c.kvcm_enable_vipserver                           = t[30].cast<bool>();
-                c.kvcm_vipserver_domain                           = t[31].cast<std::string>();
-                c.kvcm_server_address                             = t[32].cast<std::string>();
-                c.kvcm_instance_group                             = t[33].cast<std::string>();
-                c.kvcm_meta_channel_retry_time                    = t[34].cast<uint32_t>();
-                c.kvcm_meta_channel_connection_timeout            = t[35].cast<uint32_t>();
-                c.kvcm_meta_channel_call_timeout                  = t[36].cast<uint32_t>();
-                c.kvcm_storage_thread_num                         = t[37].cast<uint32_t>();
-                c.kvcm_storage_queue_size                         = t[38].cast<uint32_t>();
-                c.kvcm_put_timeout_ms                             = t[39].cast<int>();
-                c.kvcm_get_timeout_ms                             = t[40].cast<int>();
-                c.kvcm_model_sdk_config                           = t[41].cast<std::string>();
-                c.kvcm_model_user_data                            = t[42].cast<std::string>();
-                c.kvcm_model_extra_info                           = t[43].cast<std::string>();
-                c.kvcm_instance_id_salt                           = t[44].cast<std::string>();
-                c.kvcm_asyncwrapper_thread_num                    = t[45].cast<size_t>();
-                c.kvcm_asyncwrapper_queue_size                    = t[46].cast<size_t>();
-                c.kvcm_get_broadcast_timeout                      = t[47].cast<int>();
-                c.kvcm_put_broadcast_timeout                      = t[48].cast<int>();
-                c.kvcm_client_config                              = t[49].cast<std::string>();
-                c.memory_cache_max_descriptors_per_transfer_batch = t[50].cast<int64_t>();
-                c.dsv4_fixed_pool_blocks                          = t[51].cast<uint32_t>();
-                c.dsv4_hca_state_pool_blocks                      = t[52].cast<uint32_t>();
-                c.dsv4_fixed_pool_use_memory                      = t[53].cast<bool>();
-                c.block_tree_full_prefix_scan_interval_ms         = t[54].cast<int64_t>();
-                c.block_tree_transfer_worker_count                = t[55].cast<int64_t>();
-                c.block_tree_business_queue_max_size              = t[56].cast<int64_t>();
-                c.block_tree_transfer_queue_max_size              = t[57].cast<int64_t>();
-                c.block_tree_device_evict_low_watermark_ratio     = t[58].cast<double>();
-                c.block_tree_device_evict_high_watermark_ratio    = t[59].cast<double>();
-                c.block_tree_memory_evict_low_watermark_ratio     = t[60].cast<double>();
-                c.block_tree_memory_evict_high_watermark_ratio    = t[61].cast<double>();
-                c.block_tree_disk_evict_low_watermark_ratio       = t[62].cast<double>();
-                c.block_tree_disk_evict_high_watermark_ratio      = t[63].cast<double>();
-                c.kv_cache_event_publisher_type                   = t[64].cast<std::string>();
-                c.kv_cache_event_manager_endpoint                 = t[65].cast<std::string>();
-                c.kv_cache_event_instance_group                   = t[66].cast<std::string>();
-                c.kv_cache_event_instance_id                      = t[67].cast<std::string>();
-                c.kv_cache_event_host_ip_port                     = t[68].cast<std::string>();
-                c.memory_cache_swa_block_ratio                    = t[69].cast<double>();
-                c.dsv41_decoder_swa_pool_blocks                   = t[70].cast<uint32_t>();
-                c.enable_crc                                      = t[71].cast<bool>();
-                c.kvcm_read_backend_type                          = t[72].cast<int32_t>();
-                c.kvcm_min_replica_count                          = t[73].cast<int32_t>();
-                c.kv_cache_event_snapshot_interval_ms              = t[74].cast<int>();
-                c.linear_pool_blocks                              = t[75].cast<uint32_t>();
-                c.swa_pool_blocks                                 = t[76].cast<uint32_t>();
+                c.reuse_cache                          = t[2].cast<bool>();
+                c.multi_task_prompt                    = t[3].cast<std::string>();
+                c.multi_task_prompt_str                = t[4].cast<std::string>();
+                c.multi_task_prompt_tokens             = t[5].cast<std::map<std::string, std::vector<int>>>();
+                c.reserve_block_ratio                  = t[6].cast<int64_t>();
+                c.max_block_size_per_item              = t[7].cast<int>();
+                c.memory_cache_size_mb                 = t[8].cast<int64_t>();
+                c.memory_cache_sync_timeout_ms         = t[9].cast<int64_t>();
+                c.reuse_cache_tail_blocks              = t[10].cast<int>();
+                c.fp8_kv_cache                         = t[11].cast<int>();
+                c.ssm_state_dtype                      = t[12].cast<std::string>();
+                c.kv_cache_mem_mb                      = t[13].cast<int64_t>();
+                c.seq_size_per_block                   = t[14].cast<int>();
+                c.kernel_seq_size_per_block            = t[15].cast<int>();
+                c.test_block_num                       = t[16].cast<int>();
+                c.use_block_cache                      = t[17].cast<int>();
+                c.enable_device_cache                  = t[18].cast<bool>();
+                c.enable_memory_cache                  = t[19].cast<bool>();
+                c.enable_disk_cache                    = t[20].cast<bool>();
+                c.enable_remote_cache                  = t[21].cast<bool>();
+                c.disk_cache_paths                     = t[22].cast<std::string>();
+                c.disk_cache_size_mb                   = t[23].cast<int64_t>();
+                c.disk_cache_buffered_io               = t[24].cast<bool>();
+                c.disk_cache_sync_timeout_ms           = t[25].cast<int64_t>();
+                c.disk_cache_staging_block_count       = t[26].cast<int64_t>();
+                c.device_eviction_policy               = t[27].cast<std::string>();
+                c.memory_eviction_policy               = t[28].cast<std::string>();
+                c.disk_eviction_policy                 = t[29].cast<std::string>();
+                c.kvcm_enable_vipserver                = t[30].cast<bool>();
+                c.kvcm_vipserver_domain                = t[31].cast<std::string>();
+                c.kvcm_server_address                  = t[32].cast<std::string>();
+                c.kvcm_instance_group                  = t[33].cast<std::string>();
+                c.kvcm_meta_channel_retry_time         = t[34].cast<uint32_t>();
+                c.kvcm_meta_channel_connection_timeout = t[35].cast<uint32_t>();
+                c.kvcm_meta_channel_call_timeout       = t[36].cast<uint32_t>();
+                c.kvcm_storage_thread_num              = t[37].cast<uint32_t>();
+                c.kvcm_storage_queue_size              = t[38].cast<uint32_t>();
+                c.kvcm_put_timeout_ms                  = t[39].cast<int>();
+                c.kvcm_get_timeout_ms                  = t[40].cast<int>();
+                c.kvcm_model_sdk_config                = t[41].cast<std::string>();
+                c.kvcm_model_user_data                 = t[42].cast<std::string>();
+                c.kvcm_model_extra_info                = t[43].cast<std::string>();
+                c.kvcm_instance_id_salt                = t[44].cast<std::string>();
+                c.kvcm_asyncwrapper_thread_num         = t[45].cast<size_t>();
+                c.kvcm_asyncwrapper_queue_size         = t[46].cast<size_t>();
+                c.kvcm_get_broadcast_timeout           = t[47].cast<int>();
+                c.kvcm_put_broadcast_timeout           = t[48].cast<int>();
+                c.kvcm_client_config                   = t[49].cast<std::string>();
+                c.memory_cache_max_descriptors_per_transfer_batch   = t[50].cast<int64_t>();
+                c.dsv4_fixed_pool_blocks                            = t[51].cast<uint32_t>();
+                c.dsv4_hca_state_pool_blocks                        = t[52].cast<uint32_t>();
+                c.dsv4_fixed_pool_use_memory                        = t[53].cast<bool>();
+                c.block_tree_full_prefix_scan_interval_ms           = t[54].cast<int64_t>();
+                c.block_tree_transfer_worker_count                  = t[55].cast<int64_t>();
+                c.block_tree_business_queue_max_size                = t[56].cast<int64_t>();
+                c.block_tree_transfer_queue_max_size                = t[57].cast<int64_t>();
+                c.block_tree_device_evict_low_watermark_ratio       = t[58].cast<double>();
+                c.block_tree_device_evict_high_watermark_ratio      = t[59].cast<double>();
+                c.block_tree_memory_evict_low_watermark_ratio       = t[60].cast<double>();
+                c.block_tree_memory_evict_high_watermark_ratio      = t[61].cast<double>();
+                c.block_tree_disk_evict_low_watermark_ratio         = t[62].cast<double>();
+                c.block_tree_disk_evict_high_watermark_ratio        = t[63].cast<double>();
+                c.kv_cache_event_publisher_type                     = t[64].cast<std::string>();
+                c.kv_cache_event_manager_endpoint                   = t[65].cast<std::string>();
+                c.kv_cache_event_instance_group                     = t[66].cast<std::string>();
+                c.kv_cache_event_instance_id                        = t[67].cast<std::string>();
+                c.kv_cache_event_host_ip_port                       = t[68].cast<std::string>();
+                c.memory_cache_swa_block_ratio                      = t[69].cast<double>();
+                c.dsv41_decoder_swa_pool_blocks                     = t[70].cast<uint32_t>();
+                c.enable_crc                                        = t[71].cast<bool>();
+                c.kvcm_read_backend_type                            = t[72].cast<int32_t>();
+                c.kvcm_min_replica_count                            = t[73].cast<int32_t>();
+                c.kv_cache_event_snapshot_interval_ms               = t[74].cast<int>();
+                c.linear_pool_blocks                                = t[75].cast<uint32_t>();
+                c.swa_pool_blocks                                   = t[76].cast<uint32_t>();
                 c.block_tree_full_device_evict_low_watermark_ratio  = t[77].cast<double>();
                 c.block_tree_full_device_evict_high_watermark_ratio = t[78].cast<double>();
                 c.block_tree_full_memory_evict_low_watermark_ratio  = t[79].cast<double>();
@@ -1088,6 +1087,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
+        .def_readwrite("sp_dspark_confidence_mode", &SpeculativeExecutionConfig::sp_dspark_confidence_mode)
+        .def_readwrite("sp_dspark_confidence_temperature",
+                       &SpeculativeExecutionConfig::sp_dspark_confidence_temperature)
+        .def_readwrite("sp_dspark_verify_budget", &SpeculativeExecutionConfig::sp_dspark_verify_budget)
+        .def_readwrite("sp_dspark_verify_mode", &SpeculativeExecutionConfig::sp_dspark_verify_mode)
+        .def_readwrite("sp_dspark_verify_budget_mode", &SpeculativeExecutionConfig::sp_dspark_verify_budget_mode)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -1102,10 +1107,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.quantization,
                                       self.checkpoint_path,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.sp_dspark_confidence_mode,
+                                      self.sp_dspark_confidence_temperature,
+                                      self.sp_dspark_verify_budget,
+                                      self.sp_dspark_verify_mode,
+                                      self.sp_dspark_verify_budget_mode);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12 && t.size() != 15 && t.size() != 16
+                    && t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -1122,9 +1133,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() == 11) {
                         c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
                     }
-                    if (t.size() == 12) {
+                    if (t.size() >= 12) {
                         c.sp_dspark_mask_token_id      = t[10].cast<int64_t>();
                         c.sp_dspark_sample_from_anchor = t[11].cast<bool>();
+                    }
+                    if (t.size() >= 15) {
+                        c.sp_dspark_confidence_mode        = t[12].cast<std::string>();
+                        c.sp_dspark_confidence_temperature = t[13].cast<double>();
+                        c.sp_dspark_verify_budget          = t[14].cast<int64_t>();
+                    }
+                    if (t.size() >= 16) {
+                        c.sp_dspark_verify_mode = t[15].cast<std::string>();
+                    }
+                    if (t.size() >= 17) {
+                        c.sp_dspark_verify_budget_mode = t[16].cast<std::string>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());

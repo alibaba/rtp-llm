@@ -109,6 +109,7 @@ def _compress_norm_main_store_kernel(
     positions,
     requests,
     starts,
+    input_lengths,
     frequencies,
     state,
     state_table,
@@ -148,7 +149,12 @@ def _compress_norm_main_store_kernel(
     current = tl.load(values + token * VALUE_STRIDE + columns)
     if RATIO == 2:
         current_score = tl.load(scores + token * SCORE_STRIDE + columns)
-        if token % S == 0:
+        first = (
+            token % S == 0
+            if input_lengths is None
+            else position == tl.load(starts + request).to(tl.int64)
+        )
+        if first:
             previous_position = tl.maximum(
                 tl.load(starts + request).to(tl.int64) - 1, 0
             )
@@ -244,6 +250,7 @@ def _index_norm_store_state_kernel(
     positions,
     requests,
     starts,
+    input_lengths,
     frequencies,
     index_cache,
     index_table,
@@ -318,7 +325,12 @@ def _index_norm_store_state_kernel(
         block = tl.load(
             state_table + request * STATE_STRIDE + block_in_sequence % STATE_COLS
         ).to(tl.int64)
-        end = tl.load(starts + request).to(tl.int64) + S
+        length = (
+            S
+            if input_lengths is None
+            else tl.load(input_lengths + request).to(tl.int64)
+        )
+        end = tl.load(starts + request).to(tl.int64) + length
         effective_end = tl.minimum((block_in_sequence + 1) * STATE_TPB, end)
         if (block > 0) & (position + STATE_EB >= effective_end):
             if TRAP:
@@ -444,7 +456,9 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
     return True
 
 
-def try_produce_global(attn, x, positions, req_ids, starts, *, projected=None) -> bool:
+def try_produce_global(
+    attn, x, positions, req_ids, starts, *, projected=None, input_lengths=None
+) -> bool:
     """Write main/index/state pools, or return False without mutations.
 
     The caller retains ownership of the shared paged-index descriptor. The
@@ -453,6 +467,13 @@ def try_produce_global(attn, x, positions, req_ids, starts, *, projected=None) -
     """
     if not is_supported(attn, x, positions, req_ids, starts):
         return False
+    if input_lengths is not None and (
+        input_lengths.shape != starts.shape
+        or input_lengths.device != starts.device
+        or input_lengths.dtype not in (torch.int32, torch.int64)
+        or not input_lengths.is_contiguous()
+    ):
+        raise ValueError("Packed compressor lengths must match the request prefixes")
     from rtp_llm.models_py.modules.dsv41.fp8.compressor import _linear_bf16_bf16_fp32
 
     batch, span, _ = x.shape
@@ -496,6 +517,7 @@ def try_produce_global(attn, x, positions, req_ids, starts, *, projected=None) -
         positions,
         req_ids,
         starts,
+        input_lengths,
         attn.freqs_cis.view(torch.float32),
         state,
         state_table,
@@ -537,6 +559,7 @@ def try_produce_global(attn, x, positions, req_ids, starts, *, projected=None) -
         positions,
         req_ids,
         starts,
+        input_lengths,
         attn.freqs_cis.view(torch.float32),
         index,
         index_table,
