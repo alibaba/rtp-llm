@@ -931,38 +931,51 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         var ctx = attempt.owner();
         try (var accepted = runtime.registerRequestWork(ctx)) {
             boolean applied = false, recorded = false, committed = false;
+            Snapshot before;
+            DecodeEndpoint endpoint = null;
             synchronized (ctx) {
                 if (!requests.isCurrent(ctx) || ctx.data().getScheduler() != this) {
                     return false;
                 }
+                before = ctx.snapshot();
+                if (before.preemption() != null
+                        && before.preemption().identity() == attempt
+                        && (event.endpoint() == null
+                                || before.route().decodeEp() == event.endpoint()
+                                        && Objects.equals(
+                                                before.route().decodeReservation(),
+                                                event.reservation()))) {
+                    endpoint = event.endpoint();
+                }
+            }
+            // Decode owns its ledger lock. Keep the resource mutation outside the request lock;
+            // the second Context section below commits it only if this exact attempt survived.
+            if (endpoint != null) {
+                var target = endpoint;
+                var mutation =
+                        recover(
+                                runtime::recordFailure,
+                                () ->
+                                        target.updatePreemption(
+                                                attempt.attemptToken(),
+                                                DecodeResources.PreemptionUpdate.fenced(
+                                                        event.reservation())));
+                committed = mutation != null && mutation.status().applied();
+            }
+            synchronized (ctx) {
                 var current = ctx.snapshot();
                 if (current.preemption() != null
                         && current.preemption().identity() == attempt
-                        && (event.endpoint() == null
-                                || current.route().decodeEp() == event.endpoint()
+                        && (endpoint == null
+                                || current.route().decodeEp() == endpoint
                                         && Objects.equals(
                                                 current.route().decodeReservation(),
                                                 event.reservation()))) {
-                    var mutation =
-                            event.endpoint() == null
-                                    ? null
-                                    : recover(
-                                            runtime::recordFailure,
-                                            () -> {
-                                                return event.endpoint()
-                                                        .updatePreemption(
-                                                                attempt.attemptToken(),
-                                                                DecodeResources.PreemptionUpdate
-                                                                        .fenced(
-                                                                                event
-                                                                                        .reservation()));
-                                            });
-                    committed = mutation != null && mutation.status().applied();
                     var terminal =
                             !committed
                                     ? null
                                     : new EndEvidence(
-                                            current.route(),
+                                            before.route(),
                                             EndKind.PRIORITY,
                                             null,
                                             false,
@@ -984,7 +997,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                             terminal),
                                     System.currentTimeMillis());
                     recorded = update.kind() == UpdateKind.APPLIED;
-                    applied = recorded && (event.endpoint() == null || committed);
+                    applied = recorded && (endpoint == null || committed);
                 }
                 // A stale attempt must not discard a current delivery's cleanup proof.
                 if (event.cleanup() != null) {
@@ -992,14 +1005,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                             ctx.recordDeliveryResult(event.cleanup()).kind() == UpdateKind.APPLIED;
                 }
             }
+            if (committed) {
+                var committedEndpoint = endpoint;
+                recover(
+                        runtime::recordFailure,
+                        () -> committedEndpoint.publishCapacity(DecodeEndpoint.CapacityEdge.BOTH));
+            }
             if (recorded) {
-                if (committed) {
-                    recover(
-                            runtime::recordFailure,
-                            () ->
-                                    event.endpoint()
-                                            .publishCapacity(DecodeEndpoint.CapacityEdge.BOTH));
-                }
                 try {
                     advanceRequest(ctx, ctx.snapshot());
                 } catch (RuntimeException | Error failed) {
@@ -1046,6 +1058,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         PreemptionRegistration attempt;
         DecodeEndpoint decode;
         boolean capacityChanged;
+        EndEvidence terminal;
+        boolean confirmationPending;
         synchronized (ctx) {
             current = ctx.snapshot();
             if (current.preemption() == null) {
@@ -1057,36 +1071,39 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             attempt = granted.value();
             decode = current.route().decodeEp();
-            var terminal = current.preemption().pendingTerminal();
+            terminal = current.preemption().pendingTerminal();
+            confirmationPending = terminal == null && current.preemption().confirmationPending();
             capacityChanged =
                     decode != null && !(terminal != null && current.close().decodeSettled());
-            var mutation =
-                    !capacityChanged
-                            ? null
-                            : recover(
-                                    runtime::recordFailure,
-                                    () -> {
-                                        return decode.updatePreemption(
+        }
+        // Reconciliation is a two-phase handoff: the ledger mutation may block on Decode state,
+        // while the Context lock is reserved only for the exact commit.
+        var mutation =
+                !capacityChanged
+                        ? null
+                        : recover(
+                                runtime::recordFailure,
+                                () ->
+                                        decode.updatePreemption(
                                                 attempt.attemptToken(),
                                                 terminal == null
                                                         ? DecodeResources.PreemptionUpdate.active(
                                                                 attempt.reservation())
                                                         : terminal.kind() == EndKind.PRIORITY
                                                                 ? DecodeResources.PreemptionUpdate
-                                                                        .canceled(
-                                                                                attempt
-                                                                                        .reservation())
+                                                                        .canceled(attempt.reservation())
                                                                 : DecodeResources.PreemptionUpdate
-                                                                        .finished(
-                                                                                attempt
-                                                                                        .reservation()));
-                                    });
-            boolean committed = !capacityChanged || mutation != null && mutation.status().applied();
-            ctx.completePreemption(
-                    attempt,
-                    new PreemptionReport(
-                            null, committed, committed && terminal != null, false, terminal),
-                    System.currentTimeMillis());
+                                                                        .finished(attempt.reservation())));
+        boolean committed = !capacityChanged || mutation != null && mutation.status().applied();
+        boolean recorded;
+        synchronized (ctx) {
+            var update =
+                    ctx.completePreemption(
+                            attempt,
+                            new PreemptionReport(
+                                    null, committed, committed && terminal != null, false, terminal),
+                            System.currentTimeMillis());
+            recorded = update.kind() == UpdateKind.APPLIED;
             if (!committed) {
                 return;
             }
@@ -1096,8 +1113,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     runtime::recordFailure,
                     () -> decode.publishCapacity(DecodeEndpoint.CapacityEdge.BOTH));
         }
-        if (current.preemption().pendingTerminal() == null
-                && current.preemption().confirmationPending()) {
+        if (recorded && confirmationPending) {
             recover(
                     runtime::recordFailure,
                     () ->

@@ -24,6 +24,190 @@ import static org.mockito.Mockito.when;
 
 class DeliveryStopTest {
     @Test
+    void acceptance_preemptionRepliesBelongToTheirRegistration() throws Exception {
+        var runtime = runtime();
+        var claim = sentClaim(runtime);
+        var firstRpc = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
+        var secondRpc = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
+        when(runtime.engineClient.cancelAsync(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(firstRpc, secondRpc);
+        var scheduler = claim.owner().data().getScheduler();
+        org.mockito.Mockito.doReturn(true).when(scheduler).onPreemption(any(), any());
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new DeliveryMetricsReporter(null));
+        var first = preemption(claim, 1L);
+        var second = preemption(claim, 2L);
+        try {
+            var firstAnswer = dispatcher.preempt(first, null, "first", 5_000L);
+            RequestProtocolTestSupport.awaitCondition(() -> firstRpc.getNumberOfDependents() != 0);
+            var secondAnswer = dispatcher.preempt(second, null, "second", 5_000L);
+
+            firstRpc.complete(EngineGrpcClient.CancelReply.NOT_FOUND);
+            assertEquals(PreemptionRegistration.Reply.NOT_FOUND, firstAnswer.get(2, TimeUnit.SECONDS));
+            assertFalse(
+                    secondAnswer.isDone(),
+                    "a later registration must not consume the earlier registration's reply");
+
+            secondRpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertEquals(PreemptionRegistration.Reply.WAITING, secondAnswer.get(2, TimeUnit.SECONDS));
+        } finally {
+            runtime.signals().completeDelivery(claim);
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void acceptance_preemptionTimeoutDoesNotDiscardLateRemoteReceipt() throws Exception {
+        var runtime = runtime();
+        var claim = sentClaim(runtime);
+        var rpc = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
+        when(runtime.engineClient.cancelAsync(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(rpc);
+        var scheduler = claim.owner().data().getScheduler();
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new DeliveryMetricsReporter(null));
+        try {
+            var answer = dispatcher.preempt(preemption(claim, 1L), null, "deadline", 25L);
+            RequestProtocolTestSupport.awaitCondition(() -> rpc.getNumberOfDependents() != 0);
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, answer.get(2, TimeUnit.SECONDS));
+
+            rpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.timeout(2_000L))
+                    .onPreemption(any(), any());
+        } finally {
+            runtime.signals().completeDelivery(claim);
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void acceptance_rejectedPreemptionDoesNotReuseAnotherRegistrationReply() throws Exception {
+        var runtime = runtime();
+        var claim = sentClaim(runtime);
+        var firstRpc = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
+        when(runtime.engineClient.cancelAsync(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(firstRpc);
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new DeliveryMetricsReporter(null));
+        try {
+            var first = dispatcher.preempt(preemption(claim, 1L), null, "first", 5_000L);
+            RequestProtocolTestSupport.awaitCondition(() -> firstRpc.getNumberOfDependents() != 0);
+            var stop = dispatcher.stop(claim);
+            var rejected = dispatcher.preempt(preemption(claim, 2L), null, "rejected", 5_000L);
+
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, rejected.get(2, TimeUnit.SECONDS));
+            firstRpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertEquals(DeliveryDispatcher.StopResult.REMOTE_CLEANED, stop.get(2, TimeUnit.SECONDS));
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, first.get(2, TimeUnit.SECONDS));
+        } finally {
+            firstRpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            runtime.signals().completeDelivery(claim);
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void acceptance_unsentStopDoesNotIssueRemoteCancel() throws Exception {
+        var runtime = runtime();
+        var claim = claim(runtime);
+        when(claim.owner().snapshot().delivery().send()).thenReturn(ContextResult.SendState.NOT_SENT);
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new DeliveryMetricsReporter(null));
+        try {
+            var result = dispatcher.stop(claim).get(2, TimeUnit.SECONDS);
+            assertEquals(DeliveryDispatcher.StopResult.NOT_SENT, result);
+            verifyNoInteractions(runtime.engineClient);
+            assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
+        } finally {
+            runtime.signals().completeDelivery(claim);
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void acceptance_remoteProofDoesNotReleaseLocalSettlement() throws Exception {
+        var runtime = runtime();
+        var claim = sentClaim(runtime);
+        when(runtime.engineClient.cancelAsync(
+                        any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(
+                        java.util.concurrent.CompletableFuture.completedFuture(
+                                EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new DeliveryMetricsReporter(null));
+        try {
+            assertEquals(
+                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
+                    dispatcher.stop(claim).get(2, TimeUnit.SECONDS));
+            assertFalse(
+                    runtime.signals().delivery(claim).toCompletableFuture().isDone(),
+                    "remote proof must not fabricate local settlement");
+            runtime.signals().completeDelivery(claim);
+            assertTrue(runtime.signals().delivery(claim).toCompletableFuture().isDone());
+        } finally {
+            runtime.signals().completeDelivery(claim);
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void acceptance_exactClaimHasOneOperation() throws Exception {
+        var runtime = runtime();
+        var claim = claim(runtime);
+        var equalValue =
+                new DeliveryClaim(
+                        claim.owner(), claim.sequence(), claim.item(), claim.kind(), claim.batchId());
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
+                        new DeliveryMetricsReporter(null));
+        try {
+            var first = dispatcher.stop(claim);
+            assertSame(first, dispatcher.stop(claim));
+            assertEquals(
+                    DeliveryDispatcher.StopResult.STALE,
+                    dispatcher.stop(equalValue).get(2, TimeUnit.SECONDS));
+            runtime.signals().completeDelivery(claim);
+            first.get(2, TimeUnit.SECONDS);
+            verifyNoInteractions(runtime.engineClient);
+        } finally {
+            runtime.signals().completeDelivery(claim);
+            runtime.shutdown();
+        }
+    }
+
+    @Test
     void physicalSettlementWakesStopWithoutWaitingForThePreemptionRpcDeadline() throws Exception {
         var runtime = runtime();
         var claim = sentClaim(runtime);
@@ -257,6 +441,15 @@ class DeliveryStopTest {
         when(claim.item().prefillEp())
                 .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
         return claim;
+    }
+
+    private static PreemptionRegistration preemption(DeliveryClaim claim, long attemptToken) {
+        return new PreemptionRegistration(
+                claim.owner(),
+                attemptToken,
+                new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                        attemptToken, 41L, attemptToken),
+                new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
     }
 
     @Test

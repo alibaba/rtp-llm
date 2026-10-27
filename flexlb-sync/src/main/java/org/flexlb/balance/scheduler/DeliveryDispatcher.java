@@ -591,9 +591,14 @@ public class DeliveryDispatcher {
         answer.whenComplete((ignored, failure) -> timeout.cancel());
         var task = record(claim == null ? registration : claim, claim, registration.owner());
         CompletableFuture<PreemptionRegistration.Reply> response;
+        boolean rejected;
         synchronized (task) {
-            if (!task.closed
-                    && !task.stopRequested
+            rejected =
+                    task.closed
+                            || (task.stopRequested
+                                    && (task.preemption == null
+                                            || task.preemption.registration() != registration));
+            if (!rejected
                     && (task.preemption == null
                             || task.preemption.registration() != registration)) {
                 task.preemption =
@@ -604,7 +609,11 @@ public class DeliveryDispatcher {
                                 expiresAt,
                                 new CompletableFuture<>());
             }
-            response = task.preemption == null ? task.firstReply : task.preemption.response();
+            response = rejected ? null : task.preemption.response();
+        }
+        if (rejected) {
+            answer.complete(PreemptionRegistration.Reply.UNKNOWN);
+            return answer;
         }
         response.whenComplete(
                 (reply, failure) ->
