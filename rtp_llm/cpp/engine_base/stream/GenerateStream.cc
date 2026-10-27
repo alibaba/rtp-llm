@@ -108,7 +108,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -122,9 +122,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
         && !model_config.hidden_state_capture_layer_ids.empty()
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::INVALID_PARAMS,
-                    "chunked prefill incompatible: hidden_state_capture");
+        reportEvent(
+            StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: hidden_state_capture");
         return;
     }
     if (!input->fake_query && chunk_size > 0
@@ -138,13 +137,12 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              config.return_hidden_states                     ? "return_hidden_states" :
                              config.return_all_hidden_states                 ? "return_all_hidden_states" :
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
-                             input->custom_output_token_position >= 0       ? "custom_output" :
+                             input->custom_output_token_position >= 0        ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
                                                                                nullptr;
         if (reason != nullptr) {
-            reportEvent(StreamEvents::Error,
-                        ErrorCode::INVALID_PARAMS,
-                        "chunked prefill incompatible: " + std::string(reason));
+            reportEvent(
+                StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
             return;
         }
         setChunkSize(static_cast<int>(chunk_size));
@@ -222,6 +220,69 @@ bool GenerateStream::hasCacheKeys() const {
 
 const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
     return stream_cache_resource_->cacheKeys(batch_id);
+}
+
+GenerateStream::CachePrepareResult GenerateStream::prepareCache() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    if (hasErrorWithoutLock() || getStatus() == StreamState::FINISHED) {
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+    if (!queryPdSep() && generateConfig()->max_new_tokens > 1) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::INVALID_PARAMS,
+                                      "RTP_LLM_ASYNC_PREPARE_CACHE=1 requires a pure PD workload; local multi-token "
+                                      "generation is unsupported. Disable async preparation on instances that allow "
+                                      "local generation fallback");
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+    if (generate_status_->hasEvent(StreamEvents::CachePrepared)) {
+        return CachePrepareResult::DONE;
+    }
+    if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
+        const auto result = stream_cache_resource_->initKVBlock();
+        if (!result.ok()) {
+            if (absl::IsUnavailable(result)) {
+                stream_cache_resource_->reportMallocRetry();
+                return CachePrepareResult::LACK_MEM;
+            }
+            generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+        } else {
+            const bool loading = stream_cache_resource_->asyncLoadCache();
+            generate_status_->reportEvent(StreamEvents::LoadInitiated);
+            if (loading) {
+                recordLoadingCacheStartTime();
+                return CachePrepareResult::WAIT;
+            }
+        }
+    } else {
+        if (!stream_cache_resource_->loadCacheDone()) {
+            return CachePrepareResult::WAIT;
+        }
+        recordLoadingCacheDoneTime();
+        if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
+            return CachePrepareResult::LACK_MEM;
+        }
+        if (hasErrorWithoutLock()) {
+            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+        if (!(stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+              && stream_cache_resource_->isContextStream())) {
+            // Match the synchronous post-load top-up for PDFUSION / PD fallback.
+            const auto result = stream_cache_resource_->incrKVBlock();
+            if (!result.ok()) {
+                if (absl::IsUnavailable(result)) {
+                    return CachePrepareResult::LACK_MEM;
+                }
+                generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+            }
+        }
+    }
+    generate_status_->reportEvent(StreamEvents::CachePrepared);
+    return CachePrepareResult::DONE;
 }
 
 absl::Status GenerateStream::initKVBlock() {
@@ -513,6 +574,11 @@ int GenerateStream::contextLength() const {
 
 int GenerateStream::prefixLength() const {
     return reuse_length_;
+}
+
+int GenerateStream::synchronizedPrefixLength() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return prefixLength();
 }
 
 int GenerateStream::reuseLength() const {
@@ -1073,6 +1139,7 @@ const ResourceContext& GenerateStream::resourceContext() const {
 }
 
 size_t GenerateStream::curBlocksNum() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
     return stream_cache_resource_->curBlocksNum();
 }
 
@@ -1550,7 +1617,7 @@ std::string GenerateStream::debugString() const {
     debug_string << "GenerateStream {"
                  << "generate_input:" << generate_input_->debugString() << ", max_seq_len:" << max_seq_len_
                  << ", input_length:" << inputLength() << ", seq_length:" << seqLength()
-                 << ", reuse_length:" << reuse_length_ << ", current_batch_size:" << currentBatchSize()
+                 << ", reuse_length:" << reuseLength() << ", current_batch_size:" << currentBatchSize()
                  << ", next_batch_size:" << nextBatchSize() << ", need_release_resource: " << need_release_resource_
                  << ", sp_edit_search_index: " << sp_edit_search_index_ << ", mtp token indices" << mtp_token_index_
                  << ", contain_propose_token: " << contain_propose_token_ << ", propose_token: " << propose_token_;
