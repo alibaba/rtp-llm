@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -26,6 +27,19 @@ public:
 
     MOCK_METHOD((ErrorResult<GenerateOutputs>), nextOutput, (int64_t), (override));
     MOCK_METHOD(void, updateOutput, (const StreamUpdateInfo&), (override));
+};
+
+class SchedulerControlledStream: public NormalGenerateStream {
+public:
+    using NormalGenerateStream::NormalGenerateStream;
+
+    MOCK_METHOD(StreamState, getStatus, (), (const, override));
+};
+
+class TestGenerateContext: public GenerateContext {
+public:
+    using GenerateContext::GenerateContext;
+    using GenerateContext::stopStream;
 };
 
 class TestLocalRpcServer: public LocalRpcServer {
@@ -97,7 +111,8 @@ std::shared_ptr<MockGenerateStream> createMockStream() {
     return std::make_shared<MockGenerateStream>(input, model_config, RuntimeConfig{});
 }
 
-std::shared_ptr<NormalGenerateStream> createNormalStream() {
+template<typename Stream = NormalGenerateStream>
+std::shared_ptr<Stream> createNormalStream() {
     auto input             = std::make_shared<GenerateInput>();
     input->generate_config = std::make_shared<GenerateConfig>();
     input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -105,7 +120,48 @@ std::shared_ptr<NormalGenerateStream> createNormalStream() {
 
     ModelConfig model_config;
     model_config.max_seq_len = 3;
-    return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+    return std::make_shared<Stream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+}
+
+TEST(GenerateContextTest, StopPreservesConsumerCompletionBeforeSchedulerCommit) {
+    auto stream = createNormalStream<SchedulerControlledStream>();
+    stream->reportEvent(StreamEvents::GenerateDone);
+    // The scheduler commits after cleanup observes the consumer-complete window.
+    EXPECT_CALL(*stream, getStatus())
+        .WillOnce(Return(StreamState::RUNNING))
+        .WillRepeatedly(Return(StreamState::FINISHED));
+    kmonitor::MetricsReporterPtr reporter;
+    TestGenerateContext         context(1, 0, nullptr, reporter, std::make_shared<RpcServerRuntimeMeta>());
+    context.getStream() = stream;
+    context.stopStream();
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(context.getStream(), nullptr);
+}
+
+TEST(GenerateContextTest, DestructionPreservesConsumerCompletionBeforeSchedulerCommit) {
+    auto stream = createNormalStream<SchedulerControlledStream>();
+    stream->reportEvent(StreamEvents::GenerateDone);
+    EXPECT_CALL(*stream, getStatus())
+        .WillOnce(Return(StreamState::RUNNING))
+        .WillRepeatedly(Return(StreamState::FINISHED));
+    kmonitor::MetricsReporterPtr reporter;
+    {
+        TestGenerateContext context(1, 0, nullptr, reporter, std::make_shared<RpcServerRuntimeMeta>());
+        context.getStream() = stream;
+    }
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST(GenerateContextTest, StopStillCancelsAnUnfinishedConsumer) {
+    auto stream = createNormalStream<SchedulerControlledStream>();
+    EXPECT_CALL(*stream, getStatus())
+        .WillOnce(Return(StreamState::RUNNING))
+        .WillRepeatedly(Return(StreamState::FINISHED));
+    kmonitor::MetricsReporterPtr reporter;
+    TestGenerateContext         context(1, 0, nullptr, reporter, std::make_shared<RpcServerRuntimeMeta>());
+    context.getStream() = stream;
+    context.stopStream();
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
 ErrorResult<GenerateOutputs> wakeResult(WakeReason reason) {

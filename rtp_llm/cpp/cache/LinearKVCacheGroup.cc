@@ -218,7 +218,13 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
     const auto&         existing_blocks = block_ids.blocks();
     const int           existing_scan   = std::min(current_blocks_len, total_slots);
     for (int i = 0; i < existing_scan; ++i) {
-        if (should_materialize(i) && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
+        // Prefix reuse restores only its terminal recurrent state. Earlier
+        // NULL slots are historical snapshots that will not be recomputed.
+        // Recreating them solely for retention would publish uninitialized
+        // states under valid prefix keys. Only an active tail/reserve slot can
+        // be backfilled; newly appended slots still follow the retention rule.
+        if (shouldMaterializeBlock(i, seq_len, reserve_step, false)
+            && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
             positions_to_backfill.push_back(static_cast<size_t>(i));
         }
     }
