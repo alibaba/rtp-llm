@@ -85,7 +85,11 @@ def _reduce_prenorm_kernel(
     partial,
     square_sum,
     output,
-    TOKENS: tl.constexpr,
+    # Runtime, not constexpr: TOKENS is the per-chunk token count and changes on
+    # every chunk. As a constexpr it produced 224 cached variants on L20Z
+    # prefill, each costing a full Triton compilation. SPLITS must stay
+    # constexpr because it drives tl.static_range.
+    TOKENS,
     SPLITS: tl.constexpr,
     EPS: tl.constexpr,
 ):

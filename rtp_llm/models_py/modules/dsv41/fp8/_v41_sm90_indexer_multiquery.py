@@ -90,7 +90,10 @@ def _score_two_queries_concat_rejected_kernel(
     end_ptr,
     out_ptr,
     ROWS,
-    CAPACITY: tl.constexpr,
+    # Runtime, not constexpr: CAPACITY is the per-chunk key count and changes on
+    # every chunk. As a constexpr it forced a fresh Triton compilation per chunk
+    # (28k cached variants / 44 GB on L20Z prefill, ~1.45 s stall each).
+    CAPACITY,
     BLOCK: tl.constexpr,
 ):
     # Existing 32-head GEMM M axis becomes two adjacent groups of 32 heads.
@@ -172,7 +175,10 @@ def _score_two_queries_kernel(
     end_ptr,
     out_ptr,
     ROWS,
-    CAPACITY: tl.constexpr,
+    # Runtime, not constexpr: CAPACITY is the per-chunk key count and changes on
+    # every chunk. As a constexpr it forced a fresh Triton compilation per chunk
+    # (28k cached variants / 44 GB on L20Z prefill, ~1.45 s stall each).
+    CAPACITY,
     BLOCK: tl.constexpr,
 ):
     """Share K decode but retain original M32 dot and axis0 reduction.

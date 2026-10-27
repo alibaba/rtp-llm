@@ -35,7 +35,10 @@ def _score_kernel(
     start_ptr,
     end_ptr,
     out_ptr,
-    CAPACITY: tl.constexpr,
+    # Runtime, not constexpr: CAPACITY is the per-chunk key count and changes on
+    # every chunk. As a constexpr it forced a fresh Triton compilation per chunk
+    # (59k cached variants / 49 GB on L20Z prefill, ~1.45 s stall each).
+    CAPACITY,
     HEADS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
     PAGED: tl.constexpr,

@@ -9,8 +9,11 @@ import triton.language as tl
 def _expand_hc_kernel(
     source,
     output,
-    tokens: tl.constexpr,
-    width: tl.constexpr,
+    # Runtime, not constexpr: `tokens` is the per-chunk prefill token count and
+    # changes on every chunk. As a constexpr it produced 2,340 cached variants
+    # on L20Z prefill, each costing a full Triton compilation.
+    tokens,
+    width,
 ):
     rows = (tl.program_id(0) * 4 + tl.arange(0, 4)).to(tl.int64)
     cols = tl.program_id(1) * 512 + tl.arange(0, 512)
