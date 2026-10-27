@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -96,7 +97,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -154,6 +155,60 @@ private:
     int64_t                      baseline_allocated_  = 0;
     int64_t                      baseline_reserved_   = 0;
 };
+#endif
+#if USING_CUDA
+constexpr size_t kMiB = 1024 * 1024;
+
+void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
+    if (role_type != RoleType::PREFILL) {
+        return;
+    }
+
+    const int64_t max_mb    = autil::EnvUtil::getEnv("TORCH_CUDA_POOL_PREALLOC_MB", int64_t(-1));
+    const int64_t safety_mb = autil::EnvUtil::getEnv("TORCH_CUDA_POOL_PREALLOC_SAFETY_MB", int64_t(8192));
+    RTP_LLM_CHECK_WITH_INFO(max_mb >= -1 && safety_mb >= 0, "invalid Torch CUDA pool preallocation config");
+    if (max_mb == 0) {
+        return;
+    }
+
+    c10::cuda::CUDAGuard device_guard(device_id);
+    size_t               cuda_free  = 0;
+    size_t               cuda_total = 0;
+    RTP_LLM_CHECK_WITH_INFO(cudaMemGetInfo(&cuda_free, &cuda_total) == cudaSuccess, "cudaMemGetInfo failed");
+
+    // Match large_segment_size_mb=1024: never let allocator rounding consume the safety margin.
+    constexpr int64_t allocation_granularity_mb = 1024;
+    int64_t           target_mb = std::max<int64_t>(0, static_cast<int64_t>(cuda_free / kMiB) - safety_mb);
+    if (max_mb > 0) {
+        target_mb = std::min(target_mb, max_mb);
+    }
+    target_mb = target_mb / allocation_granularity_mb * allocation_granularity_mb;
+    if (target_mb == 0) {
+        RTP_LLM_LOG_WARNING(
+            "skip Torch CUDA pool preallocation: free=%zu MiB safety=%ld MiB", cuda_free / kMiB, safety_mb);
+        return;
+    }
+
+    const int64_t target_bytes = target_mb * static_cast<int64_t>(kMiB);
+    {
+        auto buffer =
+            torch::empty({target_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device_id));
+    }
+
+    const auto stats        = c10::cuda::CUDACachingAllocator::getDeviceStats(device_id);
+    const auto cached_bytes = stats.reserved_bytes[0].current - stats.allocated_bytes[0].current;
+    RTP_LLM_CHECK_WITH_INFO(cached_bytes >= target_bytes,
+                            "Torch CUDA pool preallocation failed: target=%ld MiB cached=%ld MiB",
+                            target_mb,
+                            cached_bytes / static_cast<int64_t>(kMiB));
+    RTP_LLM_LOG_INFO("Torch CUDA pool ready: device=%d target=%ld MiB cached=%ld MiB free_before=%zu MiB "
+                     "safety=%ld MiB",
+                     device_id,
+                     target_mb,
+                     cached_bytes / static_cast<int64_t>(kMiB),
+                     cuda_free / kMiB,
+                     safety_mb);
+}
 #endif
 }  // anonymous namespace
 
@@ -377,7 +432,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     RuntimeConfig stream_runtime_config                            = runtime_config;
     stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          stream_runtime_config,
                                                          resource_context_,
@@ -548,14 +603,14 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    const bool use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
-    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+    const int64_t token_budget             = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool    use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
         use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
-    fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
+    fake_input->generate_config->calculate_loss = int(runtime_config.warm_up_with_loss);
     if (!use_global_budget_warmup) {
         const bool generation_prefill_cuda_graph_requested =
             shouldCreateGenerationPrefillCudaGraph(params.hw_kernel_config,
@@ -643,9 +698,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         max_consumed = memory_tracker->maxConsumedBytes();
         token_heavy_result.value().reset();
 
-        const int64_t block_size       = model_config_.attn_config.tokens_per_block;
-        const int64_t row_count =
-            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
+        const int64_t block_size = model_config_.attn_config.tokens_per_block;
+        const int64_t row_count  = std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
         const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
@@ -653,8 +707,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         // Conservatively combine multiple rows with a full chunk per row and a long prefix.
         // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result = runPrefillWarmupShape(
-            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        auto row_heavy_result =
+            runPrefillWarmupShape(row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
@@ -704,7 +758,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     }
-    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -834,6 +888,9 @@ absl::Status NormalEngine::startLoop() {
         THROW_IF_STATUS_ERROR(initSystemPrompt());
         RTP_LLM_LOG_INFO("init system prompt done");
     }
+#if USING_CUDA
+    preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId());
+#endif
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
