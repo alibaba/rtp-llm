@@ -902,11 +902,6 @@ void StreamCacheResource::publishKVCacheForPDSep() {
                 }
                 auto cache_key = makeCacheKey(model_id, std::to_string(cache_keys[block_pos]), global_layer_begin + layer_id, tag);
                 auto parts = cache_manager->convertIndexToBufferByTag(block_id, static_cast<int>(layer_id), tag);
-                // TEMP PROBE (revert before final): dump publish parts for tag
-                for (size_t pi = 0; pi < parts.size(); ++pi) {
-                    RTP_LLM_LOG_WARNING("PROBE publish parts tag=%s layer=%zu block=%zu part=%zu/%zu bytes=%zu",
-                                        tag.c_str(), layer_id, block_pos, pi, parts.size(), parts[pi].size_bytes);
-                }
 
                 auto add_block = [&](const std::string& key, const BlockInfo& block) {
                     if (block.addr == nullptr || block.size_bytes == 0) {
@@ -989,10 +984,6 @@ void StreamCacheResource::publishKVCacheForPDSep() {
                     }
                     auto cache_key = makeCacheKey(draft_model_id, std::to_string(cache_keys[block_pos]), local_layer_id, tag);
                     auto parts      = cache_manager->convertIndexToBufferByTag(block_id, static_cast<int>(global_layer_id), tag);
-                    for (size_t pi = 0; pi < parts.size(); ++pi) {
-                        RTP_LLM_LOG_WARNING("PROBE publish draft parts tag=%s local_layer=%zu global_layer=%u block=%zu part=%zu/%zu bytes=%zu",
-                                            tag.c_str(), local_layer_id, global_layer_id, block_pos, pi, parts.size(), parts[pi].size_bytes);
-                    }
                     auto add_block = [&](const std::string& key, const BlockInfo& block) {
                         if (block.addr == nullptr || block.size_bytes == 0) {
                             return;
