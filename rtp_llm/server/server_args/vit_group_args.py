@@ -169,6 +169,22 @@ def init_vit_group_args(parser, vit_config):
         help="多模态开启的Cache的大小",
     )
     vit_group.add_argument(
+        "--mm_remote_cache_namespace",
+        env_name="MM_REMOTE_CACHE_NAMESPACE",
+        bind_to=(vit_config, "mm_remote_cache_namespace"),
+        type=str,
+        default="",
+        help="Required immutable model-weight and preprocessing revision namespace",
+    )
+    vit_group.add_argument(
+        "--mm_remote_cache_write_timeout_ms",
+        env_name="MM_REMOTE_CACHE_WRITE_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_remote_cache_write_timeout_ms"),
+        type=int,
+        default=1000,
+        help="Native write timeout; failed cache writes do not fail inference",
+    )
+    vit_group.add_argument(
         "--url_cache_item_num",
         env_name="URL_CACHE_ITEM_NUM",
         bind_to=(vit_config, "url_cache_item_num"),

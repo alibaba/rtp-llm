@@ -4,6 +4,7 @@ import logging
 import multiprocessing.pool
 import threading
 import time
+import uuid
 from functools import wraps
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -17,6 +18,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal import emb_deepseek_diagnostics, emb_diagnostics
 from rtp_llm.multimodal import mm_work_item as work_item_ops
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
 from rtp_llm.multimodal.mm_async_result import continue_after
@@ -182,10 +184,10 @@ class MMProcessEngine:
         )
 
         self.mm_part = mm_part
+        self._diagnostic_model_type = model_config.model_type
 
         self._remote_embedding_cache = None
         if vit_config.mm_remote_cache_enable:
-            from rtp_llm.multimodal.kvcm import RtpKvMetaObjectClient
             from rtp_llm.multimodal.mm_remote_embedding_cache import (
                 MMRemoteEmbeddingCache,
             )
@@ -194,40 +196,17 @@ class MMProcessEngine:
                 raise ValueError(
                     "MM_REMOTE_CACHE_ENABLE requires a nonzero CPU embedding cache"
                 )
-            limits = (
-                vit_config.mm_remote_cache_max_object_bytes,
-                vit_config.mm_remote_cache_max_inflight_bytes,
-                vit_config.mm_remote_cache_max_pending,
-                vit_config.mm_remote_cache_read_timeout_ms,
-            )
-            if min(limits) <= 0:
-                raise ValueError("remote embedding cache limits must be positive")
-            client = (
-                RtpKvMetaObjectClient.from_kv_cache_config(
-                    kv_cache_config, max_object_bytes=limits[0]
-                )
-                if kv_cache_config is not None
-                else RtpKvMetaObjectClient.from_env(max_object_bytes=limits[0])
-            )
-            self._remote_embedding_cache = MMRemoteEmbeddingCache(
-                client,
-                max_object_bytes=limits[0],
-                max_inflight_bytes=limits[1],
-                max_pending=limits[2],
-                read_timeout_ms=limits[3],
-                cuda_device=(
+            self._remote_embedding_cache = MMRemoteEmbeddingCache.from_configs(
+                model_config,
+                vit_config,
+                kv_cache_config=kv_cache_config,
+                device=(
                     torch.device("cuda", torch.cuda.current_device())
                     if torch.cuda.is_available()
                     else None
                 ),
             )
-            logging.info(
-                "ViT shared remote cache enabled: instance=%s group=%s limits=%s; "
-                "local eviction never removes shared objects",
-                client.instance_id,
-                client.instance_group,
-                limits,
-            )
+            logging.info("ViT shared remote cache enabled; CPU eviction upload policy")
 
         # threading.Lock: protects gRPC-handler-thread access within this
         # process. multiprocessing.Lock would round-trip through an OS
@@ -822,6 +801,9 @@ class MMProcessEngine:
         except Exception as error:
             self.report_vit_error(error)
             raise
+        if self._remote_embedding_cache is not None:
+            for item in mm_inputs:
+                self._remote_embedding_cache.normalize_cpp_url_input(item)
         res = self._embed_with_greennet_sync(
             mm_inputs,
             request_id=request_id,
@@ -977,6 +959,11 @@ class MMProcessEngine:
         )
 
         work_items = []
+        trace_id = uuid.uuid4().hex
+        model_type = getattr(self, "_diagnostic_model_type", None)
+        if emb_diagnostics.enabled() and model_type == "qwen3_vl":
+            emb_diagnostics.request_start(trace_id, len(mm_inputs))
+        emb_deepseek_diagnostics.request_start(trace_id, len(mm_inputs), model_type)
         ready_event = threading.Event()
         try:
             for index in range(0, len(mm_inputs), batch_size):
@@ -997,7 +984,44 @@ class MMProcessEngine:
                 if isinstance(inspection_handle, SourceInspection):
                     inspection_handle.bind_work_item(work_item, index)
                 work_item.preprocess_ready_event = ready_event
+                work_item.cache_source = (
+                    "local"
+                    if work_item.embedding_result is not None
+                    or work_item.waiting_for_cache
+                    else "encoder"
+                )
+                if emb_diagnostics.enabled() and model_type == "qwen3_vl":
+                    work_item.emb_diagnostic_trace = trace_id
+                if (
+                    emb_deepseek_diagnostics.enabled(model_type)
+                    and model_type == "deepseek_vl_v2"
+                ):
+                    work_item.deepseek_diagnostic_trace = trace_id
                 remote_cache = self._remote_embedding_cache
+                if remote_cache is not None:
+                    work_item.remote_cache = remote_cache
+                    work_item.remote_trace_id = trace_id
+                    work_item.remote_cache_observer = remote_cache.record
+                    work_item.remote_cache_key = None
+                    try:
+                        work_item.remote_cache_key = remote_cache.key(
+                            batch, trace_id=trace_id
+                        )
+                    except (ValueError, TypeError, AttributeError) as error:
+                        remote_cache.record(
+                            "cache_bypass",
+                            trace_id=trace_id,
+                            reason="invalid_key_material",
+                            error_type=type(error).__name__,
+                        )
+                    emb_diagnostics.bind_key(trace_id, work_item.remote_cache_key)
+                    emb_deepseek_diagnostics.bind_key(
+                        trace_id, work_item.remote_cache_key
+                    )
+                    if work_item.cache_state == "miss":
+                        remote_cache.bind_entry(
+                            work_item.cache_entry, work_item.remote_cache_key, trace_id
+                        )
                 if (
                     remote_cache is not None
                     # Remote tensors do not carry matching source bytes/verdicts.
@@ -1006,9 +1030,13 @@ class MMProcessEngine:
                     and work_item.should_preprocess
                 ):
                     work_item.embedding_result = remote_cache.load(
-                        work_item.cache_key,
+                        work_item.remote_cache_key,
+                        trace_id=trace_id,
                         timeout_ms=max(1, int(work_item.remaining_timeout_s() * 1000)),
                     )
+                    if work_item.embedding_result is not None:
+                        work_item.cache_source = "remote"
+                        remote_cache.observe_entry(work_item.cache_entry, trace_id)
                 work_item.remaining_timeout_s()
                 self.preprocess_executor.submit(work_item)
                 if isinstance(inspection_handle, SourceInspection):
@@ -1108,6 +1136,21 @@ class MMProcessEngine:
                         wi.cache_entry,
                         self._embedding_cache,
                     )
+            source = getattr(wi, "cache_source", "encoder")
+            emb_diagnostics.delivered(
+                getattr(wi, "emb_diagnostic_trace", None), result, source
+            )
+            emb_deepseek_diagnostics.delivered(
+                getattr(wi, "deepseek_diagnostic_trace", None), result, source
+            )
+            remote_cache = getattr(wi, "remote_cache", None)
+            if remote_cache is not None:
+                remote_cache.record(
+                    "result_used",
+                    key=wi.remote_cache_key,
+                    trace_id=wi.remote_trace_id,
+                    source=source,
+                )
             emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
             if len(result) > 2:

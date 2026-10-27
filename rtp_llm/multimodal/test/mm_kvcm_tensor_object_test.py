@@ -224,7 +224,12 @@ class ObjectFacadeTest(unittest.TestCase):
         with patch.object(
             facade_module,
             "_load_kvcm_client_types",
-            return_value=(lambda _: backend, lambda **kw: SimpleNamespace(**kw)),
+            return_value=(
+                lambda _: backend,
+                lambda **kw: SimpleNamespace(**kw),
+                RuntimeError,
+                object(),
+            ),
         ):
             client = facade_module.RtpKvMetaObjectClient._from_config(config)
         self.addCleanup(client.close)

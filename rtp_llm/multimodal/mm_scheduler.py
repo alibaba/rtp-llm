@@ -19,6 +19,7 @@ import torch.profiler
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal import emb_deepseek_diagnostics, emb_diagnostics
 from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
 from rtp_llm.multimodal.mm_work_item import prepare_batch_feature_hashes
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
@@ -98,7 +99,19 @@ def _run_embedding(
 
     with Timer() as route_timer:
         with torch.profiler.record_function("batched_embedding"):
-            batch_outputs = mm_part.batched_embedding(data_list, type_list)
+            for wi in items:
+                observer = getattr(wi, "remote_cache_observer", None)
+                if observer is not None:
+                    observer(
+                        "encoder_forward",
+                        key=wi.remote_cache_key,
+                        trace_id=wi.remote_trace_id,
+                        batch_items=len(items),
+                    )
+            with emb_diagnostics.encoder_scope(
+                items
+            ), emb_deepseek_diagnostics.encoder_scope(items):
+                batch_outputs = mm_part.batched_embedding(data_list, type_list)
     # Forward-only latency, sampled per merged batch -> its own metric. The
     # historical per-request (wait + forward) latency stays on
     # VIT_EMBEDDING_RT_METRIC, reported in submit_and_wait.
@@ -114,6 +127,13 @@ def _run_embedding(
     prepare_batch_feature_hashes(items, batch_outputs)
     for wi, result in zip(items, batch_outputs):
         wi.embedding_result = result
+        emb_diagnostics.encoder_tuple(getattr(wi, "emb_diagnostic_trace", None), result)
+        emb_deepseek_diagnostics.encoder_tuple(
+            getattr(wi, "deepseek_diagnostic_trace", None), result
+        )
+        remote_cache = getattr(wi, "remote_cache", None)
+        if remote_cache is not None:
+            remote_cache.observe_entry(wi.cache_entry, wi.remote_trace_id)
         wi.complete_cache(result)
 
 

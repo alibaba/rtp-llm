@@ -184,6 +184,28 @@ class RtpKvMetaExplicitConfigTest(unittest.TestCase):
         self.assertNotIn("transfer_client_config", repr(derived))
         self.assertNotIn("user_data", repr(derived))
 
+    def test_small_sdk_queue_is_raised_only_in_the_derived_client(self):
+        source = _primary_config()
+        source["sdk_config"]["queue_size"] = 1
+        original = copy.deepcopy(source)
+
+        explicit = RtpKvMetaObjectClientConfig.from_kv_cache_config(
+            _split_reco_config(reco_client_config=_serialized({"": source}))
+        )
+        split = RtpKvMetaObjectClientConfig.from_kv_cache_config(
+            _split_reco_config(reco_storage_queue_size=1)
+        )
+
+        self.assertEqual(
+            json.loads(explicit.transfer_client_config)["sdk_config"]["queue_size"],
+            64,
+        )
+        self.assertEqual(
+            json.loads(split.transfer_client_config)["sdk_config"]["queue_size"],
+            64,
+        )
+        self.assertEqual(source, original)
+
     def test_selects_single_named_or_explicit_empty_key_primary(self):
         single = _split_reco_config(
             reco_client_config=_serialized({"model": _primary_config()})
@@ -297,8 +319,9 @@ class RtpKvMetaExplicitConfigTest(unittest.TestCase):
             (("meta_channel_config", "call_timeout"), 600_001),
             (("sdk_config",), None),
             (("sdk_config", "thread_num"), 0),
-            (("sdk_config", "queue_size"), 63),
+            (("sdk_config", "queue_size"), 0),
             (("sdk_config", "sdk_backend_configs"), {}),
+            (("sdk_config", "sdk_backend_configs"), []),
             (("sdk_config", "sdk_backend_configs"), ["not-an-object"]),
             (("sdk_config", "sdk_backend_configs"), [{}]),
             (("sdk_config", "timeout_config"), []),
@@ -428,13 +451,74 @@ class RtpKvMetaExplicitConfigTest(unittest.TestCase):
             RtpKvMetaObjectClientConfig.from_kv_cache_config(
                 config
             ).write_timeout_seconds,
-            41,
+            51,
         )
 
         primary["meta_channel_config"]["call_timeout"] = 600_000
         config = _split_reco_config(reco_client_config=_serialized({"": primary}))
         with self.assertRaisesRegex(RtpKvMetaObjectConfigError, "write lease limit"):
             RtpKvMetaObjectClientConfig.from_kv_cache_config(config)
+
+    def test_timeout_overrides_are_isolated_and_drive_the_write_lease(self):
+        source = _primary_config()
+        original = copy.deepcopy(source)
+        config = _split_reco_config(reco_client_config=_serialized({"": source}))
+
+        derived = RtpKvMetaObjectClientConfig.from_kv_cache_config(
+            config,
+            call_timeout_ms=5_000,
+            put_timeout_ms=40_000,
+            get_timeout_ms=700,
+        )
+        transfer = json.loads(derived.transfer_client_config)
+
+        self.assertEqual(derived.call_timeout_ms, 5_000)
+        self.assertEqual(derived.write_timeout_seconds, 96)
+        self.assertEqual(transfer["meta_channel_config"]["call_timeout"], 5_000)
+        self.assertEqual(
+            transfer["sdk_config"]["timeout_config"],
+            {"put_timeout_ms": 40_000, "get_timeout_ms": 700},
+        )
+        self.assertEqual(source, original)
+
+    def test_timeout_overrides_cannot_mask_invalid_shared_configuration(self):
+        primary = _primary_config()
+        primary["sdk_config"]["timeout_config"]["get_timeout_ms"] = 0
+        config = _split_reco_config(reco_client_config=_serialized({"": primary}))
+
+        with self.assertRaisesRegex(
+            RtpKvMetaObjectConfigError, "KVCM SDK get_timeout_ms"
+        ):
+            RtpKvMetaObjectClientConfig.from_kv_cache_config(config, get_timeout_ms=500)
+
+        valid_config = _split_reco_config(reco_client_config=_serialized())
+        for field, value in (
+            ("call_timeout_ms", 0),
+            ("put_timeout_ms", True),
+            ("get_timeout_ms", 1 << 31),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(RtpKvMetaObjectConfigError):
+                    RtpKvMetaObjectClientConfig.from_kv_cache_config(
+                        valid_config, **{field: value}
+                    )
+
+        resolver_calls = []
+        vip_primary = _primary_config(
+            enable_vipserver=True,
+            vipserver_domain="kvcm.example",
+            address=[],
+        )
+        vip_config = _split_reco_config(
+            reco_client_config=_serialized({"": vip_primary})
+        )
+        with self.assertRaises(RtpKvMetaObjectConfigError):
+            RtpKvMetaObjectClientConfig.from_kv_cache_config(
+                vip_config,
+                vipserver_resolver=lambda domain: resolver_calls.append(domain),
+                get_timeout_ms=0,
+            )
+        self.assertEqual(resolver_calls, [])
 
     def test_serialization_failure_is_redacted(self):
         config = _split_reco_config(reco_client_config=_serialized())
@@ -631,7 +715,7 @@ class RtpKvMetaSplitConfigTest(unittest.TestCase):
         self.assertEqual(derived.instance_group, "kve_pace_group_m3")
         self.assertEqual(derived.instance_id, "kve_pace_group_m3")
         self.assertEqual(derived.call_timeout_ms, 1500)
-        self.assertEqual(derived.write_timeout_seconds, 105)
+        self.assertEqual(derived.write_timeout_seconds, 205)
         self.assertEqual(
             transfer["sdk_config"]["timeout_config"],
             {"put_timeout_ms": 100_000, "get_timeout_ms": 100_000},
@@ -706,12 +790,13 @@ class RtpKvMetaSplitConfigTest(unittest.TestCase):
             ("reco_meta_channel_connection_timeout", True),
             ("reco_meta_channel_call_timeout", 600_001),
             ("reco_storage_thread_num", 0),
-            ("reco_storage_queue_size", 63),
+            ("reco_storage_queue_size", 0),
             ("reco_put_timeout_ms", 0),
             ("reco_get_timeout_ms", False),
             ("reco_model_sdk_config", None),
             ("reco_model_sdk_config", "x" * (1024 * 1024 + 1)),
             ("reco_model_sdk_config", "{}"),
+            ("reco_model_sdk_config", "[]"),
             ("reco_model_sdk_config", '["not-an-object"]'),
             ("reco_model_sdk_config", '[{"type":"pace","type":"file"}]'),
             ("reco_model_user_data", 7),
@@ -758,7 +843,7 @@ class RtpKvMetaSplitConfigTest(unittest.TestCase):
             ({"RECO_ENABLE_VIPSERVER": "t"}, "boolean"),
             ({"RECO_ENABLE_VIPSERVER": "f"}, "boolean"),
             ({"RECO_META_CHANNEL_CALL_TIMEOUT": "not-int"}, "integer"),
-            ({"RECO_STORAGE_QUEUE_SIZE": "63"}, "at least 64"),
+            ({"RECO_STORAGE_QUEUE_SIZE": "0"}, "valid range"),
             ({"RECO_PUT_TIMEOUT_MS": "0"}, "valid range"),
             ({"RECO_INSTANCE_GROUP": 7}, "must be a string"),
         )

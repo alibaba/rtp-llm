@@ -37,6 +37,7 @@ from rtp_llm.models_py.utils.expert_load_monitor import (
     ExpertLoadContext,
     expert_load_for_layer,
 )
+from rtp_llm.multimodal import emb_deepseek_diagnostics
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -520,11 +521,24 @@ class GenericMoeModel(GptModelBase):
             inputs.embedding_inputs.combo_tokens_type_ids,
             inputs.embedding_inputs.text_tokens_mask,
         )
-        return injector(
+        model_type = self.config.model_type
+        ticket = emb_deepseek_diagnostics.model_begin(
+            multimodal_features,
+            multimodal_inputs.mm_features_locs,
+            model_type,
+            (
+                self.parallelism_config.tp_size
+                if emb_deepseek_diagnostics.enabled(model_type)
+                else None
+            ),
+        )
+        hidden_states = injector(
             inputs_embeds,
             multimodal_features,
             multimodal_inputs.mm_features_locs,
         )
+        emb_deepseek_diagnostics.embedding_copied(ticket, hidden_states)
+        return hidden_states
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         hidden_states = self.embedding(inputs)

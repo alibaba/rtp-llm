@@ -1,7 +1,7 @@
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from rtp_llm.server.backend_manager import BackendManager
 
@@ -109,6 +109,51 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                     if expected_calls:
                         init_deepep.assert_called_once_with(engine_config, model_config)
                     factory.from_model_configs.assert_called_once()
+
+
+class BackendManagerCommInitTest(unittest.TestCase):
+    def _check_start(self, world_size, cp_enabled, expected_init):
+        config = SimpleNamespace(
+            world_size=world_size,
+            prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp_enabled),
+        )
+        manager = BackendManager.__new__(BackendManager)
+        manager.py_env_configs = SimpleNamespace(
+            parallelism_config=config,
+            server_config=object(),
+            distribute_config=SimpleNamespace(dist_comm_timeout=60),
+            ft_disable_custom_ar_override=None,
+        )
+        manager._distributed_server = Mock()
+        engine_config = SimpleNamespace(parallelism_config=config)
+        boundary = RuntimeError("stop before model loading")
+        with (
+            patch(
+                "rtp_llm.server.backend_manager.EngineConfig.create",
+                return_value=engine_config,
+            ),
+            patch(
+                "rtp_llm.server.backend_manager.init_distributed_environment"
+            ) as initialize,
+            patch(
+                "rtp_llm.server.backend_manager.get_world_info", side_effect=boundary
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop before model loading"):
+                manager.start()
+        self.assertEqual(initialize.call_count, int(expected_init))
+        if expected_init:
+            self.assertIs(initialize.call_args.args[0], config)
+            self.assertEqual(initialize.call_args.kwargs["backend"], "nccl")
+
+    def test_cp_single_rank_initializes_communication(self):
+        self._check_start(world_size=1, cp_enabled=True, expected_init=True)
+
+    def test_plain_single_rank_keeps_existing_startup(self):
+        self._check_start(world_size=1, cp_enabled=False, expected_init=False)
+
+    def test_multiple_ranks_keep_existing_initialization(self):
+        self._check_start(world_size=2, cp_enabled=False, expected_init=True)
 
 
 if __name__ == "__main__":

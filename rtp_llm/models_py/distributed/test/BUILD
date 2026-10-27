@@ -1,3 +1,14 @@
+py_test(
+    name = "collective_torch_single_rank_test",
+    srcs = ["collective_torch_single_rank_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+    exec_properties = {'gpu':'A10', 'gpu_count':'1'},
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],

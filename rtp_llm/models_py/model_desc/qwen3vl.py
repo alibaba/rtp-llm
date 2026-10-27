@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     reshape_extra_input_to_deepstack,
 )
+from rtp_llm.multimodal import emb_diagnostics
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -100,36 +101,55 @@ class Qwen3VLModel(GptModelBase):
             else []
         )
 
-        inputs_embeds = self.embed_tokens(
-            input_ids, position_ids, token_type_ids, text_tokens_mask
-        )
-        hidden_states = self.multimodal_embedding_injector(
-            inputs_embeds, mm_features, mm_feature_locs
-        )
-
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-
-        if mm_deepstack_embeds and mm_feature_locs is not None:
-            cpu_locs = (
-                mm_feature_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+        with emb_diagnostics.model_scope(
+            mm_features,
+            mm_deepstack_embeds,
+            mm_feature_locs,
+            position_ids,
+            self.parallelism_config.tp_size if emb_diagnostics.enabled() else None,
+        ) as diagnostic_ticket:
+            inputs_embeds = self.embed_tokens(
+                input_ids, position_ids, token_type_ids, text_tokens_mask
             )
-        else:
-            cpu_locs = []
+            hidden_states = self.multimodal_embedding_injector(
+                inputs_embeds, mm_features, mm_feature_locs
+            )
 
-        capture = self.capture_context(inputs.capture_hidden_states)
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
-            hidden_states = decoder_layer(
-                hidden_states,
-                layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-            )
-            hidden_states = self.multimodal_deepstack_injector(
-                hidden_states, mm_deepstack_embeds, cpu_locs, i
-            )
-            capture.capture_layer(i, hidden_states)
-        return capture.finalize(hidden_states)
+            emb_diagnostics.embedding_copied(diagnostic_ticket, hidden_states)
+
+            if fmha_impl is None:
+                fmha_impl = self.prepare_fmha_impl(inputs)
+
+            if mm_deepstack_embeds and mm_feature_locs is not None:
+                cpu_locs = (
+                    mm_feature_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+                )
+            else:
+                cpu_locs = []
+
+            capture = self.capture_context(inputs.capture_hidden_states)
+            for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    layer_fmha_impl,
+                    kv_cache=(
+                        self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                    ),
+                )
+                diagnostic_add = emb_diagnostics.before_deepstack(
+                    diagnostic_ticket, hidden_states, i
+                )
+                hidden_states = self.multimodal_deepstack_injector(
+                    hidden_states, mm_deepstack_embeds, cpu_locs, i
+                )
+                emb_diagnostics.after_deepstack(
+                    diagnostic_ticket, diagnostic_add, hidden_states, i
+                )
+                capture.capture_layer(i, hidden_states)
+            return capture.finalize(hidden_states)
 
 
 __all__ = [
