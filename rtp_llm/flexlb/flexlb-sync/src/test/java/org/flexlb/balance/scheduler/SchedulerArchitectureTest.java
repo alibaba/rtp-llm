@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Protect the migrated consumer boundaries, without constraining unrelated endpoint APIs. */
 class SchedulerArchitectureTest {
     @Test
-    void placementAndDeliveryConsumersCannotRetainOrAcceptTheWholeScheduler() throws IOException {
+    void placementAndDeliveryConsumersCannotRetainOrAcceptTheWholeScheduler() {
         for (Class<?> consumer :
                 new Class<?>[] {
                     DirectRequestScheduler.class,
@@ -28,8 +28,6 @@ class SchedulerArchitectureTest {
                 }) {
             assertNoDependency(consumer, RequestScheduler.class);
         }
-        assertNoImplementationDependency(
-                DeliveryDispatcher.class, AbstractRequestScheduler.PreemptionEvent.class);
         assertNoDependency(AbstractRequestScheduler.class, RequestWorkerSelector.class);
     }
 

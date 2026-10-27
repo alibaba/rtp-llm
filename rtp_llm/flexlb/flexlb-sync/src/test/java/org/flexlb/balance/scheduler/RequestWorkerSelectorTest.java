@@ -150,8 +150,7 @@ class RequestWorkerSelectorTest {
                                                 return null;
                                             })
                                     .when(requests)
-                                    .onDeliveryEvidence(
-                                            eq(claim), any(ContextResult.RouteDelivered.class));
+                                    .onDeliveryFact(any(ContextResult.RouteDelivered.class));
                             return claim;
                         });
         when(requests.publish(any(), any(), eq(false)))
@@ -236,7 +235,7 @@ class RequestWorkerSelectorTest {
             verify(prefill.pin).close();
             verify(decode.pin).close();
             verify(requests, never())
-                    .onDeliveryEvidence(any(), any(ContextResult.RouteDelivered.class));
+                    .onDeliveryFact(any(ContextResult.RouteDelivered.class));
             return;
         }
 
@@ -251,7 +250,7 @@ class RequestWorkerSelectorTest {
         var order = org.mockito.Mockito.inOrder(decode.pin, prefill.pin, requests);
         order.verify(decode.pin).close();
         order.verify(prefill.pin).close();
-        order.verify(requests).onDeliveryEvidence(any(), any(ContextResult.RouteDelivered.class));
+        order.verify(requests).onDeliveryFact(any(ContextResult.RouteDelivered.class));
     }
 
     @Test
@@ -335,11 +334,13 @@ class RequestWorkerSelectorTest {
 
         assertTrue(scheduler(router(), context).submit(context).join().isSuccess());
 
-        var evidence = org.mockito.ArgumentCaptor.forClass(ContextResult.RouteDelivered.class);
-        verify(requests).onDeliveryEvidence(eq(lastDelivery), evidence.capture());
+        var evidence = org.mockito.ArgumentCaptor.forClass(ContextResult.DeliveryFact.class);
+        verify(requests).onDeliveryFact(evidence.capture());
+        assertTrue(evidence.getValue() instanceof ContextResult.RouteDelivered);
+        var routeDelivered = (ContextResult.RouteDelivered) evidence.getValue();
         assertEquals(
-                unknown ? 0L : evidence.getValue().nowMs() + 10_000L,
-                evidence.getValue().predictedAtMs());
+                unknown ? 0L : routeDelivered.nowMs() + 10_000L,
+                routeDelivered.predictedAtMs());
         verify(endpoint).release(registration, null);
     }
 

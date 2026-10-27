@@ -114,7 +114,7 @@ class BatchDeliveryTest {
             assertEquals(DeliveryResult.Status.DELIVERED, f.result(1L).status());
             verify(f.runtime.deliveries()).tryReserveDelivery();
             verify(f.prefill).reserveBatch(eq(first), eq(701L), anyInt());
-            verify(f.owner, never()).onDeliveryEvidence(any(), isA(RouteDelivered.class));
+            verify(f.owner, never()).onDeliveryFact(isA(RouteDelivered.class));
         }
     }
 
@@ -525,15 +525,13 @@ class BatchDeliveryTest {
             assertEquals(Set.of(1L, 2L), f.preparationFailures.keySet());
             assertTrue(f.results.isEmpty());
             verify(f.owner, times(1))
-                    .onDeliveryEvidence(
-                            isNull(),
+                    .onDeliveryFact(
                             argThat(
                                     e ->
                                             e instanceof PreparationFailure failure
                                                     && failure.route() == first));
             verify(f.owner, times(1))
-                    .onDeliveryEvidence(
-                            isNull(),
+                    .onDeliveryFact(
                             argThat(
                                     e ->
                                             e instanceof PreparationFailure failure
@@ -714,7 +712,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                         ((DeliveryClaim) call.getArgument(0)).item().requestId()));
         doAnswer(
                         call -> {
-                            DeliveryEvidence evidence = call.getArgument(1);
+                            DeliveryEvidence evidence = call.getArgument(0);
                             if (evidence instanceof Prediction prediction) {
                                 predictions.put(
                                         prediction.delivery().item().requestId(),
@@ -739,7 +737,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                             return null;
                         })
                 .when(owner)
-                .onDeliveryEvidence(any(), any());
+                .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         when(decode.acquireDispatchPermit(any(), any()))
                 .thenAnswer(
                         call -> {

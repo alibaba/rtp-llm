@@ -206,8 +206,7 @@ class RejectedDeliveryWithdrawalRaceTest {
             assertEquals(0, decode.routingView().inflightHardKv());
             assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             verify(owner, times(1))
-                    .onDeliveryEvidence(
-                            org.mockito.ArgumentMatchers.isNull(),
+                    .onDeliveryFact(
                             org.mockito.ArgumentMatchers.argThat(
                                     evidence ->
                                             evidence

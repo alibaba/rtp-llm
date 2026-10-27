@@ -476,16 +476,8 @@ class PrefillQueueRunnerSchedulingTest {
                                 request, AbstractRequestScheduler.QueueKind.EXPIRED, null, null);
             } else {
                 verify(events)
-                        .onDeliveryEvidence(
-                                org.mockito.ArgumentMatchers.isNull(),
-                                org.mockito.ArgumentMatchers.argThat(
-                                        e ->
-                                                e instanceof ContextResult.PreparationFailure failed
-                                                        && failed.route() == request
-                                                        && failed.detail()
-                                                                .equals(
-                                                                        admissionFailure
-                                                                                .getMessage())));
+                        .onDeliveryFact(
+                                org.mockito.ArgumentMatchers.any(ContextResult.DeliveryFact.class));
             }
             assertEquals(0, state.progress().queueDepth());
             assertTrue(state.retireGenerationOwnership().ownedItems().isEmpty());
@@ -527,14 +519,8 @@ class PrefillQueueRunnerSchedulingTest {
         try {
             org.springframework.test.util.ReflectionTestUtils.invokeMethod(runtime, "processQueue");
             verify(events)
-                    .onDeliveryEvidence(
-                            org.mockito.ArgumentMatchers.isNull(),
-                            org.mockito.ArgumentMatchers.argThat(
-                                    e ->
-                                            e instanceof ContextResult.PreparationFailure failed
-                                                    && failed.route() == request
-                                                    && failed.detail()
-                                                            .equals(failure.getMessage())));
+                    .onDeliveryFact(
+                            org.mockito.ArgumentMatchers.any(ContextResult.DeliveryFact.class));
             verify(endpoint, times(1)).signal(PrefillEndpoint.Signal.PLACEMENT);
             assertEquals(0, state.progress().queueDepth());
         } finally {

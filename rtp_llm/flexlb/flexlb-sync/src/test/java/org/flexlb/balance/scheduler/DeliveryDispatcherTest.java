@@ -1533,16 +1533,16 @@ class DeliveryDispatcherTest {
             org.mockito.Mockito.doAnswer(
                             call -> {
                                 observer.accept(
-                                        item, ((TransportResult) call.getArgument(1)).result());
+                                        item,
+                                        ((TransportResult) call.getArgument(0)).result());
                                 return null;
                             })
                     .when(item.ctx().data().getScheduler())
-                    .onDeliveryEvidence(
-                            org.mockito.ArgumentMatchers.same(claim),
+                    .onDeliveryFact(
                             org.mockito.ArgumentMatchers.isA(TransportResult.class));
             org.mockito.Mockito.doAnswer(
                             call -> {
-                                var failed = (PreparationFailure) call.getArgument(1);
+                                var failed = (PreparationFailure) call.getArgument(0);
                                 observer.accept(
                                         item,
                                         DeliveryResult.notSent(
@@ -1550,10 +1550,9 @@ class DeliveryDispatcherTest {
                                 return null;
                             })
                     .when(item.ctx().data().getScheduler())
-                    .onDeliveryEvidence(
-                            org.mockito.ArgumentMatchers.isNull(),
+                    .onDeliveryFact(
                             argThat(
-                                    e ->
+                                    (ContextResult.DeliveryFact e) ->
                                             e instanceof PreparationFailure failed
                                                     && failed.route() == item));
         }

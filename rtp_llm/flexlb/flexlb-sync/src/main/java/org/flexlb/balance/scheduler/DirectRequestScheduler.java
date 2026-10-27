@@ -103,8 +103,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                                                                         .getDecision()
                                                                         .getLifetime(),
                                                                 now);
-                                        onDeliveryEvidence(
-                                                delivery.claim(),
+                                        onDeliveryFact(
                                                 new RouteDelivered(
                                                         delivery.claim(), visibility, now));
                                         yield null;
