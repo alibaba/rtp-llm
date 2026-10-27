@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -70,6 +71,69 @@ class FakeRawRequest(object):
 
 
 class FrontendServerTest(TestCase):
+    def test_invalid_token_budget_is_client_error(self):
+        from rtp_llm.structure.request_constants import request_id_field_name
+
+        config = GenerateConfig(max_new_tokens=-1)
+        with self.assertRaises(FtRuntimeException) as raised:
+            config.validate()
+        with patch("rtp_llm.frontend.frontend_server.kmonitor"):
+            response = self.frontend_server._handle_exception(
+                {request_id_field_name: 1}, raised.exception
+            )
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.body)
+        self.assertEqual(body["error_code"], 507)
+        self.assertEqual(body["error_code_str"], "507_ERROR_INPUT_FORMAT_ERROR")
+        self.assertEqual(body["message"], raised.exception.message)
+
+    def test_long_prompt_is_client_error_and_internal_error_stays_500(self):
+        from rtp_llm.structure.request_constants import request_id_field_name
+
+        request = {request_id_field_name: 1}
+        long_prompt = FtRuntimeException(
+            ExceptionType.LONG_PROMPT_ERROR, "prompt exceeds model capacity"
+        )
+        long_prompt.aux_info = {"input_len": 10252, "output_len": 0}
+        with patch("rtp_llm.frontend.frontend_server.kmonitor"):
+            response = self.frontend_server._handle_exception(request, long_prompt)
+            self.assertEqual(response.status_code, 400)
+            body = json.loads(response.body)
+            self.assertEqual(body["error_code"], 511)
+            self.assertEqual(body["aux_info"], long_prompt.aux_info)
+            response = self.frontend_server._handle_exception(
+                request, RuntimeError("backend failed")
+            )
+            self.assertEqual(response.status_code, 500)
+
+    def test_invalid_grammar_is_client_error_and_verify_failures_stay_internal(self):
+        from rtp_llm.structure.request_constants import request_id_field_name
+
+        request = {request_id_field_name: 1}
+        invalid = FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            "Failed to compile regex grammar: unclosed '['",
+        )
+        invalid.aux_info = {"input_len": 25, "output_len": 0}
+        with patch("rtp_llm.frontend.frontend_server.kmonitor"):
+            response = self.frontend_server._handle_exception(request, invalid)
+            self.assertEqual(response.status_code, 400)
+            body = json.loads(response.body)
+            self.assertEqual(body["error_code"], 605)
+            self.assertEqual(body["error_code_str"], "605_INVALID_PARAMS")
+            self.assertEqual(body["message"], invalid.message)
+            self.assertEqual(body["aux_info"], invalid.aux_info)
+            for error_type in (
+                ExceptionType.GRAMMAR_VERIFY_EXCEPTION,
+                ExceptionType.EXECUTION_EXCEPTION,
+                ExceptionType.GENERATE_TIMEOUT,
+            ):
+                with self.subTest(error_type=error_type):
+                    response = self.frontend_server._handle_exception(
+                        request, FtRuntimeException(error_type, "backend failed")
+                    )
+                    self.assertEqual(response.status_code, 500)
+
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         # Create PyEnvConfigs with default values for testing
@@ -94,6 +158,23 @@ class FrontendServerTest(TestCase):
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
+
+    def test_openai_stream_ends_with_done_marker(self):
+        async def _run():
+            with patch.object(
+                self.frontend_server._frontend_worker,
+                "is_streaming",
+                return_value=True,
+            ):
+                response = await self.frontend_server.inference(
+                    req={"prompt": "hello", "stream": True},
+                    raw_request=FakeRawRequest(),
+                )
+                return [chunk async for chunk in response.body_iterator]
+
+        chunks = asyncio.run(_run())
+        self.assertIn('"res":"hello"', chunks[0])
+        self.assertEqual(chunks[-1], "data: [DONE]\r\n\r\n")
 
     def test_simple(self):
         loop = asyncio.new_event_loop()
