@@ -161,9 +161,15 @@ class QuantizedMetadataTest(unittest.TestCase):
         )
         scales = torch.empty((2, 48), dtype=torch.int32).as_subclass(TrackedTensor)
         values.recorded, scales.recorded = [], []
-        work = prefetch._LookupWork.__new__(prefetch._LookupWork)
+        from rtp_llm.models_py.modules.dsv41._engram_decode_schedule import (
+            _ScheduledWork,
+        )
+
+        work = _ScheduledWork.__new__(_ScheduledWork)
         work.ids = torch.zeros((2, 24), dtype=torch.int64)
-        work.rows, work.joined = (values, scales), set()
+        work.rows, work.joined = (values, scales), {}
+        work.tokens = work.next_token = 2
+        work.epoch = 1
         work.current = Mock()
         work.module = SimpleNamespace(embed_tokens=object())
         work.state = SimpleNamespace(stream=Mock(), matches=Mock(return_value=True))

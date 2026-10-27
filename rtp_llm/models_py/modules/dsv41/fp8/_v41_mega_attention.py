@@ -112,6 +112,8 @@ def is_supported(attn) -> bool:
 class MegaAttention(torch.nn.Module):
     """Prepared weights registered as ordinary nonpersistent model buffers."""
 
+    _supports_engram_lookup_schedule = True
+
     def __init__(
         self,
         backend,
@@ -343,6 +345,9 @@ class MegaAttention(torch.nn.Module):
         """
         q = self.pad_q(q)
         rows = q.shape[0]
+        hook = getattr(self, "_engram_lookup_schedule", None)
+        if hook is not None:
+            hook.before_core()
         output, scales, _ = self.backend.fused_norm_rope_attn_rope_cast_decode(
             q,
             swa_pool.unsqueeze(2),
@@ -366,6 +371,8 @@ class MegaAttention(torch.nn.Module):
             True,
             True,
         )
+        if hook is not None:
+            hook.after_core()
         return output, scales
 
     def project_output(self, pair, wo_b, out=None):
