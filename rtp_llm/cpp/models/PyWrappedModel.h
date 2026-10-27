@@ -251,11 +251,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (weights_.lm_head && weights_.lm_head->kernel.dtype() == torch::kUInt8) {
         RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "compute_quantized_logits"),
                                 "Packed LM head requires Python compute_quantized_logits");
-        // Packed heads may expose their native output dtype so TP gathers
-        // BF16 logits before the sampler's FP32 promotion.
-        py_lm_head_method_ = py::hasattr(py_model_, "_compute_quantized_logits_native") ?
-                                 py_model_.attr("_compute_quantized_logits_native") :
-                                 py_model_.attr("compute_quantized_logits");
+        py_lm_head_method_ = py_model_.attr("compute_quantized_logits");
     }
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
     const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"

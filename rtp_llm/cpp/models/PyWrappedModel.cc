@@ -961,9 +961,10 @@ torch::Tensor PyWrappedModel::computeQuantizedLogits(const torch::Tensor& hidden
     py::gil_scoped_acquire gil;
     auto logits = py_lm_head_method_(hidden).cast<torch::Tensor>();
     RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2 && logits.size(0) == hidden.size(0)
-                                && logits.size(1) == weights_.lm_head->kernel.size(0) && logits.is_floating_point()
+                                && logits.size(1) == weights_.lm_head->kernel.size(0)
+                                && logits.scalar_type() == torch::kBFloat16
                                 && logits.device() == hidden.device(),
-                            "Quantized LM head must return floating point local logits "
+                            "Quantized LM head must return BF16 local logits "
                             "[rows, local_vocab] on the hidden device");
     return logits;
 }

@@ -71,14 +71,13 @@ class GptModelBase(nn.Module):
                     input_scale=weight.get_global_weight(W.lm_head_i_s),
                 )
 
-    def compute_quantized_logits(self, hidden):
-        return self._compute_quantized_logits_native(hidden).float()
+    def compute_quantized_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Return BF16 local logits [rows, local_vocab] on hidden.device.
 
-    def _compute_quantized_logits_native(self, hidden):
+        TP gather and the subsequent FP32 promotion belong to the caller.
+        """
         if self.nvfp4_lm_head is None:
             raise ValueError("No quantized LM head was initialized")
-        # Preserve the GEMM's BF16 output through TP communication. Promotion
-        # to FP32 belongs after gathering the vocabulary shards.
         return self.nvfp4_lm_head(hidden.to(torch.bfloat16))
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:

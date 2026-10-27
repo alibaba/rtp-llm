@@ -259,7 +259,7 @@ class AutoModel:
     ) -> torch.Tensor:
         hidden_states = model_outputs.hidden_states[-1:, :]
         if self.lm_head_weight.dtype == torch.uint8:
-            logits = self.model.compute_quantized_logits(hidden_states)
+            logits = self.model.compute_quantized_logits(hidden_states).float()
         else:
             logits = torch.matmul(
                 hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()

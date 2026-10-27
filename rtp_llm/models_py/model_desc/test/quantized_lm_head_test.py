@@ -78,13 +78,10 @@ class QuantizedLmHeadOutputTest(unittest.TestCase):
             )
         hidden = torch.full((3, 128), 6, dtype=torch.bfloat16, device="cuda")
         with torch.no_grad():
-            native = model._compute_quantized_logits_native(hidden)
-            public = model.compute_quantized_logits(hidden)
-        self.assertEqual(native.dtype, torch.bfloat16)
-        self.assertEqual(public.dtype, torch.float32)
-        expected = torch.full((3, 128), 128 * 36, device="cuda", dtype=torch.float32)
-        torch.testing.assert_close(native.float(), expected, rtol=0, atol=0)
-        torch.testing.assert_close(public, expected, rtol=0, atol=0)
+            logits = model.compute_quantized_logits(hidden)
+        self.assertEqual(logits.dtype, torch.bfloat16)
+        expected = torch.full((3, 128), 128 * 36, device="cuda", dtype=torch.bfloat16)
+        torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
     def test_forward_keeps_hidden_only_contract(self):
         model = HeadOnlyModel()
@@ -95,7 +92,7 @@ class QuantizedLmHeadOutputTest(unittest.TestCase):
         head.assert_not_called()
         self.assertTrue(torch.equal(outputs.hidden_states, hidden))
 
-    def test_native_output_preserves_fp32_interface(self):
+    def test_projection_returns_bf16_for_all_hidden_dtypes(self):
         # Isolate projection dtype from the packed-weight kernel. The on-device
         # loader/projection case above covers the actual NVFP4 GEMM.
         model = HeadOnlyModel()
@@ -104,13 +101,10 @@ class QuantizedLmHeadOutputTest(unittest.TestCase):
                 hidden = (torch.arange(24).reshape(3, 8) / 16 + offset).to(dtype)
                 expected = nn.functional.linear(
                     hidden.to(torch.bfloat16), model.nvfp4_lm_head.weight
-                ).float()
-                native = model._compute_quantized_logits_native(hidden)
-                public = model.compute_quantized_logits(hidden)
-                self.assertEqual(native.dtype, torch.bfloat16)
-                self.assertEqual(public.dtype, torch.float32)
-                self.assertTrue(torch.equal(native.float(), expected))
-                self.assertTrue(torch.equal(public, expected))
+                )
+                logits = model.compute_quantized_logits(hidden)
+                self.assertEqual(logits.dtype, torch.bfloat16)
+                self.assertTrue(torch.equal(logits, expected))
 
     def test_standalone_samples_packed_and_dense_heads(self):
         from rtp_llm.models_py.standalone.auto_model import AutoModel
@@ -128,19 +122,19 @@ class QuantizedLmHeadOutputTest(unittest.TestCase):
                     else model.nvfp4_lm_head.weight
                 )
                 with torch.no_grad():
-                    actual = runtime._sample_next_token(outputs)
-                    expected = model.compute_quantized_logits(hidden[-1:]).argmax(-1)
+                    expected = (
+                        model.compute_quantized_logits(hidden[-1:]).float().argmax(-1)
+                    )
+                    with patch("torch.argmax", wraps=torch.argmax) as sample:
+                        actual = runtime._sample_next_token(outputs)
+                    self.assertEqual(sample.call_args.args[0].dtype, torch.float32)
                 self.assertTrue(torch.equal(actual, expected))
 
     def test_uninitialized_head_fails_explicitly(self):
         model = HeadOnlyModel()
         model.nvfp4_lm_head = None
-        for compute in (
-            model.compute_quantized_logits,
-            model._compute_quantized_logits_native,
-        ):
-            with self.assertRaisesRegex(ValueError, "No quantized LM head"):
-                compute(torch.zeros(1, 8))
+        with self.assertRaisesRegex(ValueError, "No quantized LM head"):
+            model.compute_quantized_logits(torch.zeros(1, 8))
 
 
 if __name__ == "__main__":

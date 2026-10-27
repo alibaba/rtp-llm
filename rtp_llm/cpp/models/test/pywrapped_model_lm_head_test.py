@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock
 
 import torch
 from torch import nn
@@ -23,10 +24,10 @@ class ProjectionModel(GptModelBase):
     def forward(self, inputs, fmha_impl=None):
         raise AssertionError("This fixture exercises C++ output processing only")
 
-    def _compute_quantized_logits_native(self, hidden):
+    def compute_quantized_logits(self, hidden):
         self.projected_rows.append(hidden.shape[0])
         self.assert_outside_graph()
-        return super()._compute_quantized_logits_native(hidden)
+        return super().compute_quantized_logits(hidden)
 
     @staticmethod
     def assert_outside_graph():
@@ -146,11 +147,36 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             clear_comm_ops()
 
     def test_invalid_python_projection_is_rejected_at_boundary(self):
-        self.model._compute_quantized_logits_native = lambda hidden: hidden
-        with self.assertRaisesRegex(RuntimeError, "floating point local logits"):
+        self.model.compute_quantized_logits = lambda hidden: hidden
+        with self.assertRaisesRegex(RuntimeError, "BF16 local logits"):
             run_lm_head(self.model, self.packed, self.hidden, self.indexes)
 
-    def test_public_fp32_projection_callback_remains_supported(self):
+    def test_non_bf16_projection_is_rejected_before_tp_gather(self):
+        gather = Mock()
+        register_comm_ops(lambda *args: None, lambda *args: None, gather)
+        try:
+            for dtype in (torch.float16, torch.float32):
+                for already_selected in (False, True):
+                    with self.subTest(dtype=dtype, already_selected=already_selected):
+                        self.model.compute_quantized_logits = (
+                            lambda hidden: torch.zeros(
+                                (hidden.shape[0], 16), device=hidden.device, dtype=dtype
+                            )
+                        )
+                        with self.assertRaisesRegex(RuntimeError, "BF16 local logits"):
+                            run_lm_head(
+                                self.model,
+                                self.packed,
+                                self.hidden,
+                                self.indexes,
+                                already_selected=already_selected,
+                                tp_size=2,
+                            )
+            gather.assert_not_called()
+        finally:
+            clear_comm_ops()
+
+    def test_public_bf16_projection_callback_is_supported(self):
         class PublicProjection:
             def initialize(inner, resources):
                 return True
@@ -165,7 +191,7 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             result = run_lm_head(
                 PublicProjection(), self.packed, self.hidden, self.indexes
             )
-            expected = self.model.compute_quantized_logits(self.hidden[[5, 1]])
+            expected = self.model.compute_quantized_logits(self.hidden[[5, 1]]).float()
         torch.testing.assert_close(result["logits"], expected)
 
 
