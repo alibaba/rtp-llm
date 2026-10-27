@@ -1,14 +1,21 @@
 
 def extract_data(envs):
     data = []
-    prefix = 'internal_source/rtp_llm/test/smoke/'
+    prefixes = [
+        'internal_source/rtp_llm/test/smoke/',
+        'rtp_llm/test/smoke/',
+    ]
     for env in envs:
         if env.startswith('MULTI_TASK_PROMPT='):
             # Use index('=')+1 instead of split('=')[1] so a value containing
             # '=' (e.g. a query-string or kv-style fragment) is preserved in
             # full. Starlark has no maxsplit, so split() would silently drop
             # everything after the first '='.
-            data.append(env[env.index('=') + 1 + len(prefix):])
+            value = env[env.index('=') + 1:]
+            for prefix in prefixes:
+                if value.startswith(prefix):
+                    data.append(value[len(prefix):])
+                    break
     return data
 
 def extract_multi_task_prompt_data(smoke_args):
@@ -29,10 +36,15 @@ def extract_multi_task_prompt_data(smoke_args):
             for i in range(len(tokens)):
                 if tokens[i] == '--multi_task_prompt' and i + 1 < len(tokens):
                     path = tokens[i + 1]
-                    if path.startswith('internal_source/rtp_llm/test/smoke/'):
-                        relative_path = path[len('internal_source/rtp_llm/test/smoke/'):]
-                        if relative_path not in data:
-                            data.append(relative_path)
+                    for prefix in [
+                        'internal_source/rtp_llm/test/smoke/',
+                        'rtp_llm/test/smoke/',
+                    ]:
+                        if path.startswith(prefix):
+                            relative_path = path[len(prefix):]
+                            if relative_path not in data:
+                                data.append(relative_path)
+                            break
                     break
     return data
 
