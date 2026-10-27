@@ -286,6 +286,7 @@ BlockInfo MemoryLayoutStrategy::makeBlockInfo(const torch::Tensor& tensor, void*
     BlockInfo info;
     info.is_cuda      = dev.is_cuda();
     info.device_index = dev.index();
+    info.device_type  = static_cast<int32_t>(dev.type());
     info.scalar_type  = static_cast<int32_t>(tensor.scalar_type());
     info.addr         = addr;
     info.size_bytes   = size_bytes;
