@@ -167,6 +167,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
+        if INPLACE_FINAL_STATE and IS_CONTINUOUS_BATCHING:
+            # Verification must consume the same stored state as the next
+            # single-token decode, including BF16/FP16 cache rounding.
+            b_h = b_h.to(p_ht.dtype.element_ty).to(tl.float32)
+
         p_q += stride_qs
         p_k += stride_ks
         p_o += HV * V
