@@ -794,7 +794,7 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
     EXPECT_DOUBLE_EQ(snapshotQps(metrics->write_bandwidth_bytes_per_sec_metric, tags), 0);
 }
 
-TEST(BlockTreeCacheMetricsTest, InsertHardStopReportsTierStateAndPreservesCommonTags) {
+TEST(BlockTreeCacheMetricsTest, InsertHardStopReportsTierOperationAndPreservesCommonTags) {
     kmonitor::MetricsTags         common_tags("dp_rank", "7");
     auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
@@ -808,23 +808,26 @@ TEST(BlockTreeCacheMetricsTest, InsertHardStopReportsTierStateAndPreservesCommon
                                            std::make_pair(Tier::HOST, "HOST"),
                                            std::make_pair(Tier::DISK, "DISK"),
                                            std::make_pair(Tier::NONE, "NONE")}) {
-        for (const auto& [state, state_label] : {std::make_pair(GroupSetTransferState::IDLE, "IDLE"),
-                                                 std::make_pair(GroupSetTransferState::DEMOTING, "DEMOTING"),
-                                                 std::make_pair(GroupSetTransferState::LOAD_PENDING, "LOAD_PENDING"),
-                                                 std::make_pair(GroupSetTransferState::LOADING, "LOADING")}) {
+        for (const auto state : {GroupSetTransferState::IDLE,
+                                 GroupSetTransferState::DEMOTING,
+                                 GroupSetTransferState::LOAD_PENDING,
+                                 GroupSetTransferState::LOADING}) {
             const BlockTreeInsertHardStopInfo hard_stop{tier, state};
             reporter.reportInsertHardStop(hard_stop);
             reporter.reportInsertHardStop(hard_stop);
+        }
+        for (const auto& [operation, count] :
+             {std::make_pair("idle", 2), std::make_pair("evict", 2), std::make_pair("load", 4)}) {
             auto tags = common_tags;
-            tags.AddTag("existing_tier", tier_label);
-            tags.AddTag("transfer_state", state_label);
-            EXPECT_DOUBLE_EQ(snapshotQps(metric, tags, "rtp_llm_kv_cache_insert_hard_stop_qps"), 2);
+            tags.AddTag("tier", tier_label);
+            tags.AddTag("operation", operation);
+            EXPECT_DOUBLE_EQ(snapshotQps(metric, tags, "rtp_llm_kv_cache_insert_hard_stop_qps"), count);
         }
     }
-    EXPECT_EQ(metricSeriesCount(metric), 16u);
+    EXPECT_EQ(metricSeriesCount(metric), 12u);
     EXPECT_EQ(metrics_reporter->getTags().FindTag("dp_rank"), "7");
-    EXPECT_TRUE(metrics_reporter->getTags().FindTag("existing_tier").empty());
-    EXPECT_TRUE(metrics_reporter->getTags().FindTag("transfer_state").empty());
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("tier").empty());
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("operation").empty());
 }
 
 TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources) {
@@ -853,8 +856,8 @@ TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources
     cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
     cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
 
-    kmonitor::MetricsTags tags("existing_tier", "HOST");
-    tags.AddTag("transfer_state", "IDLE");
+    kmonitor::MetricsTags tags("tier", "HOST");
+    tags.AddTag("operation", "idle");
     EXPECT_EQ(metricSeriesCount(metric), 1u);
     EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 2);
     EXPECT_TRUE(node->children.empty());
