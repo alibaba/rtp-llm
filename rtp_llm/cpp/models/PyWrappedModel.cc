@@ -19,6 +19,7 @@
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/int8_lm_head.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 #endif
 
@@ -969,6 +970,98 @@ torch::Tensor PyWrappedModel::computeQuantizedLogits(const torch::Tensor& hidden
     return logits;
 }
 
+torch::Tensor PyWrappedModel::lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& kernel) {
+    torch::Tensor logits;
+#if USING_CUDA
+    bool int8_used = false;
+#endif
+    if (py_lm_head_method_) {
+        logits = computeQuantizedLogits(last_hidden);
+    } else
+#if USING_CUDA
+        if (kernel.dtype() == torch::kBFloat16) {
+        auto x = last_hidden.to(torch::kBFloat16);
+        if (int8_lm_head_ && kernel.dim() == 2 && x.dim() == 2 && x.size(1) == kernel.size(1)
+            && rtp_llm::int8LmHeadGemvSupported(x.size(0), kernel.size(1))) {
+            RTP_LLM_PROFILE_SCOPE("py_model.lmHeadLogits(int8_gemv)");
+            const int64_t N      = kernel.size(0);
+            const int64_t K      = kernel.size(1);
+            auto          stream = c10::cuda::getCurrentCUDAStream().stream();
+            if (!int8_lm_head_q_.defined() || int8_lm_head_src_ != kernel.data_ptr()) {
+                auto w              = kernel.contiguous();
+                int8_lm_head_q_     = torch::empty({N, K}, w.options().dtype(torch::kInt8));
+                int8_lm_head_scale_ = torch::empty({N}, w.options().dtype(torch::kFloat32));
+                rtp_llm::invokeQuantizeLmHeadInt8(reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()),
+                                                  int8_lm_head_q_.data_ptr<int8_t>(),
+                                                  int8_lm_head_scale_.data_ptr<float>(),
+                                                  N,
+                                                  K,
+                                                  stream);
+                cudaCheckLastError();
+                int8_lm_head_src_ = kernel.data_ptr();
+                RTP_LLM_LOG_INFO("INT8 LM head enabled: quantized [%ld, %ld] bf16 head to int8 + per-row scale%s",
+                                 N,
+                                 K,
+                                 int8_lm_head_check_ ? " (check mode: bf16 logits served)" : "");
+            }
+            x                     = x.contiguous();
+            logits                = torch::empty({x.size(0), N}, x.options().dtype(torch::kFloat32));
+            const cudaError_t err = rtp_llm::invokeInt8LmHeadGemv(int8_lm_head_q_.data_ptr<int8_t>(),
+                                                                  int8_lm_head_scale_.data_ptr<float>(),
+                                                                  reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),
+                                                                  logits.data_ptr<float>(),
+                                                                  x.size(0),
+                                                                  N,
+                                                                  K,
+                                                                  stream);
+            RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess, "INT8 LM head GEMV failed: %s", cudaGetErrorString(err));
+            int8_used = true;
+        } else {
+            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(x, kernel);
+        }
+    } else if (kernel.dtype() == torch::kFloat16) {
+        logits = torch_ext::cublas_gemm_fp16_fp16_fp32(last_hidden.to(torch::kFloat16), kernel);
+    } else
+#endif
+    {
+        logits = torch::mm(last_hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
+    }
+    printTorchTensorData(logits, "logits");
+    if (device_props_.tp_size > 1) {
+        RTP_LLM_PROFILE_SCOPE("py_model.lmHeadLogits(tp_sync_logits)");
+        logits = tpSyncEmbeddingOrLogits(logits);
+    }
+#if USING_CUDA
+    if (int8_used && int8_lm_head_check_) {
+        auto ref = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16).contiguous(), kernel);
+        if (device_props_.tp_size > 1) {
+            ref = tpSyncEmbeddingOrLogits(ref);
+        }
+        if (!int8_lm_head_check_stats_.defined()) {
+            int8_lm_head_check_stats_ = torch::zeros({2}, ref.options().dtype(torch::kLong));
+        }
+        // Compare top-1 only over the served vocabulary; padded tail rows are dropped before sampling.
+        auto          ref_top1 = ref;
+        auto          out_top1 = logits;
+        const int64_t vocab    = static_cast<int64_t>(description_.output_vocab_size);
+        if (vocab > 0 && vocab < ref.size(1)) {
+            ref_top1 = ref.narrow(1, 0, vocab);
+            out_top1 = logits.narrow(1, 0, vocab);
+        }
+        auto mismatch = (ref_top1.argmax(-1) != out_top1.argmax(-1)).sum();
+        int8_lm_head_check_stats_.select(0, 0).add_(ref.size(0));
+        int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
+        if (++int8_lm_head_check_calls_ % 256 == 0) {
+            auto s = int8_lm_head_check_stats_.cpu();
+            RTP_LLM_LOG_INFO(
+                "INT8 LM head check: rows=%ld top1_mismatch=%ld", s[0].item<int64_t>(), s[1].item<int64_t>());
+        }
+        logits = ref;
+    }
+#endif
+    return logits;
+}
+
 GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   const bool            has_context_request,
                                                   const bool            need_all_logits,
@@ -1071,24 +1164,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor logits;
         {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
-            if (py_lm_head_method_) {
-                logits = computeQuantizedLogits(last_hidden);
-            } else
-#if USING_CUDA
-            if (lm_head->kernel.dtype() == torch::kBFloat16) {
-                logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-            } else if (lm_head->kernel.dtype() == torch::kFloat16) {
-                logits = torch_ext::cublas_gemm_fp16_fp16_fp32(last_hidden.to(torch::kFloat16), lm_head->kernel);
-            } else
-#endif
-            {
-                logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-            }
-        }
-        printTorchTensorData(logits, "logits");
-        if (device_props_.tp_size > 1) {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
-            logits = tpSyncEmbeddingOrLogits(logits);
+            logits = lmHeadLogits(last_hidden, lm_head->kernel);
         }
         if (description_.output_vocab_size > 0) {
             RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
@@ -1137,24 +1213,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     torch::Tensor logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
-        if (py_lm_head_method_) {
-            logits = computeQuantizedLogits(last_hidden);
-        } else
-#if USING_CUDA
-        if (lm_head->kernel.dtype() == torch::kBFloat16) {
-            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-        } else if (lm_head->kernel.dtype() == torch::kFloat16) {
-            logits = torch_ext::cublas_gemm_fp16_fp16_fp32(last_hidden.to(torch::kFloat16), lm_head->kernel);
-        } else
-#endif
-        {
-            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-        }
-    }
-    printTorchTensorData(logits, "logits");
-    if (device_props_.tp_size > 1) {
-        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
-        logits = tpSyncEmbeddingOrLogits(logits);
+        logits = lmHeadLogits(last_hidden, lm_head->kernel);
     }
     if (description_.output_vocab_size > 0) {
         RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2

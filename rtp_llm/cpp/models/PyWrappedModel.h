@@ -1,5 +1,8 @@
 
 #pragma once
+
+#include <cstdlib>
+#include <cstring>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
@@ -97,6 +100,11 @@ private:
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
     torch::Tensor   computeQuantizedLogits(const torch::Tensor& hidden);
+    // LM head matmul + TP logits gather. With RTP_LLM_INT8_LM_HEAD=1 and a bf16 head, calls with
+    // M <= 8 rows run a weight-only INT8 GEMV (per-row scale) on a copy quantized at first use.
+    // RTP_LLM_INT8_LM_HEAD_CHECK=1 additionally runs the bf16 head, serves the bf16 logits and
+    // logs how often the gathered top-1 token differs.
+    torch::Tensor   lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& lm_head_kernel);
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
                                       const bool            has_context_request,
                                       const bool            need_all_logits,
@@ -141,6 +149,18 @@ private:
     bool       has_mtp_hidden_buffer_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
+
+    static bool envFlagOn(const char* name) {
+        const char* v = std::getenv(name);
+        return v != nullptr && (std::strcmp(v, "1") == 0 || std::strcmp(v, "true") == 0 || std::strcmp(v, "ON") == 0);
+    }
+    bool          int8_lm_head_{envFlagOn("RTP_LLM_INT8_LM_HEAD")};
+    bool          int8_lm_head_check_{envFlagOn("RTP_LLM_INT8_LM_HEAD_CHECK")};
+    const void*   int8_lm_head_src_{nullptr};
+    torch::Tensor int8_lm_head_q_;
+    torch::Tensor int8_lm_head_scale_;
+    torch::Tensor int8_lm_head_check_stats_;  // int64 [rows, top1_mismatch] on device
+    int64_t       int8_lm_head_check_calls_{0};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
