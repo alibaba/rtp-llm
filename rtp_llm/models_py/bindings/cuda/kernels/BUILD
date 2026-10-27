@@ -348,3 +348,17 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+# Weight-only INT8 (per-row scale) LM head GEMV for small-M decode; used by PyWrappedModel
+# when RTP_LLM_INT8_LM_HEAD=1.
+cc_library(
+    name = "int8_lm_head",
+    srcs = ["int8_lm_head.cu"],
+    hdrs = ["int8_lm_head.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)

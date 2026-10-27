@@ -30,3 +30,18 @@ cc_test(
     ] + torch_deps() + cuda13_torch_link_deps,
     exec_properties = {"gpu": "H20"},
 )
+
+cc_test(
+    name = "int8_lm_head_test",
+    srcs = ["Int8LmHeadTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:int8_lm_head",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    tags = ["RTX_5000_PRO", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
