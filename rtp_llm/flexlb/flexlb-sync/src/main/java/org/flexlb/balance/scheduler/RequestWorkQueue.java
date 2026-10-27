@@ -7,7 +7,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 
-/** Serializes and coalesces each request's closing effects outside Context's monitor. */
+/**
+ * Serializes resource settlement only. Notifications wait here, never in RequestContext.
+ */
 final class RequestWorkQueue {
     private final ConcurrentMap<RequestContext, Lane> lanes = new ConcurrentHashMap<>();
 
@@ -81,14 +83,16 @@ final class RequestWorkQueue {
                 }
                 if (next == null) {
                     lanes.remove(context, this);
-                    Failures.rethrow(failure, "request closing failed");
+                    Failures.rethrow(failure, "request settlement failed");
                     return;
                 }
                 failure = Failures.run(failure, next.work());
             }
         }
 
-        /** A failed start resolves every counted task, including a notification queued during handoff. */
+        /**
+         * A failed start resolves every counted task, including a notification queued during handoff.
+         */
         private void reject(Throwable cause) {
             Task abandoned;
             synchronized (this) {

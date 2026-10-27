@@ -547,7 +547,7 @@ class RequestSchedulerContractTest {
                     SchedulerTestSupport.Stage.FINALIZING, SchedulerTestSupport.stage(request));
             verify(endpoint, times(3)).release(null, route);
             org.mockito.Mockito.doReturn(true).when(endpoint).release(null, route);
-            f.requests.scheduleClose(request);
+            f.requests.requestCleanup(request);
             RequestProtocolTestSupport.awaitCondition(
                     () -> !f.requests.requests.isCurrent(request));
             SchedulerTestSupport.awaitRequestWork(f.requests.runtime);

@@ -752,19 +752,19 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                 return null;
                             }
                             var claim =
-                                    (ContextResult.DeliveryFacts)
+                                    (DeliveryClaim)
                                             ((Granted<?>)
                                                             item.ctx()
-                                                                    .prepareDelivery(
+                                                                    .beginDelivery(
                                                                             item,
                                                                             call.getArgument(1),
                                                                             call.getArgument(2),
                                                                             System
                                                                                     .currentTimeMillis()))
                                                     .value();
-                            item.ctx().publishDelivery(claim);
-                            claims.add(claim.identity());
-                            return claim.identity();
+                            item.ctx().commitDelivery(claim, true, System.currentTimeMillis());
+                            claims.add(claim);
+                            return claim;
                         });
         when(owner.tryStartSend(any()))
                 .thenAnswer(

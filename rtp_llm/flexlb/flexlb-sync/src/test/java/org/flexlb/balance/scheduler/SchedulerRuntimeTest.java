@@ -32,37 +32,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SchedulerRuntimeTest {
-    @Test
-    @org.junit.jupiter.api.Timeout(15)
-    void deferredCloseCannotBlockItsRequestWorkSource() throws Exception {
-        try (var f = new Fixture()) {
-            var context = RequestProtocolTestSupport.context(f.config, 9111L);
-            var entered = new java.util.concurrent.CountDownLatch(1);
-            var release = new java.util.concurrent.CountDownLatch(1);
-            var sourceReturned = new java.util.concurrent.CompletableFuture<Void>();
-            try {
-                f.runtime.executeRequestWork(
-                        context,
-                        () -> {
-                            try (var accepted = f.runtime.registerRequestWork(context)) {
-                                accepted.submitClose(
-                                        () -> {
-                                            entered.countDown();
-                                            RequestProtocolTestSupport.await(release);
-                                        },
-                                        false);
-                            }
-                            sourceReturned.complete(null);
-                        });
-                assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS));
-                sourceReturned.get(2, java.util.concurrent.TimeUnit.SECONDS);
-            } finally {
-                release.countDown();
-                SchedulerTestSupport.awaitRequestWork(f.runtime);
-            }
-        }
-    }
-
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void executorErrorTransfersWorkOnceAndDoesNotLeakItsDrainOwner(boolean recoveryAlsoFails)

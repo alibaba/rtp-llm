@@ -4,6 +4,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.projection.RouteTimelineProjector;
 import org.flexlb.balance.projection.WorkSnapshot;
 
 import java.util.ArrayList;
@@ -29,11 +30,11 @@ public final class RequestTimeEstimationTestSupport {
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
 
-    static final org.flexlb.config.DispatcherConfig.Type ROUTE =
-            org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
+    static final RequestTimeEstimation.DeliveryProjection ROUTE =
+            RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
 
-    static final org.flexlb.config.DispatcherConfig.Type BATCH =
-            org.flexlb.config.DispatcherConfig.Type.BATCH;
+    static final RequestTimeEstimation.DeliveryProjection BATCH =
+            RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
 
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
             new PrefillTimePredictor.Evaluator() {
@@ -80,7 +81,7 @@ public final class RequestTimeEstimationTestSupport {
         return new QueueSnapshot(
                 NOW_MS,
                 queueScheduling,
-                org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
                 ordering,
                 constraints,
                 ordered,
@@ -139,9 +140,12 @@ public final class RequestTimeEstimationTestSupport {
             WorkSnapshot work,
             PrefillTimePredictor.Evaluator evaluator,
             Probe probe,
-            org.flexlb.config.DispatcherConfig.Type deliveryMode) {
+            RequestTimeEstimation.DeliveryProjection deliveryProjection) {
         return project(
-                new RequestTimeEstimation.Inputs(queue, work, 0L), probe, evaluator, deliveryMode);
+                new RequestTimeEstimation.Inputs(queue, work, 0L),
+                probe,
+                evaluator,
+                deliveryProjection);
     }
 
     /**
@@ -168,18 +172,18 @@ public final class RequestTimeEstimationTestSupport {
             RequestTimeEstimation.Inputs inputs,
             Probe probe,
             PrefillTimePredictor.Evaluator evaluator,
-            org.flexlb.config.DispatcherConfig.Type deliveryMode) {
-        return project(inputs, probe, evaluator, deliveryMode, inputs.queue().capturedAtMs());
+            RequestTimeEstimation.DeliveryProjection deliveryProjection) {
+        return project(inputs, probe, evaluator, deliveryProjection, inputs.queue().capturedAtMs());
     }
 
     public static RequestTimeEstimation.Candidate project(
             RequestTimeEstimation.Inputs inputs,
             Probe probe,
             PrefillTimePredictor.Evaluator evaluator,
-            org.flexlb.config.DispatcherConfig.Type deliveryMode,
+            RequestTimeEstimation.DeliveryProjection deliveryProjection,
             long planningAtMs) {
         RequestTimeEstimation.CandidateView view =
-                RequestTimeEstimation.current()
+                RouteTimelineProjector.current()
                         .projectView(
                                 inputs,
                                 probe.requestId(),
@@ -190,7 +194,7 @@ public final class RequestTimeEstimationTestSupport {
                                 probe.hitCache(),
                                 probe.routingCacheMatchTokens(),
                                 evaluator,
-                                deliveryMode,
+                                deliveryProjection,
                                 planningAtMs);
         return immutable(view);
     }
@@ -205,6 +209,7 @@ public final class RequestTimeEstimationTestSupport {
                         source.incomingPrefillMs(),
                         source.initialHeadDisposition(),
                         source.detail(),
+                        source.blockerRole(),
                         source.cacheHitTokens(),
                         source.routingCacheMatchTokens());
     }

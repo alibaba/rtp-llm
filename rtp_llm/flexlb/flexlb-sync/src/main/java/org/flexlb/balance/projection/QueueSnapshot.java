@@ -1,6 +1,7 @@
 package org.flexlb.balance.projection;
 
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.planner.GroupingPolicy;
 
 import java.util.Comparator;
 import java.util.List;
@@ -18,7 +19,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 public record QueueSnapshot(
         long capturedAtMs,
         boolean queueScheduling,
-        GroupPlanner grouping,
+        GroupingPolicy grouping,
         Comparator<GroupPlanner.Item> ordering,
         GroupPlanner.Constraints constraints,
         List<GroupPlanner.Item> activeItems,

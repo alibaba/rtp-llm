@@ -7,8 +7,10 @@ import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.BatchIdGenerator;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.SafeFlexMonitor;
 import org.flexlb.util.Failures;
 import org.springframework.core.env.Environment;
@@ -49,6 +51,12 @@ final class DeliveryExecution {
     final AdmissionCapacity decodeDeliveryCapacity;
     final int maxInflightBatches;
     private BatchIdGenerator batchIds;
+    private static final RequestTimeEstimation.AdmissionBlockSemantics DELIVERY_CAPACITY_BLOCK =
+            new RequestTimeEstimation.AdmissionBlockSemantics(
+                    "DELIVERY_CAPACITY_BATCH_ADMISSION",
+                    RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
+                    "DELIVERY_CAPACITY_BATCH_ADMISSION",
+                    RoleType.PREFILL);
 
     void configureBatchIds(Environment environment) {
         if (batchIds == null) {
@@ -127,7 +135,9 @@ final class DeliveryExecution {
             }
             if (!deliveryPermits.tryAcquire()) {
                 return CapacityBoundary.Attempt.rejected(
-                        CapacityBoundary.unavailable(CapacityBoundary.Resource.DISPATCH_EXECUTOR));
+                        CapacityBoundary.unavailable(
+                                CapacityBoundary.Resource.DISPATCH_EXECUTOR,
+                                DELIVERY_CAPACITY_BLOCK));
             }
             try {
                 return CapacityBoundary.Attempt.accepted(new DeliveryPermit());

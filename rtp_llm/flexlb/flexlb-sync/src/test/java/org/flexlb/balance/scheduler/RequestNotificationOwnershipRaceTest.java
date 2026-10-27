@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.flexlb.balance.scheduler.ContextResult.End;
+import static org.flexlb.balance.scheduler.ContextResult.EndToken;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -41,7 +42,8 @@ import static org.mockito.Mockito.when;
 @Timeout(15)
 class RequestNotificationOwnershipRaceTest {
     @Test
-    void externalCancellationDoesNotReleaseItsQueuedCloseOwner() throws Exception {
+    void externalCancellationCannotFinishAnotherRunningTerminalNotificationOwner()
+            throws Exception {
         var config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.useFifoQueue(config);
         var service = mock(ConfigService.class);
@@ -61,7 +63,7 @@ class RequestNotificationOwnershipRaceTest {
         var notificationStarted = new CountDownLatch(1);
         var finishNotification = new CountDownLatch(1);
         var blockFirstNotification = new AtomicBoolean(true);
-        var notificationOwner = new AtomicReference<End>();
+        var notificationOwner = new AtomicReference<EndToken>();
         var originalCaller = Thread.currentThread();
         doAnswer(
                         call -> {
@@ -69,10 +71,10 @@ class RequestNotificationOwnershipRaceTest {
                                 assertNotSame(
                                         originalCaller,
                                         Thread.currentThread(),
-                                        "the existing request work lane owns this notification");
+                                        "the queue decision thread owns this notification");
                                 var state = context.snapshot();
                                 assertEquals(Phase.ENDING, state.phase());
-                                notificationOwner.set(state.outcome());
+                                notificationOwner.set(state.close().endOperation());
                                 assertNotNull(notificationOwner.get());
                                 assertFalse(state.close().notificationsAttempted());
                                 notificationStarted.countDown();
@@ -83,33 +85,30 @@ class RequestNotificationOwnershipRaceTest {
                 .when(timer)
                 .update(eq(context), any());
         ReflectionTestUtils.setField(runtime, "timer", timer);
-        var workStarted = new CountDownLatch(1);
-        var finishWork = new CountDownLatch(1);
-        try (var work = runtime.registerRequestWork(context)) {
-            work.submitClose(
-                    () -> {
-                        workStarted.countDown();
-                        RequestProtocolTestSupport.await(finishWork);
-                    },
-                    false);
-        }
+        // Restore the real asynchronous postEvent path, replacing the helper's synchronous control
+        // stub.
+        doAnswer(
+                        call -> {
+                            call.callRealMethod();
+                            assertTrue(notificationStarted.await(5, TimeUnit.SECONDS));
+                            return null;
+                        })
+                .when(owner)
+                .queueControl(eq(context), org.mockito.ArgumentMatchers.isNull());
         owner.start();
         try {
-            assertTrue(workStarted.await(5, TimeUnit.SECONDS));
             assertNull(context.snapshot().route());
             assertTrue(
                     future.cancel(false),
                     "the frontend cancellation keeps its synchronous Future contract");
             assertTrue(future.isCancelled());
-            finishWork.countDown();
-            assertTrue(notificationStarted.await(5, TimeUnit.SECONDS));
             assertEquals(ResponseKind.CANCELLATION, context.snapshot().selectedResponse().kind());
             assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellation().reason());
             assertEquals(
                     Phase.ENDING,
                     context.snapshot().phase(),
                     "an external publisher cannot complete a running close owner");
-            assertSame(notificationOwner.get(), context.snapshot().outcome());
+            assertSame(notificationOwner.get(), context.snapshot().close().endOperation());
             assertFalse(context.snapshot().close().notificationsAttempted());
             assertFalse(context.snapshot().close().notificationsDone());
             assertFalse(context.snapshot().close().timersDone());
@@ -125,7 +124,7 @@ class RequestNotificationOwnershipRaceTest {
                             context.snapshot().phase() == Phase.CLOSED
                                     && runtime.requests().liveRequestCount() == 0);
             SchedulerTestSupport.awaitRequestWork(runtime);
-            assertSame(notificationOwner.get(), context.snapshot().outcome());
+            assertNull(context.snapshot().close().endOperation());
             assertTrue(context.snapshot().close().notificationsDone());
             assertTrue(context.snapshot().close().timersDone());
             assertTrue(future.isCancelled());
@@ -136,17 +135,20 @@ class RequestNotificationOwnershipRaceTest {
                     ((Number) ReflectionTestUtils.getField(runtime, "pendingWork")).longValue());
             assertNull(SchedulerTestSupport.failure(owner));
         } finally {
-            finishWork.countDown();
             finishNotification.countDown();
+            doCallRealMethod()
+                    .when(owner)
+                    .queueControl(eq(context), org.mockito.ArgumentMatchers.isNull());
             ReflectionTestUtils.setField(runtime, "timer", originalTimer);
             runtime.shutdown();
         }
     }
 
     @SuppressWarnings("unchecked")
-    private static Set<ResponsePublication> publications(SchedulerRuntime runtime) {
+    private static Set<ResponseCompletionExecutor.CompletionRegistration> publications(
+            SchedulerRuntime runtime) {
         var values =
-                (Set<ResponsePublication>)
+                (Set<ResponseCompletionExecutor.CompletionRegistration>)
                         ReflectionTestUtils.getField(
                                 SchedulerTestSupport.responseCompletions(runtime), "registrations");
         synchronized (values) {

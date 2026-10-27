@@ -279,7 +279,14 @@ class PrefillQueueRunnerPerformanceTest {
                         new org.flexlb.service.monitor.DeliveryMetricsReporter(null));
         AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
         var facilities = mock(SchedulerRuntime.class);
-        var boundary = CapacityBoundary.unavailable(CapacityBoundary.Resource.DISPATCH_EXECUTOR);
+        var boundary =
+                CapacityBoundary.unavailable(
+                        CapacityBoundary.Resource.DISPATCH_EXECUTOR,
+                        new RequestTimeEstimation.AdmissionBlockSemantics(
+                                "PERF_BLOCK",
+                                RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
+                                "PERF_BLOCK",
+                                RoleType.PREFILL));
         var execution = mock(DeliveryExecution.class);
         org.mockito.Mockito.when(facilities.deliveries()).thenReturn(execution);
         org.mockito.Mockito.when(execution.tryReserveDelivery())
@@ -357,7 +364,13 @@ class PrefillQueueRunnerPerformanceTest {
                 List<RequestRoute> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
-            return CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
+            return CapacityBoundary.unavailable(
+                    CapacityBoundary.Resource.PREFILL_BATCH,
+                    new RequestTimeEstimation.AdmissionBlockSemantics(
+                            "PERF_BLOCK",
+                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
+                            "PERF_BLOCK",
+                            RoleType.PREFILL));
         }
     }
 }

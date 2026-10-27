@@ -343,17 +343,12 @@ class DecodeSelectorTest {
     }
 
     private static void assertScratchReleased(Object scratch) {
-        var views =
-                (java.util.ArrayList<?>)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                scratch, "views");
-        Assertions.assertTrue(views.isEmpty());
-        var addresses =
-                (String[])
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                scratch, "addresses");
-        for (String address : addresses) {
-            Assertions.assertNull(address);
+        for (String field : List.of("views", "candidates")) {
+            var list =
+                    (java.util.ArrayList<?>)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    scratch, field);
+            Assertions.assertTrue(list.isEmpty());
         }
         Assertions.assertEquals(
                 false,

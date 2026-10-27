@@ -107,7 +107,7 @@ class RequestAdmissionExpirationRaceTest {
                     SchedulerTestSupport.repository(registry).liveRequestCount(),
                     "transient local release failure must recover without another notification");
             for (var context : contexts) {
-                registry.scheduleClose(context);
+                registry.requestCleanup(context);
             }
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
             assertEquals(
@@ -179,7 +179,7 @@ class RequestAdmissionExpirationRaceTest {
             CompletableFuture.runAsync(
                             SchedulerTestSupport.responseCompletions(registry.runtime)::close)
                     .get(2L, TimeUnit.SECONDS);
-            registry.scheduleClose(context);
+            registry.requestCleanup(context);
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
             assertEquals(0, SchedulerTestSupport.repository(registry).liveRequestCount());
             verify(prefill, times(2)).release(null, item);

@@ -1,17 +1,24 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.projection.RequestTimeEstimation;
+
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * Materialized result of crossing one delivery-admission boundary.
- * The boundary carries only the resource fact; queue projection interprets it.
+ * A delivery wait may carry additional route-publication restrictions;
+ * absent projection semantics leave routing forecasts unchanged.
  */
-public record CapacityBoundary(Status status, Resource resource, Throwable cause) {
+public record CapacityBoundary(
+        Status status,
+        Resource resource,
+        RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics,
+        Throwable cause) {
 
     public static final CapacityBoundary OWNERSHIP_LOST =
-            new CapacityBoundary(Status.OWNERSHIP_LOST, null, null);
+            new CapacityBoundary(Status.OWNERSHIP_LOST, null, null, null);
 
     public CapacityBoundary {
         Objects.requireNonNull(status, "status");
@@ -20,16 +27,30 @@ public record CapacityBoundary(Status status, Resource resource, Throwable cause
         checkArgument(
                 unavailable == (resource != null)
                         && failed == (cause != null)
-                        && (unavailable || resource == null),
+                        && (unavailable || projectionSemantics == null),
                 "capacity boundary status requires its exact payload");
     }
 
-    public static CapacityBoundary unavailable(Resource resource) {
-        return new CapacityBoundary(Status.UNAVAILABLE, Objects.requireNonNull(resource), null);
+    public static CapacityBoundary unavailable(
+            Resource resource, RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics) {
+        return new CapacityBoundary(
+                Status.UNAVAILABLE,
+                Objects.requireNonNull(resource, "resource"),
+                Objects.requireNonNull(projectionSemantics, "projectionSemantics"),
+                null);
+    }
+
+    /**
+     * Park delivery without restricting publication into the worker queue.
+     */
+    public static CapacityBoundary deliveryUnavailable(Resource resource) {
+        return new CapacityBoundary(
+                Status.UNAVAILABLE, Objects.requireNonNull(resource, "resource"), null, null);
     }
 
     public static CapacityBoundary failed(Throwable cause) {
-        return new CapacityBoundary(Status.FAILED, null, Objects.requireNonNull(cause, "cause"));
+        return new CapacityBoundary(
+                Status.FAILED, null, null, Objects.requireNonNull(cause, "cause"));
     }
 
     public boolean unavailable() {
@@ -42,7 +63,9 @@ public record CapacityBoundary(Status status, Resource resource, Throwable cause
         FAILED
     }
 
-    /** Shared capacity failure descriptions for direct admission and queued delivery. */
+    /**
+     * Shared capacity failure descriptions for direct admission and queued delivery.
+     */
     @lombok.Getter
     @lombok.RequiredArgsConstructor
     public enum Resource {
@@ -54,7 +77,9 @@ public record CapacityBoundary(Status status, Resource resource, Throwable cause
         private final String description;
     }
 
-    /** Either an accepted capability/value or one fully materialized boundary. */
+    /**
+     * Either an accepted capability/value or one fully materialized boundary.
+     */
     public record Attempt<T>(T value, CapacityBoundary boundary) {
 
         public Attempt {

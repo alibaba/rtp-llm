@@ -3,84 +3,51 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.dao.loadbalance.Response;
 
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BooleanSupplier;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkState;
 
-/** One response execution owner, registered before Context freezes the selected outcome. */
+/**
+ * One accepted response task. State selection belongs to Context; execution belongs to this registration.
+ */
 final class ResponsePublication implements AutoCloseable {
-    private enum Phase {
-        RESERVED,
-        SUBMITTED,
-        RUNNING,
-        COMPLETED,
-        CLOSED
-    }
-
-    private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.RESERVED);
-    private final ResponseCompletionExecutor executor;
+    private final ResponseCompletionExecutor.CompletionRegistration registration;
     final RequestContext owner;
     final boolean delivery;
+    private final AtomicBoolean used = new AtomicBoolean();
 
     ResponsePublication(SchedulerRuntime runtime, RequestContext owner, boolean delivery) {
-        this(runtime.responseCompletions(), owner, delivery);
-    }
-
-    ResponsePublication(
-            ResponseCompletionExecutor executor, RequestContext owner, boolean delivery) {
         this.owner = Objects.requireNonNull(owner);
         this.delivery = delivery;
-        this.executor = executor;
-        checkState(executor.register(this), "frontend publication is closed");
+        registration = runtime.registerResponseCompletion();
+        checkState(registration != null, "frontend publication is closed");
+    }
+
+    void use() {
+        checkState(used.compareAndSet(false, true), "response task already consumed");
     }
 
     boolean hasCompletionOwner() {
-        return switch (phase.get()) {
-            case SUBMITTED, RUNNING, COMPLETED -> true;
-            default -> false;
-        };
+        return registration.hasCompletionOwner();
     }
 
-    boolean isSubmitted() {
-        return phase.get() == Phase.SUBMITTED;
-    }
-
-    void submit(BooleanSupplier completion) {
+    void submit(Supplier<Boolean> completion) {
         if (Thread.holdsLock(owner)) {
             close();
             throw new IllegalStateException("response submission under Context lock");
         }
-        checkState(
-                phase.compareAndSet(Phase.RESERVED, Phase.SUBMITTED),
-                "response task already consumed");
-        executor.submit(this, () -> run(Phase.SUBMITTED, completion));
+        use();
+        registration.submit(completion::get);
     }
 
-    boolean completeNow(BooleanSupplier completion) {
+    boolean completeNow(Supplier<Boolean> completion) {
         if (Thread.holdsLock(owner)) {
             close();
             throw new IllegalStateException("response completion under Context lock");
         }
-        return run(Phase.RESERVED, completion);
-    }
-
-    private boolean run(Phase expected, BooleanSupplier completion) {
-        if (!phase.compareAndSet(expected, Phase.RUNNING)) {
-            return false;
-        }
-        try {
-            return executor.invoke(completion);
-        } finally {
-            phase.set(Phase.COMPLETED);
-            executor.release(this);
-        }
-    }
-
-    void reject() {
-        if (phase.compareAndSet(Phase.SUBMITTED, Phase.CLOSED)) {
-            executor.release(this);
-        }
+        use();
+        return registration.completeNow(completion::get);
     }
 
     boolean complete(RequestFuture.Completion kind, Response response, Throwable failure) {
@@ -97,8 +64,8 @@ final class ResponsePublication implements AutoCloseable {
 
     @Override
     public void close() {
-        if (phase.compareAndSet(Phase.RESERVED, Phase.CLOSED)) {
-            executor.release(this);
+        if (used.compareAndSet(false, true)) {
+            registration.close();
         }
     }
 }

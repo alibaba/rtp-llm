@@ -19,6 +19,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.flexlb.balance.scheduler.ContextResult.Blocked;
+import static org.flexlb.balance.scheduler.ContextResult.Blocker;
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
@@ -30,6 +32,7 @@ import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -74,16 +77,19 @@ class RequestCancellationFailureOrderingTest {
                         false);
         var end = context.beginClose(failure, 1003L);
         if (cancelFirst) {
-            assertNotNull(end.after().placement());
+            assertEquals(Blocker.PLACEMENT, assertInstanceOf(Blocked.class, end).blocker());
             assertEquals(Phase.OPEN, context.snapshot().phase());
             assertNull(context.snapshot().outcome());
-            assertEquals(EndKind.FRONTEND, context.snapshot().placement().pendingTerminal().kind());
+            assertNull(context.snapshot().close().endOperation());
+            assertEquals(
+                    EndKind.DELIVERY_FAILURE,
+                    context.snapshot().placement().pendingTerminal().kind());
             context.completePlacement(scope, PublicationResult.PUBLISHED, 1004L);
-            RequestCleanupPassTest.ended(
+            RequestCleanupPassTest.granted(
                     context.beginClose(context.snapshot().pendingEnd(), 1005L));
             assertFirstCause(context);
         } else {
-            RequestCleanupPassTest.ended(end);
+            RequestCleanupPassTest.granted(end);
             assertEquals(RequestState.Phase.FAILED, context.snapshot().outcome().outcome().phase());
             assertNotNull(
                     context.snapshot().placement(),
@@ -120,9 +126,10 @@ class RequestCancellationFailureOrderingTest {
                         false);
         var end = context.beginClose(failure, 1003L);
         if (cancelFirst) {
-            assertNotNull(end.after().preemption());
-            assertEquals(Phase.ENDING, context.snapshot().phase());
-            assertFirstCause(context);
+            assertEquals(Blocker.PREEMPTION, assertInstanceOf(Blocked.class, end).blocker());
+            assertEquals(Phase.OPEN, context.snapshot().phase());
+            assertNull(context.snapshot().outcome());
+            assertNull(context.snapshot().close().endOperation());
             assertEquals(
                     EndKind.DELIVERY_FAILURE,
                     context.snapshot().preemption().pendingTerminal().kind());
@@ -132,11 +139,11 @@ class RequestCancellationFailureOrderingTest {
             assertNull(
                     context.snapshot().preemption(),
                     "the exact locally releasable owner ends its attempt");
-            RequestCleanupPassTest.ended(
+            RequestCleanupPassTest.granted(
                     context.beginClose(context.snapshot().pendingEnd(), 1005L));
             assertFirstCause(context);
         } else {
-            RequestCleanupPassTest.ended(end);
+            RequestCleanupPassTest.granted(end);
             assertEquals(RequestState.Phase.FAILED, context.snapshot().outcome().outcome().phase());
             assertSame(preemption, context.snapshot().preemption().identity());
             assertFalse(
@@ -182,7 +189,7 @@ class RequestCancellationFailureOrderingTest {
                             return call.callRealMethod();
                         })
                 .when(owner.runtime)
-                .responseCompletions();
+                .registerResponseCompletion();
         try {
             try (var admission = owner.claimAdmissionHandle("9503", future)) {
                 assertNotNull(admission);
@@ -202,6 +209,7 @@ class RequestCancellationFailureOrderingTest {
                             "no accepted response task can race an instantaneous isDone assertion");
                     assertFalse(future.isDone());
                     assertNull(context.snapshot().outcome());
+                    assertNull(context.snapshot().close().endOperation());
                     var inactivity = context.snapshot().deadlines().inactivity();
                     owner.onDeadline(inactivity, inactivity.atMs());
                     owner.onEngineEvidence(
@@ -237,14 +245,15 @@ class RequestCancellationFailureOrderingTest {
     }
 
     private static void cancel(RequestContext context) {
-        context.requestCancel(
-                new Cancellation(
-                        0L,
-                        CancelReason.CLIENT_CANCELLED,
-                        false,
-                        1001L,
-                        StrategyErrorType.REQUEST_CANCELLED,
-                        "first client cancellation"));
+        RequestCleanupPassTest.granted(
+                context.requestCancel(
+                        new Cancellation(
+                                0L,
+                                CancelReason.CLIENT_CANCELLED,
+                                false,
+                                1001L,
+                                StrategyErrorType.REQUEST_CANCELLED,
+                                "first client cancellation")));
     }
 
     private static void assertFirstCause(RequestContext context) {

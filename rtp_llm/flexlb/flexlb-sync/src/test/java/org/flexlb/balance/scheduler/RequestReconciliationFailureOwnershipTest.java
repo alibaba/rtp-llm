@@ -9,8 +9,8 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
+import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -28,14 +29,15 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A failed physical reconciliation retains its facts for the next ledger attempt. */
+/**
+ * A failed physical reconciliation must give back its exact state-only operation token.
+ */
 class RequestReconciliationFailureOwnershipTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -43,7 +45,7 @@ class RequestReconciliationFailureOwnershipTest {
             boolean matchingDecodeTerminal) throws Exception {
         var config = SchedulingTestConfig.newConfig();
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
-        var context = RequestProtocolTestSupport.context(config, 9721L);
+        var context = RequestProtocolTestSupport.context(config, "9721");
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var owner =
@@ -51,10 +53,10 @@ class RequestReconciliationFailureOwnershipTest {
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
+                        mock(TheoryCacheHitReporter.class));
         ReflectionTestUtils.setField(owner.runtime, "timer", mock(ExpirationTimer.class));
         RequestProtocolTestSupport.register(owner, context);
-        var reservation = new DecodeResources.ReservationHandle(1L, 9721L, 3L);
+        var reservation = new DecodeResources.ReservationHandle(1L, "9721", 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
         var prefill = mock(PrefillEndpoint.class);
         var server = new ServerStatus();
@@ -115,6 +117,7 @@ class RequestReconciliationFailureOwnershipTest {
             if (matchingDecodeTerminal) {
                 var retained = context.snapshot();
                 assertSame(registration, retained.preemption().identity());
+                assertNull(retained.preemption().reconciliation());
                 assertEquals(PreemptionCancelPhase.CANCEL_IN_FLIGHT, retained.preemption().phase());
                 assertNotNull(retained.preemption().pendingTerminal());
                 assertFalse(retained.preemption().finished());
@@ -147,6 +150,15 @@ class RequestReconciliationFailureOwnershipTest {
                     ((Number) ReflectionTestUtils.getField(owner.runtime, "pendingWork"))
                             .longValue());
         } finally {
+            // Preserve bounded cleanup even when the pre-fix regression assertion fails.
+            var state = context.snapshot();
+            if (state.preemption() != null && state.preemption().reconciliation() != null) {
+                context.completePreemption(
+                        state.preemption().reconciliation(),
+                        new PreemptionReport(
+                                null, false, false, false, state.preemption().pendingTerminal()),
+                        System.currentTimeMillis());
+            }
             if (context.snapshot().phase() != Phase.CLOSED) {
                 when(decode.updatePreemption(4L, proof))
                         .thenReturn(

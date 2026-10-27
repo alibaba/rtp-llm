@@ -1993,16 +1993,16 @@ class DeliveryDispatcherTest {
         ctx.bindPlacement(placement, route, PublicationResult.PUBLISHED);
         ctx.completePlacement(placement, PublicationResult.PUBLISHED, now);
         var delivery =
-                (ContextResult.DeliveryFacts)
+                (DeliveryClaim)
                         ((Granted<?>)
-                                        ctx.prepareDelivery(
+                                        ctx.beginDelivery(
                                                 route,
                                                 DeliveryClaimKind.BATCH_ENQUEUE,
                                                 Long.parseLong(requestId),
                                                 now))
                                 .value();
-        ctx.publishDelivery(delivery);
-        when(ctx.data().getScheduler().tryStartSend(delivery.identity())).thenReturn(true);
+        ctx.commitDelivery(delivery, true, now);
+        when(ctx.data().getScheduler().tryStartSend(delivery)).thenReturn(true);
         return route;
     }
 

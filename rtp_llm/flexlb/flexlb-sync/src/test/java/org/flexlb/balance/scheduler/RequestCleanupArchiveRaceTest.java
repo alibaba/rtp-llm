@@ -12,8 +12,11 @@ import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
+import static org.flexlb.balance.scheduler.ContextResult.ProgressKind;
+import static org.flexlb.balance.scheduler.ContextResult.Rejected;
 import static org.flexlb.balance.scheduler.ContextResult.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -22,22 +25,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RequestCleanupArchiveRaceTest {
     @RepeatedTest(16)
     @Timeout(15)
-    void terminalFactsRequireBothNotificationAndPhysicalReleaseProof() throws Exception {
+    void terminalEffectsCannotCloseWhileAnExternalReleaseIsStillRunning() throws Exception {
         var context = RequestCleanupPassTest.openContext(7501L);
-        RequestCleanupPassTest.ended(
-                context.beginClose(
-                        new EndEvidence(
-                                context.snapshot().route(),
-                                EndKind.FAILURE,
-                                null,
-                                false,
-                                0L,
-                                StrategyErrorType.DISPATCH_FAILED,
-                                "cleanup required",
-                                false,
-                                false),
-                        1001L));
-        assertNotNull(context.releaseReason());
+        var terminal =
+                RequestCleanupPassTest.granted(
+                        context.beginClose(
+                                new EndEvidence(
+                                        context.snapshot().route(),
+                                        EndKind.FAILURE,
+                                        null,
+                                        false,
+                                        0L,
+                                        StrategyErrorType.DISPATCH_FAILED,
+                                        "cleanup required",
+                                        false,
+                                        false),
+                                1001L));
+        var pass = RequestCleanupPassTest.granted(context.beginSettlement());
         var ready = new CountDownLatch(2);
         var start = new CountDownLatch(1);
         var workers = Executors.newFixedThreadPool(2);
@@ -48,7 +52,7 @@ class RequestCleanupArchiveRaceTest {
                                 ready.countDown();
                                 assertTrue(start.await(5, TimeUnit.SECONDS));
                                 return context.completeClose(
-                                        RequestCleanupPassTest.released(true, true), 1002L);
+                                        pass, RequestCleanupPassTest.released(true, true), 1002L);
                             });
             var effects =
                     workers.submit(
@@ -56,7 +60,14 @@ class RequestCleanupArchiveRaceTest {
                                 ready.countDown();
                                 assertTrue(start.await(5, TimeUnit.SECONDS));
                                 return context.completeClose(
-                                        new CloseProgress(true, false, false, true, true), 1002L);
+                                        terminal,
+                                        new CloseProgress(
+                                                ProgressKind.NOTIFICATIONS,
+                                                false,
+                                                false,
+                                                true,
+                                                true),
+                                        1002L);
                             });
             assertTrue(ready.await(5, TimeUnit.SECONDS));
             start.countDown();
@@ -70,9 +81,9 @@ class RequestCleanupArchiveRaceTest {
                     "the last real obligation must close atomically");
             assertEquals(Phase.CLOSED, current.phase());
             assertNull(current.route());
-            assertNull(context.releaseReason());
+            assertInstanceOf(Rejected.class, context.beginSettlement());
             var duplicate =
-                    context.completeClose(RequestCleanupPassTest.released(true, true), 1003L);
+                    context.completeClose(pass, RequestCleanupPassTest.released(true, true), 1003L);
             assertEquals(UpdateKind.STALE, duplicate.kind());
             assertSame(duplicate.before(), duplicate.after());
         } finally {

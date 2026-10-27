@@ -235,8 +235,10 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
             }
         }
 
-        void submitClose(Runnable work, boolean inline) {
-            checkState(!Thread.holdsLock(context), "request closing submission under Context lock");
+        void submitSettlement(Runnable work, boolean inline) {
+            checkState(
+                    !Thread.holdsLock(context),
+                    "resource settlement submission under Context lock");
             synchronized (this) {
                 checkState(!sourceClosed && !submitted, "request work already handed off");
                 submitted = true;
@@ -370,8 +372,8 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
     }
 
-    ResponseCompletionExecutor responseCompletions() {
-        return responseCompletions;
+    ResponseCompletionExecutor.CompletionRegistration registerResponseCompletion() {
+        return responseCompletions.tryRegister();
     }
 
     ExpirationTimer deadlines() {

@@ -9,6 +9,7 @@ import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.DecodeCostFormula;
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.SchedulingMetadata;
@@ -23,7 +24,6 @@ import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,16 +46,8 @@ public class DecodeSelector {
 
     private static final class Scratch {
         private final ArrayList<DecodeRoutingView> views = new ArrayList<>();
-        private String[] addresses = new String[0];
-        private int[] candidates = new int[0];
+        private final ArrayList<DecodeRoutingView> candidates = new ArrayList<>();
         private boolean inUse;
-
-        private void prepare(int size) {
-            if (candidates.length < size) {
-                addresses = new String[size];
-                candidates = new int[size];
-            }
-        }
     }
 
     private final EndpointRegistry endpointRegistry;
@@ -78,7 +70,33 @@ public class DecodeSelector {
     }
 
     public PlacementResult<ServerStatus, RoleType> select(
+            RequestData data, String group, RequestRoute route) {
+        data.beginRoutingAttempt(RoleType.DECODE);
+        return select(
+                data,
+                data.getRequest(),
+                data.getSchedulingMetadata(),
+                group,
+                data.getDecodeAdmissionCapacity(),
+                data.getDecodeCostFormula(),
+                data.getConfig().isDirect(),
+                route);
+    }
+
+    public PlacementResult<ServerStatus, RoleType> select(
             Request request, SchedulingMetadata metadata, String group, RequestRoute route) {
+        return select(null, request, metadata, group, capacity, costFormula, direct, route);
+    }
+
+    private PlacementResult<ServerStatus, RoleType> select(
+            RequestData data,
+            Request request,
+            SchedulingMetadata metadata,
+            String group,
+            AdmissionCapacity capacity,
+            DecodeCostFormula costFormula,
+            boolean direct,
+            RequestRoute route) {
         Scratch cached = SCRATCH.get();
         Scratch scratch = cached.inUse ? new Scratch() : cached;
         scratch.inUse = true;
@@ -86,28 +104,25 @@ public class DecodeSelector {
         try {
             for (int attempt = 0; attempt < MAX_SELECTION_ATTEMPTS; attempt++) {
                 var snapshots = scratch.views;
+                var candidates = scratch.candidates;
                 snapshots.clear();
+                candidates.clear();
                 endpointRegistry.decodeRoutingSnapshot(group, snapshots);
                 captured = Math.max(captured, snapshots.size());
-                scratch.prepare(snapshots.size());
-                var candidates = scratch.candidates;
                 if (snapshots.isEmpty()) {
                     return PlacementResult.blocked(RoleType.DECODE);
                 }
                 Availability preferred = Availability.IMPOSSIBLE;
                 long largestKvBudget = 0L;
-                int candidateCount = 0;
-                for (int index = 0; index < snapshots.size(); index++) {
-                    DecodeRoutingView view = snapshots.get(index);
-                    scratch.addresses[index] = view.address();
-                    Availability available = availability(request, view);
+                for (DecodeRoutingView view : snapshots) {
+                    Availability available = availability(request, view, capacity, direct);
                     largestKvBudget = Math.max(largestKvBudget, capacity.kvBudget(view.totalKv()));
                     if (available.ordinal() < preferred.ordinal()) {
                         preferred = available;
-                        candidateCount = 0;
+                        candidates.clear();
                     }
                     if (available == preferred) {
-                        candidates[candidateCount++] = index;
+                        candidates.add(view);
                     }
                 }
                 if (preferred == Availability.IMPOSSIBLE) {
@@ -116,12 +131,12 @@ public class DecodeSelector {
                                     request.getExpectedKvTokens(), largestKvBudget));
                 }
                 if (preferred == Availability.BUSY && direct) {
-                    return classifyCapacityFailure(request, metadata, snapshots);
+                    return classifyCapacityFailure(request, metadata, snapshots, capacity, direct);
                 }
                 double minimumCost = Double.POSITIVE_INFINITY;
                 int winners = 0;
-                for (int index = 0; index < candidateCount; index++) {
-                    DecodeRoutingView view = snapshots.get(candidates[index]);
+                for (int index = 0; index < candidates.size(); index++) {
+                    DecodeRoutingView view = candidates.get(index);
                     double cost =
                             costFormula.evaluate(
                                     view.totalLoad(),
@@ -137,7 +152,7 @@ public class DecodeSelector {
                     }
                     // Compact ties in place; the write index never overtakes the read index.
                     if (cost == minimumCost) {
-                        candidates[winners++] = candidates[index];
+                        candidates.set(winners++, view);
                     }
                 }
                 if (winners == 0) {
@@ -147,12 +162,23 @@ public class DecodeSelector {
                 }
                 int selectedIndex =
                         rotation.next(
-                                RoleType.DECODE, group, scratch.addresses, candidates, winners);
+                                RoleType.DECODE,
+                                group,
+                                winners,
+                                i -> true,
+                                i -> candidates.get(i).address());
                 checkState(selectedIndex >= 0, "Decode snapshot candidate disappeared");
-                DecodeRoutingView selected = snapshots.get(selectedIndex);
+                DecodeRoutingView selected = candidates.get(selectedIndex);
                 WorkerEndpoint.GenerationPin pin =
                         endpointRegistry.captureDecodeGeneration(selected);
                 if (pin != null) {
+                    if (data != null) {
+                        data.recordSelectionReason(
+                                RoleType.DECODE,
+                                winners > 1
+                                        ? "DECODE_MIN_COST_ROUND_ROBIN_TIEBREAK"
+                                        : "DECODE_MIN_COST");
+                    }
                     return PlacementResult.success(
                             buildServerStatus(selected, pin, request.getRequestId(), route));
                 }
@@ -162,7 +188,7 @@ public class DecodeSelector {
             // Clear every capture, including losers and partially captured exceptional traversals.
             captured = Math.max(captured, scratch.views.size());
             scratch.views.clear();
-            Arrays.fill(scratch.addresses, 0, Math.min(captured, scratch.addresses.length), null);
+            scratch.candidates.clear();
             scratch.inUse = false;
             if (scratch == cached && captured > MAX_CACHED_WORKERS) {
                 SCRATCH.remove();
@@ -171,7 +197,11 @@ public class DecodeSelector {
     }
 
     private PlacementResult<ServerStatus, RoleType> classifyCapacityFailure(
-            Request request, SchedulingMetadata metadata, List<DecodeRoutingView> views) {
+            Request request,
+            SchedulingMetadata metadata,
+            List<DecodeRoutingView> views,
+            AdmissionCapacity capacity,
+            boolean direct) {
         Response failure = null;
         boolean uniformFailure = true;
         List<Map<String, Object>> evidence = new ArrayList<>();
@@ -197,7 +227,8 @@ public class DecodeSelector {
                                     snapshot.routing().totalKv(),
                                     "kvAvailable",
                                     snapshot.routing().placementUsage().hardKvAvailable()));
-                    workerFailure = classifyCapacityFailure(request, metadata, snapshot);
+                    workerFailure =
+                            classifyCapacityFailure(request, metadata, snapshot, capacity, direct);
                 }
             }
             if (failure == null) {
@@ -229,11 +260,15 @@ public class DecodeSelector {
                         List.copyOf(evidence)));
     }
 
-    /** Classify only the dimensions that prevent this request from fitting. */
+    /**
+     * Classify only the dimensions that prevent this request from fitting.
+     */
     private Response classifyCapacityFailure(
             Request request,
             SchedulingMetadata metadata,
-            DecodeResources.AdmissionSummary snapshot) {
+            DecodeResources.AdmissionSummary snapshot,
+            AdmissionCapacity capacity,
+            boolean direct) {
         var routing = snapshot.routing();
         var usage = direct ? routing.dispatchUsage() : routing.placementUsage();
         if (usage.totalKvTokens() > 0
@@ -284,7 +319,8 @@ public class DecodeSelector {
                         : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
     }
 
-    private Availability availability(Request request, DecodeRoutingView view) {
+    private Availability availability(
+            Request request, DecodeRoutingView view, AdmissionCapacity capacity, boolean direct) {
         if (view.totalKv() > 0L
                 && request.getExpectedKvTokens() > capacity.kvBudget(view.totalKv())) {
             return Availability.IMPOSSIBLE;
@@ -313,7 +349,7 @@ public class DecodeSelector {
     private ServerStatus buildServerStatus(
             DecodeRoutingView selected,
             WorkerEndpoint.GenerationPin selectedPin,
-            long requestId,
+            String requestId,
             RequestRoute route) {
         try {
             checkState(

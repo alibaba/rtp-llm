@@ -74,8 +74,11 @@ class PrefillQueueRunnerRequestCapacityTest {
                                             .PREEMPTED),
                             any(),
                             org.mockito.Mockito.isNull());
-            assertFalse(fixture.endpoint.removeQueued(item(config, fixture.endpoint, 1L)));
-            assertTrue(fixture.endpoint.removeQueued(routes.getFirst()));
+            assertFalse(
+                    fixture.endpoint.control(
+                            item(config, fixture.endpoint, 1L), PrefillQueueRunner.Control.REMOVE));
+            assertTrue(
+                    fixture.endpoint.control(routes.getFirst(), PrefillQueueRunner.Control.REMOVE));
             assertEquals(7, fixture.endpoint.ownership.captureQueue(20).items().size());
         }
     }
@@ -161,7 +164,7 @@ class PrefillQueueRunnerRequestCapacityTest {
                         "schedulingMetadata",
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
             } else {
-                assertTrue(fixture.endpoint.removeQueued(route));
+                assertTrue(fixture.endpoint.control(route, PrefillQueueRunner.Control.REMOVE));
             }
             assertNull(
                     fixture.endpoint.commit(
@@ -319,7 +322,7 @@ class PrefillQueueRunnerRequestCapacityTest {
                     (items, reason, evaluator, prediction, real) -> {
                         groupSize.set(items.size());
                         prepared.countDown();
-                        return CapacityBoundary.unavailable(
+                        return CapacityBoundary.deliveryUnavailable(
                                 CapacityBoundary.Resource.PREFILL_BATCH);
                     });
             assertEquals(

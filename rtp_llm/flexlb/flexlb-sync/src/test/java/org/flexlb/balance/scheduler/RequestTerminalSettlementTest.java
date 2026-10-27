@@ -16,12 +16,15 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.flexlb.balance.scheduler.ContextResult.End;
+import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
+import static org.flexlb.balance.scheduler.ContextResult.EndToken;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
+import static org.flexlb.balance.scheduler.ContextResult.Granted;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
+import static org.flexlb.balance.scheduler.ContextResult.ProgressKind;
 import static org.flexlb.balance.scheduler.SchedulerTestSupport.stage;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -176,17 +179,18 @@ class RequestTerminalSettlementTest {
     }
 
     @Test
-    void queuedCancellationDoesNotWaitForAClaimWithoutPhysicalOwnership() {
+    void queuedCancellationResumesAfterExactPreemptionRelease() {
         Fixture f = fixture(true, true);
         PreemptionRegistration claim =
                 f.requestContext().data().getScheduler().tryClaim(RESERVATION, 4L).orElse(null);
         assertNotNull(claim);
         assertEquals(
-                RequestState.Phase.CANCELLED,
+                RequestState.Phase.CANCEL_REQUESTED,
                 f.scheduler()
                         .cancel(f.requestContext(), 0L, CancelReason.CLIENT_CANCELLED)
                         .state());
-        assertFalse(RequestProtocolTestSupport.releasePreemption(f.scheduler(), claim));
+        assertFalse(f.requestContext().data().getFuture().isDone());
+        assertTrue(RequestProtocolTestSupport.releasePreemption(f.scheduler(), claim));
         assertFalse(
                 RequestProtocolTestSupport.awaitResult(f.requestContext().data().getFuture())
                         .isSuccess());
@@ -758,7 +762,7 @@ class RequestTerminalSettlementTest {
                                 RequestProtocolTestSupport.handoff(() -> true));
         assertTrue(f.scheduler().tryStartSend(delivery));
         RequestProtocolTestSupport.transport(f.scheduler(), delivery, DeliveryResult.delivered());
-        End action;
+        EndToken action;
         synchronized (context) {
             context.recordEngineEvidence(
                     new EngineEvidence(
@@ -771,24 +775,24 @@ class RequestTerminalSettlementTest {
                             System.currentTimeMillis()));
             var end =
                     context.beginClose(context.snapshot().pendingEnd(), System.currentTimeMillis());
-            action = RequestCleanupPassTest.ended(end);
+            action = ((Granted<EndToken>) end).value();
         }
         assertNotNull(action);
         assertNotNull(
                 context.snapshot().deadlines().inactivity(),
                 "unsettled resource retains inactivity watch");
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                f.scheduler(), "scheduleClose", context);
+                f.scheduler(), "requestCleanup", context);
         SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         assertEquals(
-                Stage.FINISHED,
+                Stage.FINALIZING,
                 stage(context),
-                "the single finish owner completes notifications and physical settlement together");
+                "resource evidence cannot archive before the terminal execution owner finishes");
         assertTrue(context.snapshot().close().prefillSettled());
         assertTrue(context.snapshot().close().decodeSettled());
-        assertNull(
+        assertNotNull(
                 context.snapshot().deadlines().inactivity(),
-                "completed notification and settlement remove the watch");
+                "pending notification obligation retains its watch");
         assertFalse(
                 f.scheduler()
                         .completeExternal(
@@ -800,12 +804,29 @@ class RequestTerminalSettlementTest {
         assertTrue(
                 context.snapshot().deliveryReleasable(),
                 "late frontend failure cannot revoke completed execution evidence");
+        var timer = f.scheduler().runtime.deadlines();
+        doAnswer(
+                        call -> {
+                            assertFalse(Thread.holdsLock(context));
+                            assertNotNull(context.snapshot().deadlines().inactivity());
+                            return null;
+                        })
+                .when(timer)
+                .update(any(), any());
+        var pendingPlan = context.snapshot().deadlines();
+        org.mockito.Mockito.clearInvocations(timer);
+        timer.update(context, pendingPlan);
+        context.completeClose(
+                action,
+                new CloseProgress(ProgressKind.NOTIFICATIONS, false, false, true, true),
+                System.currentTimeMillis());
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                f.scheduler(), "scheduleClose", context);
+                f.scheduler(), "requestCleanup", context);
         SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         assertEquals(Stage.FINISHED, stage(context));
         verify(f.item().prefillEp(), times(1)).release(null, f.item());
         assertNull(context.snapshot().deadlines().inactivity());
+        verify(timer).update(context, pendingPlan);
     }
 
     @Test
@@ -954,9 +975,13 @@ class RequestTerminalSettlementTest {
         var original = context.snapshot().outcome();
         assertEquals("original terminal failure", original.detail());
         assertFalse(RequestProtocolTestSupport.awaitResult(context.data().getFuture()).isSuccess());
-        if (failures >= 3) {
-            assertEquals(3, attempts.get(), "one finish wake-up performs at most three attempts");
+        if (failures == 5) {
+            assertEquals(
+                    5,
+                    attempts.get(),
+                    "close installs at most three times, then settlement recovers at most twice");
             assertEquals(Phase.ENDING, context.snapshot().phase());
+            assertNull(context.snapshot().close().endOperation());
             assertTrue(context.snapshot().close().notificationsAttempted());
             assertFalse(context.snapshot().close().timersDone());
             assertTrue(timer.needsUpdate(context, context.snapshot().deadlines()));
@@ -968,15 +993,7 @@ class RequestTerminalSettlementTest {
             verify(f.item().prefillEp(), times(1)).release(null, f.item());
             verify(f.item().decodeEp(), times(1))
                     .release(RESERVATION, DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
-            if (failures > 3) {
-                assertSame(
-                        expected,
-                        assertThrows(
-                                IllegalStateException.class,
-                                () -> f.scheduler().scheduleClose(context)));
-            } else {
-                f.scheduler().scheduleClose(context);
-            }
+            f.scheduler().requestCleanup(context);
             SchedulerTestSupport.awaitRequestWork(f.scheduler().runtime);
         }
         assertEquals(
@@ -1052,19 +1069,22 @@ class RequestTerminalSettlementTest {
                 .thenReturn(
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
-        when(publisher.register(any())).thenReturn(true);
-        doAnswer(
-                        call -> {
-                            call.<Runnable>getArgument(1).run();
-                            return null;
-                        })
-                .when(publisher)
-                .submit(any(), any());
-        when(publisher.invoke(any()))
+        when(publisher.tryRegister())
                 .thenAnswer(
-                        call ->
-                                call.<java.util.function.BooleanSupplier>getArgument(0)
-                                        .getAsBoolean());
+                        call -> {
+                            var registration =
+                                    mock(ResponseCompletionExecutor.CompletionRegistration.class);
+                            doAnswer(
+                                            completion -> {
+                                                ((java.util.function.BooleanSupplier)
+                                                                completion.getArgument(0))
+                                                        .getAsBoolean();
+                                                return null;
+                                            })
+                                    .when(registration)
+                                    .submit(any());
+                            return registration;
+                        });
         var prefillServer = new org.flexlb.dao.loadbalance.ServerStatus();
         prefillServer.setServerIp("127.0.0.1");
         prefillServer.setGrpcPort(8090);

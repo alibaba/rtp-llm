@@ -389,7 +389,7 @@ class DeliverySettlementTest {
         doAnswer(call -> EndpointTestSupport.releaseRequest(ledger.prefill, call.getArgument(1)))
                 .when(prefill)
                 .release(null, member.item());
-        registry.scheduleClose(member.requestContext());
+        registry.requestCleanup(member.requestContext());
         physicalSettlement.get(2, TimeUnit.SECONDS);
         SchedulerTestSupport.awaitRequestWork(registry.runtime);
         assertOccupancy(0, 0);
@@ -508,12 +508,17 @@ class DeliverySettlementTest {
             assertEquals(1, decode.routingView().engineCapacityUsed());
             var settlement =
                     AbstractRequestScheduler.releaseResources(
-                            item,
-                            source == DeliveryResult.Status.NOT_SENT
-                                    ? DecodeResources.ReleaseReason.NOT_SENT
-                                    : null,
-                            true,
-                            false);
+                            new ContextResult.ClosePermit(
+                                    context,
+                                    1L,
+                                    item,
+                                    source == DeliveryResult.Status.NOT_SENT
+                                            ? DecodeResources.ReleaseReason.NOT_SENT
+                                            : null,
+                                    true,
+                                    false,
+                                    false,
+                                    false));
             boolean released = source == DeliveryResult.Status.NOT_SENT && !accepted;
             assertEquals(released, settlement.decodeSettled());
             assertTrue(settlement.prefillSettled());

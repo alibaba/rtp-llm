@@ -186,6 +186,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             } else {
                 try (pin) {
                     result = state.dispatch(permit.lease, outcome);
+                    if (result.capacityReleased()) {
+                        publishCapacity(
+                                outcome == DispatchOutcome.ABANDONED
+                                        ? CapacityEdge.BOTH
+                                        : CapacityEdge.DISPATCH);
+                    }
                 }
             }
             // Returning an unused permit succeeds once, but cannot grant sending ownership later.
@@ -241,11 +247,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         public boolean release() {
-            var result = endpoint.dispatch(this, DispatchOutcome.ABANDONED);
-            if (result.capacityReleased()) {
-                endpoint.publishCapacity(CapacityEdge.BOTH);
-            }
-            return result.status() == EngineDispatchPermitTransferStatus.TRANSFERRED;
+            return endpoint.dispatch(this, DispatchOutcome.ABANDONED).status()
+                    == EngineDispatchPermitTransferStatus.TRANSFERRED;
         }
     }
 

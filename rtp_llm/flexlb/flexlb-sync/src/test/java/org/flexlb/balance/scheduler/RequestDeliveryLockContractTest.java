@@ -157,7 +157,8 @@ class RequestDeliveryLockContractTest {
                     java.util.OptionalLong.empty(),
                     null);
             assertEquals(
-                    RequestState.Phase.CANCELLED, cancellation.get(5, TimeUnit.SECONDS).state());
+                    RequestState.Phase.CANCEL_REQUESTED,
+                    cancellation.get(5, TimeUnit.SECONDS).state());
             assertNull(
                     lifecycle.claimDelivery(
                             registered.item(),

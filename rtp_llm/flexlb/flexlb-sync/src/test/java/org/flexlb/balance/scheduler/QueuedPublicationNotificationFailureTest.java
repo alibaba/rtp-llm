@@ -292,7 +292,7 @@ class QueuedPublicationNotificationFailureTest {
                 queue.closeOutstandingAndTerminalize();
             }
             for (var context : queue.requests.snapshotActive()) {
-                queue.scheduleClose(context);
+                queue.requestCleanup(context);
             }
             SchedulerTestSupport.timer(queue.runtime).close();
             SchedulerTestSupport.closeRequestExecutors(queue.runtime);

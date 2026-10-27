@@ -16,6 +16,7 @@ import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -32,6 +33,8 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static com.google.common.base.Preconditions.checkState;
+import static org.flexlb.balance.scheduler.ContextResult.CancelEvidence;
+import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.Granted;
@@ -75,13 +78,17 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private final OrderedRequestQueue orderedQueue;
     private final PlacementCapacityWaitQueue waitingRequests;
 
-    /** Entries exist only while the scheduler owns global placement. */
+    /**
+     * Entries exist only while the scheduler owns global placement.
+     */
     private final Map<RequestContext, GlobalQueueEntry> queuedEntries = new IdentityHashMap<>();
 
     private final ArrayDeque<QueueEvent> events = new ArrayDeque<>();
     private final Set<Plan> pendingPreemptions = Collections.newSetFromMap(new IdentityHashMap<>());
 
-    /** Waiting on local preemption slots, independent of physical Worker capacity edges. */
+    /**
+     * Waiting on local preemption slots, independent of physical Worker capacity edges.
+     */
     private final Set<GlobalQueueEntry> preemptionQuotaWaiters =
             Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -90,8 +97,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private final Set<GlobalQueueEntry> inFlight =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
+    private final ArrayDeque<RequestContext> controlInbox = new ArrayDeque<>();
 
-    /** Published by the decision thread; timeout readers never acquire the queue lock. */
+    /**
+     * Published by the decision thread; timeout readers never acquire the queue lock.
+     */
     private volatile Map<String, Object> latestQueueWaitSnapshot =
             Map.of("cause", "waiting for placement");
 
@@ -135,14 +145,33 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                     close();
                 });
         availability.addListener(availabilityListener);
+        initializeEncoderQueue(
+                router::selectEncoder, router.hasEncoderRole(), availability, config);
     }
 
-    /** Start scheduler workers before accepting requests. */
+    @Override
+    public PlacementCounts placementCounts() {
+        PlacementCounts encoder = encoderPlacementCounts();
+        lock.lock();
+        try {
+            return new PlacementCounts(
+                    queuedEntries.size() + encoder.queued(),
+                    waitingRequests.size() + encoder.blocked());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Start scheduler workers before accepting requests.
+     */
     void start() {
         decisionThread.start();
     }
 
-    /** Latest queue wait cause and counters; this snapshot is not specific to the current request. */
+    /**
+     * Latest queue wait cause and counters; this snapshot is not specific to the current request.
+     */
     Map<String, Object> getLatestQueueWaitSnapshot() {
         return latestQueueWaitSnapshot;
     }
@@ -152,7 +181,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         if (withdrawn != null) {
             return requeue(withdrawn);
         }
-        postEvent(new QueueEvent(EventKind.INVALIDATE, null, exact, null));
+        postEvent(new QueueEvent(EventKind.CONTROL, null, exact, null));
         return true;
     }
 
@@ -225,7 +254,56 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 : latestQueueWaitSnapshot;
     }
 
-    /** Enqueue without selecting an endpoint on the ingress thread. */
+    boolean resolveControl(RequestContext context, boolean shuttingDown) {
+        if (context == null
+                || context.data().getScheduler() != this
+                || !requests.isCurrent(context)) {
+            return false;
+        }
+        var state = context.snapshot();
+        if (state.route() == null && state.placement() == null && state.cancellation() != null) {
+            var cancelled = state.cancellation();
+            if (cancelled.operation() != null) {
+                context.completeCancel(
+                        cancelled.operation(),
+                        new CancelEvidence(CancelEvidenceKind.LOCAL_WITHDRAWN, false, false),
+                        System.currentTimeMillis());
+            }
+            closeRequest(
+                    context,
+                    state.pendingEnd() != null
+                            ? state.pendingEnd()
+                            : new EndEvidence(
+                                    null,
+                                    EndKind.FRONTEND,
+                                    null,
+                                    false,
+                                    0L,
+                                    cancelled.errorType(),
+                                    cancelled.detail(),
+                                    false,
+                                    false));
+        }
+        if (shuttingDown) {
+            closeRequest(
+                    context,
+                    new EndEvidence(
+                            state.route(),
+                            EndKind.SHUTDOWN,
+                            null,
+                            false,
+                            0L,
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "request scheduler is shutting down",
+                            false,
+                            false));
+        }
+        return true;
+    }
+
+    /**
+     * Enqueue without selecting an endpoint on the ingress thread.
+     */
     @Override
     public CompletableFuture<Response> submit(RequestContext context) {
         return submit(context, () -> {});
@@ -238,6 +316,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 RequestSchedulerEntry.tryCompleteVitRequest(context, requests, router);
         if (vitResult != null) {
             return vitResult;
+        }
+        if (context != null && context.data().getRequest() != null) {
+            Response invalid = router.validateRoles(context);
+            if (invalid != null) {
+                return CompletableFuture.completedFuture(invalid);
+            }
+            if (router.isEncoderOnly(context)) {
+                return submitEncoder(context, router::selectEncoder, onRegistered);
+            }
         }
         if (context != null && context.data().getConfig().isDirect()) {
             return CompletableFuture.completedFuture(
@@ -263,12 +350,12 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             var state = context == null ? null : context.snapshot();
             if (!future.isDone() && state.phase() == Phase.OPEN && state.cancellation() == null) {
                 if (!trySubmitRegistered(context)) {
-                    shutdownRequest(context);
+                    resolveControl(context, true);
                 }
             } else if (context != null
                     && context.data().getScheduler() == this
                     && context.data().getFuture() == future) {
-                closeRequest(context, null);
+                resolveControl(context, false);
             }
             return future;
         } catch (RuntimeException failure) {
@@ -296,6 +383,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             if (!postEvent(new QueueEvent(EventKind.SUBMIT, entry, null, null))) {
                 return false;
             }
+            future.whenComplete((ignored, failure) -> queueControl(context, null));
             return true;
         } catch (RuntimeException failure) {
             // Once registration has been handed here, this mode owns execution failures.
@@ -305,13 +393,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                             StrategyErrorType.DISPATCH_FAILED,
                             "Queue submission failed: " + failure.getMessage()),
                     false)) {
-                closeRequest(context, null);
+                resolveControl(context, false);
             }
             return true;
         }
     }
 
-    /** A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline. */
+    /**
+     * A withdrawal is not a new request: keep its sequence, context, Future and absolute deadline.
+     */
     public boolean requeue(RequestRoute previous) {
         if (previous.future().isDone()) {
             return true;
@@ -341,22 +431,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         while ((event = events.pollFirst()) != null) {
             switch (event.kind) {
                 case CAPACITY -> waitingRequests.capacityChanged(event.key);
-                case INVALIDATE -> {
-                    GlobalQueueEntry entry = queuedEntries.get(event.context);
-                    if (entry != null) {
-                        removeRequest(entry);
-                    }
+                case CONTROL -> {
+                    controlInbox.addLast(event.context);
                 }
                 case SUBMIT, REQUEUE -> {
                     GlobalQueueEntry entry = event.entry;
-                    var state = entry.context.snapshot();
-                    // Invalidation may arrive before SUBMIT. The recorded state also fences
-                    // an archived request whose asynchronous response has not completed yet.
-                    if (entry.context.data().getFuture().isDone()
-                            || state.phase() != Phase.OPEN
-                            || state.cancellation() != null) {
-                        continue;
-                    }
                     checkState(
                             queuedEntries.putIfAbsent(entry.context, entry) == null,
                             "duplicate global queue identity");
@@ -371,14 +450,65 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                             entry.context.data().setPlacementSequence(entry.sequence);
                         }
                     }
+                    if (entry.context.data().getFuture().isDone()
+                            || (requests.isCurrent(entry.context)
+                                    && entry.context.snapshot().cancellation() != null)) {
+                        controlInbox.addLast(entry.context);
+                    }
                 }
             }
         }
     }
 
+    private record ControlAction(RequestContext context, GlobalQueueEntry entry) {}
+
+    private void runControlActions(List<ControlAction> readyControls) {
+        for (ControlAction control : readyControls) {
+            RequestContext context = control.context();
+            GlobalQueueEntry entry = control.entry();
+            try {
+                resolveControl(context, false);
+                var state = context.snapshot();
+                if (entry != null
+                        && context.data().getScheduler() == this
+                        && requests.isCurrent(context)
+                        && state.phase() == Phase.OPEN
+                        && state.route() == null
+                        && state.placement() == null
+                        && state.preemption() == null
+                        && state.cancellation() == null
+                        && !context.data().getFuture().isDone()) {
+                    lock.lock();
+                    try {
+                        if (!closed.get() && queuedEntries.get(context) == entry && entry.removed) {
+                            orderedQueue.restore(entry);
+                            changed.signal();
+                        }
+                    } finally {
+                        lock.unlock();
+                    }
+                } else if (entry != null) {
+                    removeRequest(entry);
+                }
+            } catch (Throwable failure) {
+                Logger.error(
+                        "Global queue control failed: request_id={}",
+                        context.data().getRequestId(),
+                        failure);
+                publish(
+                        context,
+                        buildErrorResponse(
+                                StrategyErrorType.DISPATCH_FAILED, "global queue control failed"),
+                        false);
+            }
+        }
+        readyControls.clear();
+    }
+
     private void runDecisionLoop() {
         boolean drained = false;
         try {
+            List<ControlAction> controls = new ArrayList<>();
             while (true) {
                 if (closed.get() && !drained) {
                     drainOnClose();
@@ -392,30 +522,51 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                         break;
                     }
                     consumeEventsLocked();
+                    RequestContext controlled;
+                    while ((controlled = controlInbox.pollFirst()) != null) {
+                        GlobalQueueEntry entry = queuedEntries.get(controlled);
+                        if (entry != null) {
+                            orderedQueue.remove(entry);
+                            waitingRequests.remove(entry);
+                        }
+                        controls.add(new ControlAction(controlled, entry));
+                    }
                     completed = completedPlans.pollFirst();
                 } finally {
                     lock.unlock();
                 }
+                runControlActions(controls);
                 if (completed != null) {
                     processCompletedPlan(completed);
                 }
                 lock.lock();
                 try {
-                    // A completed route can publish capacity or invalidate queued work.
-                    // Apply those index changes before selecting the next planning slots.
+                    // Control effects can restore an older entry, and a completed route
+                    // can publish capacity. Both precede selecting the next planning slots.
                     consumeEventsLocked();
+                    RequestContext controlled;
+                    while ((controlled = controlInbox.pollFirst()) != null) {
+                        GlobalQueueEntry entry = queuedEntries.get(controlled);
+                        if (entry != null) {
+                            orderedQueue.remove(entry);
+                            waitingRequests.remove(entry);
+                        }
+                        controls.add(new ControlAction(controlled, entry));
+                    }
                     int slots = plannerCount - inFlight.size();
                     candidates = closed.get() || slots == 0 ? List.of() : planningCandidates(slots);
                     inFlight.addAll(candidates);
                 } finally {
                     lock.unlock();
                 }
+                runControlActions(controls);
                 candidates.forEach(this::submitPlan);
                 lock.lock();
                 try {
                     // Arrivals and plan publication use this same lock. Check work again
                     // after effects; a signal while effects ran must never be lost.
                     while (events.isEmpty()
+                            && controlInbox.isEmpty()
                             && completedPlans.isEmpty()
                             && (!closed.get()
                                     || drained
@@ -572,7 +723,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         }
     }
 
-    /** Caller holds lock; every examined entry counts against the scan budget. */
+    /**
+     * Caller holds lock; every examined entry counts against the scan budget.
+     */
     private List<GlobalQueueEntry> planningCandidates(int slots) {
         waitingRequests.resumeReady(slots, orderedQueue::markRequestReadyForRetry);
         return orderedQueue.scanForPlanningCandidates(
@@ -698,13 +851,15 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                                             request.getHardKvTokens(),
                                             request.getExpectedKvTokens(),
                                             routing.priority(),
-                                            decodeAdmissionCapacity)
+                                            context.data().getDecodeAdmissionCapacity())
                                     .handle();
             if (routing.decodeEp() != null && plan.pendingDecodeRollback == null) {
                 return PlacementResult.blocked(routing.placementKey(RoleType.DECODE));
             }
         }
-        RequestRoute route = RequestRoute.create(context, routing, plan.pendingDecodeRollback);
+        RequestRoute route =
+                RequestRoute.create(
+                        context, routing, plan.pendingDecodeRollback, plan.returnedVictimIds);
         plan.acquired = route;
         var placement = context.snapshot().placement();
         plan.placementToken = placement == null ? null : placement.operation();
@@ -844,12 +999,13 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             abandoned = List.copyOf(all);
             events.clear();
             queuedEntries.clear();
+            controlInbox.clear();
         } finally {
             lock.unlock();
         }
         for (GlobalQueueEntry entry : abandoned) {
             try {
-                if (!shutdownRequest(entry.context)) {
+                if (!resolveControl(entry.context, true)) {
                     completeDecisionResponse(
                             entry,
                             buildErrorResponse(
@@ -863,25 +1019,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                         failure);
             }
         }
-    }
-
-    private boolean shutdownRequest(RequestContext context) {
-        if (context.data().getScheduler() != this || !requests.isCurrent(context)) {
-            return false;
-        }
-        closeRequest(
-                context,
-                new EndEvidence(
-                        context.snapshot().route(),
-                        EndKind.SHUTDOWN,
-                        null,
-                        false,
-                        0L,
-                        StrategyErrorType.DISPATCH_FAILED,
-                        "request scheduler is shutting down",
-                        false,
-                        false));
-        return true;
     }
 
     @Override
@@ -935,7 +1072,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private enum EventKind {
         SUBMIT,
         REQUEUE,
-        INVALIDATE,
+        CONTROL,
         CAPACITY
     }
 
@@ -949,6 +1086,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         private AdmissionHandle handle;
         private DecodeResources.ReservationHandle pendingDecodeRollback;
         private RequestRoute acquired;
+        private List<String> returnedVictimIds = List.of();
         private PlacementToken placementToken;
         private boolean published;
         private Throwable rollbackFailure;
@@ -984,9 +1122,13 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             return entry.context;
         }
 
-        /** A false result leaves ownership with DecodeAdmission. */
+        /**
+         * A false result leaves ownership with DecodeAdmission.
+         */
         public synchronized boolean accept(
-                DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
+                DecodeEndpoint endpoint,
+                DecodeResources.ReservationHandle reservation,
+                List<String> preemptRequestIds) {
             var route = result == null ? null : result.value();
             var ctx = context();
             synchronized (ctx) {
@@ -996,7 +1138,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                         || route == null
                         || route.decodeEp() != endpoint
                         || pendingDecodeRollback != null
-                        || reservation.requestId() != route.requestId()
+                        || !Objects.equals(reservation.requestId(), route.requestId())
                         || ctx.data().getFuture().isDone()
                         || state.phase() != Phase.OPEN
                         || state.cancellation() != null
@@ -1011,6 +1153,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 return false;
             }
             pendingDecodeRollback = reservation;
+            returnedVictimIds = List.copyOf(preemptRequestIds);
             return true;
         }
 

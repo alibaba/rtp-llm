@@ -53,8 +53,8 @@ class RequestCompletionPublicationRaceTest {
     @Timeout(15)
     void externalCloseWaitsForNestedCompletionCallbacks(boolean asyncOuter) throws Exception {
         var responseExecutor = new ResponseCompletionExecutor(1);
-        var outerRegistration = SchedulerTestSupport.responsePublication(responseExecutor);
-        var innerRegistration = SchedulerTestSupport.responsePublication(responseExecutor);
+        var outerRegistration = responseExecutor.tryRegister();
+        var innerRegistration = responseExecutor.tryRegister();
         var outer = new RequestFuture((completion, response, failure) -> false);
         var inner = new RequestFuture((completion, response, failure) -> false);
         var response = new Response();
@@ -94,10 +94,8 @@ class RequestCompletionPublicationRaceTest {
                     () ->
                             closingThread.get() != null
                                     && closingThread.get().getState() == Thread.State.WAITING);
-            assertThrows(
-                    IllegalStateException.class,
-                    () -> SchedulerTestSupport.responsePublication(responseExecutor),
-                    "close must stop accepting new registrations");
+            assertNull(
+                    responseExecutor.tryRegister(), "close must stop accepting new registrations");
             assertTrue(outer.isDone());
             assertTrue(inner.isDone());
             assertFalse(
@@ -280,7 +278,7 @@ class RequestCompletionPublicationRaceTest {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     responseExecutor, "completionWorkers", failedExecutor);
         }
-        var registration = SchedulerTestSupport.responsePublication(responseExecutor);
+        var registration = responseExecutor.tryRegister();
         assertNotNull(registration);
         var owner = new java.util.concurrent.atomic.AtomicReference<Thread>();
         var follower = new java.util.concurrent.atomic.AtomicReference<Thread>();
@@ -300,9 +298,8 @@ class RequestCompletionPublicationRaceTest {
                             });
             RequestProtocolTestSupport.awaitCondition(
                     () -> owner.get() != null && owner.get().getState() == Thread.State.WAITING);
-            assertThrows(
-                    IllegalStateException.class,
-                    () -> SchedulerTestSupport.responsePublication(responseExecutor),
+            assertNull(
+                    responseExecutor.tryRegister(),
                     "close must reject new reservations while an earlier publication is pending");
             var second =
                     closers.submit(
@@ -556,8 +553,7 @@ class RequestCompletionPublicationRaceTest {
                                 entered.countDown();
                                 await(resume);
                             });
-            SchedulerTestSupport.responsePublication(completions)
-                    .submit(() -> blockedFuture.completeOwned(new Response()));
+            completions.tryRegister().submit(() -> blockedFuture.completeOwned(new Response()));
             try {
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
                 org.springframework.test.util.ReflectionTestUtils.invokeMethod(
@@ -578,21 +574,23 @@ class RequestCompletionPublicationRaceTest {
                 var terminalPublication =
                         new ResponsePublication(
                                 fixture.scheduler().runtime, fixture.requestContext(), false);
-                ContextResult.End terminal;
-                RequestState settled;
+                ContextResult.EndToken terminal;
+                SchedulerTestSupport.FixtureSettlement settled;
                 synchronized (fixture.requestContext()) {
                     terminal =
-                            RequestProtocolTestSupport.endFixture(
+                            RequestProtocolTestSupport.claimTerminal(
+                                    fixture.scheduler(),
                                     fixture.requestContext(),
-                                    ContextResult.EndKind.FRONTEND,
-                                    "worker failed while response executor was busy");
+                                    TerminalOutcome.fail(
+                                            "worker failed while response executor was busy"),
+                                    failure,
+                                    true);
                     assertNotNull(terminalPublication);
                     settled =
                             SchedulerTestSupport.settleTerminalFixture(
                                     fixture.requestContext(), terminal);
                 }
-                fixture.scheduler().requests.archive(fixture.requestContext(), settled);
-                fixture.scheduler().runtime.deadlines().remove(fixture.requestContext());
+                settled.releaseAndArchive(fixture.scheduler(), fixture.requestContext());
                 var candidate =
                         new ContextResult.ResponseCandidate(
                                 fixture.requestContext(),
@@ -676,19 +674,21 @@ class RequestCompletionPublicationRaceTest {
                         .thenAccept(
                                 response ->
                                         assertFalse(Thread.holdsLock(fixture.requestContext())));
-        RequestState settled;
+        SchedulerTestSupport.FixtureSettlement settled;
         synchronized (fixture.requestContext()) {
             var deadline = fixture.requestContext().snapshot().deadlines().inactivity();
             fixture.requestContext().recordDeadline(deadline, deadline.atMs(), null);
             var terminal =
-                    RequestProtocolTestSupport.endFixture(
+                    RequestProtocolTestSupport.claimTerminal(
+                            fixture.scheduler(),
                             fixture.requestContext(),
-                            ContextResult.EndKind.INACTIVITY,
-                            "request inactive");
+                            TerminalOutcome.timeout("request inactive"),
+                            new Response(),
+                            true);
             assertNotNull(terminal);
             assertSame(
                     fixture.candidate(),
-                    fixture.requestContext().snapshot().selectedResponse(),
+                    fixture.requestContext().snapshot().selectedResponse().candidate(),
                     "an already selected delivery owns the frontend result");
             settled =
                     SchedulerTestSupport.settleTerminalFixture(fixture.requestContext(), terminal);
@@ -696,8 +696,7 @@ class RequestCompletionPublicationRaceTest {
                     RequestState.Phase.TIMED_OUT,
                     RequestState.from(fixture.requestContext().snapshot()).state());
         }
-        fixture.scheduler().requests.archive(fixture.requestContext(), settled);
-        fixture.scheduler().runtime.deadlines().remove(fixture.requestContext());
+        settled.releaseAndArchive(fixture.scheduler(), fixture.requestContext());
         assertTrue(
                 fixture.publication().complete(RequestFuture.Completion.RESPONSE, success, null));
         assertSame(success, fixture.requestContext().data().getFuture().join());
@@ -734,19 +733,20 @@ class RequestCompletionPublicationRaceTest {
         var publication =
                 new ResponsePublication(
                         fixture.scheduler().runtime, fixture.requestContext(), false);
-        RequestState settled;
+        SchedulerTestSupport.FixtureSettlement settled;
         synchronized (fixture.requestContext()) {
             var terminal =
-                    RequestProtocolTestSupport.endFixture(
+                    RequestProtocolTestSupport.claimTerminal(
+                            fixture.scheduler(),
                             fixture.requestContext(),
-                            ContextResult.EndKind.FRONTEND,
-                            "worker failed before response publication");
+                            TerminalOutcome.fail("worker failed before response publication"),
+                            failure,
+                            true);
             assertNotNull(publication);
             settled =
                     SchedulerTestSupport.settleTerminalFixture(fixture.requestContext(), terminal);
         }
-        fixture.scheduler().requests.archive(fixture.requestContext(), settled);
-        fixture.scheduler().runtime.deadlines().remove(fixture.requestContext());
+        settled.releaseAndArchive(fixture.scheduler(), fixture.requestContext());
         Response success = new Response();
         success.setSuccess(true);
         assertFalse(
@@ -842,7 +842,7 @@ class RequestCompletionPublicationRaceTest {
             RequestContext context = fixture.requestContext();
             RequestRoute exact = context.snapshot().route();
             var phase = context.snapshot().phase();
-            org.mockito.Mockito.doReturn(false).when(publisher).register(any());
+            org.mockito.Mockito.doReturn(null).when(publisher).tryRegister();
             try {
                 Runnable reject =
                         () -> {
@@ -882,6 +882,7 @@ class RequestCompletionPublicationRaceTest {
                 }
                 assertSame(exact, context.snapshot().route());
                 assertEquals(phase, context.snapshot().phase());
+                assertNull(context.snapshot().close().endOperation());
                 assertNull(context.snapshot().outcome());
                 assertNull(context.snapshot().selectedResponse());
                 assertFalse(context.data().getFuture().isDone());
@@ -913,9 +914,9 @@ class RequestCompletionPublicationRaceTest {
                                         null,
                                         System.currentTimeMillis()));
                 assertEquals(ContextResult.Phase.OPEN, fixture.requestContext().snapshot().phase());
-                assertNotNull(fixture.requestContext().snapshot().delivery());
+                assertTrue(fixture.requestContext().snapshot().delivery().transferred());
                 assertNull(fixture.requestContext().snapshot().outcome());
-                verify(publisher, org.mockito.Mockito.never()).register(any());
+                verify(publisher, org.mockito.Mockito.never()).tryRegister();
             } finally {
                 fixture.publication().close();
                 SchedulerTestSupport.timer(fixture.scheduler().runtime).close();
@@ -926,7 +927,10 @@ class RequestCompletionPublicationRaceTest {
 
     private static Fixture fixture() {
         var executor = mock(ResponseCompletionExecutor.class);
-        when(executor.register(any())).thenReturn(true);
+        when(executor.tryRegister())
+                .thenAnswer(
+                        invocation ->
+                                mock(ResponseCompletionExecutor.CompletionRegistration.class));
         return fixture(executor);
     }
 

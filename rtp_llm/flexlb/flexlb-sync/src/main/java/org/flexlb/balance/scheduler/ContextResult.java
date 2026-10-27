@@ -2,16 +2,20 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.Objects;
 
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Immutable facts and exact permissions, without execution callbacks or infrastructure handles. */
+/**
+ * Immutable facts and exact permissions, without execution callbacks or infrastructure handles.
+ */
 public final class ContextResult {
     private ContextResult() {}
 
@@ -37,7 +41,10 @@ public final class ContextResult {
     public enum Blocker {
         PLACEMENT,
         PREEMPTION,
-        RELEASE_PROOF
+        SENDER,
+        RELEASE_PROOF,
+        CLOSE_IN_PROGRESS,
+        RECONCILIATION
     }
 
     public enum Rejection {
@@ -75,10 +82,19 @@ public final class ContextResult {
         TERMINAL,
         CANCELLATION,
         EXTERNAL_SUCCESS,
-        EXTERNAL_FAILURE
+        EXTERNAL_FAILURE,
+        ENCODER_ACK
+    }
+
+    public enum CancelKind {
+        GLOBAL_QUEUE,
+        WORKER_QUEUE,
+        REMOTE,
+        WAIT_PLACEMENT
     }
 
     public enum CancelEvidenceKind {
+        LOCAL_WITHDRAWN,
         CLEANED,
         FENCED,
         ACKNOWLEDGED,
@@ -107,7 +123,23 @@ public final class ContextResult {
         RETIRED
     }
 
-    public record Identity(long requestId, long incarnation) {}
+    public enum ProgressKind {
+        NOTIFICATIONS,
+        NOTIFICATION_REJECTED,
+        RELEASE
+    }
+
+    public record Identity(
+            String requestId,
+            long incarnation,
+            long originalNumericRequestId,
+            RequestPhase requestPhase) {
+        public Identity(String requestId, long incarnation) {
+            this(requestId, incarnation, 0L, RequestPhase.GENERATION);
+        }
+    }
+
+    public record EncoderFacts(EncoderEndpoint endpoint, boolean acknowledged) {}
 
     public record End(
             EndKind kind, TerminalOutcome outcome, StrategyErrorType errorType, String detail) {}
@@ -233,7 +265,13 @@ public final class ContextResult {
     }
 
     public record CancellationFacts(
-            CancelReason reason, StrategyErrorType errorType, String detail) {}
+            CancelReason reason,
+            StrategyErrorType errorType,
+            String detail,
+            CancelPermit operation) {}
+
+    public record CancelEvidence(
+            CancelEvidenceKind kind, boolean prefillSettled, boolean decodeSettled) {}
 
     public record PreemptionReport(
             PreemptionCancelPhase phase,
@@ -243,14 +281,14 @@ public final class ContextResult {
             EndEvidence terminal) {}
 
     public record CloseProgress(
-            boolean notificationsAttempted,
+            ProgressKind kind,
             boolean prefillSettled,
             boolean decodeSettled,
             boolean notificationsDone,
             boolean timersDone) {}
 
-    public record ResponseCandidate(RequestContext owner, ResponseKind kind, End result, long nowMs)
-            implements GrantValue {}
+    public record ResponseCandidate(
+            RequestContext owner, ResponseKind kind, End result, long nowMs) {}
 
     public sealed interface DeliveryEvidence
             permits TransportResult,
@@ -288,11 +326,58 @@ public final class ContextResult {
         RequestContext owner();
     }
 
+    public sealed interface CloseOperation extends GrantValue permits EndToken, ClosePermit {}
+
     public record PlacementToken(RequestContext owner, long sequence, RequestRoute withdrawing)
             implements GrantValue {}
 
     public record RoutePermit(
             RequestContext owner, PlacementToken operation, RequestRoute route, boolean publishable)
+            implements GrantValue {}
+
+    public record CancelPermit(
+            RequestContext owner,
+            long sequence,
+            RequestRoute route,
+            DeliveryClaim delivery,
+            CancelKind kind,
+            CancelReason reason)
+            implements GrantValue {}
+
+    public record ReconciliationPermit(
+            RequestContext owner,
+            PreemptionRegistration attempt,
+            RequestRoute route,
+            EndEvidence terminal,
+            boolean confirmationPending)
+            implements GrantValue {}
+
+    public record EndToken(
+            RequestContext owner,
+            long sequence,
+            RequestRoute route,
+            PreemptionRegistration preemption)
+            implements CloseOperation {}
+
+    public record ClosePermit(
+            RequestContext owner,
+            long sequence,
+            RequestRoute route,
+            DecodeResources.ReleaseReason releaseReason,
+            boolean prefillSettled,
+            boolean decodeSettled,
+            boolean notificationsDone,
+            boolean timersDone)
+            implements CloseOperation {}
+
+    public record ResponseSelection(
+            RequestContext owner,
+            ResponseKind kind,
+            End result,
+            RequestRoute route,
+            long batchId,
+            long selectedAtMs,
+            ResponseCandidate candidate)
             implements GrantValue {}
 
     public record PlacementFacts(
@@ -387,11 +472,21 @@ public final class ContextResult {
             boolean executionFinished,
             boolean prefillProof,
             boolean decodeProof,
-            long startedAtMs)
-            implements GrantValue {
-        @Override
-        public RequestContext owner() {
-            return identity.owner();
+            boolean transferred,
+            long startedAtMs,
+            long acknowledgedAtMs) {
+        DeliveryFacts transferToSender() {
+            return new DeliveryFacts(
+                    identity,
+                    send,
+                    acknowledged,
+                    abandonment,
+                    executionFinished,
+                    prefillProof,
+                    decodeProof,
+                    true,
+                    startedAtMs,
+                    acknowledgedAtMs);
         }
 
         DeliveryFacts withSendState(SendState next) {
@@ -408,7 +503,9 @@ public final class ContextResult {
                     executionFinished,
                     prefillProof,
                     decodeProof,
-                    startedAtMs);
+                    transferred,
+                    startedAtMs,
+                    acknowledgedAtMs);
         }
 
         DeliveryFacts mergeReleaseProof(
@@ -421,14 +518,16 @@ public final class ContextResult {
                     executionFinished || finished,
                     prefillProof || prefillSettled,
                     decodeProof || decodeSettled,
-                    startedAtMs);
+                    transferred,
+                    startedAtMs,
+                    acknowledgedAtMs);
         }
 
         DeliveryFacts abandon(SendState next, CancelReason reason) {
             return recordResult(next, reason, prefillProof, decodeProof);
         }
 
-        DeliveryFacts acknowledge() {
+        DeliveryFacts acknowledge(long nowMs) {
             return new DeliveryFacts(
                     identity,
                     send,
@@ -437,7 +536,9 @@ public final class ContextResult {
                     executionFinished,
                     prefillProof,
                     decodeProof,
-                    startedAtMs);
+                    transferred,
+                    startedAtMs,
+                    nowMs);
         }
 
         DeliveryFacts recordEnd(CancelReason abandoned, boolean completed) {
@@ -449,10 +550,16 @@ public final class ContextResult {
                     executionFinished || completed,
                     prefillProof,
                     decodeProof,
-                    startedAtMs);
+                    transferred,
+                    startedAtMs,
+                    acknowledgedAtMs);
         }
     }
 
+    /**
+     * @param restorationObserved whether Prefill ACTIVE or Decode KV_ALLOCATED was observed
+     *                            after this preemption was registered; earlier reports do not count
+     */
     public record PreemptionFacts(
             PreemptionRegistration identity,
             PreemptionCancelPhase phase,
@@ -460,7 +567,8 @@ public final class ContextResult {
             boolean finished,
             EndEvidence pendingTerminal,
             boolean confirmationPending,
-            boolean restorationObserved) {
+            boolean restorationObserved,
+            ReconciliationPermit reconciliation) {
         PreemptionFacts observeRestoration() {
             return new PreemptionFacts(
                     identity,
@@ -469,7 +577,20 @@ public final class ContextResult {
                     finished,
                     pendingTerminal,
                     confirmationPending,
-                    true);
+                    true,
+                    reconciliation);
+        }
+
+        PreemptionFacts beginReconciliation(ReconciliationPermit permit) {
+            return new PreemptionFacts(
+                    identity,
+                    phase,
+                    cancelAcknowledged,
+                    finished,
+                    pendingTerminal,
+                    confirmationPending,
+                    restorationObserved,
+                    permit);
         }
 
         PreemptionFacts recordReport(
@@ -481,7 +602,8 @@ public final class ContextResult {
                     finished || ledgerCommitted && terminal != null,
                     terminal,
                     confirmationPending,
-                    restorationObserved);
+                    restorationObserved,
+                    null);
         }
 
         PreemptionFacts awaitConfirmation() {
@@ -492,7 +614,8 @@ public final class ContextResult {
                     finished,
                     pendingTerminal,
                     true,
-                    restorationObserved);
+                    restorationObserved,
+                    reconciliation);
         }
 
         PreemptionFacts finish() {
@@ -503,7 +626,8 @@ public final class ContextResult {
                     true,
                     pendingTerminal,
                     confirmationPending,
-                    restorationObserved);
+                    restorationObserved,
+                    reconciliation);
         }
 
         PreemptionFacts retainTerminal(EndEvidence terminal) {
@@ -514,11 +638,14 @@ public final class ContextResult {
                     finished,
                     terminal,
                     confirmationPending,
-                    restorationObserved);
+                    restorationObserved,
+                    reconciliation);
         }
     }
 
     public record CloseFacts(
+            EndToken endOperation,
+            ClosePermit releaseOperation,
             boolean prefillSettled,
             boolean decodeSettled,
             boolean notificationsDone,
@@ -527,6 +654,8 @@ public final class ContextResult {
             boolean notificationsAttempted) {
         CloseFacts withSettlement(boolean prefillSettled, boolean decodeSettled) {
             return new CloseFacts(
+                    endOperation,
+                    releaseOperation,
                     prefillSettled,
                     decodeSettled,
                     notificationsDone,
@@ -542,6 +671,8 @@ public final class ContextResult {
 
         CloseFacts markExpired() {
             return new CloseFacts(
+                    endOperation,
+                    releaseOperation,
                     prefillSettled,
                     decodeSettled,
                     notificationsDone,
@@ -552,6 +683,8 @@ public final class ContextResult {
 
         CloseFacts beginEnding(EndEvidence evidence, boolean prefillCompleted) {
             return new CloseFacts(
+                    null,
+                    releaseOperation,
                     prefillSettled || evidence.prefillSettled() || prefillCompleted,
                     decodeSettled || evidence.decodeSettled(),
                     false,
@@ -560,20 +693,49 @@ public final class ContextResult {
                     notificationsAttempted);
         }
 
+        CloseFacts claimNotifications(EndToken exact) {
+            return new CloseFacts(
+                    exact,
+                    releaseOperation,
+                    prefillSettled,
+                    decodeSettled,
+                    false,
+                    timersDone,
+                    expired,
+                    notificationsAttempted);
+        }
+
+        CloseFacts claimRelease(ClosePermit exact) {
+            return new CloseFacts(
+                    endOperation,
+                    exact,
+                    prefillSettled,
+                    decodeSettled,
+                    notificationsDone,
+                    timersDone,
+                    expired,
+                    notificationsAttempted);
+        }
+
         CloseFacts recordProgress(CloseProgress progress, boolean preemptionFinished) {
+            boolean notification = progress.kind() != ProgressKind.RELEASE;
             boolean notified =
                     notificationsDone || progress.notificationsDone() && preemptionFinished;
             return new CloseFacts(
+                    notification ? null : endOperation,
+                    notification ? releaseOperation : null,
                     prefillSettled || progress.prefillSettled(),
                     decodeSettled || progress.decodeSettled(),
                     notified,
                     timersDone || progress.timersDone(),
                     expired,
-                    notificationsAttempted || progress.notificationsAttempted());
+                    notificationsAttempted || progress.kind() == ProgressKind.NOTIFICATIONS);
         }
 
         CloseFacts retainEnd(EndEvidence evidence) {
             return new CloseFacts(
+                    endOperation,
+                    releaseOperation,
                     prefillSettled || evidence.prefillSettled(),
                     decodeSettled || evidence.decodeSettled(),
                     notificationsDone,
@@ -583,7 +745,9 @@ public final class ContextResult {
         }
     }
 
-    /** Control facts are shared by observations that change only activity timestamps. */
+    /**
+     * Control facts are shared by observations that change only activity timestamps.
+     */
     public record SnapshotFacts(
             Identity key,
             long createdAtMs,
@@ -596,18 +760,71 @@ public final class ContextResult {
             CancellationFacts cancellation,
             End outcome,
             EndEvidence pendingEnd,
-            ResponseCandidate selectedResponse,
+            ResponseSelection selectedResponse,
             CloseFacts close,
             ExpirationTimer.Plan deadlines,
             RequestState terminalRecord,
             boolean deliveryReleasable,
-            boolean preparedDelivery) {}
+            boolean preparedDelivery,
+            boolean localEndEligible,
+            boolean frontendCancelEligible,
+            EncoderFacts encoder) {}
 
     public record Snapshot(
             @lombok.experimental.Delegate SnapshotFacts facts,
             long lastWorkerAtMs,
             long updatedAtMs,
-            long inactivityExpiresAtMs) {}
+            long inactivityExpiresAtMs) {
+        public Snapshot(
+                Identity key,
+                long createdAtMs,
+                Phase phase,
+                RequestRoute route,
+                PlacementFacts placement,
+                DeliveryFacts delivery,
+                EngineFacts engine,
+                PreemptionFacts preemption,
+                CancellationFacts cancellation,
+                End outcome,
+                EndEvidence pendingEnd,
+                ResponseSelection selectedResponse,
+                CloseFacts close,
+                ExpirationTimer.Plan deadlines,
+                RequestState terminalRecord,
+                long lastWorkerAtMs,
+                long updatedAtMs,
+                boolean deliveryReleasable,
+                boolean preparedDelivery,
+                boolean localEndEligible,
+                boolean frontendCancelEligible,
+                long inactivityExpiresAtMs) {
+            this(
+                    new SnapshotFacts(
+                            key,
+                            createdAtMs,
+                            phase,
+                            route,
+                            placement,
+                            delivery,
+                            engine,
+                            preemption,
+                            cancellation,
+                            outcome,
+                            pendingEnd,
+                            selectedResponse,
+                            close,
+                            deadlines,
+                            terminalRecord,
+                            deliveryReleasable,
+                            preparedDelivery,
+                            localEndEligible,
+                            frontendCancelEligible,
+                            null),
+                    lastWorkerAtMs,
+                    updatedAtMs,
+                    inactivityExpiresAtMs);
+        }
+    }
 
     public record Update(UpdateKind kind, Snapshot before, Snapshot after) {
         public Update {
