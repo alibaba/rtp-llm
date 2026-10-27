@@ -3174,16 +3174,22 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionKeepsRequestSourc
     for (const auto& [pool, block] : device_sources) {
         EXPECT_EQ(pool->refCount(block), 1u);
     }
-    // The FULL drop would cascade to freshly loaded SWA blocks still held by
-    // this request. Preserve the entire plan until those holders are released.
+    // FULL only checks its primary blocks. Freshly loaded SWA targets lose their
+    // CACHE references during the cascade but stay allocated for the request.
     const auto version_before_reclaim = environment->cache->getKeySnapshot().version;
-    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 0);
-    EXPECT_EQ(environment->cache->getKeySnapshot().version, version_before_reclaim);
-    for (const auto& [pool, block] : request_target_blocks) {
-        EXPECT_EQ(pool->refCount(block), 2u);
-        releaseDeviceBlocks(*environment->cache, pool, {block});
-    }
     EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
+    EXPECT_GT(environment->cache->getKeySnapshot().version, version_before_reclaim);
+    EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before - 2);
+    for (const auto& [pool, block] : request_target_blocks) {
+        EXPECT_TRUE(pool->isAllocated(block));
+        EXPECT_EQ(pool->refCount(block), 1u);
+        EXPECT_EQ(pool->treeRefCount(block), 0u);
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+        EXPECT_FALSE(pool->isAllocated(block));
+    }
+    // The ready prefix still has two cached FULL blocks after dropping the suffix.
+    EXPECT_EQ(environment->cache->evictForGroup("group0", 2), 2);
+    EXPECT_EQ(environment->cache->getStats().tree_node_count, 0u);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
     }
