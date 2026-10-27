@@ -38,6 +38,9 @@ public class NoOpFlexMonitor implements FlexMonitor {
     }
 
     @Override
+    public boolean isEnabled(String metricName) { return false; }
+
+    @Override
     public String toString() {
         return "NoOpFlexMonitor";
     }
