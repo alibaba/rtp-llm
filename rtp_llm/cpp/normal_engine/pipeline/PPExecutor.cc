@@ -839,9 +839,9 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
     plan.model_input          = std::move(model_input_status.value());
     plan.model_input.skip_run = stream_groups.empty();
 
-    if (is_dspark_ && chunked_prefill_enabled_ && !plan.is_decode && !stream_groups.empty()
-        && !plan.model_input.is_fake_stream) {
-        RTP_LLM_CHECK_WITH_INFO(streams.size() == 1, "DSpARK chunked prefill requires one request per CP batch");
+    if ((is_dspark_ || (sp_enabled_ && role_type_ == RoleType::PREFILL)) && chunked_prefill_enabled_
+        && !plan.is_decode && !stream_groups.empty() && !plan.model_input.is_fake_stream) {
+        RTP_LLM_CHECK_WITH_INFO(streams.size() == 1, "speculative chunked prefill requires one request per CP batch");
         plan.dspark_intermediate_chunk = streams.front()->isChunkStream();
         if (plan.dspark_intermediate_chunk) {
             // Ring/state slots can be overwritten by later chunks. Register the
@@ -1090,8 +1090,8 @@ void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
     result.request_errors.assign(stream_count, ErrorInfo::OkStatus());
     result.prompt_logits.resize(stream_count);
     if (plan.dspark_intermediate_chunk) {
-        RTP_LLM_CHECK_WITH_INFO(is_dspark_ && chunked_prefill_enabled_ && !plan.is_decode,
-                                "intermediate commit requires DSpARK chunked prefill");
+        RTP_LLM_CHECK_WITH_INFO(chunked_prefill_enabled_ && !plan.is_decode,
+                                "intermediate commit requires speculative chunked prefill");
         result.new_token_ids     = torch::empty({stream_count, 0}, torch::kInt32);
         result.new_token_lengths = torch::zeros({stream_count}, torch::kInt32);
         return;
@@ -1538,7 +1538,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 }
             }
 
-            if (sp_enabled_) {
+            if (sp_enabled_ && (is_dspark_ || !plan.dspark_intermediate_chunk)) {
                 mtp::maybeOverrideLastHiddenWithMtpBuffer(
                     model_output, *model_, cp_enabled ? -1 : plan.model_input.combo_tokens.numel());
 

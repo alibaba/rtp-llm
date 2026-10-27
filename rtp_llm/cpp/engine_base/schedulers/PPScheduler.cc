@@ -37,6 +37,13 @@ bool PPScheduler::supportsChunkedPrefill(const RuntimeConfig&              runti
     if (sp_config.type == SP_TYPE_NONE) {
         return true;
     }
+    // MTP fastgen (step 1a): intermediate chunks run target only; the final chunk
+    // samples and runs the draft once for the PD handoff proposal. Singleton batch only.
+    if (sp_config.type == SP_TYPE_MTP && pd_sep_config.role_type == RoleType::PREFILL
+        && runtime_config.fifo_scheduler_config.cp_force_single_prefill
+        && autil::EnvUtil::getEnv<int64_t>("RTP_LLM_MTP_CHUNKED_PREFILL", 0) == 1) {
+        return true;
+    }
     // DSpARK commits unshifted target features. Limit the experiment to the
     // singleton CP prefill schedule so a round has one unambiguous chunk phase.
     return sp_config.type == SP_TYPE_DSPARK && pd_sep_config.role_type == RoleType::PREFILL
