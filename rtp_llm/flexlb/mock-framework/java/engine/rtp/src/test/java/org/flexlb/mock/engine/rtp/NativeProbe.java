@@ -17,9 +17,16 @@ public final class NativeProbe {
             var worker = rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
             var cache = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
             var health = rpc.checkHealth(EmptyPB.getDefaultInstance());
-            var result = Map.of("health", health.getHealth(), "role", worker.getRole(), "role_type", worker.getRoleType().name(),
+            var result = new java.util.HashMap<String, Object>(Map.of("health", health.getHealth(), "role", worker.getRole(), "role_type", worker.getRoleType().name(),
                 "alive", worker.getAlive(), "total_tokens", worker.getTotalKvCache(), "available_tokens", cache.getAvailableKvCache(),
-                "block_size", cache.getBlockSize(), "cache_keys", cache.getCacheKeysCount());
+                "block_size", cache.getBlockSize(), "cache_keys", cache.getCacheKeysCount()));
+            if (worker.getRoleType() == RoleTypePB.ROLE_TYPE_PREFILL) {
+                var input = GenerateInputPB.newBuilder().setRequestId(42).addAllTokenIds(List.of(1, 2, 3, 4))
+                    .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(1)).build();
+                var stream = rpc.generateStreamCall(input); var output = stream.next();
+                if (stream.hasNext() || !output.getFlattenOutput().getFinished(0)) throw new IllegalStateException("Invalid local generation result");
+                result.put("local_output_tokens", output.getFlattenOutput().getAuxInfo(0).getOutputLen());
+            }
             new ObjectMapper().writeValue(Path.of(args[1]).toFile(), result);
         } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }

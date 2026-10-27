@@ -48,6 +48,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             : (int) Math.ceil(blocks * ratio / 100.0);
         if (nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE) != 1 || nativeInt(config, "dp_rank", 0, 0, Integer.MAX_VALUE) != 0)
             throw new IllegalArgumentException("RTP node currently supports dp_size=1, dp_rank=0 only");
+        if (nativeInt(config, "max_context_batch_size", 1, 1, Integer.MAX_VALUE) != 1)
+            throw new IllegalArgumentException("Local prefill currently supports max_context_batch_size=1 only");
         var compute = ComputeModels.fromJson(root.path("environment").path("compute"));
         if ((role == Role.prefill ? compute.configuration().prefill() : compute.configuration().decode()) == null)
             throw new IllegalArgumentException("Missing compute model for " + role);
@@ -67,6 +69,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("dp_size", 1).put("dp_rank", 0).put("tp_size", tpSize);
+        result.put("max_context_batch_size", 1).put("local_request_limit", LocalPrefill.LIMIT);
         result.set("config", business()); result.set("compute", compute.effectiveConfiguration());
         return result;
     }

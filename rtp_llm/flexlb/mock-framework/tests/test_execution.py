@@ -119,8 +119,12 @@ def test_phase_deadline_includes_previous_steps(probe, tmp_path):
 
 
 def test_step_timeout_is_limited_by_remaining_phase_budget(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [call('first', args={'delay_ms': 100}),
-                                          call('second', args={'delay_ms': 300}, within='2s')], timeout='200ms')
+    # Consume the first budget locally so JVM first-call warmup cannot fail step one.
+    result, out = execute(probe, tmp_path, [
+        {'call': {'id': 'first', 'describe': '消耗阶段预算', 'interface': 'runtime/wait',
+                  'args': {'duration': '1s'}}},
+        call('second', args={'delay_ms': 1500}, within='3s'),
+    ], timeout='2s')
     assert result['status'] == 'ERROR'
     assert [e['status'] for e in events(out) if e['event'] == 'step_finished'] == ['PASS', 'ERROR']
     assert_cleaned(out)

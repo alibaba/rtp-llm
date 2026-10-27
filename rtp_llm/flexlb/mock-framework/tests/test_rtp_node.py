@@ -56,6 +56,8 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 assert actual['role'] == f'RoleType.{role.upper()}'
                 assert actual['total_tokens'] == actual['available_tokens'] == 128
                 assert actual['block_size'] == 16 and actual['cache_keys'] == 0
+                if role == 'prefill':
+                    assert actual['local_output_tokens'] == 1
                 effective = json.loads((directory / 'effective-config.json').read_text())
                 assert effective['compute'][role]['noise']['scale'] == 1
             assert (await task)['status'] == 'PASS'

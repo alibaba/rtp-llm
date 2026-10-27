@@ -40,7 +40,11 @@ public final class RtpNode implements AutoCloseable {
     public DeviceCache cache() { return cache; }
     public Map<String, Object> endpoints() {
         return Map.of("id", config.id(), "role", config.role().name(), "engine", "rtp", "rpc", rpcAddress(),
-            "control", api.url(), "supported_rpc", List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus"));
+            "control", api.url(), "supported_rpc", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
+                ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall")
+                : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus"),
+            "local_generation", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
+                ? Map.of("max_new_tokens", 1, "text_only", true) : Map.of());
     }
 
     @Override public void close() {
