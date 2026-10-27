@@ -307,17 +307,36 @@ class AttnImplFactory(object):
             decode_cascade_max_requests > 0
             and not attn_inputs.is_prefill
             and not attn_configs.use_mla
-            and not (fmha_config and fmha_config.disable_flashinfer_native)
             and not attn_inputs.headwise_config
         ):
             import torch
 
-            if torch.version.hip is None and torch.cuda.is_available():
+            attn_inputs.is_cuda_graph = is_cuda_graph
+            if torch.version.hip is not None and torch.cuda.is_available():
+                from rtp_llm.models_py.modules.factory.attention.rocm_impl.beam_search_cascade import (
+                    AiterCascadeDecodeImpl,
+                )
+
+                if AiterCascadeDecodeImpl.support(
+                    attn_configs, attn_inputs
+                ) and AiterCascadeDecodeImpl.support_parallelism_config(
+                    parallelism_config
+                ):
+                    return AiterCascadeDecodeImpl(
+                        attn_configs,
+                        attn_inputs,
+                        parallelism_config,
+                        decode_cascade_max_requests,
+                        model_config.max_seq_len,
+                        fmha_config=fmha_config,
+                    )
+            elif torch.cuda.is_available() and not (
+                fmha_config and fmha_config.disable_flashinfer_native
+            ):
                 from rtp_llm.models_py.modules.factory.attention.cuda_impl.beam_search_cascade import (
                     PyFlashinferCascadeDecodeImpl,
                 )
 
-                attn_inputs.is_cuda_graph = is_cuda_graph
                 if PyFlashinferCascadeDecodeImpl.support(
                     attn_configs, attn_inputs
                 ) and PyFlashinferCascadeDecodeImpl.support_parallelism_config(

@@ -96,7 +96,7 @@ configuration, set `DECODE_CUDA_GRAPH_MAX_BATCH_SIZE` explicitly.
 ### Beam Search Cascade Attention
 
 `ENABLE_DECODE_CASCADE_ATTENTION=1` (CLI:
-`--enable_decode_cascade_attention 1`) enables shared-prefix attention for CUDA
+`--enable_decode_cascade_attention 1`) enables shared-prefix attention for CUDA/ROCm
 MHA/GQA Decode. It is disabled by default and supports FP16/BF16 KV caches.
 It leaves Prefill, MLA, quantized KV caches and speculative verification on
 their existing attention paths.
@@ -105,6 +105,20 @@ Complete KV pages shared by adjacent beams are evaluated with a Prefill kernel;
 private pages, including the current token, use a Decode kernel. Their outputs
 are merged using log-sum-exp. The planner verifies every shared page ID, so
 different requests and beam widths can reuse one captured graph.
+
+On ROCm, the BF16 shuffled-cache path with 16-token pages uses AITER paged
+Prefill for shared prefixes and a Triton kernel for the private suffix and softmax-state merge.
+Fixed query tiles keep HIP Graph launch geometry unchanged across request,
+beam ancestry, page-table and sequence-length changes. FP16, linear-V caches
+and other page sizes use the layout-aware Triton prefix implementation. Large
+KV pools also use Triton with 64-bit offsets to avoid CK indexing limits. FP8 **model** PTPC
+quantization is supported with FP16/BF16 KV; quantized KV retains ordinary
+Decode. Beam output bookkeeping completes before the next scheduler step;
+`ENGINE_ASYNC_WORKER_COUNT` still controls parallel output workers.
+
+Prefix and Decode kernels use different FP16/BF16 reduction orders, which can
+change scores and rankings among close beam candidates. Model-level accuracy
+comparisons should include candidate sets and cumulative scores as well as Top-1.
 
 Request slots follow `CONCURRENCY_LIMIT`, with one additional slot for padded
 rows. No separate request-slot setting or request-count graph buckets are
