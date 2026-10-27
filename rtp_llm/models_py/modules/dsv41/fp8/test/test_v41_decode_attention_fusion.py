@@ -506,6 +506,8 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
                             _select(attn, x, qr, positions)
                     torch.cuda.current_stream().wait_stream(stream)
                     graph = torch.cuda.CUDAGraph()
+                    # Direct selection calls bypass the model's _begin_forward.
+                    attn._shared_attention.pop("decode_indexer_metadata", None)
                     with torch.cuda.graph(graph):
                         got = _select(attn, x, qr, positions)
                     for _ in range(2):
