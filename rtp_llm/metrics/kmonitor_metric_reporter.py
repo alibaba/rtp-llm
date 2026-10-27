@@ -1,6 +1,6 @@
 import logging
 from enum import Enum
-from typing import Any, Dict, Union
+from typing import Any, Dict, Iterable, Optional, Union
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
@@ -201,15 +201,22 @@ class MetricReporter(object):
     def flush(self) -> None:
         self._kmon.flush()
 
-    def init(self):
+    def init(
+        self,
+        *,
+        acc_metrics: Optional[Iterable[AccMetrics]] = None,
+        gauge_metrics: Optional[Iterable[GaugeMetrics]] = None,
+        tags: Optional[Dict[str, str]] = None,
+    ):
+        """Register once; workers can restrict metrics and isolate their series."""
         if not self._inited:
             self._inited = True
-            for metric in AccMetrics:
+            for metric in AccMetrics if acc_metrics is None else acc_metrics:
                 self._matic_map[metric.value] = self._kmon.register_acc_metric(
-                    metric.value
+                    metric.value, tags or {}
                 )
 
-            for metric in GaugeMetrics:
+            for metric in GaugeMetrics if gauge_metrics is None else gauge_metrics:
                 self._matic_map[metric.value] = self._kmon.register_gauge_metric(
-                    metric.value
+                    metric.value, tags or {}
                 )
