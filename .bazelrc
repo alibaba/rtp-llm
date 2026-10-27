@@ -215,9 +215,8 @@ test --run_under=//tools:nvidia_wheel_env
 # by default, hence the explicit PATH / LD_LIBRARY_PATH overrides.
 #
 # These were previously hard-coded into smoke defs.bzl pointing at user-
-# private conda envs (/home/tanboyu.tby/..., /home/serina.wzq/...) which
-# only worked on those specific dev boxes. Centralize here so every cu13
-# test sees the same toolchain.
+# private conda envs which only worked on those specific dev boxes.
+# Centralize here so every cu13 test sees the same toolchain.
 test:cuda13_arm --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
