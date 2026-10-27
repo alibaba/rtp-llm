@@ -64,6 +64,7 @@ class TorchSymmMemCommunicator:
         """
 
         self.disabled = True
+        self._owner_stream = None
 
         if not torch_symm_mem_available:
             return
@@ -123,6 +124,19 @@ class TorchSymmMemCommunicator:
             return
         self.disabled = False
 
+    def _stream_compatible(self):
+        # AllReduce and AllGather share one scratch buffer. A second stream
+        # must use NCCL rather than overwrite a still-running collective/copy.
+        stream = torch.cuda.current_stream(self.device).cuda_stream
+        return self._owner_stream is None or self._owner_stream == stream
+
+    def _claim_stream(self):
+        stream = torch.cuda.current_stream(self.device).cuda_stream
+        if self._owner_stream is None:
+            self._owner_stream = stream
+        elif self._owner_stream != stream:
+            raise RuntimeError("symmetric-memory scratch belongs to another stream")
+
     def should_torch_symm_mem_allreduce(self, inp: torch.Tensor):
         """
         Fast-path eligibility check for a given tensor.
@@ -137,6 +151,8 @@ class TorchSymmMemCommunicator:
             True if the symmetric-memory path can handle this tensor.
         """
         if self.disabled:
+            return False
+        if inp.device != self.device or not self._stream_compatible():
             return False
         if inp.dtype != self.dtype:
             return False
@@ -164,6 +180,7 @@ class TorchSymmMemCommunicator:
             - Selects 'multimem' or 'two_shot' kernel based on topology.
             - Writes the result into 'out' and returns it.
         """
+        self._claim_stream()
         if out is None:
             out = torch.empty_like(inp)
         self.buffer[: inp.numel()].copy_(inp.view(-1))
@@ -179,7 +196,9 @@ class TorchSymmMemCommunicator:
         return out
 
     # adapter from torch/distributed/_symmetric_memory/__init__.py
-    def should_torch_symm_mem_allgather(self, shard: torch.Tensor) -> bool:
+    def should_torch_symm_mem_allgather(
+        self, shard: torch.Tensor, *, max_gathered_rows: Optional[int] = 2048
+    ) -> bool:
         """
         Fast-path eligibility check for all_gather.
 
@@ -189,17 +208,25 @@ class TorchSymmMemCommunicator:
           - dtype must be bfloat16.
           - Shard must be contiguous (op requirement).
           - Shard byte size must be 4-byte aligned (hardware requirement).
-          - Gather is along dim 0 only; leading_dims * world_size <= 2048
-            (empirical heuristic from PyTorch fused_all_gather_matmul).
+          - Gather is along dim 0 only. The default 2048 gathered-row cap is
+            a fused-GEMM heuristic; standalone CP gather can omit that cap.
+          - Only the buffer's owner stream may use its shared scratch.
           - Total gathered size (shard * world_size) must fit in the buffer.
         """
         if self.disabled or shard.dtype != self.dtype or not shard.is_contiguous():
             return False
+        if shard.device != self.device or not self._stream_compatible():
+            return False
         shard_bytes = shard.numel() * shard.element_size()
+        if shard_bytes == 0 or shard.data_ptr() % 4 != 0:
+            return False
         if shard_bytes % 4 != 0:
             return False
         leading_numel = math.prod(shard.shape[:-1]) if shard.dim() >= 2 else 1
-        if leading_numel * self.world_size > 2048:
+        if (
+            max_gathered_rows is not None
+            and leading_numel * self.world_size > max_gathered_rows
+        ):
             return False
         return shard_bytes * self.world_size < self.max_size
 
@@ -227,6 +254,7 @@ class TorchSymmMemCommunicator:
             - Output is staged through the symmetric buffer and then copied
               to a regular tensor.
         """
+        self._claim_stream()
         shard_numel = shard.numel()
         total_numel = shard_numel * self.world_size
         if out is None:

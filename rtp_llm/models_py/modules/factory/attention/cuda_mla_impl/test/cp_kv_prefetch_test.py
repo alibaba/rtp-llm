@@ -162,6 +162,10 @@ class PipelineProtocolTest(unittest.TestCase):
             _cp_rank=0,
             _kv_owner_tokens_per_block=64,
         )
+        # This is a CPU event-protocol test, not a distributed allocator test.
+        p = patch.object(kv, "registered_kv_overlap_buffers", return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
         self.pipeline = kv.CrossLayerKvPrefetch(self.fmha, self.cache)
         self.fmha._cross_layer_prefetch = self.pipeline
 

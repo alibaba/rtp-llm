@@ -70,6 +70,7 @@ def _env_enabled(name: str) -> bool:
 # avoiding an os.environ lookup in every layer keeps the dispatcher negligible.
 _OPT_ENABLED = _env_enabled("GLM5_CP_OPT")
 _PYNCCL_VALIDATE = _env_enabled("GLM5_CP_PYNCCL_VALIDATE")
+_TORCH_SYMM_GATHER = os.environ.get("RTP_LLM_CP_TORCH_SYMM_GATHER", "1") == "1"
 
 
 class _NCCLLib:
@@ -204,6 +205,7 @@ _LIB: "_NCCLLib | None" = None
 _COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
+_OVERLAP_SYMM_COMMS: Dict[Tuple[Any, int], Any] = {}
 _WORLD_SIZES: Dict[Any, int] = {}
 _OVERLAP_BUFFERS: Dict[Tuple[Any, ...], Any] = {}
 _INDEXER_BUFFERS: Dict[Tuple[Any, ...], Tuple[Any, Any]] = {}
@@ -304,7 +306,32 @@ def warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
         _get_comm(process_group, device)
     key = _comm_key(process_group, device)
     if key not in _OVERLAP_STREAMS:
-        _OVERLAP_STREAMS[key] = torch.cuda.Stream(device=device)
+        # Let short cache pack/write kernels progress while Q GEMMs are queued.
+        # Stream dependencies, not priority, still establish correctness.
+        _OVERLAP_STREAMS[key] = torch.cuda.Stream(device=device, priority=-1)
+    if _TORCH_SYMM_GATHER and key not in _OVERLAP_SYMM_COMMS:
+        from rtp_llm.models_py.distributed.symm_mem import (
+            TorchSymmMemCommunicator,
+            get_symm_mem_communicator,
+        )
+
+        main = get_symm_mem_communicator()
+        side = None
+        if main is not None and main.group is process_group and not main.disabled:
+            # Collective allocation belongs in the existing rank-uniform
+            # prepare step, never in all_gather_kv_overlap's per-layer path.
+            # Separate storage also separates the multicast barrier signals
+            # from Indexer/main-stream collectives.
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "KV symmetric scratch must be prepared before capture"
+                )
+            side = TorchSymmMemCommunicator(process_group, device)
+            if side.disabled:
+                side = None
+            else:
+                side._owner_stream = _OVERLAP_STREAMS[key].cuda_stream
+        _OVERLAP_SYMM_COMMS[key] = side
     return _OVERLAP_STREAMS[key]
 
 
@@ -464,6 +491,13 @@ def all_gather_kv_overlap(
             device=input.device,
         )
     _validate_all_gather(output, input, process_group)
+    side = _OVERLAP_SYMM_COMMS.get(_comm_key(process_group, input.device))
+    if side is not None:
+        gathered = _try_torch_symm_all_gather(
+            input, process_group, communicator=side, output=output
+        )
+        if gathered is not None:
+            return gathered
     lib.all_gather(
         input.data_ptr(),
         output.data_ptr(),
@@ -488,6 +522,11 @@ def _require_comm(process_group, device: torch.device):
 def destroy() -> None:
     """Release symmetric windows and direct communicators before PG teardown."""
     global _LIB
+
+    for key, side in _OVERLAP_SYMM_COMMS.items():
+        if side is not None:
+            _OVERLAP_STREAMS[key].synchronize()
+    _OVERLAP_SYMM_COMMS.clear()
 
     for stream, buffers in _INDEXER_BUFFERS.values():
         stream.synchronize()
@@ -808,13 +847,43 @@ def all_gather_into_tensor(
     )
 
 
+def _try_torch_symm_all_gather(input, process_group, *, communicator=None, output=None):
+    """Use the existing TP multicast buffer for small, eager BF16 gathers.
+
+    The 2048-row limit in the generic wrapper is a fused-GEMM heuristic,
+    not a constraint of the flattened standalone gather. Keep its byte,
+    alignment, topology and single-stream ownership checks instead.
+    """
+    if not _TORCH_SYMM_GATHER or not input.is_cuda or input.numel() == 0:
+        return None
+    from rtp_llm.models_py.distributed.symm_mem import get_symm_mem_communicator
+
+    comm = communicator if communicator is not None else get_symm_mem_communicator()
+    if (
+        comm is None
+        or comm.group is not process_group
+        or input.device != comm.device
+        or torch.cuda.is_current_stream_capturing()
+        or not comm.should_torch_symm_mem_allgather(input, max_gathered_rows=None)
+    ):
+        return None
+    if output is not None:
+        # Preserve caller-owned registered buffers and avoid an extra copy.
+        comm.all_gather(input, out=output.view(comm.world_size, *input.shape))
+        return output
+    gathered = comm.all_gather(input)
+    if gathered is None:
+        return None
+    return gathered.view(comm.world_size * input.size(0), *input.shape[1:])
+
+
 def all_gather(
     input: torch.Tensor,
     group: Any = None,
     *,
     role: str | None = None,
 ) -> torch.Tensor:
-    """GLM5 dispatcher: symmetric window, ordinary pynccl, then C10D."""
+    """GLM5 dispatcher: Torch multicast, registered/ordinary NCCL, then C10D."""
     registered = _registered_indexer_all_gather(input, group, role)
     if registered is not None:
         return registered
@@ -826,6 +895,9 @@ def all_gather(
         )
 
     process_group = _resolve_process_group(group)
+    gathered = _try_torch_symm_all_gather(input, process_group)
+    if gathered is not None:
+        return gathered
     world_size = _world_size(process_group)
     output_shape = (world_size * input.shape[0], *input.shape[1:])
     output = _symm_output(

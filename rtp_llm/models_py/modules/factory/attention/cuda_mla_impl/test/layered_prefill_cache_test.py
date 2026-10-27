@@ -27,8 +27,8 @@ class LayeredPrefillCacheTest(unittest.TestCase):
         if not torch.cuda.is_available():
             raise RuntimeError("layered prefill tests require an allocated CUDA GPU")
 
-    def make_cache(self, dtype):
-        width = 584 if dtype == torch.uint8 else 512
+    def make_cache(self, dtype, width=None):
+        width = width or (584 if dtype == torch.uint8 else 512)
         backing = []
         for layer in range(8):
             tensor = torch.empty(
@@ -295,6 +295,162 @@ class LayeredPrefillCacheTest(unittest.TestCase):
                             rtol=0,
                             atol=0,
                         )
+
+    def add_rank_major_plan(self, fmha, cp_size, empty=False):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+            _rank_major_slot_mapping,
+        )
+
+        op = fmha.fmha_impl
+        fmha.overlap_kv = True
+        if empty:
+            op.sharded_slot_mapping = op.sharded_slot_mapping[:0]
+        slots = op.sharded_slot_mapping
+        # Ragged gather order with padding and a token owned by another rank.
+        rows = cp_size * 2
+        op.kv_restore_unpad_indices = torch.tensor(
+            [rows - 1, 0, rows // 2, 1][: slots.numel()],
+            device="cuda",
+            dtype=torch.int64,
+        )
+        op.rank_major_slot_mapping = _rank_major_slot_mapping(
+            slots, op.kv_restore_unpad_indices, rows
+        )
+        op._rank_major_source_slots = slots
+        return rows
+
+    def test_compact_rank_major_fp8_writes_and_recycled_pages(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+            MlaKVCacheWriteOp,
+        )
+
+        for cp_size in (4, 8):
+            for empty in (False, True):
+                with self.subTest(cp=cp_size, empty=empty):
+                    cache = self.make_cache(torch.uint8, width=656)
+                    fmha = self.make_fmha(True)
+                    rows = self.add_rank_major_plan(fmha, cp_size, empty)
+                    op = fmha.fmha_impl
+                    original_slots = op.sharded_slot_mapping
+                    original_plan = op.rank_major_slot_mapping
+                    writer = MlaKVCacheWriteOp.__new__(MlaKVCacheWriteOp)
+                    writer.kv_cache_type = "fp8_ds_mla"
+                    writer.scale = torch.tensor(1.0, device="cuda")
+                    aux = torch.cuda.Stream()
+                    compute = torch.cuda.current_stream()
+                    for iteration in range(2):
+                        if iteration:
+                            cache.backing[1][7].fill_(93)
+                        expected = [t.cpu().clone() for t in cache.backing]
+                        # Noncontiguous raw gather views, padding, and partial
+                        # page appends use the actual production quantizer.
+                        raw = torch.randn(
+                            rows, 608, device="cuda", dtype=torch.bfloat16
+                        )
+                        ckv, kpe = raw[:, :512], raw[:, 512:576]
+                        logical = raw.index_select(0, op.kv_restore_unpad_indices)
+                        cache.begin_forward(fmha)
+                        staged_plan = cache.rank_major_slots
+                        self.assertIsNotNone(staged_plan)
+                        for layer in range(8):
+                            cache.before_layer(layer)
+                            if layer == 0:
+                                cache.prefetch_owner(layer)
+                                continue
+                            reference = expected[layer].cuda()
+                            if not empty:
+                                writer.forward(
+                                    logical[:, :512],
+                                    logical[:, 512:576],
+                                    SimpleNamespace(kv_cache_base=reference),
+                                    None,
+                                    slot_mapping_override=original_slots,
+                                )
+                            view = LayerKVCache()
+                            view.kv_cache_base = cache.backing[layer]
+                            with cache.attention(layer, fmha, view) as target:
+                                self.assertIs(op.rank_major_slot_mapping, staged_plan)
+                                self.assertIs(
+                                    op._rank_major_source_slots, op.sharded_slot_mapping
+                                )
+                                # Match production ordering: H2D wait on compute,
+                                # aux KV writer, then compute joins before D2H.
+                                aux.wait_stream(compute)
+                                try:
+                                    with torch.cuda.stream(aux):
+                                        torch.cuda._sleep(100_000)
+                                        writer.forward(
+                                            ckv,
+                                            kpe,
+                                            target,
+                                            None,
+                                            slot_mapping_override=op.rank_major_slot_mapping,
+                                        )
+                                finally:
+                                    compute.wait_stream(aux)
+                            expected[layer] = reference.cpu()
+                            self.assertIs(op.rank_major_slot_mapping, original_plan)
+                            self.assertIs(op._rank_major_source_slots, original_slots)
+                        cache.end_forward()
+                        compute.synchronize()
+                        for tensor, reference in zip(cache.backing, expected):
+                            torch.testing.assert_close(
+                                tensor.cpu(), reference, rtol=0, atol=0
+                            )
+
+    def test_compact_rank_major_plan_gates_and_exception_restore(self):
+        for gate in (
+            "enabled",
+            "disabled",
+            "missing",
+            "stale",
+            "unsharded",
+            "cross_layer",
+        ):
+            with self.subTest(gate=gate):
+                cache = self.make_cache(torch.uint8)
+                fmha = self.make_fmha(gate != "unsharded")
+                self.add_rank_major_plan(fmha, 4)
+                op = fmha.fmha_impl
+                if gate == "disabled":
+                    fmha.overlap_kv = False
+                elif gate == "missing":
+                    op.rank_major_slot_mapping = None
+                elif gate == "stale":
+                    op._rank_major_source_slots = op.sharded_slot_mapping.clone()
+                if gate == "cross_layer":
+                    fmha._cross_layer_prefetch = object()
+                original = (op.rank_major_slot_mapping, op._rank_major_source_slots)
+                cache.begin_forward(fmha)
+                self.assertEqual(
+                    cache.rank_major_slots is not None,
+                    gate in ("enabled", "cross_layer"),
+                )
+                cache.before_layer(0)
+                cache.prefetch_owner(0)
+                cache.before_layer(1)
+                view = LayerKVCache()
+                view.kv_cache_base = cache.backing[1]
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    with cache.attention(1, fmha, view):
+                        if gate == "enabled":
+                            self.assertIs(
+                                op.rank_major_slot_mapping, cache.rank_major_slots
+                            )
+                            self.assertIs(op._rank_major_source_slots, cache.slots)
+                        else:
+                            self.assertIs(op.rank_major_slot_mapping, original[0])
+                            self.assertIs(op._rank_major_source_slots, original[1])
+                        raise RuntimeError("injected")
+                cache.end_forward(failed=True)
+                self.assertIs(op.rank_major_slot_mapping, original[0])
+                self.assertIs(op._rank_major_source_slots, original[1])
+                # A later non-overlap forward must not retain a compact plan.
+                fmha.overlap_kv = False
+                cache.begin_forward(fmha)
+                self.assertIsNone(cache.rank_major_slots)
+                cache.end_forward()
+                torch.cuda.synchronize()
 
     def test_exception_restores_metadata_and_drains_transfers(self):
         cache = self.make_cache(torch.uint8)

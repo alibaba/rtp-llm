@@ -128,6 +128,25 @@ class _PrefillStaging:
         self.slots = compact_slots.to(
             device=self.device, dtype=self.original_slots.dtype
         )
+        # The CP writer consumes gather-order rows. Host staging changes their
+        # physical destinations, so remap its write plan once per forward too.
+        # Keeping the original HBM plan would silently write the wrong pages;
+        # disabling the plan forces all host layers onto the serial KV path.
+        self.rank_major_slots = None
+        original_plan = getattr(op, "rank_major_slot_mapping", None)
+        if (
+            getattr(fmha, "overlap_kv", False)
+            and getattr(op, "kv_cache_sharded", False)
+            and original_plan is not None
+            and getattr(op, "_rank_major_source_slots", None) is self.original_slots
+        ):
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+                _rank_major_slot_mapping,
+            )
+
+            self.rank_major_slots = _rank_major_slot_mapping(
+                self.slots, op.kv_restore_unpad_indices, original_plan.numel()
+            )
         self.fetch_runs = self._fetch_plan(mapping, slots_cpu)
         self.write_runs = contiguous_runs(
             [(mapping[page], page) for page in dirty_pages]
@@ -168,8 +187,20 @@ class _PrefillStaging:
         sharded = getattr(op, "kv_cache_sharded", False)
         target = LayerKVCache()
         target.kv_cache_base = self.staging[slot]
+        # Cross-layer prefetch owns a separate history pipeline. Keep its
+        # existing writer path; this plan only enables same-layer overlap.
+        swap_rank_major = (
+            sharded
+            and self.rank_major_slots is not None
+            and getattr(fmha, "_cross_layer_prefetch", None) is None
+        )
         op.block_table = self.block_table
         if sharded:
+            if swap_rank_major:
+                original_rank_major = op.rank_major_slot_mapping
+                original_rank_major_source = op._rank_major_source_slots
+                op.rank_major_slot_mapping = self.rank_major_slots
+                op._rank_major_source_slots = self.slots
             op.sharded_slot_mapping = self.slots
         else:
             fmha.rope_params.slot_mapping.copy_(self.slots)
@@ -185,6 +216,9 @@ class _PrefillStaging:
             op.block_table = original_table
             if sharded:
                 op.sharded_slot_mapping = self.original_slots
+                if swap_rank_major:
+                    op.rank_major_slot_mapping = original_rank_major
+                    op._rank_major_source_slots = original_rank_major_source
             else:
                 fmha.rope_params.slot_mapping.copy_(self.original_slots)
             fmha.write_cache_store_impl = original_store

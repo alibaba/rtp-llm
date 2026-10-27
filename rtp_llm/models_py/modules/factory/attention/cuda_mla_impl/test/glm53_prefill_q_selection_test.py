@@ -106,7 +106,9 @@ class QPreselectionControlTest(unittest.TestCase):
                     # Only the opt-in side stream launches KV before the Q BMM.
                     if name.startswith("overlap"):
                         impl.fmha_impl.gather_kv.assert_called_once()
-                        self.assertTrue(impl.fmha_impl.gather_kv.call_args.kwargs["overlap"])
+                        self.assertTrue(
+                            impl.fmha_impl.gather_kv.call_args.kwargs["overlap"]
+                        )
                     else:
                         impl.fmha_impl.gather_kv.assert_not_called()
                     self.assertEqual(layer_id, 2)
@@ -136,7 +138,11 @@ class QPreselectionControlTest(unittest.TestCase):
                 impl.fmha_impl.forward = attend
                 with patch.dict(
                     os.environ,
-                    {"RTP_LLM_CP_KV_Q_OVERLAP": "1" if name.startswith("overlap") else "0"},
+                    {
+                        "RTP_LLM_CP_KV_Q_OVERLAP": (
+                            "1" if name.startswith("overlap") else "0"
+                        )
+                    },
                 ):
                     self.assertIsNone(
                         impl.forward(
@@ -444,6 +450,116 @@ class QPreselectionCudaTest(unittest.TestCase):
         return torch.einsum(
             "thk,hkv->thv", result.float(), self.weights[0][W.mla_vc].float()
         ).to(self.dtype)
+
+    def test_rank_major_attention_b3_b6_full_workload_shapes(self):
+        from rtp_llm.models_py.modules.dsv4.cp import build_kv_allgather_restore_indices
+
+        self.TOPK = 2048
+        for chunks, lengths, new_lengths, expected_valid_q in (
+            ([180, 182, 182], [36553, 36821, 36821], [713, 725, 725], 531),
+            (
+                [518, 518, 518, 520, 520, 520],
+                [53781, 53525, 53525, 53533, 53533, 53533],
+                [2069, 2069, 2069, 2077, 2077, 2077],
+                3096,
+            ),
+        ):
+            # CP4 zigzag rank0 owns the first and last eighth of each request.
+            # The last chunk contains the padding; mirror the actual trace's
+            # 544 -> 531 and 3114 -> 3096 Q selection before the input BMM.
+            removed = []
+            start = 0
+            for local_rows, new_length in zip(chunks, new_lengths):
+                half = (new_length + 7) // 8
+                self.assertEqual(local_rows, half * 2)
+                padding = 8 * half - new_length
+                removed.extend(range(start + local_rows - padding, start + local_rows))
+                start += local_rows
+            with self.subTest(
+                rows=sum(chunks), valid_q=expected_valid_q, kv=sum(lengths)
+            ):
+                data = self._fixture(chunks, removed=removed)
+                self.assertEqual(data.ids.numel(), expected_valid_q)
+                data.lengths = lengths
+                data.starts = [sum(lengths[:r]) for r in range(len(lengths))]
+                data.fused = (
+                    torch.randn(sum(lengths), 576, device=self.device, dtype=self.dtype)
+                    * 0.1
+                )
+                row_lengths = torch.tensor(lengths, device=self.device)[data.req_ids]
+                data.topk = (
+                    torch.randint(
+                        0,
+                        2**20,
+                        (data.ids.numel(), self.TOPK),
+                        device=self.device,
+                        dtype=torch.int32,
+                    )
+                    % row_lengths[:, None]
+                ).to(torch.int32)
+                data.topk[:, ::13] = -1
+                impl = self._impl(data, workspace=False)
+                op = impl.fmha_impl
+                op.sharded_kv_restore_indices = build_kv_allgather_restore_indices(
+                    torch.tensor(lengths), 4, 64, self.device
+                )
+                physical_rows = sum((n + 255) // 256 * 256 for n in lengths)
+                raw = torch.full(
+                    (physical_rows, 576),
+                    float("nan"),
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+                raw.index_copy_(0, op.sharded_kv_restore_indices, data.fused)
+                q = impl._apply_input_bmm(data.q, 0)[data.ids]
+                expected = op._attend_gather(
+                    q, object(), data.topk, prepared_kv=data.fused
+                )
+                actual = op._attend_gather(
+                    q,
+                    object(),
+                    data.topk,
+                    prepared_kv=cp._RankMajorKv(raw, op.sharded_kv_restore_indices),
+                )
+                self.assertTrue(torch.isfinite(actual).all().item())
+                self.assertTrue(
+                    torch.equal(
+                        actual.contiguous().view(torch.uint8),
+                        expected.contiguous().view(torch.uint8),
+                    )
+                )
+
+    def test_prepared_rank_major_attention_is_bitwise_identical(self):
+        cases = [
+            ([16], (), False),
+            ([7, 9], (6, 15), False),
+            ([0, 5, 9], (), True),
+            ([4, 2], (0, 1, 2, 3, 4), False),
+        ]
+        for chunks, removed, strided in cases:
+            with self.subTest(chunks=chunks, removed=removed, strided=strided):
+                data = self._fixture(chunks, removed, strided)
+                impl = self._impl(data, workspace=False)
+                op = impl.fmha_impl
+                q = impl._apply_input_bmm(data.q, 0)[data.ids]
+                raw = torch.full(
+                    (data.fused.shape[0] + 5, data.fused.shape[1]),
+                    float("nan"),
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+                raw.index_copy_(0, op.sharded_kv_restore_indices, data.fused)
+                expected = op._attend_gather(
+                    q, object(), data.topk, prepared_kv=data.fused
+                )
+                actual = op._attend_gather(
+                    q,
+                    object(),
+                    data.topk,
+                    prepared_kv=cp._RankMajorKv(raw, op.sharded_kv_restore_indices),
+                )
+                self.assertTrue(torch.isfinite(actual).all().item())
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
     def test_real_kernels_match_legacy_and_independent_attention(self):
         cases = [

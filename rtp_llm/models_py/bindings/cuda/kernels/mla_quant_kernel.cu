@@ -6,6 +6,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cmath>
 #include <type_traits>
@@ -425,6 +426,7 @@ cp_gather_and_upconvert_fp8_kv_cache_kernel(const uint8_t* __restrict__ src_cach
 // Output to fused [total_tokens, 576] buffer (512 kv_nope + 64 rope).
 // threads 0..127: FP8 dequant (4 bytes each → 4 bf16)
 // threads 128..143: rope copy (4 bf16 each)
+template<bool PADDED = false>
 __global__ void
 cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_cache,
                                                __nv_bfloat16* __restrict__ dst_fused,  // [TOT_TOKENS, 576]
@@ -437,7 +439,8 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
                                                const int64_t cache_entry_stride,
                                                const int64_t dst_fused_stride,
                                                const int32_t batch_size,
-                                               const int64_t total_tokens) {
+                                               const int64_t total_tokens,
+                                               const int32_t* __restrict__ padded_lens) {
     const int     warp_id          = threadIdx.x >> 5;
     const int     lane             = threadIdx.x & 31;
     const int64_t token_global_idx = (int64_t)blockIdx.x * (blockDim.x >> 5) + warp_id;
@@ -450,7 +453,8 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
         int lo = 0, hi = batch_size;
         while (lo < hi) {
             int mid = (lo + hi) / 2;
-            if (token_global_idx < workspace_starts[mid] + seq_lens[mid])
+            if (token_global_idx < static_cast<int64_t>(workspace_starts[mid])
+                                       + (PADDED ? padded_lens[mid] : seq_lens[mid]))
                 hi = mid;
             else
                 lo = mid + 1;
@@ -460,8 +464,18 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
 
     const int32_t seq_start = workspace_starts[bid];
     const int32_t local_idx = static_cast<int32_t>(token_global_idx - seq_start);
-    if (local_idx < 0 || local_idx >= seq_lens[bid])
+    if (local_idx < 0 || local_idx >= seq_lens[bid]) {
+        if constexpr (PADDED) {
+            // Padding must never dereference a block-table entry. Every output
+            // row is written, including empty requests and reused workspaces.
+            auto* dst = dst_fused + token_global_idx * dst_fused_stride;
+            const uint4 zero = make_uint4(0, 0, 0, 0);
+            reinterpret_cast<uint4*>(dst + lane * 16)[0] = zero;
+            reinterpret_cast<uint4*>(dst + lane * 16)[1] = zero;
+            reinterpret_cast<int32_t*>(dst + 512)[lane] = 0;
+        }
         return;
+    }
 
     const int32_t page_idx    = local_idx / block_size;
     const int32_t page_offset = local_idx % block_size;
@@ -540,7 +554,7 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
     dim3 grid(static_cast<unsigned>((total_tokens + 3) / 4));
     dim3 block(128);  // 4 warps, 1 warp per token
 
-    cp_gather_and_upconvert_fp8_kv_cache_v2_kernel<<<grid, block, 0, stream>>>(
+    cp_gather_and_upconvert_fp8_kv_cache_v2_kernel<false><<<grid, block, 0, stream>>>(
         src_cache.data_ptr<uint8_t>(),
         reinterpret_cast<__nv_bfloat16*>(dst_fused.data_ptr()),
         block_table.data_ptr<int32_t>(),
@@ -552,7 +566,56 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
         cache_entry_stride,
         dst_fused_stride,
         static_cast<int32_t>(batch_size),
-        total_tokens);
+        total_tokens,
+        nullptr);
+}
+
+void cp_gather_and_upconvert_fp8_kv_cache_padded(const torch::Tensor& src_cache,
+                                               torch::Tensor& dst_fused,
+                                               const torch::Tensor& block_table,
+                                               const torch::Tensor& actual_lens,
+                                               const torch::Tensor& padded_lens,
+                                               const torch::Tensor& padded_starts) {
+    // Length values and block IDs come from the existing CP plan. Validate
+    // metadata only: do not introduce a device-to-host sync into the hot path.
+    TORCH_CHECK(src_cache.is_cuda() && dst_fused.is_cuda(), "KV pack requires CUDA tensors");
+    const c10::cuda::CUDAGuard guard(src_cache.device());
+    TORCH_CHECK(src_cache.dim() == 3 && src_cache.size(1) > 0 && src_cache.size(2) == 656
+                    && src_cache.scalar_type() == torch::kUInt8 && src_cache.stride(2) == 1
+                    && src_cache.stride(1) % 16 == 0 && src_cache.stride(0) % 16 == 0
+                    && reinterpret_cast<uintptr_t>(src_cache.data_ptr()) % 16 == 0,
+                "expected aligned FP8 KV cache [blocks, page_size, 656]");
+    TORCH_CHECK(dst_fused.dim() == 2 && dst_fused.size(1) == 576
+                    && dst_fused.scalar_type() == torch::kBFloat16 && dst_fused.stride(1) == 1
+                    && dst_fused.stride(0) >= 576 && dst_fused.stride(0) % 8 == 0
+                    && reinterpret_cast<uintptr_t>(dst_fused.data_ptr()) % 16 == 0
+                    && dst_fused.device() == src_cache.device(),
+                "expected aligned BF16 output [padded_rows, 576] on cache device");
+    const int64_t batch_size = actual_lens.numel();
+    for (const auto* tensor : {&actual_lens, &padded_lens, &padded_starts}) {
+        TORCH_CHECK(tensor->dim() == 1 && tensor->numel() == batch_size
+                        && tensor->scalar_type() == torch::kInt32 && tensor->is_contiguous()
+                        && tensor->device() == src_cache.device(),
+                    "KV pack lengths/starts must be contiguous CUDA int32 vectors on cache device");
+    }
+    TORCH_CHECK(block_table.dim() == 2 && block_table.size(0) == batch_size
+                    && block_table.scalar_type() == torch::kInt32 && block_table.stride(1) == 1
+                    && block_table.device() == src_cache.device(),
+                "KV pack block table must be CUDA int32 [batch, blocks] on cache device");
+    TORCH_CHECK(batch_size > 0 || dst_fused.size(0) == 0, "nonempty output requires requests");
+    if (dst_fused.size(0) == 0) {
+        return;
+    }
+    const int64_t total_tokens = dst_fused.size(0);
+    const auto stream = c10::cuda::getCurrentCUDAStream();
+    cp_gather_and_upconvert_fp8_kv_cache_v2_kernel<true>
+        <<<dim3(static_cast<unsigned>((total_tokens + 3) / 4)), dim3(128), 0, stream>>>(
+            src_cache.data_ptr<uint8_t>(), reinterpret_cast<__nv_bfloat16*>(dst_fused.data_ptr()),
+            block_table.data_ptr<int32_t>(), actual_lens.data_ptr<int32_t>(), padded_starts.data_ptr<int32_t>(),
+            static_cast<int32_t>(src_cache.size(1)), block_table.stride(0), src_cache.stride(0),
+            src_cache.stride(1), dst_fused.stride(0), static_cast<int32_t>(batch_size), total_tokens,
+            padded_lens.data_ptr<int32_t>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,

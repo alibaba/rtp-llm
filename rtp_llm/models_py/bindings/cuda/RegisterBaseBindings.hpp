@@ -350,6 +350,12 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("batch_size"),
                   py::arg("total_tokens"));
 
+    rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache_padded",
+                 &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache_padded,
+                 "Read FP8 KV into padded BF16 rows, fusing conversion, scatter and zero fill",
+                 py::arg("src_cache"), py::arg("dst_fused"), py::arg("block_table"),
+                 py::arg("actual_lens"), py::arg("padded_lens"), py::arg("padded_starts"));
+
     rtp_ops_m.def("concat_and_cache_mla",
                   &rtp_llm::concat_and_cache_mla,
                   "Concat and cache MLA (Multi-Head Latent Attention) kernel",

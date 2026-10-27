@@ -224,6 +224,8 @@ class MlaAttention(nn.Module):
         q_c = None
         q_c_fp8 = None
         q_c_scale = None
+        defer_q_projection = False
+        defer_cross_layer_kv = False
         if self.q_lora_rank > 0:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
@@ -276,11 +278,25 @@ class MlaAttention(nn.Module):
                     force_reuse_topk_indices,
                 )
                 fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
-            q = (
-                self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
-                if q_c_fp8 is not None
-                else self.q_b_proj(q_c)
+            defer_cross_layer_kv = (
+                not early_prefetch
+                and fused_qkv.dtype == torch.bfloat16
+                and getattr(fmha_impl, "cross_layer_new_kv_before_q", False) is True
             )
+            defer_q_projection = defer_cross_layer_kv or (
+                not early_prefetch
+                and fused_qkv.dtype == torch.bfloat16
+                # Keep Q ahead of any host-staging H2D wait. Layered caches
+                # also temporarily remap the writer's physical slots.
+                and getattr(fmha_impl, "layered_prefill_cache", None) is None
+                and getattr(fmha_impl, "overlap_kv_before_q", False) is True
+            )
+            if not defer_q_projection:
+                q = (
+                    self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                    if q_c_fp8 is not None
+                    else self.q_b_proj(q_c)
+                )
         else:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
@@ -295,7 +311,11 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-        q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
+        q_view = (
+            None
+            if defer_q_projection
+            else q.reshape(-1, self.num_heads, self.q_head_dim)
+        )
 
         compressed_kv, k_pe = torch.split(
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
@@ -323,9 +343,42 @@ class MlaAttention(nn.Module):
         )
         with ExitStack() as stack:
             prepared_kv = None
+            new_kv = None
+            if defer_q_projection:
+                if (
+                    defer_cross_layer_kv
+                    and compressed_kv.dtype == k_pe.dtype == torch.bfloat16
+                ):
+                    new_kv = stack.enter_context(
+                        fmha_impl.gather_cross_layer_kv_before_q(compressed_kv, k_pe)
+                    )
+                elif (
+                    not defer_cross_layer_kv
+                    and compressed_kv.dtype == k_pe.dtype == torch.bfloat16
+                ):
+                    attention_cache = stack.enter_context(cache_context)
+                    prepared_kv = stack.enter_context(
+                        fmha_impl.prepare_kv_before_q(
+                            compressed_kv, k_pe, attention_cache
+                        )
+                    )
+                # Keep this inside ExitStack: projection/Indexer failures must
+                # join the KV producer before a layered cache can be recycled.
+                q = (
+                    self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                    if q_c_fp8 is not None
+                    else self.q_b_proj(q_c)
+                )
+                q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
+                if prepared_kv is not None or new_kv is not None:
+                    fmha_impl.apply_query_rope(q_view)
             # With Q-LoRA the Indexer reads q_c, so rotating q_view early is
             # independent. Preserve the original ordering for other backends.
-            if self.q_lora_rank > 0 and getattr(fmha_impl, "overlap_kv", False):
+            if (
+                prepared_kv is None
+                and self.q_lora_rank > 0
+                and getattr(fmha_impl, "overlap_kv", False)
+            ):
                 attention_cache = stack.enter_context(cache_context)
                 prepared_kv = stack.enter_context(
                     fmha_impl.prepare_kv(
@@ -334,6 +387,7 @@ class MlaAttention(nn.Module):
                         k_pe,
                         attention_cache,
                         layer_id=self.layer_idx,
+                        **({"new_kv": new_kv} if new_kv is not None else {}),
                     )
                 )
             if not early_prefetch:

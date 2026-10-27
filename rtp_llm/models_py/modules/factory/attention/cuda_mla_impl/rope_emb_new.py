@@ -43,3 +43,16 @@ class NewMlaRotaryEmbeddingOp(object):
             ),
             interleave=not self.is_neox_style,
         )
+
+    def forward_query(self, query: torch.Tensor, pos_ids: torch.Tensor) -> None:
+        """Rotate Q only after a separate CP KV producer has rotated K."""
+        empty_key = query[:, :0, :]
+        rope._apply_rope_pos_ids_cos_sin_cache(
+            q=query,
+            k=empty_key,
+            q_rope=query,
+            k_rope=empty_key,
+            cos_sin_cache=self.cos_sin_cache,
+            pos_ids=pos_ids,
+            interleave=not self.is_neox_style,
+        )
