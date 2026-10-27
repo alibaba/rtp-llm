@@ -111,8 +111,8 @@ def try_full_decode(
         return None
     batch, span, _ = x.shape
     rows = batch * span
-    req = metadata.req_id_per_token[:rows].long()
-    starts = metadata.start_pos[:batch].long()
+    req = metadata.req_id_per_token[:rows]
+    starts = metadata.start_pos[:batch]
     if not is_supported(attn, x, positions, req, starts):
         return None
     from rtp_llm.models_py.modules.dsv41.fp8.attention import _cuda_device_index
@@ -143,11 +143,24 @@ def try_full_decode(
     auxiliary.wait_stream(current)
     try:
         with torch.cuda.stream(global_stream):
-            attn._produce_global_decode(x, positions, req, starts)
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_full_projection import project
+
+            projected = project(attn, x)
+            if projected is None:
+                attn._produce_global_decode(x, positions, req, starts)
+            else:
+                values, scores, work.weights = projected
+                work.outputs.extend(projected)
+                # Publish the head weights before compression/cache writes.
+                auxiliary.wait_stream(global_stream)
+                attn._produce_global_decode(
+                    x, positions, req, starts, projected=(values, scores)
+                )
         keys = attn._shared_attention["global"][attn.layer_id]
         with torch.cuda.stream(auxiliary):
-            work.weights = F.linear(x.reshape(rows, -1), attn.index_weights)
-            work.outputs.append(work.weights)
+            if work.weights is None:
+                work.weights = F.linear(x.reshape(rows, -1), attn.index_weights)
+                work.outputs.append(work.weights)
             work.metadata = _v41_decode_indexer.get_decode_metadata(
                 attn._shared_attention,
                 keys,

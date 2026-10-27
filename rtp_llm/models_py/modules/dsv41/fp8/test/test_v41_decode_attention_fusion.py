@@ -269,6 +269,164 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
     def setUp(self):
         _LAST_PAGED_LOGITS.clear()
 
+    def _slot_reuse_case(self, ratio):
+        region = CSA_KV if ratio == 2 else HCA_KV
+        pool = torch.empty(8, 128 // ratio, 288, dtype=torch.uint8, device="cuda")
+        table = torch.tensor([[1, 0, 3], [2, 4, 0]], dtype=torch.int32, device="cuda")
+        selected = (
+            torch.arange(512, device="cuda", dtype=torch.int32)[None].repeat(12, 1) - 2
+        )
+        requests = torch.arange(2, device="cuda", dtype=torch.int32).repeat_interleave(
+            6
+        )
+        attn = SimpleNamespace(
+            layer_id=2,
+            index_source_layer_id=2,
+            kv_source_layer_id=2,
+            compress_ratio=ratio,
+            _cp_ctx=None,
+            _shared_attention={"layers": {2: None}, "topk": {2: selected}},
+            _kv_cache=SimpleNamespace(
+                get_kernel_seq_size_per_block=lambda tag: 128,
+                get_seq_size_per_block=lambda tag: 256,
+            ),
+            _block_tables_by_type={region: table},
+            _global_region=lambda: region,
+            _source_pool=lambda _: pool,
+        )
+        attn._slots = MethodType(AttentionV41FP8._slots, attn)
+        attn._source_entries = lambda _, p: p.shape[1]
+        attn._decode_global_slots = MethodType(
+            AttentionV41FP8._decode_global_slots, attn
+        )
+        return attn, selected, requests, table
+
+    def _slot_reference(self, attn, selected, requests):
+        # Independent CPU address calculation, including reserved page zero.
+        selected, requests = selected.cpu().long(), requests.cpu().long()
+        table = attn._block_tables_by_type[attn._global_region()].cpu().long()
+        entries = 128 // attn.compress_ratio
+        blocks = selected.clamp_min(0) // entries
+        pages = table[requests[:, None], blocks.clamp_max(table.shape[1] - 1)]
+        slots = pages * entries + selected.remainder(entries)
+        return torch.where(
+            (selected >= 0) & (blocks < table.shape[1]) & (pages > 0), slots, -1
+        ).int()
+
+    def test_physical_slots_reuse_published_topk_and_mapping(self):
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                attn, selected, requests, table = self._slot_reuse_case(ratio)
+                with patch.object(
+                    paged_topk_translator,
+                    "translate_local_to_global_slots",
+                    wraps=paged_topk_translator.translate_local_to_global_slots,
+                ) as convert:
+                    first = attn._decode_global_slots(selected, requests)
+                    torch.testing.assert_close(
+                        first.cpu(), self._slot_reference(attn, selected, requests)
+                    )
+                    for layer in range(3, 8):
+                        attn.layer_id = layer
+                        self.assertIs(
+                            attn._decode_global_slots(selected, requests[:]), first
+                        )
+                    self.assertEqual(convert.call_count, 1)
+                    changed_requests = requests.flip(0)
+                    second = attn._decode_global_slots(selected, changed_requests)
+                    self.assertEqual(convert.call_count, 2)
+                    torch.testing.assert_close(
+                        second.cpu(),
+                        self._slot_reference(attn, selected, changed_requests),
+                    )
+                    attn._block_tables_by_type[attn._global_region()] = table.flip(0)
+                    third = attn._decode_global_slots(selected, requests)
+                    self.assertEqual(convert.call_count, 3)
+                    torch.testing.assert_close(
+                        third.cpu(), self._slot_reference(attn, selected, requests)
+                    )
+                    new_selected = selected.clone()
+                    attn._shared_attention["topk"] = {2: new_selected}
+                    self.assertIsNot(
+                        attn._decode_global_slots(new_selected, requests), third
+                    )
+                    self.assertEqual(convert.call_count, 4)
+                    attn._decode_global_slots(selected, requests)
+                    attn._decode_global_slots(selected, requests)
+                    self.assertEqual(convert.call_count, 6)
+                    attn.index_source_layer_id = 8
+                    new_selected.add_(1)
+                    attn._shared_attention["topk"] = {8: new_selected}
+                    next_group = attn._decode_global_slots(new_selected, requests)
+                    self.assertEqual(convert.call_count, 7)
+                    torch.testing.assert_close(
+                        next_group.cpu(),
+                        self._slot_reference(attn, new_selected, requests),
+                    )
+
+    def test_physical_slots_forward_reset_and_stream_isolation(self):
+        attn, selected, requests, table = self._slot_reuse_case(1)
+        first = attn._decode_global_slots(selected, requests)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            second = attn._decode_global_slots(selected, requests)
+        torch.cuda.current_stream().wait_stream(stream)
+        self.assertIsNot(first, second)
+        AttentionV41FP8._begin_forward(attn)
+        self.assertNotIn("decode_global_slots", attn._shared_attention)
+        selected.add_(7)
+        table.fill_(5)
+        attn._shared_attention["topk"] = {2: selected}
+        third = attn._decode_global_slots(selected, requests)
+        self.assertIsNot(first, third)
+        torch.testing.assert_close(
+            third.cpu(), self._slot_reference(attn, selected, requests)
+        )
+
+    def test_physical_slots_graph_replay_refreshes_shared_output(self):
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                attn, selected, requests, table = self._slot_reuse_case(ratio)
+
+                def forward():
+                    AttentionV41FP8._begin_forward(attn)
+                    attn._shared_attention["topk"] = {2: selected}
+                    first = attn._decode_global_slots(selected, requests)
+                    self.assertIs(
+                        first, attn._decode_global_slots(selected, requests[:])
+                    )
+                    return first
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        forward()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = forward()
+                for phase in range(6):
+                    selected.copy_(
+                        torch.arange(512, device="cuda", dtype=torch.int32)[None]
+                        - phase * 13
+                    )
+                    table.copy_(
+                        torch.tensor(
+                            [[1 + phase % 3, 0, 4], [2, 5, 0]],
+                            dtype=torch.int32,
+                            device="cuda",
+                        )
+                    )
+                    requests.copy_(
+                        (torch.arange(12, device="cuda", dtype=torch.int32) + phase) % 2
+                    )
+                    graph.replay()
+                    torch.testing.assert_close(
+                        output.cpu(), self._slot_reference(attn, selected, requests)
+                    )
+
     def test_actual_slot_gate_and_padded_pool_fallback(self):
         for ratio in (1, 2):
             for padded in (False, True):
@@ -348,6 +506,8 @@ class V41DecodeAttentionFusionCUDA(unittest.TestCase):
                             _select(attn, x, qr, positions)
                     torch.cuda.current_stream().wait_stream(stream)
                     graph = torch.cuda.CUDAGraph()
+                    # Direct selection calls bypass the model's _begin_forward.
+                    attn._shared_attention.pop("decode_indexer_metadata", None)
                     with torch.cuda.graph(graph):
                         got = _select(attn, x, qr, positions)
                     for _ in range(2):
