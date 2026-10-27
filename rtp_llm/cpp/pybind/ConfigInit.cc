@@ -492,6 +492,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_device_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_device_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_device_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_device_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_memory_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_memory_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_memory_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_memory_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_full_disk_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_disk_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_full_disk_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
@@ -565,7 +577,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      10,
+                                      11,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -636,13 +648,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_crc,
                                       self.linear_pool_blocks,
                                       self.swa_pool_blocks,
+                                      self.block_tree_full_device_evict_low_watermark_ratio,
+                                      self.block_tree_full_device_evict_high_watermark_ratio,
+                                      self.block_tree_full_memory_evict_low_watermark_ratio,
+                                      self.block_tree_full_memory_evict_high_watermark_ratio,
+                                      self.block_tree_full_disk_evict_low_watermark_ratio,
+                                      self.block_tree_full_disk_evict_high_watermark_ratio,
                                       self.memory_cache_swa_block_ratio,
                                       self.dsv41_decoder_swa_pool_blocks);
             },
             [](py::tuple t) {
-                const py::tuple pool_state = t;
-                const bool has_pool_fields = t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
-                if (has_pool_fields) {
+                const py::tuple host_pool_state = t;
+                const bool has_host_pool_fields = t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                if (has_host_pool_fields) {
+                    t = t[py::slice(0, 78, 1)].cast<py::tuple>();
+                    t[1] = py::int_(10);
+                }
+                const py::tuple full_watermark_state = t;
+                const bool has_full_watermarks = t.size() == 78 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_full_watermarks) {
                     t = t[py::slice(0, 72, 1)].cast<py::tuple>();
                     t[1] = py::int_(9);
                 }
@@ -690,6 +714,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_host_pool_fields) {
+                    c.memory_cache_swa_block_ratio = host_pool_state[78].cast<double>();
+                    c.dsv41_decoder_swa_pool_blocks = host_pool_state[79].cast<uint32_t>();
+                }
+                if (has_full_watermarks) {
+                    c.block_tree_full_device_evict_low_watermark_ratio = full_watermark_state[72].cast<double>();
+                    c.block_tree_full_device_evict_high_watermark_ratio = full_watermark_state[73].cast<double>();
+                    c.block_tree_full_memory_evict_low_watermark_ratio = full_watermark_state[74].cast<double>();
+                    c.block_tree_full_memory_evict_high_watermark_ratio = full_watermark_state[75].cast<double>();
+                    c.block_tree_full_disk_evict_low_watermark_ratio = full_watermark_state[76].cast<double>();
+                    c.block_tree_full_disk_evict_high_watermark_ratio = full_watermark_state[77].cast<double>();
+                }
                 // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
                 const auto value = [&](size_t index) {
                     return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
@@ -776,10 +812,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (has_crc_field) {
                     c.enable_crc = crc_state[69].cast<bool>();
-                }
-                if (has_pool_fields) {
-                    c.memory_cache_swa_block_ratio = pool_state[72].cast<double>();
-                    c.dsv41_decoder_swa_pool_blocks = pool_state[73].cast<uint32_t>();
                 }
                 return c;
             }));

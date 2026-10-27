@@ -80,7 +80,9 @@ public:
                     Tier        source_tier,
                     bool        notify_settled,
                     const char* trigger_type = "force_drop");
-    void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
+    void   scheduleWatermarkEvictionsLocked(Tier                         tier,
+                                            const TierWatermark&         watermark,
+                                            std::optional<TierWatermark> full_watermark = std::nullopt);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Release a detached operation's source CACHE reference after it settles, without publishing its target.
     void discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs);

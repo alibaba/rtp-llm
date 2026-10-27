@@ -166,12 +166,19 @@ struct KVCacheConfig {
     int64_t                                 block_tree_transfer_worker_count                = 4;
     int64_t                                 block_tree_business_queue_max_size              = 10000;
     int64_t                                 block_tree_transfer_queue_max_size              = 10000;
-    double   block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
-    double   block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double   block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
-    double   block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
-    double   block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
-    double   block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
+    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    // FULL-only per-tier overrides: -1/-1 inherits the shared watermarks.
+    double   block_tree_full_device_evict_low_watermark_ratio  = -1.0;
+    double   block_tree_full_device_evict_high_watermark_ratio = -1.0;
+    double   block_tree_full_memory_evict_low_watermark_ratio  = -1.0;
+    double   block_tree_full_memory_evict_high_watermark_ratio = -1.0;
+    double   block_tree_full_disk_evict_low_watermark_ratio    = -1.0;
+    double block_tree_full_disk_evict_high_watermark_ratio   = -1.0;
     int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                           = 0;
     uint32_t swa_pool_blocks                              = 0;
