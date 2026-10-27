@@ -98,6 +98,12 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     }
 
     @Override
+    public boolean isEnabled(String metricName) {
+        Set<String> allowed = ALLOWED_METRICS;
+        return allowed == null || allowed.contains(metricName);
+    }
+
+    @Override
     public void report(String metricName, double value) {
         report(metricName, null, value);
     }
