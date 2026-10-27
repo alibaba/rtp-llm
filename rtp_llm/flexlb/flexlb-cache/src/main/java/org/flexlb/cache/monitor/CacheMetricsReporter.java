@@ -72,7 +72,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE
  * @author FlexLB
  */
 @Slf4j
-@Component
 public class CacheMetricsReporter {
 
     /**
