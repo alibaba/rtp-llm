@@ -34,6 +34,7 @@ from rtp_llm.ops import (
     MlaOpsType,
     OpaqueBlockEntryCountMode,
 )
+from rtp_llm.utils.dsa_indexing import build_dsa_indexer_groups, dsa_layer_has_indexer
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -189,7 +190,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             )
 
         # indexer weight
-        if self.model_config.attn_config.is_sparse:
+        if dsa_layer_has_indexer(self.model_config, layer_id):
             mla_layer_weights.extend(
                 [
                     MlaAttnAtomicWeight(
@@ -550,6 +551,45 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
 
 
 class DeepSeekV2(BaseModel):
+    def _configure_sparse_kv_offload(self) -> None:
+        from rtp_llm.ops import CacheOffloadPolicy
+
+        attn = self.model_config.attn_config
+        if (
+            not (attn.use_mla and attn.is_sparse)
+            or self.model_config.mla_ops_type == MlaOpsType.MHA
+        ):
+            raise ValueError("sparse KV offload requires sparse MLA")
+        selected = self.max_generate_batch_size * attn.indexer_topk
+        if selected <= 0 or selected > torch.iinfo(torch.int32).max:
+            raise ValueError(
+                "sparse KV offload max_selected_rows must fit positive int32"
+            )
+        descs = self.model_config.kv_cache_spec_descs
+        runtime_groups = {
+            layer: source
+            for source, layers in build_dsa_indexer_groups(
+                self.model_config, len(descs)
+            ).items()
+            for layer in layers
+        }
+        for layer_id, layer in enumerate(descs):
+            expected_tags = {"default"}
+            if dsa_layer_has_indexer(self.model_config, layer_id):
+                expected_tags.add("indexer_kv")
+            if {desc.tag for desc in layer} != expected_tags:
+                raise ValueError(
+                    "sparse MLA offload descriptors must match the indexer source layers"
+                )
+            for desc in layer:
+                if desc.tag == "default":
+                    policy = CacheOffloadPolicy()
+                    policy.enabled = True
+                    policy.max_selected_rows = selected
+                    desc.offload = policy
+                    desc.offload_runtime_group = runtime_groups[layer_id]
+        self.model_config.kv_cache_spec_descs = descs
+
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         if model_config.kv_cache_spec_descs:
@@ -584,8 +624,10 @@ class DeepSeekV2(BaseModel):
         )
         indexer_desc.compression_ratio = 1
         descs = model_config.kv_cache_spec_descs
-        for layer_descs in descs:
-            layer_descs.append(indexer_desc)
+        sources = build_dsa_indexer_groups(model_config, model_config.num_layers)
+        for layer_id, layer_descs in enumerate(descs):
+            if layer_id in sources:
+                layer_descs.append(indexer_desc)
         model_config.kv_cache_spec_descs = descs
 
     @classmethod
@@ -764,6 +806,12 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.indexer_head_dim = config_json["index_head_dim"]
                 config.attn_config.indexer_head_num = config_json["index_n_heads"]
                 config.attn_config.indexer_topk = config_json["index_topk"]
+                config.index_topk_freq = int(config_json.get("index_topk_freq", 1))
+                config.index_skip_topk_offset = config_json.get(
+                    "index_skip_topk_offset"
+                )
+                config.index_topk_pattern = config_json.get("index_topk_pattern")
+                config.indexer_types = config_json.get("indexer_types")
 
     @staticmethod
     def get_weight_cls():

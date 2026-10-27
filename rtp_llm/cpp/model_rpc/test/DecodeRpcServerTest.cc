@@ -1,13 +1,19 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <future>
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "autil/NetUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -301,11 +307,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -330,11 +336,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -661,8 +667,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             resource_released       = stream->stream_cache_resource_->isResourceReleased();
             blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
             EXPECT_EQ(stream->outputTokenLen(), 0);
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            const auto timing = stream->getTimeInfo();
+            executed          = timing.running_started || timing.first_token_committed || timing.generation_done;
             RpcMetricsCollector metrics;
             context.collectBasicMetrics(metrics);
             error_qps = metrics.error_qps;
@@ -1051,5 +1057,217 @@ TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
                                                     kBaseSeqSizePerBlock)
                     .empty());
 }
+
+namespace {
+
+CacheConfig pdCacheConfig(bool hybrid) {
+    auto config = test::makeSparseOffloadTestConfig(hybrid ? std::vector<std::string>{"default", "indexer_kv"} :
+                                                             std::vector<std::string>{"default"});
+    if (hybrid) {
+        config.tiered_cache_configs.erase("indexer_kv");
+        auto policies =
+            std::vector<CacheGroupPolicy>{config.group("default").policy, config.group("indexer_kv").policy};
+        policies[1].offload = {};
+        test::setTestGroupPolicies(config, policies);
+    }
+    return config;
+}
+
+DecodeRpcServer::LoadKVCacheContext loadContext(bool hybrid) {
+    auto kv = std::make_shared<BlockIds>();
+    kv->add({1, 2, 5, 6, 7});
+    GroupBlockIds ids{{{"default", 0}}, {kv}};
+    if (hybrid) {
+        auto indexer = std::make_shared<BlockIds>();
+        indexer->add({8, 4, 3, 9, 7});
+        ids.tag_to_index_["indexer_kv"] = 1;
+        ids.rows_.push_back(indexer);
+    }
+    return {42,
+            "offload-pd",
+            {"localhost"},
+            {101, 102, 103, 104},
+            std::move(ids),
+            /*reuse_block_size=*/1,
+            /*timeout_ms=*/10000,
+            1,
+            0,
+            nullptr,
+            1};
+}
+
+class SparseOffloadPdTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        initLogger();
+        initRuntime(0, false, false, MlaOpsType::AUTO);
+    }
+
+    void allocate(KVCacheManager& manager) {
+        ASSERT_TRUE(manager.init());
+        for (const auto& pool : manager.coordinator_manager_->groupBlockPools()) {
+            while (const auto block = pool->malloc()) {
+                pool->incRef(*block);
+            }
+        }
+        manager.publishOffloadVersions(manager.takeOffloadVersionUpdates(), manager.cacheConfig().groupTags());
+    }
+};
+
+TEST_F(SparseOffloadPdTest, CompletedLoadUsesActualProjectionAndFailureDoesNotPublish) {
+    for (const bool hybrid : {false, true}) {
+        KVCacheManager manager(pdCacheConfig(hybrid));
+        ASSERT_NO_FATAL_FAILURE(allocate(manager));
+        const auto                             context = loadContext(hybrid);
+        const DecodeRpcServer::LoadCacheResult failed{ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "injected"), 0};
+        DecodeRpcServer::markLoadedOffloadOverwrite(manager, context, failed);
+        EXPECT_EQ(manager.takeOffloadVersionUpdates().size(0), 0);
+
+        DecodeRpcServer::markLoadedOffloadOverwrite(manager, context, {ErrorInfo(), 4});
+        const auto updates = manager.takeOffloadVersionUpdates();
+        EXPECT_EQ(updates.size(0), hybrid ? 4 : 3);
+        manager.publishOffloadVersions(updates, manager.cacheConfig().groupTags());
+        const auto& storages = manager.coordinator_manager_->groupBlockPools()[0]->allLayerOffloadStorage();
+        for (const auto& storage : storages) {
+            const auto generations = storage->generations.cpu();
+            EXPECT_EQ(generations[1].item<int64_t>(), hybrid ? 2 : 1);
+            for (const int block : {2, 5, 6}) {
+                EXPECT_EQ(generations[block].item<int64_t>(), 2);
+            }
+            EXPECT_EQ(generations[7].item<int64_t>(), 1);
+        }
+        if (hybrid) {
+            EXPECT_TRUE(manager.coordinator_manager_->groupBlockPools()[1]->allLayerOffloadStorage().empty());
+        }
+        EXPECT_EQ(manager.takeOffloadVersionUpdates().size(0), 0);
+    }
+}
+
+TEST_F(SparseOffloadPdTest, TcpLoadsMixedTargetsAndIndependentIndexerIdsByteForByte) {
+    KVCacheManager manager(pdCacheConfig(true));
+    ASSERT_NO_FATAL_FAILURE(allocate(manager));
+    const auto                 context = loadContext(true);
+    auto                       source  = std::make_shared<RequestBlockBuffer>("offload-pd");
+    auto                       target  = std::make_shared<RequestBlockBuffer>("offload-pd");
+    std::vector<torch::Tensor> source_tensors, target_tensors;
+    bool                       has_host = false, has_cuda = false;
+    for (int layer = 0; layer < 2; ++layer) {
+        for (const std::string tag : {"default", "indexer_kv"}) {
+            const auto& ids = context.blockIdsForGroup(tag).blocks();
+            for (size_t index = 0; index < context.cache_keys.size(); ++index) {
+                const auto parts = manager.convertIndexToBuffer(layer, tag, ids[index]);
+                ASSERT_EQ(parts.size(), 1u);
+                const auto& block = parts[0];
+                has_cuda |= block.is_cuda;
+                has_host |= !block.is_cuda;
+                if (tag == "indexer_kv") {
+                    EXPECT_TRUE(block.is_cuda);
+                }
+                auto bytes =
+                    torch::arange(block.size_bytes, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
+                        .add(static_cast<int64_t>(source_tensors.size()))
+                        .remainder(251)
+                        .to(torch::kUInt8);
+                auto destination = torch::from_blob(
+                    block.addr,
+                    {static_cast<int64_t>(block.size_bytes)},
+                    torch::TensorOptions().dtype(torch::kUInt8).device(block.is_cuda ? torch::kCUDA : torch::kCPU));
+                destination.zero_();
+                const auto key =
+                    "kv_" + std::to_string(layer) + "_" + tag + "_" + std::to_string(context.cache_keys[index]);
+                source->addBlock(
+                    key, std::shared_ptr<void>(bytes.data_ptr(), [](void*) {}), block.size_bytes, true, true);
+                target->addBlock(
+                    key, std::shared_ptr<void>(block.addr, [](void*) {}), block.size_bytes, block.is_cuda, true);
+                source_tensors.push_back(bytes);
+                target_tensors.push_back(destination);
+            }
+        }
+    }
+    ASSERT_TRUE(has_host && has_cuda);
+    cudaSyncAndCheck();
+
+    CacheStoreInitParams params;
+    params.memory_util   = createMemoryUtilImpl(false);
+    params.enable_metric = false;
+    params.listen_port   = autil::NetUtil::randomPort();
+    auto prefill         = NormalCacheStore::createNormalCacheStore(params);
+    ASSERT_NE(prefill, nullptr);
+    const auto prefill_port = params.listen_port;
+    params.listen_port      = autil::NetUtil::randomPort();
+    auto decode             = NormalCacheStore::createNormalCacheStore(params);
+    ASSERT_NE(decode, nullptr);
+
+    using Result   = std::pair<bool, CacheStoreErrorCode>;
+    auto loaded    = std::make_shared<std::promise<Result>>();
+    auto load_done = loaded->get_future();
+    decode->load(
+        target,
+        [loaded](bool ok, CacheStoreErrorCode code) { loaded->set_value({ok, code}); },
+        "127.0.0.1",
+        prefill_port,
+        0,
+        10000);
+    EXPECT_EQ(load_done.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_EQ(manager.takeOffloadVersionUpdates().size(0), 0);
+
+    auto stored     = std::make_shared<std::promise<Result>>();
+    auto store_done = stored->get_future();
+    prefill->store(source, [stored](bool ok, CacheStoreErrorCode code) { stored->set_value({ok, code}); });
+    ASSERT_EQ(store_done.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    ASSERT_EQ(store_done.get(), (Result{true, CacheStoreErrorCode::None}));
+    ASSERT_EQ(load_done.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    ASSERT_EQ(load_done.get(), (Result{true, CacheStoreErrorCode::None}));
+    DecodeRpcServer::markLoadedOffloadOverwrite(manager, context, {ErrorInfo(), 4});
+    EXPECT_EQ(manager.takeOffloadVersionUpdates().size(0), 4);
+    for (size_t index = 0; index < source_tensors.size(); ++index) {
+        EXPECT_TRUE(torch::equal(target_tensors[index].cpu(), source_tensors[index].cpu())) << index;
+    }
+}
+
+TEST_F(SparseOffloadPdTest, RegistrationUsesNativeBuffersAndExcludesHotRows) {
+    KVCacheSpecDesc desc;
+    desc.tag                          = "global_kv_1";
+    desc.cache_type                   = OpaqueKV;
+    desc.entry_elems                  = 288;
+    desc.entry_dtype                  = TYPE_UINT8;
+    desc.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    desc.compression_ratio            = 8;
+    desc.block_stride_bytes_alignment = 8192;
+    SpecBuildContext context;
+    context.seq_size_per_block      = 256;
+    context.kernel_tokens_per_block = 128;
+    const auto compressed           = SpecBuilder::build(desc, context);
+    EXPECT_EQ(compressed->block_size_bytes(), 2u * 8192u);
+    for (const auto& spec :
+         std::vector<KVCacheSpecPtr>{compressed, test::makeResolvedMhaSpec(TYPE_INT8, 2, 8, 8, "sparse_heads")}) {
+        auto config = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 2, 6);
+        config.tiered_cache_configs.emplace(spec->tag, TieredCacheConfig{6, 2, 17});
+        KVCacheManager manager(config);
+        ASSERT_TRUE(manager.init());
+        LayerBlockConverterImpl converter(manager.coordinator_manager_);
+        const auto              buffers = converter.getAllBuffers();
+        ASSERT_EQ(buffers.size(), spec->scale_block_size_bytes() ? 8u : 4u);
+        size_t host_bytes = 0, device_bytes = 0;
+        for (const auto& [block, registered_bytes] : buffers) {
+            EXPECT_EQ(registered_bytes, block.size_bytes);
+            (block.is_cuda ? device_bytes : host_bytes) += block.size_bytes;
+        }
+        const size_t block_bytes = spec->block_size_bytes() + spec->scale_block_size_bytes();
+        EXPECT_EQ(device_bytes, 2u * 2u * block_bytes);
+        EXPECT_EQ(host_bytes, 2u * 4u * block_bytes);
+        for (const int block_id : {1, 2, 5}) {
+            const auto parts       = converter.convertIndexToBuffer(0, spec->tag, block_id, 1, 0);
+            size_t     transferred = 0;
+            for (const auto& part : parts) {
+                EXPECT_EQ(part.is_cuda, block_id < 2);
+                transferred += part.size_bytes;
+            }
+            EXPECT_EQ(transferred, block_bytes);
+        }
+    }
+}
+
+}  // namespace
 
 }  // namespace rtp_llm

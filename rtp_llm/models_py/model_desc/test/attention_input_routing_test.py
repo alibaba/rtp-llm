@@ -6,7 +6,10 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -188,7 +191,9 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 model.prepare_fmha_impl(inputs)
             factory.assert_not_called()
 
-    def test_sparse_mla_cacheless_prepare_accepts_generation_prefill_selection_mode(self):
+    def test_sparse_mla_cacheless_prepare_accepts_generation_prefill_selection_mode(
+        self,
+    ):
         model = object.__new__(GenericMoeModel)
         model.__dict__.update(
             config=SimpleNamespace(
@@ -292,6 +297,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             return_value=SimpleNamespace(
                 hidden_states=hidden_states,
                 residual=residual,
+                topk_indices=None,
             )
         )
         model.__dict__.update(

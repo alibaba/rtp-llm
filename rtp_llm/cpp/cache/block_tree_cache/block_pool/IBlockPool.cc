@@ -79,7 +79,8 @@ std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n) {
     for (const auto block : result) {
         const bool was_available = isAvailableNoLock(block);
         assert(was_available);
-        allocated_[block]      = 1;
+        allocated_[block] = 1;
+        onAllocatedNoLock(block);
         tree_refcounts_[block] = 0;
         for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
             typed_refcounts[block] = 0;

@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
@@ -10,7 +11,6 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
-    get_layer_caches_for_groups,
     select_fmha_impl_for_group,
     select_fmha_impl_for_layer,
 )
@@ -35,6 +35,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.utils.dsa_indexing import (
+    build_dsa_indexer_groups,
+    dsa_layer_has_indexer,
+    dsa_layer_skips_topk,
+)
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
@@ -262,9 +267,15 @@ class GenericMoeLayer(nn.Module):
 
 
 class DecodeLayerOutput:
-    def __init__(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+    def __init__(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        topk_indices: Optional[torch.Tensor] = None,
+    ):
         self.hidden_states = hidden_states
         self.residual = residual
+        self.topk_indices = topk_indices
 
 
 class GenericMoeDecoderLayer(nn.Module):
@@ -284,6 +295,13 @@ class GenericMoeDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        self._uses_sparse_mla = bool(
+            config.attn_config.use_mla and config.attn_config.is_sparse
+        )
+        self._drain_offload_before_moe = (
+            layer_idx in config.moe_layer_index
+            and os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "0") == "1"
+        )
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -297,6 +315,8 @@ class GenericMoeDecoderLayer(nn.Module):
                 quant_config,
                 hw_kernel_config,
                 global_weights=global_weights,
+                has_indexer=dsa_layer_has_indexer(config, layer_idx),
+                reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -346,20 +366,33 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: Any,
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            fmha_impl=fmha_impl,
-            kv_cache=kv_cache,
-        )
+        topk_indices = None
+        if self._uses_sparse_mla:
+            hidden_states, topk_indices = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                prev_topk_indices=prev_topk_indices,
+                return_topk=True,
+            )
+            plan = self.self_attn.offload_plan
+            if plan is not None and self._drain_offload_before_moe and not plan.drain:
+                plan.runtime.drain()
+        else:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+            )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states)
 
-        return DecodeLayerOutput(hidden_states, residual)
+        return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
 
 class GenericMoeModel(GptModelBase):
@@ -416,6 +449,16 @@ class GenericMoeModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
+        self.indexer_groups = (
+            build_dsa_indexer_groups(model_config, self.layer_num)
+            if self._uses_sparse_mla()
+            else {}
+        )
+        self.indexer_sources = {
+            layer: source
+            for source, layers in self.indexer_groups.items()
+            for layer in layers
+        }
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
@@ -442,6 +485,27 @@ class GenericMoeModel(GptModelBase):
         return bool(
             self.config.attn_config.use_mla and self.config.attn_config.is_sparse
         )
+
+    def initialize(self, init_resource) -> bool:
+        self.offload_plans = {}
+        descs = self.config.kv_cache_spec_descs
+        if any(
+            desc.offload is not None and desc.offload.enabled
+            for layer in descs
+            for desc in layer
+        ):
+            from rtp_llm.models_py.modules.offload.plan import build_offload_plans
+
+            self.offload_plans = build_offload_plans(init_resource.kv_cache, descs)
+        for (layer, tag), plan in self.offload_plans.items():
+            if not self._uses_sparse_mla() or tag != "default":
+                raise ValueError(
+                    f"GenericMoeModel has no offload attention adapter for {tag}"
+                )
+            self.layers[layer].self_attn.configure_offload(
+                plan, self.max_generate_batch_size
+            )
+        return super().initialize(init_resource)
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self._uses_sparse_mla():
@@ -471,9 +535,18 @@ class GenericMoeModel(GptModelBase):
                     "sparse MLA requires exactly attention input tags "
                     f"{sorted(required_tags)}; available tags={raw_tags}"
                 )
-        return super().prepare_fmha_impl(
+        result = super().prepare_fmha_impl(
             inputs, is_cuda_graph, cuda_graph_selection_mode
         )
+        if getattr(self, "offload_plans", {}):
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+                SparseMlaImpl,
+            )
+
+            default = select_fmha_impl_for_group(result, "default")
+            if not isinstance(default, SparseMlaImpl) or default.is_prefill:
+                raise ValueError("sparse KV offload requires SparseMlaImpl decode")
+        return result
 
     def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         """Build token embeddings and inject features for an MM request.
@@ -502,6 +575,20 @@ class GenericMoeModel(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        try:
+            return self._forward(inputs, fmha_impl)
+        except Exception:
+            if (
+                getattr(self, "offload_plans", {})
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                # No sampler completion exists on failure. Join before engine
+                # error handling can release this forward's backing blocks.
+                self.reset_sparse_kv_offload()
+                torch.cuda.current_stream().synchronize()
+            raise
+
+    def _forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         hidden_states = self.embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
@@ -510,6 +597,7 @@ class GenericMoeModel(GptModelBase):
         capture = self.capture_context(inputs.capture_hidden_states)
         residual = torch.zeros_like(hidden_states)
         is_sparse_mla = self._uses_sparse_mla()
+        prev_topk_indices = None
         if is_sparse_mla:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
@@ -527,13 +615,20 @@ class GenericMoeModel(GptModelBase):
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             if is_sparse_mla:
                 layer_fmha_impl = sparse_fmha_impl
-                layer_kv_cache = (
-                    get_layer_caches_for_groups(
-                        self.kv_cache, i, ("default", "indexer_kv")
-                    )
-                    if self.kv_cache is not None
-                    else None
-                )
+                if self.kv_cache is not None:
+                    indexer_layer = self.indexer_sources[i]
+                    layer_kv_cache = {
+                        "default": (
+                            None
+                            if (i, "default") in self.offload_plans
+                            else self.kv_cache.get_layer_cache(i, "default")
+                        ),
+                        "indexer_kv": self.kv_cache.get_layer_cache(
+                            indexer_layer, "indexer_kv"
+                        ),
+                    }
+                else:
+                    layer_kv_cache = None
             else:
                 layer_fmha_impl = select_fmha_impl_for_layer(
                     fmha_impl, self.kv_cache, i
@@ -546,9 +641,11 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=layer_kv_cache,
+                **({"prev_topk_indices": prev_topk_indices} if is_sparse_mla else {}),
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            prev_topk_indices = output.topk_indices
             capture.capture_layer(i, hidden_states, residual)
 
         return capture.finalize(hidden_states, residual)

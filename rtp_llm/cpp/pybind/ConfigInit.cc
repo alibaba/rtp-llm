@@ -512,6 +512,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
+        .def_readwrite("enable_sparse_kv_offload", &KVCacheConfig::enable_sparse_kv_offload)
+        .def_readwrite("sparse_kv_offload_host_mb", &KVCacheConfig::sparse_kv_offload_host_mb)
+        .def_readwrite("sparse_kv_offload_test_hbm_blocks", &KVCacheConfig::sparse_kv_offload_test_hbm_blocks)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def_readwrite("enable_disk_cache", &KVCacheConfig::enable_disk_cache)
@@ -574,7 +577,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      7,
+                                      8,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -641,9 +644,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
-                                      self.kv_cache_event_host_ip_port);
+                                      self.kv_cache_event_host_ip_port,
+                                      self.enable_sparse_kv_offload,
+                                      self.sparse_kv_offload_host_mb,
+                                      self.sparse_kv_offload_test_hbm_blocks);
             },
             [](py::tuple t) {
+                const py::tuple offload_state = t;
+                const bool      has_offload_fields =
+                    t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
+                if (has_offload_fields) {
+                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
+                    t[1] = py::int_(7);
+                }
                 const py::tuple event_state = t;
                 const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
                 if (has_event_fields) {
@@ -752,6 +765,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_instance_group   = event_state[66].cast<std::string>();
                     c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
                     c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
+                }
+                if (has_offload_fields) {
+                    c.enable_sparse_kv_offload          = offload_state[69].cast<bool>();
+                    c.sparse_kv_offload_host_mb         = offload_state[70].cast<int64_t>();
+                    c.sparse_kv_offload_test_hbm_blocks = offload_state[71].cast<int>();
                 }
                 return c;
             }));
@@ -1970,6 +1988,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
+    py::class_<CacheOffloadPolicy>(m, "CacheOffloadPolicy")
+        .def(py::init<>())
+        .def_readwrite("enabled", &CacheOffloadPolicy::enabled)
+        .def_readwrite("max_selected_rows", &CacheOffloadPolicy::max_selected_rows)
+        .def(py::pickle(
+            [](const CacheOffloadPolicy& self) { return py::make_tuple(self.enabled, self.max_selected_rows); },
+            [](py::tuple t) {
+                if (t.size() != 2) {
+                    throw std::runtime_error("Invalid CacheOffloadPolicy state!");
+                }
+                return CacheOffloadPolicy{t[0].cast<bool>(), t[1].cast<uint32_t>()};
+            }));
+
     py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")
         .def(py::init<>())
         .def_readwrite("tag", &KVCacheSpecDesc::tag)
@@ -1992,6 +2023,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
+        .def_readwrite("offload", &KVCacheSpecDesc::offload)
+        .def_readwrite("offload_runtime_group", &KVCacheSpecDesc::offload_runtime_group)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
                 return py::make_tuple(self.tag,
@@ -2013,11 +2046,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.offload,
+                                      self.offload_runtime_group);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21 && t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2039,6 +2074,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() >= 21) {
+                    c.offload = t[20].cast<std::optional<CacheOffloadPolicy>>();
+                }
+                if (t.size() == 22) {
+                    c.offload_runtime_group = t[21].cast<std::optional<uint32_t>>();
+                }
                 return c;
             }));
 

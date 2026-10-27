@@ -843,12 +843,41 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     return request;
 }
 
+void DecodeRpcServer::markLoadedOffloadOverwrite(KVCacheManager&           manager,
+                                                 const LoadKVCacheContext& context,
+                                                 const LoadCacheResult&    result) {
+    if (!result.ok() || !manager.hasSparseKvOffload() || !manager.isAllocatorOwner()) {
+        return;
+    }
+    const auto& config = manager.cacheConfig();
+    for (const auto& [tag, tiered] : config.tiered_cache_configs) {
+        (void)tiered;
+        const auto&      group = config.topology().group(tag);
+        const auto&      ids   = context.blockIdsForGroup(tag).blocks();
+        const auto       plan  = buildGroupLoadPlan(group.policy,
+                                             ids.size(),
+                                             context.cache_keys.size(),
+                                             static_cast<size_t>(std::max<int64_t>(context.reuse_block_size, 0)),
+                                             config.groupNums() > 1,
+                                             group.seqSizePerBlock(),
+                                             config.seq_size_per_block);
+        BlockIndicesType overwritten;
+        for (const auto& pair : plan) {
+            const auto block = ids[pair.offset_index];
+            if (!isNullBlockIdx(block)) {
+                overwritten.push_back(block);
+            }
+        }
+        manager.markOffloadOverwrite(tag, overwritten);
+    }
+}
+
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*                              generate_stream = decode_context.getStream().get();
-    auto&                              cache_keys      = generate_stream->cacheKeys(0);
-    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    auto*       generate_stream = decode_context.getStream().get();
+    auto&       cache_keys      = generate_stream->cacheKeys(0);
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -887,18 +916,25 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
                                     decode_context.server_context,
                                     decode_context.prefill_cp_size};
 
+    // Publish only after every rank has finished loading, before the stream can
+    // enter localGenerate. Use the same projection as the actual load requests.
+    const auto finish = [&](LoadCacheResult result) {
+        markLoadedOffloadOverwrite(*engine_->resourceContext().cache_manager, load_context, result);
+        return result;
+    };
+
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
         for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
             auto load_result = loadCache(load_context);
             if (load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
                 && load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
-                return load_result;
+                return finish(load_result);
             }
         }
     }
 
-    return loadCacheAsyncForTp(decode_context, load_context);
+    return finish(loadCacheAsyncForTp(decode_context, load_context));
 }
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
@@ -1506,9 +1542,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1680,7 +1716,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

@@ -48,6 +48,11 @@ enum class CpBlockSliceMode : int8_t {
     PAYLOAD_BYTES = 2,
 };
 
+struct CacheOffloadPolicy {
+    bool     enabled           = false;
+    uint32_t max_selected_rows = 0;
+};
+
 struct CacheGroupPolicy {
     CacheGroupType       group_type             = CacheGroupType::FULL;
     bool                 enable_prefix_reuse    = true;
@@ -61,7 +66,8 @@ struct CacheGroupPolicy {
     CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
     // Model-derived SWA attention window in tokens. Zero means no bounded
     // window is configured and remains the default for non-SWA groups.
-    int sliding_window_size = 0;
+    int                sliding_window_size = 0;
+    CacheOffloadPolicy offload;
 };
 
 // One cache-store registration step: pair a cache key from the full logical

@@ -83,6 +83,7 @@ protected:
     bool initialized() const;
 
     virtual void onFirstTreeRefNoLock(BlockIdxType) {}
+    virtual void onAllocatedNoLock(BlockIdxType) {}
     virtual bool onLastTreeRefNoLock(BlockIdxType) {
         return true;
     }

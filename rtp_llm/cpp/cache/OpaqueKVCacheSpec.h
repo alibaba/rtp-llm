@@ -322,6 +322,14 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         return std::make_shared<CompressedKVCacheSpec>(*this);
     }
 
+    CacheEntryLayout entryLayout() const override {
+        const uint32_t pages = seq_size_per_block / kernel_seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(entriesPerBlock() % pages == 0, "opaque entries must cover whole native pages");
+        const uint32_t rows  = entriesPerBlock() / pages;
+        const int64_t  width = block_size() / entriesPerBlock();
+        return {rows, {{false, entry_dtype_, 0, {rows, width}, {width, 1}}}};
+    }
+
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "CompressedKVCacheSpec{\n";

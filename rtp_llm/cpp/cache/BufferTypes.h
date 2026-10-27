@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -14,9 +15,25 @@
 
 namespace rtp_llm {
 
+struct OffloadStorage {
+    std::string                tag;
+    int                        owner_layer       = -1;
+    uint32_t                   total_blocks      = 0;
+    uint32_t                   hbm_blocks        = 0;
+    uint32_t                   rows_per_block    = 0;
+    uint32_t                   rows_per_page     = 0;
+    uint32_t                   max_selected_rows = 0;
+    std::vector<torch::Tensor> host_planes;
+    std::vector<torch::Tensor> resident_planes;
+    torch::Tensor              generations;
+};
+
+using OffloadStoragePtr = std::shared_ptr<const OffloadStorage>;
+
 struct BlockBufferPtrInfo {
-    torch::Tensor kv_addr;
-    torch::Tensor kv_scale_addr;
+    torch::Tensor     kv_addr;
+    torch::Tensor     kv_scale_addr;
+    OffloadStoragePtr offload;
 };
 
 // Dense, immutable all-layer view for one cache group. A group that does not
@@ -28,7 +45,7 @@ public:
 
     explicit CacheLayerLayout(std::vector<BlockBufferPtrInfo> layers): layers_(std::move(layers)) {
         for (const auto& layer : layers_) {
-            active_layer_count_ += layer.kv_addr.defined() ? 1 : 0;
+            active_layer_count_ += layer.kv_addr.defined() || layer.offload != nullptr ? 1 : 0;
         }
     }
 
@@ -47,7 +64,7 @@ public:
     bool hasLayer(size_t layer_id) const {
         RTP_LLM_CHECK_WITH_INFO(
             layer_id < layers_.size(), "CacheLayerLayout invalid layer_id=%zu size=%zu", layer_id, layers_.size());
-        return layers_[layer_id].kv_addr.defined();
+        return layers_[layer_id].kv_addr.defined() || layers_[layer_id].offload != nullptr;
     }
 
     const BlockBufferPtrInfo& at(size_t layer_id) const {

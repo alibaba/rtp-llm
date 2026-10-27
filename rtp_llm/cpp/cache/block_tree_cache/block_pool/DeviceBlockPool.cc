@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -161,6 +162,7 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
         for (size_t i = 0; i < transfer_count; ++i) {
             auto& change     = changes[reclaimable[i]];
             change.new_count = 1;
+            onAllocatedNoLock(change.block);
             replacements.push_back(change.block);
         }
         replacements.insert(replacements.end(), fresh_blocks->begin(), fresh_blocks->end());
@@ -218,6 +220,54 @@ size_t DeviceBlockPool::referencedBlocksNum() const {
 
 void DeviceBlockPool::onFirstTreeRefNoLock(BlockIdxType block) {
     ++refcounts_[block];
+}
+
+bool DeviceBlockPool::isOffload() const {
+    return config().offload.has_value();
+}
+
+const std::vector<OffloadStoragePtr>& DeviceBlockPool::allLayerOffloadStorage() const {
+    return offload_storages_;
+}
+
+void DeviceBlockPool::onAllocatedNoLock(BlockIdxType block) {
+    if (!isOffload()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(config().offload_version_owner, "only the allocator rank may change offload generations");
+    auto& version = offload_cpu_generations_[block];
+    RTP_LLM_CHECK_WITH_INFO(version < std::numeric_limits<int64_t>::max(), "offload generation overflow");
+    ++version;
+    if (!offload_dirty_[block]) {
+        offload_dirty_[block] = 1;
+        offload_dirty_blocks_.push_back(block);
+    }
+}
+
+void DeviceBlockPool::markOffloadOverwrite(const BlockIdList& blocks) {
+    if (!isOffload()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    for (const auto block : blocks) {
+        checkAllocatedNoLock(block);
+    }
+    for (const auto block : blocks) {
+        onAllocatedNoLock(block);
+    }
+}
+
+std::vector<std::pair<BlockIdxType, int64_t>> DeviceBlockPool::takeOffloadVersionUpdates() {
+    std::lock_guard<std::mutex>                   lock(mutex_);
+    std::vector<std::pair<BlockIdxType, int64_t>> updates;
+    updates.reserve(offload_dirty_blocks_.size());
+    for (const auto block : offload_dirty_blocks_) {
+        updates.emplace_back(block, offload_cpu_generations_[block]);
+        offload_dirty_[block] = 0;
+    }
+    offload_dirty_blocks_.clear();
+    return updates;
 }
 
 bool DeviceBlockPool::onLastTreeRefNoLock(BlockIdxType block) {
@@ -303,7 +353,7 @@ void DeviceBlockPool::initializeCacheBuffer() {
     if (cfg.use_pinned_cpu_backing) {
         initializePinnedCpuBuffer();
     } else if (cfg.use_device_malloc_backing) {
-        initializeDeviceMallocBuffer();
+        initializeDeviceMallocBuffer(cfg.total_size_bytes);
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
@@ -355,12 +405,12 @@ void DeviceBlockPool::initializePinnedCpuBuffer() {
                             cfg.pool_name.c_str());
 }
 
-void DeviceBlockPool::initializeDeviceMallocBuffer() {
+void DeviceBlockPool::initializeDeviceMallocBuffer(size_t bytes) {
     const auto& cfg = config();
 #if USING_CUDA
     RTP_LLM_CHECK_WITH_INFO(!cfg.use_pinned_cpu_backing,
                             "raw device malloc block pool backing requires DEVICE allocation");
-    RTP_LLM_CHECK_WITH_INFO(cfg.total_size_bytes > 0, "raw device malloc block pool total_size_bytes must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(bytes > 0, "raw device malloc block pool total_size_bytes must be > 0");
 
     int  device_id  = -1;
     auto device_err = cudaGetDevice(&device_id);
@@ -369,11 +419,11 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                             cudaGetErrorString(device_err));
 
     void*      ptr = nullptr;
-    const auto err = cudaMalloc(&ptr, cfg.total_size_bytes);
+    const auto err = cudaMalloc(&ptr, bytes);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
                             "cudaMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
                             cfg.pool_name.c_str(),
-                            cfg.total_size_bytes,
+                            bytes,
                             cudaGetErrorString(err));
 
     auto deleter = [device_id](void* p) {
@@ -391,18 +441,18 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
     };
     cache_aligned_buffer_ =
         torch::from_blob(ptr,
-                         {static_cast<int64_t>(cfg.total_size_bytes)},
+                         {static_cast<int64_t>(bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
     RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      cfg.pool_name.c_str(),
                      ptr,
-                     cfg.total_size_bytes,
+                     bytes,
                      device_id);
 #elif USING_ROCM
     RTP_LLM_CHECK_WITH_INFO(!cfg.use_pinned_cpu_backing,
                             "raw device malloc block pool backing requires DEVICE allocation");
-    RTP_LLM_CHECK_WITH_INFO(cfg.total_size_bytes > 0, "raw device malloc block pool total_size_bytes must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(bytes > 0, "raw device malloc block pool total_size_bytes must be > 0");
 
     int  device_id  = -1;
     auto device_err = hipGetDevice(&device_id);
@@ -411,11 +461,11 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                             hipGetErrorString(device_err));
 
     void*      ptr = nullptr;
-    const auto err = hipMalloc(&ptr, cfg.total_size_bytes);
+    const auto err = hipMalloc(&ptr, bytes);
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess,
                             "hipMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
                             cfg.pool_name.c_str(),
-                            cfg.total_size_bytes,
+                            bytes,
                             hipGetErrorString(err));
 
     auto deleter = [device_id](void* p) {
@@ -433,17 +483,121 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
     };
     cache_aligned_buffer_ =
         torch::from_blob(ptr,
-                         {static_cast<int64_t>(cfg.total_size_bytes)},
+                         {static_cast<int64_t>(bytes)},
                          std::move(deleter),
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
     RTP_LLM_LOG_INFO("hipMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
                      cfg.pool_name.c_str(),
                      ptr,
-                     cfg.total_size_bytes,
+                     bytes,
                      device_id);
 #else
+    (void)bytes;
     RTP_LLM_FAIL("raw device malloc block pool backing requires a CUDA or ROCm build, pool_name=%s",
                  cfg.pool_name.c_str());
+#endif
+}
+
+void DeviceBlockPool::initializeOffloadStorage() {
+#if !USING_CUDA
+    RTP_LLM_FAIL("sparse KV offload requires CUDA");
+#else
+    const auto& cfg    = config();
+    const auto& tiered = *cfg.offload;
+    RTP_LLM_CHECK_WITH_INFO(cfg.memory_layouts.size() == 1 && !cfg.use_pinned_cpu_backing,
+                            "offload requires one native layout with DEVICE placement");
+    const auto&  layout    = cfg.memory_layouts.front();
+    const size_t pages     = layout.kernel_blocks_per_kv_block;
+    const size_t page_rows = cfg.offload_layout.rows_per_page;
+    RTP_LLM_CHECK_WITH_INFO(page_rows > 0 && pages > 0 && pages <= INT32_MAX / page_rows,
+                            "offload requires complete native pages");
+    const size_t rows     = page_rows * pages;
+    const size_t resident = tiered.residentRows(page_rows);
+    RTP_LLM_CHECK_WITH_INFO(tiered.total_blocks == cfg.physical_block_count && tiered.hbm_blocks >= 2
+                                && tiered.hbm_blocks <= tiered.total_blocks && tiered.max_selected_rows > 0
+                                && static_cast<uint64_t>(tiered.total_blocks) * rows <= INT32_MAX
+                                && static_cast<uint64_t>(tiered.hbm_blocks) * rows + resident <= INT32_MAX,
+                            "invalid offload block counts or row capacity");
+    RTP_LLM_CHECK_WITH_INFO(cfg.offload_owner_layers.size() == layout.layer_num, "offload owner layer count mismatch");
+    const auto checked_product = [](size_t a, size_t b) {
+        RTP_LLM_CHECK_WITH_INFO(a == 0 || b <= static_cast<size_t>(INT64_MAX) / a, "offload allocation overflow");
+        return a * b;
+    };
+    RTP_LLM_CHECK_WITH_INFO(layout.kv_block_stride_bytes % pages == 0 && layout.kv_scale_stride_bytes % pages == 0
+                                && layout.kv_scale_stride_bytes <= SIZE_MAX - layout.kv_block_stride_bytes,
+                            "invalid offload native page stride");
+    const size_t gpu_pages      = static_cast<size_t>(tiered.hbm_blocks) * pages + resident / page_rows;
+    const size_t host_pages     = static_cast<size_t>(tiered.total_blocks - tiered.hbm_blocks) * pages;
+    const size_t bytes_per_page = (layout.kv_block_stride_bytes + layout.kv_scale_stride_bytes) / pages;
+    cfg.offload_layout.validate(layout.kv_block_stride_bytes / pages, layout.kv_scale_stride_bytes / pages);
+    const size_t gpu_bytes  = checked_product(checked_product(gpu_pages, bytes_per_page), layout.layer_num);
+    const size_t host_bytes = checked_product(checked_product(host_pages, bytes_per_page), layout.layer_num);
+    if (cfg.use_device_malloc_backing) {
+        initializeDeviceMallocBuffer(gpu_bytes);
+    } else {
+        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(gpu_bytes)},
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    }
+    cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
+    // Retain a pinned allocation for empty host views (P=0) as well.
+    offload_host_buffer_ =
+        torch::empty({static_cast<int64_t>(std::max<size_t>(host_bytes, 8))},
+                     torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
+    void*      mapped = nullptr;
+    const auto err    = cudaHostGetDevicePointer(&mapped, offload_host_buffer_.data_ptr(), 0);
+    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess && mapped == offload_host_buffer_.data_ptr(),
+                            "offload pinned storage requires identical host and CUDA UVA addresses");
+    auto generations =
+        torch::zeros({tiered.total_blocks}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    if (cfg.offload_version_owner) {
+        offload_cpu_generations_.assign(tiered.total_blocks, 0);
+        offload_dirty_.assign(tiered.total_blocks, 0);
+        offload_dirty_blocks_.reserve(tiered.total_blocks);
+    }
+    size_t     gpu_offset  = 0;
+    size_t     host_offset = 0;
+    const auto plane = [&](const torch::Tensor& buffer, size_t offset, size_t count, const CacheEntryPlane& view) {
+        const size_t kv_page_bytes = layout.kv_block_stride_bytes / pages;
+        const size_t page_bytes    = view.scale ? layout.kv_scale_stride_bytes / pages : kv_page_bytes;
+        if (view.scale) {
+            offset += checked_product(count, kv_page_bytes);
+        }
+        const auto   dtype   = dataTypeToTorchType(view.dtype);
+        const size_t element = c10::elementSize(dtype);
+        auto         typed   = buffer.narrow(0, offset, checked_product(count, page_bytes)).view(dtype);
+        auto         shape   = view.shape;
+        auto         strides = view.strides;
+        shape.insert(shape.begin(), static_cast<int64_t>(count));
+        strides.insert(strides.begin(), static_cast<int64_t>(page_bytes / element));
+        return typed.as_strided(shape, strides, typed.storage_offset() + view.offset_bytes / element);
+    };
+    for (uint32_t layer = 0; layer < layout.layer_num; ++layer) {
+        auto storage               = std::make_shared<OffloadStorage>();
+        storage->tag               = cfg.pool_name;
+        storage->owner_layer       = cfg.offload_owner_layers[layer];
+        storage->total_blocks      = tiered.total_blocks;
+        storage->hbm_blocks        = tiered.hbm_blocks;
+        storage->rows_per_block    = rows;
+        storage->rows_per_page     = page_rows;
+        storage->max_selected_rows = tiered.max_selected_rows;
+        storage->generations       = generations;
+        for (const auto& view : cfg.offload_layout.planes) {
+            storage->resident_planes.push_back(plane(cache_aligned_buffer_, gpu_offset, gpu_pages, view));
+            storage->host_planes.push_back(plane(offload_host_buffer_, host_offset, host_pages, view));
+            storage->resident_planes.back().narrow(0, 0, pages).zero_();
+        }
+        gpu_offset += checked_product(gpu_pages, bytes_per_page);
+        host_offset += checked_product(host_pages, bytes_per_page);
+        offload_storages_.push_back(std::move(storage));
+    }
+    RTP_LLM_CHECK(gpu_offset == gpu_bytes && host_offset == host_bytes);
+    RTP_LLM_LOG_INFO("offload backing pool=%s H=%u P=%u device_bytes=%zu host_bytes=%zu logical_block_bytes=%zu",
+                     cfg.pool_name.c_str(),
+                     tiered.hbm_blocks,
+                     tiered.total_blocks - tiered.hbm_blocks,
+                     offloadDeviceSizeBytes(),
+                     offloadHostSizeBytes(),
+                     blockSizeBytes());
 #endif
 }
 
@@ -557,9 +711,13 @@ bool DeviceBlockPool::init() {
     RTP_LLM_CHECK(!initialized());
     const auto& cfg = config();
 
-    initializeCacheBuffer();
-    initializeLayerMappings();
-    initializeLayoutStrategies();
+    if (isOffload()) {
+        initializeOffloadStorage();
+    } else {
+        initializeCacheBuffer();
+        initializeLayerMappings();
+        initializeLayoutStrategies();
+    }
 
     markInitialized();
 
@@ -579,8 +737,13 @@ void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cac
     }
     if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config().pool_name.c_str());
-        auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        auto memory_util = cache_store_->getMemoryUtil();
+        if (isOffload()) {
+            changeOffloadMr(memory_util, true);
+            kvcache_reg_mr_ = true;
+            return;
+        }
+        const bool gpu = where() == MemoryType::MEMORY_GPU;
 
         for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config().memory_layouts[layout_idx];
@@ -610,8 +773,13 @@ void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cac
 void DeviceBlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config().pool_name.c_str());
-        auto       memory_util = cache_store_->getMemoryUtil();
-        const bool gpu         = where() == MemoryType::MEMORY_GPU;
+        auto memory_util = cache_store_->getMemoryUtil();
+        if (isOffload()) {
+            changeOffloadMr(memory_util, false);
+            kvcache_reg_mr_ = false;
+            return;
+        }
+        const bool gpu = where() == MemoryType::MEMORY_GPU;
 
         for (size_t layout_idx = 0; layout_idx < config().memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config().memory_layouts[layout_idx];
@@ -622,6 +790,35 @@ void DeviceBlockPool::deregUserMr() {
         }
         RTP_LLM_LOG_INFO("deregister user mr for block pool success, pool_name=%s", config().pool_name.c_str());
         kvcache_reg_mr_ = false;
+    }
+}
+
+void DeviceBlockPool::changeOffloadMr(const std::shared_ptr<MemoryUtil>& memory_util, bool registering) {
+    for (size_t layer = 0; layer < offload_storages_.size(); ++layer) {
+        const auto& storage = offload_storages_[layer];
+        for (const bool gpu : {true, false}) {
+            const size_t blocks = gpu ? storage->hbm_blocks : storage->total_blocks - storage->hbm_blocks;
+            if (blocks == 0) {
+                continue;
+            }
+            // Register native buffers once; entry planes may share the same buffer.
+            for (const auto& buffer : convertIndexToBuffer(layer, gpu ? 0 : storage->hbm_blocks)) {
+                const auto start_us = currentTimeUs();
+                const bool ok =
+                    registering ?
+                        memory_util->regUserMr(buffer.addr, blocks * buffer.size_bytes, gpu, buffer.size_bytes) :
+                        memory_util->deregUserMr(buffer.addr, gpu);
+                RTP_LLM_CHECK_WITH_INFO(ok,
+                                        "offload MR %s failed: tag=%s owner=%d gpu=%d",
+                                        registering ? "registration" : "deregistration",
+                                        storage->tag.c_str(),
+                                        storage->owner_layer,
+                                        gpu);
+                if (registering) {
+                    mr_cost_time_ms_ += (currentTimeUs() - start_us) / 1000;
+                }
+            }
+        }
     }
 }
 
@@ -681,15 +878,21 @@ std::pair<int, int> DeviceBlockPool::mapGlobalLayerIdToLocal(int global_layer_id
 }
 
 std::vector<torch::Tensor> DeviceBlockPool::allLayerCacheBase() const {
+    RTP_LLM_CHECK_WITH_INFO(!isOffload(), "offload pool has no legacy full-GPU cache view");
     return global_layer_kv_tensors_;
 }
 
 std::vector<torch::Tensor> DeviceBlockPool::allLayerScaleCacheBase() const {
+    RTP_LLM_CHECK_WITH_INFO(!isOffload(), "offload pool has no legacy full-GPU scale view");
     return global_layer_kv_scale_tensors_;
 }
 
 BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
+    if (isOffload()) {
+        const auto buffers = convertIndexToBuffer(layer_id, block);
+        return {buffers[0].addr, buffers.size() > 1 ? buffers[1].addr : nullptr};
+    }
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToAddr(local_layer_id, block);
@@ -697,6 +900,39 @@ BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType blo
 
 std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
+    if (isOffload()) {
+        RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < offload_storages_.size(),
+                                "invalid offload local layer id=%d",
+                                layer_id);
+        const auto& storage = *offload_storages_[layer_id];
+        RTP_LLM_CHECK_WITH_INFO(
+            block >= 0 && static_cast<uint32_t>(block) < storage.total_blocks, "invalid offload block id=%d", block);
+        const bool             gpu         = static_cast<uint32_t>(block) < storage.hbm_blocks;
+        const size_t           local_block = gpu ? block : block - storage.hbm_blocks;
+        const auto&            backing     = gpu ? cache_aligned_buffer_ : offload_host_buffer_;
+        const auto&            layout      = config().memory_layouts.front();
+        const size_t           pages       = layout.kernel_blocks_per_kv_block;
+        const size_t           page_count  = (gpu ? storage.resident_planes : storage.host_planes).front().size(0);
+        const size_t           kv_bytes    = page_count * (layout.kv_block_stride_bytes / pages);
+        const size_t           layer_bytes = kv_bytes + page_count * (layout.kv_scale_stride_bytes / pages);
+        char*                  base        = static_cast<char*>(backing.data_ptr()) + layer_id * layer_bytes;
+        std::vector<BlockInfo> result;
+        const auto             append = [&](size_t offset, size_t stride, DataType dtype) {
+            result.push_back({gpu,
+                              gpu ? backing.get_device() : 0,
+                              static_cast<int32_t>(dataTypeToTorchType(dtype)),
+                              base + offset + local_block * stride,
+                              stride});
+        };
+        append(0, layout.kv_block_stride_bytes, layout.dtype);
+        if (layout.kv_scale_stride_bytes > 0) {
+            const auto& views = config().offload_layout.planes;
+            const auto  scale = std::find_if(views.begin(), views.end(), [](const auto& view) { return view.scale; });
+            RTP_LLM_CHECK_WITH_INFO(scale != views.end(), "offload scale buffer has no entry view");
+            append(kv_bytes, layout.kv_scale_stride_bytes, scale->dtype);
+        }
+        return result;
+    }
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(local_layer_id, block);
@@ -705,6 +941,34 @@ std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, Block
 std::vector<BlockInfo>
 DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
     RTP_LLM_CHECK(initialized());
+    if (isOffload()) {
+        const auto  buffers = convertIndexToBuffer(layer_id, block);
+        const auto& layout  = config().memory_layouts.front();
+        if (!config().offload_layout.partition_heads || layout.enable_hybrid_attention) {
+            return buffers;
+        }
+        RTP_LLM_CHECK_WITH_INFO(partition_count == 1 || layout.kernel_blocks_per_kv_block == 1,
+                                "offload MHA asymmetric TP requires one kernel page per physical block");
+        std::vector<BlockInfo> result;
+        for (const auto& buffer : buffers) {
+            const auto parts = splitKVPartitionBytes(buffer.size_bytes,
+                                                     buffer.size_bytes / 2,
+                                                     buffer.size_bytes / 2,
+                                                     layout.local_head_num_kv,
+                                                     partition_count,
+                                                     partition_id,
+                                                     "offload KV");
+            auto       key   = buffer;
+            key.addr         = static_cast<char*>(buffer.addr) + parts.k_off;
+            key.size_bytes   = parts.k_sz;
+            auto value       = buffer;
+            value.addr       = static_cast<char*>(buffer.addr) + parts.v_off;
+            value.size_bytes = parts.v_sz;
+            result.push_back(key);
+            result.push_back(value);
+        }
+        return result;
+    }
     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
     checkLayoutValidity(layout_index);
     return layout_strategies_[static_cast<size_t>(layout_index)]->convertIndexToBuffer(
@@ -733,7 +997,21 @@ int DeviceBlockPool::deviceIndex() const {
 }
 
 size_t DeviceBlockPool::getTotalSizeBytes() const {
+    if (isOffload()) {
+        return offloadDeviceSizeBytes() + offloadHostSizeBytes();
+    }
     return config().total_size_bytes;
+}
+
+size_t DeviceBlockPool::offloadHostSizeBytes() const {
+    return offload_host_buffer_.defined() ? offload_host_buffer_.nbytes() : 0;
+}
+
+size_t DeviceBlockPool::offloadDeviceSizeBytes() const {
+    return cache_aligned_buffer_.defined() ?
+               cache_aligned_buffer_.nbytes()
+                   + (offload_storages_.empty() ? 0 : offload_storages_.front()->generations.nbytes()) :
+               0;
 }
 
 size_t DeviceBlockPool::blockSizeBytes() const {

@@ -82,7 +82,9 @@ class _MoeLayer(nn.Module):
         self.hidden_increment = hidden_increment
         self.residual_increment = residual_increment
 
-    def forward(self, hidden_states, residual, fmha_impl, kv_cache=None):
+    def forward(
+        self, hidden_states, residual, fmha_impl, kv_cache=None, prev_topk_indices=None
+    ):
         return DecodeLayerOutput(
             hidden_states + self.hidden_increment,
             residual + self.residual_increment,
@@ -296,6 +298,8 @@ def _make_qwen_model(layer_ids: list[int]) -> Qwen3Model:
 def _make_moe_model(layer_ids: list[int]) -> GenericMoeModel:
     model = GenericMoeModel.__new__(GenericMoeModel)
     nn.Module.__init__(model)
+    model.indexer_sources = {0: 0, 1: 1}
+    model.offload_plans = {}
     model.config = SimpleNamespace(
         hidden_state_capture_layer_ids=layer_ids,
         attn_config=SimpleNamespace(use_mla=False, is_sparse=False),
@@ -528,7 +532,11 @@ class HiddenStateCaptureTest(unittest.TestCase):
                 torch.testing.assert_close(
                     output,
                     torch.cat(
-                        [hidden + 2 + residual, hidden + residual, hidden + 10 + residual],
+                        [
+                            hidden + 2 + residual,
+                            hidden + residual,
+                            hidden + 10 + residual,
+                        ],
                         dim=-1,
                     ),
                 )
@@ -538,16 +546,16 @@ class HiddenStateCaptureTest(unittest.TestCase):
         plan = CaptureContext.configured([0], lambda h, r: h, lambda h, r: h)
         record_range = Mock(side_effect=lambda name: nullcontext())
         profiler = SimpleNamespace(_RecordFunctionFast=record_range)
-        with patch.object(
-            torch._C, "_profiler", profiler, create=True
-        ), patch.object(
+        with patch.object(torch._C, "_profiler", profiler, create=True), patch.object(
             torch.autograd, "_profiler_enabled", return_value=True, create=True
         ) as profiler_enabled:
             capture = plan.for_forward(True)
             self.assertIs(capture._profile_enabled, True)
             self.assertIs(capture._record_function_fast, record_range)
             profiler_enabled.assert_called_once_with()
-            profiler_enabled.side_effect = AssertionError("profiler state was rechecked")
+            profiler_enabled.side_effect = AssertionError(
+                "profiler state was rechecked"
+            )
             with disable_record_function_ranges(), patch.object(
                 profiler,
                 "_RecordFunctionFast",
@@ -1483,7 +1491,10 @@ class HiddenStateCaptureTest(unittest.TestCase):
                 ]
                 if with_cache:
                     model.kv_cache = SimpleNamespace(
-                        get_layer_cache_groups=layer_caches.__getitem__
+                        get_layer_cache_groups=layer_caches.__getitem__,
+                        get_layer_cache=lambda layer, tag: next(
+                            cache for cache in layer_caches[layer] if cache.tag == tag
+                        ),
                     )
                 fmha_impl = {"indexer_kv": object(), "default": object()}
                 # Reuse the model across requests to check capture stays forward-local.

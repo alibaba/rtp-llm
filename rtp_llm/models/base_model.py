@@ -118,6 +118,8 @@ class BaseModel(object):
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
+        if kv_cache_config.enable_sparse_kv_offload:
+            self._configure_sparse_kv_offload()
         self.weight = None
         self.weight_manager = None
         # Keep the owner alive for the complete lifetime of any non-owning
@@ -265,6 +267,9 @@ class BaseModel(object):
         cls, model_config: ModelConfig, kv_cache_config: KVCacheConfig
     ) -> None:
         """Optionally apply parsed KV-cache settings before the legacy hook."""
+
+    def _configure_sparse_kv_offload(self) -> None:
+        raise ValueError(f"sparse KV offload is not supported by {type(self).__name__}")
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:

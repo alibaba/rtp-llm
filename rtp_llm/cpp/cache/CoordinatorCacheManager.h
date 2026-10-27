@@ -54,15 +54,17 @@ struct KVCachePoolMetricsSnapshot {
 class CoordinatorCacheManager: public std::enable_shared_from_this<CoordinatorCacheManager> {
 public:
     CoordinatorCacheManager(const CacheConfig&                 config,
-                            AllocationType                     allocation_type     = AllocationType::DEVICE,
-                            const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                            int64_t                            reserve_block_ratio = 0,
-                            RoleType                           role_type           = RoleType::PDFUSION):
+                            AllocationType                     allocation_type       = AllocationType::DEVICE,
+                            const kmonitor::MetricsReporterPtr metrics_reporter      = nullptr,
+                            int64_t                            reserve_block_ratio   = 0,
+                            RoleType                           role_type             = RoleType::PDFUSION,
+                            bool                               offload_version_owner = true):
         config_(config),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
         reserve_block_ratio_(reserve_block_ratio),
-        role_type_(role_type) {}
+        role_type_(role_type),
+        offload_version_owner_(offload_version_owner) {}
 
     virtual ~CoordinatorCacheManager();
 
@@ -294,6 +296,7 @@ protected:
     size_t                                 reserveBlocksForPool(size_t group_id) const;
     std::vector<DeviceBlockPoolPtr>        group_block_pools_;
     RoleType                               role_type_{RoleType::PDFUSION};
+    bool                                   offload_version_owner_{true};
     // Drain pending copies before releasing the cache groups and pools.
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 

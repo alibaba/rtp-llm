@@ -2,6 +2,7 @@
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
+#include <functional>
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -286,14 +287,14 @@ TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
 
 TEST_F(NormalEngineTest, testCacheManagerInitFailureDoesNotPublishPartialState) {
     ModelConfig model;
-    model.num_layers                   = 1;
-    model.attn_config.head_num         = 1;
-    model.attn_config.kv_head_num      = 1;
-    model.attn_config.size_per_head    = 1;
+    model.num_layers                          = 1;
+    model.attn_config.head_num                = 1;
+    model.attn_config.kv_head_num             = 1;
+    model.attn_config.size_per_head           = 1;
     model.attn_config.tokens_per_block        = 1;
     model.attn_config.kernel_tokens_per_block = 1;
-    model.kv_cache_spec_descs          = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
-    const auto config                  = CacheConfigCreator::createWarmupConfig(model, {});
+    model.kv_cache_spec_descs                 = {{{"default", KVCacheSpecType::MultiHeadAttention}}};
+    const auto config                         = CacheConfigCreator::createWarmupConfig(model, {});
 
     auto            previous  = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
     auto            candidate = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
@@ -1173,5 +1174,71 @@ TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     config.warm_up_with_loss   = true;
     EXPECT_NO_THROW(createMockEngine(config));
 }
+
+namespace {
+
+EngineInitParams supportedConfig() {
+    EngineInitParams params;
+    params.kv_cache_config.enable_sparse_kv_offload = true;
+    params.parallelism_config.role_type             = RoleType::DECODE;
+    params.pd_sep_config.role_type                  = RoleType::DECODE;
+    params.model_config_.attn_config.use_mla        = true;
+    params.model_config_.attn_config.is_sparse      = true;
+    KVCacheSpecDesc desc;
+    desc.tag                                 = "default";
+    desc.cache_type                          = KVCacheSpecType::MultiHeadLatentAttention;
+    desc.offload                             = CacheOffloadPolicy{true, 2048};
+    params.model_config_.kv_cache_spec_descs = {{desc}};
+    return params;
+}
+
+TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations) {
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    auto params                                  = supportedConfig();
+    params.parallelism_config.tp_size            = 2;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, true, true, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, false, false));
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, true));
+    const std::vector<std::function<void(EngineInitParams&)>> unsupported = {
+        [](auto& p) { p.pd_sep_config.role_type = RoleType::PDFUSION; },
+        [](auto& p) { p.parallelism_config.role_type = RoleType::PREFILL; },
+        [](auto& p) { p.parallelism_config.pp_size = 2; },
+        [](auto& p) { p.parallelism_config.prefill_cp_config.prefill_cp_size = 2; },
+        [](auto& p) { p.parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER; },
+        [](auto& p) { p.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP; },
+        [](auto& p) { p.sp_config.type = SP_TYPE_MTP; },
+        [](auto& p) { p.sp_config.type = SP_TYPE_VANILLA; },
+        [](auto& p) { p.device_resource_config.enable_layer_micro_batch = 1; },
+        [](auto& p) { p.kv_cache_config.enable_memory_cache = true; },
+        [](auto& p) { p.kv_cache_config.enable_disk_cache = true; },
+        [](auto& p) { p.kv_cache_config.enable_remote_cache = true; },
+        [](auto& p) { p.model_config_.kv_cache_spec_descs.clear(); },
+    };
+    for (size_t i = 0; i < unsupported.size(); ++i) {
+        SCOPED_TRACE(i);
+        auto invalid = params;
+        unsupported[i](invalid);
+        EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, false, true, false));
+        invalid.kv_cache_config.enable_sparse_kv_offload = false;
+        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(invalid, true, false, true));
+    }
+}
+
+TEST(SparseKvOffloadConfigTest, UsesModelDeclarationWithoutHardcodedTagsOrRowWidths) {
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    auto params                                  = supportedConfig();
+    params.model_config_.attn_config.use_mla     = false;
+    params.model_config_.attn_config.is_sparse   = false;
+    auto& desc                                   = params.model_config_.kv_cache_spec_descs[0][0];
+    desc.cache_type                              = KVCacheSpecType::OpaqueKV;
+    desc.entry_elems                             = 512;
+    desc.tag                                     = "custom_sparse_kv";
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    desc.offload->enabled = false;
+    EXPECT_ANY_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+}
+
+}  // namespace
 
 }  // namespace rtp_llm

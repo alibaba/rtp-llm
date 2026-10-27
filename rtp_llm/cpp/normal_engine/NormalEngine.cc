@@ -92,7 +92,7 @@ public:
         resource_context_.cache_manager = std::move(previous_cache_manager_);
     }
 
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
     ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
 
 private:
@@ -116,6 +116,41 @@ std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManag
 }
 #endif
 }  // anonymous namespace
+
+void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
+                                                 bool                    has_propose_model,
+                                                 bool                    is_cuda,
+                                                 bool                    drop_broad_sync) {
+    const auto& cache = params.kv_cache_config;
+    if (!cache.enable_sparse_kv_offload) {
+        return;
+    }
+    const auto& parallel = params.parallelism_config;
+    const auto& cp       = parallel.prefill_cp_config;
+    RTP_LLM_CHECK_WITH_INFO(is_cuda, "sparse KV offload requires CUDA");
+    RTP_LLM_CHECK_WITH_INFO(params.pd_sep_config.role_type == RoleType::DECODE
+                                && parallel.role_type == RoleType::DECODE,
+                            "sparse KV offload requires P/D decode role");
+    RTP_LLM_CHECK_WITH_INFO(cp.prefill_cp_size <= 1 && !(cp.is_enabled() && parallel.tp_size > 1)
+                                && !(cp.is_prefill_enabled() && cp.prefill_cp_size == 0 && parallel.tp_size > 1),
+                            "sparse KV offload does not support CP > 1");
+    RTP_LLM_CHECK_WITH_INFO(parallel.pp_size == 1, "sparse KV offload does not support PP > 1");
+    RTP_LLM_CHECK_WITH_INFO(params.sp_config.type == SP_TYPE_NONE && !has_propose_model,
+                            "sparse KV offload does not support MTP or speculative execution");
+    RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
+                            "sparse KV offload does not support layer micro-batch");
+    RTP_LLM_CHECK_WITH_INFO(!cache.enable_memory_cache && !cache.enable_disk_cache && !cache.enable_remote_cache,
+                            "sparse KV offload does not support memory/disk/remote prefix connectors");
+    RTP_LLM_CHECK_WITH_INFO(!drop_broad_sync, "sparse KV offload does not support RTP_LLM_DROP_BROAD_SYNC");
+    bool declared = false;
+    for (const auto& layer : params.model_config_.kv_cache_spec_descs) {
+        for (const auto& desc : layer) {
+            declared |= desc.offload && desc.offload->enabled;
+        }
+    }
+    // Model adapters declare supported tags; the cache creator validates their layout.
+    RTP_LLM_CHECK_WITH_INFO(declared, "model declares no sparse KV offload groups");
+}
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params):
@@ -145,6 +180,16 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         }
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
+    if (kv_cache_config.enable_sparse_kv_offload) {
+        const char* drop_sync = std::getenv("RTP_LLM_DROP_BROAD_SYNC");
+#if USING_CUDA
+        constexpr bool is_cuda = true;
+#else
+        constexpr bool is_cuda = false;
+#endif
+        validateSparseKvOffloadConfig(
+            params, propose_params_ != nullptr, is_cuda, drop_sync && std::string(drop_sync) == "1");
+    }
     if (params.py_model && !params.py_model.is_none()) {
         py::gil_scoped_acquire gil;
         if (py::hasattr(params.py_model, "custom_output_handler")) {
@@ -332,7 +377,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
-    auto stream = std::make_shared<NormalGenerateStream>(generate_input,
+    auto       stream       = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
                                                          runtime_config,
                                                          resource_context_,
@@ -531,7 +576,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
         THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     }
-    const auto max_consumed         = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
     cudaDeviceSynchronize();
@@ -616,9 +661,16 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
-    const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
-        config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    uint32_t confirmed_block_num;
+    if (kv_cache_config.enable_sparse_kv_offload) {
+        CacheConfigCreator::computeLocalOffloadConfig(
+            config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result);
+        confirmed_block_num = CacheConfigCreator::synchronizeOffloadConfig(config, parallelism_config);
+    } else {
+        const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
+            config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+        confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    }
     config.finalizeBlockNums(confirmed_block_num, runtime_config);
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,

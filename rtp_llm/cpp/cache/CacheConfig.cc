@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -125,13 +126,72 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
 
 }  // namespace
 
+// Maximize host blocks with at least two HBM blocks, then spend the remaining
+// GPU budget on HBM blocks. SWA pools retain main's ceil(N / step) sizing.
+TieredCacheCapacity solveTieredCacheCapacity(const TieredCacheBudget& budget) {
+    if (budget.offload_block_bytes == 0 || budget.max_selected_rows == 0 || budget.swa_step == 0) {
+        throw std::invalid_argument("invalid sparse KV offload geometry");
+    }
+    const uint32_t min_hbm = budget.test_hbm_blocks == 0 ? 2 : budget.test_hbm_blocks;
+    if (min_hbm < 2 || min_hbm > budget.max_blocks) {
+        throw std::invalid_argument("sparse KV offload requires at least two HBM blocks, including sentinel 0");
+    }
+    const auto fits = [&](uint32_t hbm, uint32_t host) {
+        size_t     remaining = budget.gpu_bytes;
+        const auto consume   = [&](size_t bytes, uint64_t count) {
+            if (bytes != 0 && count > remaining / bytes) {
+                return false;
+            }
+            remaining -= bytes * count;
+            return true;
+        };
+        const uint64_t total = static_cast<uint64_t>(hbm) + host;
+        return consume(budget.fixed_gpu_bytes, 1) && consume(budget.offload_block_bytes, hbm)
+               && consume(budget.device_block_bytes, total) && consume(budget.metadata_block_bytes, total)
+               && consume(budget.swa_block_bytes, (total + budget.swa_step - 1) / budget.swa_step);
+    };
+    if (!fits(min_hbm, 0)) {
+        throw std::invalid_argument("GPU budget cannot hold sparse KV offload fixed storage and two HBM blocks");
+    }
+    const auto largest = [](uint32_t low, uint32_t high, const auto& fits_count) {
+        while (low < high) {
+            const uint32_t mid = low + (high - low) / 2 + 1;
+            if (fits_count(mid)) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return low;
+    };
+    const uint32_t host_limit = static_cast<uint32_t>(
+        std::min<size_t>(budget.host_bytes / budget.offload_block_bytes, budget.max_blocks - min_hbm));
+    const uint32_t      host  = largest(0, host_limit, [&](uint32_t n) { return fits(min_hbm, n); });
+    const uint32_t      hbm   = budget.test_hbm_blocks != 0 ?
+                                    min_hbm :
+                                    largest(min_hbm, budget.max_blocks - host, [&](uint32_t n) { return fits(n, host); });
+    const uint64_t      total = static_cast<uint64_t>(hbm) + host;
+    TieredCacheCapacity result;
+    result.config         = {static_cast<uint32_t>(total), hbm, budget.max_selected_rows};
+    result.host_bytes     = host * budget.offload_block_bytes;
+    result.hbm_bytes      = hbm * budget.offload_block_bytes;
+    result.device_bytes   = total * budget.device_block_bytes;
+    result.metadata_bytes = total * budget.metadata_block_bytes;
+    result.fixed_bytes    = budget.fixed_gpu_bytes;
+    result.swa_bytes      = ((total + budget.swa_step - 1) / budget.swa_step) * budget.swa_block_bytes;
+    result.gpu_bytes =
+        result.hbm_bytes + result.device_bytes + result.metadata_bytes + result.fixed_bytes + result.swa_bytes;
+    return result;
+}
+
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.reservable == rhs.reservable && lhs.explicit_block_num == rhs.explicit_block_num
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
-           && lhs.sliding_window_size == rhs.sliding_window_size;
+           && lhs.sliding_window_size == rhs.sliding_window_size && lhs.offload.enabled == rhs.offload.enabled
+           && lhs.offload.max_selected_rows == rhs.offload.max_selected_rows;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
@@ -381,8 +441,7 @@ const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::str
             sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
         const auto first_layer_id =
             mtpGlobalLayerId(layer_num, static_cast<int>(module_index), sub_config->layer_num, 0);
-        if (first_layer_id != std::numeric_limits<uint32_t>::max()
-            && static_cast<uint64_t>(layer_id) >= first_layer_id
+        if (first_layer_id != std::numeric_limits<uint32_t>::max() && static_cast<uint64_t>(layer_id) >= first_layer_id
             && static_cast<uint64_t>(layer_id) - first_layer_id < sub_config->layer_num) {
             return sub_config->topology().groupForLayer(layer_id - static_cast<int>(first_layer_id), tag);
         }

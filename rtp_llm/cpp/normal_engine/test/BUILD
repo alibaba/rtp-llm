@@ -95,6 +95,7 @@ cc_test(
         ":mock_engine",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/normal_engine",
     ] + torch_deps() + cuda13_torch_link_deps,
     env = device_test_envs(),
     exec_properties = {"gpu": "L20_CU13"},

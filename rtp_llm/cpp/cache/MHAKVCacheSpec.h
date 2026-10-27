@@ -98,6 +98,23 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         return dtype_;
     }
 
+    CacheEntryLayout entryLayout() const override {
+        const int64_t    rows    = kernel_seq_size_per_block;
+        const int64_t    heads   = local_kv_head_num;
+        const int64_t    dim     = per_token_k_elems / heads;
+        const size_t     k_bytes = rows * per_token_k_elems * getTypeSize(dtype_);
+        CacheEntryLayout layout{kernel_seq_size_per_block,
+                                {{false, dtype_, 0, {rows, heads, dim}, {dim, rows * dim, 1}},
+                                 {false, dtype_, k_bytes, {rows, heads, dim}, {dim, rows * dim, 1}}}};
+        layout.partition_heads = true;
+        if (per_token_k_scale_bytes > 0) {
+            const size_t k_scale_bytes = rows * per_token_k_scale_bytes;
+            layout.planes.push_back({true, TYPE_FP32, 0, {rows, heads}, {1, rows}});
+            layout.planes.push_back({true, TYPE_FP32, k_scale_bytes, {rows, heads}, {1, rows}});
+        }
+        return layout;
+    }
+
     KVCacheSpecPtr clone() const override {
         return std::make_shared<MHAKVCacheSpec>(*this);
     }

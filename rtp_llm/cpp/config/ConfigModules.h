@@ -198,19 +198,22 @@ struct KVCacheConfig {
     // without such a declaration keep LinearAttentionConfig's BF16 default;
     // the legacy remote connector falls back to BF16 because it requires one
     // contiguous shared cache pool.
-    std::string ssm_state_dtype           = "auto";
-    int64_t     kv_cache_mem_mb           = -1;
-    int         seq_size_per_block        = 0;
-    int         kernel_seq_size_per_block = 0;
-    int         test_block_num            = 0;
-    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache       = true;
-    bool        enable_memory_cache       = false;
-    bool        enable_disk_cache         = false;
-    bool        enable_remote_cache       = false;
-    std::string device_eviction_policy    = "lru";
-    std::string memory_eviction_policy    = "lru";
-    std::string disk_eviction_policy      = "fifo";
+    std::string ssm_state_dtype                   = "auto";
+    int64_t     kv_cache_mem_mb                   = -1;
+    int         seq_size_per_block                = 0;
+    int         kernel_seq_size_per_block         = 0;
+    int         test_block_num                    = 0;
+    bool        enable_sparse_kv_offload          = false;
+    int64_t     sparse_kv_offload_host_mb         = 0;
+    int         sparse_kv_offload_test_hbm_blocks = 0;
+    int         use_block_cache                   = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        enable_device_cache               = true;
+    bool        enable_memory_cache               = false;
+    bool        enable_disk_cache                 = false;
+    bool        enable_remote_cache               = false;
+    std::string device_eviction_policy            = "lru";
+    std::string memory_eviction_policy            = "lru";
+    std::string disk_eviction_policy              = "fifo";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -406,18 +409,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode         = false;
-    int     wrr_available_ratio           = 80;
-    int     rank_factor                   = 0;
-    int     thread_count                  = 32;
-    int     rdma_connect_timeout_ms       = 250;
-    int     rdma_qp_count_per_connection  = 2;
-    int     rdma_io_thread_count          = 4;
-    int     rdma_worker_thread_count      = 2;
-    int     messager_io_thread_count      = 2;
-    int     messager_worker_thread_count  = 32;
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 32;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 32;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -679,7 +682,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -688,7 +691,7 @@ struct GrpcConfig: GrpcMapsConfig {
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
     int max_server_workers = 4;
-    DashScGrpcConfig(){};
+    DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);

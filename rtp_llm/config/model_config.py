@@ -113,6 +113,10 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "index_topk_freq",
+        "index_skip_topk_offset",
+        "index_topk_pattern",
+        "indexer_types",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -577,6 +581,10 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        self.index_topk_freq: int = 1
+        self.index_skip_topk_offset: Optional[int] = None
+        self.index_topk_pattern = None
+        self.indexer_types = None
         self.is_deepseek_v41: bool = False
         self.deepseek_v41_config = None
         # DSpARK draft checkpoint metadata. Runtime proposal width comes only

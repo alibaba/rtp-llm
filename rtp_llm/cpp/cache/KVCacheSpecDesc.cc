@@ -52,6 +52,9 @@ uint32_t SpecBuilder::kernelSeqSizePerBlock(const KVCacheSpecDesc&  desc,
 
 CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
     CacheGroupPolicy policy = defaultCacheGroupPolicy(groupType(desc));
+    if (desc.offload.has_value()) {
+        policy.offload = *desc.offload;
+    }
     if (desc.is_state_cache) {
         policy.enable_prefix_reuse = true;
     }

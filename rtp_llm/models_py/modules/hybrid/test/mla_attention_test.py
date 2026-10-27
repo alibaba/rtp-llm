@@ -118,6 +118,9 @@ class RecordingSparseMlaImpl(MlaImplBase):
 def make_sparse_routing_attention():
     attention = object.__new__(MlaAttention)
     torch.nn.Module.__init__(attention)
+    attention.offload_plan = None
+    attention.offload_writer = None
+    attention.reuse_topk_indices = False
     topk_indices = torch.tensor([[1]], dtype=torch.int32)
     attention.indexer = Mock(return_value=topk_indices)
     attention.q_lora_rank = 0

@@ -133,6 +133,7 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSpans,
     engramTokenWindowRows,
     engramTokenWindowWidth,
+    kvCacheGenerationUpdateNum,
     gptModelInputLength,
 };
 
@@ -162,6 +163,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitMmFeaturesLocs      = 1u << 14,
     kDeviceBitEngramWindows       = 1u << 15,
     kDeviceBitMmFeaturesSpans     = 1u << 16,
+    kDeviceBitCacheGenerations    = 1u << 17,
 };
 
 enum GptModelInputControlFlag : uint32_t {
@@ -175,6 +177,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlPdSeparation        = 1u << 7,
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
+    kControlHasKvGenerations    = 1u << 10,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);

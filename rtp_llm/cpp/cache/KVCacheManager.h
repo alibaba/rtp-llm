@@ -90,6 +90,13 @@ public:
     void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
     void blockBatchCopyForForward(const torch::Tensor& copy_mapping, const std::vector<std::string>& group_tags);
 
+    bool hasSparseKvOffload() const {
+        return !config_.tiered_cache_configs.empty();
+    }
+    void          markOffloadOverwrite(const std::string& tag, const BlockIndicesType& blocks);
+    torch::Tensor takeOffloadVersionUpdates();
+    void          publishOffloadVersions(const torch::Tensor& updates, const std::vector<std::string>& group_tags);
+
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
                        bool                            copy_last_block,

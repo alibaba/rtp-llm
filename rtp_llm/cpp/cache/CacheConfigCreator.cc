@@ -219,9 +219,10 @@ void populateGroups(CacheConfig&                 config,
                     const LayerKVCacheSpecs&     specs_by_layer,
                     const ModelConfig&           model_config) {
     struct BuildState {
-        KVCacheSpecPtr   spec;
-        std::string      fingerprint;
-        CacheGroupPolicy policy;
+        KVCacheSpecPtr                      spec;
+        std::string                         fingerprint;
+        CacheGroupPolicy                    policy;
+        std::set<std::pair<bool, uint32_t>> offload_runtime_groups;
     };
     std::map<std::string, BuildState> groups_by_tag;
     std::vector<std::string>          ordered_tags;
@@ -268,6 +269,11 @@ void populateGroups(CacheConfig&                 config,
                                         spec->tag.c_str());
             }
             layers[layer_id].group_tags.push_back(spec->tag);
+            if (policy.offload.enabled) {
+                // An unnamed storage must not alias an explicitly named group.
+                it->second.offload_runtime_groups.emplace(desc.offload_runtime_group.has_value(),
+                                                          desc.offload_runtime_group.value_or(layer_id));
+            }
         }
     }
 
@@ -279,6 +285,9 @@ void populateGroups(CacheConfig&                 config,
         group.tag    = tag;
         group.spec   = state.spec;
         group.policy = state.policy;
+        if (state.policy.offload.enabled) {
+            config.offload_runtime_counts[tag] = state.offload_runtime_groups.size();
+        }
         groups.push_back(std::move(group));
     }
     config.setTopology(std::move(groups), std::move(layers));
@@ -456,6 +465,150 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
     // Only the baseline candidate is available here. Group capacities are
     // applied after runtime cross-rank agreement, before any pool allocation.
     return block_num;
+}
+
+TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&         config,
+                                                                 const KVCacheConfig& kv_cache_config,
+                                                                 size_t               gpu_bytes,
+                                                                 size_t               max_write_rows) {
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.enable_sparse_kv_offload && config.mtp_sub_configs.empty(),
+                            "tiered cache capacity requires sparse offload without a draft model");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.sparse_kv_offload_host_mb >= 0
+                                && kv_cache_config.sparse_kv_offload_test_hbm_blocks >= 0,
+                            "sparse KV offload capacities must be non-negative");
+    TieredCacheBudget budget;
+    budget.gpu_bytes       = gpu_bytes;
+    budget.swa_step        = std::max(1, config.linear_step);
+    budget.test_hbm_blocks = kv_cache_config.sparse_kv_offload_test_hbm_blocks;
+    addBudgetBytes(budget.host_bytes, 1024 * 1024, kv_cache_config.sparse_kv_offload_host_mb);
+    if (kv_cache_config.test_block_num > 0) {
+        budget.max_blocks = kv_cache_config.test_block_num;
+    }
+    std::map<std::string, TieredCacheConfig> tiered;
+    for (const auto& group : config.groups()) {
+        const auto& policy      = group.policy;
+        const auto  block_bytes = config.blockSizeBytesForGroup(group.tag);
+        if (!policy.offload.enabled) {
+            if (policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+                continue;
+            }
+            if (policy.explicit_block_num > 0) {
+                addBudgetBytes(budget.fixed_gpu_bytes, block_bytes, policy.explicit_block_num);
+            } else if (policy.group_type == CacheGroupType::SWA) {
+                addBudgetBytes(budget.swa_block_bytes, block_bytes);
+            } else {
+                addBudgetBytes(budget.device_block_bytes, block_bytes);
+            }
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(policy.group_type == CacheGroupType::FULL && policy.explicit_block_num == 0
+                                    && policy.memory_placement == CacheMemoryPlacement::DEVICE,
+                                "offload tag=%s requires a paged FULL group",
+                                group.tag.c_str());
+        const auto pages  = group.kernelBlocksPerKvBlock();
+        const auto layout = group.spec->entryLayout();
+        layout.validate(group.kvBlockStrideBytes() / pages, group.kvScaleStrideBytes() / pages);
+        const uint32_t page_rows = layout.rows_per_page;
+        RTP_LLM_CHECK_WITH_INFO(pages <= UINT32_MAX / page_rows, "offload entry count overflow");
+        const uint32_t          rows     = page_rows * pages;
+        const uint32_t          selected = policy.offload.max_selected_rows;
+        const TieredCacheConfig capacity{0, 0, selected};
+        const uint64_t          resident = capacity.residentRows(page_rows);
+        RTP_LLM_CHECK_WITH_INFO(
+            selected > 0 && resident < static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
+            "offload tag=%s needs a positive selection fitting int32 after page alignment, S=%u page=%u",
+            group.tag.c_str(),
+            selected,
+            page_rows);
+        budget.max_blocks =
+            std::min<uint32_t>(budget.max_blocks, (std::numeric_limits<int32_t>::max() - resident) / rows);
+        const size_t owners        = config.layerIdsForGroup(group.tag).size();
+        const auto   runtime_count = config.offload_runtime_counts.find(group.tag);
+        const size_t runtimes = runtime_count == config.offload_runtime_counts.end() ? owners : runtime_count->second;
+        RTP_LLM_CHECK_WITH_INFO(runtimes > 0 && runtimes <= owners,
+                                "offload tag=%s has invalid runtime count=%zu for %zu storages",
+                                group.tag.c_str(),
+                                runtimes,
+                                owners);
+        addBudgetBytes(budget.offload_block_bytes, block_bytes);
+        RTP_LLM_CHECK_WITH_INFO(
+            block_bytes % pages == 0, "offload tag=%s has a partial page stride", group.tag.c_str());
+        addBudgetBytes(budget.fixed_gpu_bytes, block_bytes / pages, resident / page_rows);
+        // Shared selection state is per runtime; native KV and pack staging are per storage.
+        addBudgetBytes(budget.metadata_block_bytes, 8 * static_cast<size_t>(rows), runtimes);
+        addBudgetBytes(budget.metadata_block_bytes, sizeof(int64_t));  // generations shared by tag
+        size_t runtime_fixed = 0;
+        addBudgetBytes(runtime_fixed, 20, resident);
+        addBudgetBytes(runtime_fixed, 12, selected);
+        addBudgetBytes(runtime_fixed, 32);
+        addBudgetBytes(budget.fixed_gpu_bytes, runtime_fixed, runtimes);
+        size_t pack_indices = 0;
+        addBudgetBytes(pack_indices, 12, max_write_rows);
+        addBudgetBytes(budget.fixed_gpu_bytes, pack_indices, owners);
+        addBudgetBytes(budget.fixed_gpu_bytes, block_bytes / pages, (max_write_rows + page_rows - 1) / page_rows);
+        budget.max_selected_rows = std::max(budget.max_selected_rows, selected);
+        tiered.emplace(group.tag, capacity);
+    }
+    RTP_LLM_CHECK_WITH_INFO(!tiered.empty(), "model declares no sparse KV offload groups");
+    const auto result = solveTieredCacheCapacity(budget);
+    for (auto& [tag, capacity] : tiered) {
+        capacity.total_blocks    = result.config.total_blocks;
+        capacity.hbm_blocks      = result.config.hbm_blocks;
+        const auto&  group       = config.group(tag);
+        const size_t block_bytes = config.blockSizeBytesForGroup(tag);
+        const size_t page_rows   = group.spec->entryLayout().rows_per_page;
+        const size_t resident    = capacity.residentRows(page_rows);
+        const size_t hot_bytes   = (block_bytes / group.kernelBlocksPerKvBlock()) * (resident / page_rows);
+        RTP_LLM_LOG_INFO("sparse KV offload tag=%s H=%u P=%u N=%u R=%u S=%u host_bytes=%zu resident_bytes=%zu",
+                         tag.c_str(),
+                         capacity.hbm_blocks,
+                         capacity.total_blocks - capacity.hbm_blocks,
+                         capacity.total_blocks,
+                         static_cast<uint32_t>(resident),
+                         capacity.max_selected_rows,
+                         (capacity.total_blocks - capacity.hbm_blocks) * block_bytes,
+                         capacity.hbm_blocks * block_bytes + hot_bytes);
+    }
+    config.tiered_cache_configs = std::move(tiered);
+    RTP_LLM_LOG_INFO(
+        "sparse KV offload bytes: GPU=%zu host=%zu HBM_backing=%zu device_only=%zu metadata=%zu fixed=%zu SWA=%zu",
+        result.gpu_bytes,
+        result.host_bytes,
+        result.hbm_bytes,
+        result.device_bytes,
+        result.metadata_bytes,
+        result.fixed_bytes,
+        result.swa_bytes);
+    return result;
+}
+
+uint32_t CacheConfigCreator::computeLocalOffloadConfig(CacheConfig&                       config,
+                                                       const ModelConfig&                 model_config,
+                                                       const RuntimeConfig&               runtime_config,
+                                                       const KVCacheConfig&               kv_cache_config,
+                                                       const ParallelismConfig&           parallelism_config,
+                                                       const std::optional<WarmUpResult>& warm_up_result) {
+    const auto bytes = MemoryEvaluationHelper::getKVCacheMemorySize(
+        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, std::nullopt);
+    RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,
+                            "offload requires a positive decode batch size");
+    return configureOffloadCapacity(config, kv_cache_config, bytes, runtime_config.max_generate_batch_size)
+        .config.total_blocks;
+}
+
+uint32_t CacheConfigCreator::synchronizeOffloadConfig(CacheConfig&             config,
+                                                      const ParallelismConfig& parallelism_config) {
+    RTP_LLM_CHECK_WITH_INFO(!config.tiered_cache_configs.empty(), "missing sparse KV offload capacity");
+    const auto&    local = config.tiered_cache_configs.begin()->second;
+    const uint32_t hbm   = synchronizeBlockNum(local.hbm_blocks, parallelism_config);
+    // Encode P + 1 because the existing capacity agreement requires positive counts.
+    const uint32_t host = synchronizeBlockNum(local.total_blocks - local.hbm_blocks + 1, parallelism_config) - 1;
+    RTP_LLM_CHECK_WITH_INFO(hbm >= 2, "sparse KV offload requires two HBM blocks on every rank");
+    for (auto& [tag, capacity] : config.tiered_cache_configs) {
+        capacity.hbm_blocks   = hbm;
+        capacity.total_blocks = hbm + host;
+    }
+    return hbm + host;
 }
 
 uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candidate_block_num,

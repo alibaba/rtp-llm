@@ -91,6 +91,46 @@ struct KVCacheSpec;
 using KVCacheSpecPtr    = std::shared_ptr<KVCacheSpec>;
 using LayerKVCacheSpecs = std::vector<std::vector<KVCacheSpecPtr>>;
 
+// A plane is a view into one native kernel page, with entry as its first axis.
+// K/V, heads and quantization scales keep their original offsets and strides.
+struct CacheEntryPlane {
+    bool                 scale        = false;
+    DataType             dtype        = TYPE_INVALID;
+    size_t               offset_bytes = 0;
+    std::vector<int64_t> shape;
+    std::vector<int64_t> strides;
+};
+
+struct CacheEntryLayout {
+    uint32_t                     rows_per_page = 0;
+    std::vector<CacheEntryPlane> planes;
+    bool                         partition_heads = false;
+
+    void validate(size_t kv_page_bytes, size_t scale_page_bytes) const {
+        RTP_LLM_CHECK_WITH_INFO(rows_per_page > 0 && !planes.empty(),
+                                "cache group does not expose addressable KV entries");
+        for (const auto& plane : planes) {
+            const size_t bytes = plane.scale ? scale_page_bytes : kv_page_bytes;
+            RTP_LLM_CHECK_WITH_INFO(plane.dtype != TYPE_INVALID && !plane.shape.empty()
+                                        && plane.shape.front() == rows_per_page
+                                        && plane.shape.size() == plane.strides.size(),
+                                    "invalid cache entry plane shape");
+            const size_t element = getTypeSize(plane.dtype);
+            RTP_LLM_CHECK_WITH_INFO(element > 0 && bytes % element == 0 && plane.offset_bytes % element == 0
+                                        && plane.offset_bytes < bytes,
+                                    "invalid cache entry plane offset or dtype");
+            size_t remaining = (bytes - plane.offset_bytes) / element - 1;
+            for (size_t axis = 0; axis < plane.shape.size(); ++axis) {
+                RTP_LLM_CHECK_WITH_INFO(plane.shape[axis] > 0 && plane.strides[axis] > 0
+                                            && static_cast<uint64_t>(plane.shape[axis] - 1)
+                                                   <= remaining / plane.strides[axis],
+                                        "cache entry plane exceeds its native page");
+                remaining -= (plane.shape[axis] - 1) * plane.strides[axis];
+            }
+        }
+    }
+};
+
 struct KVCacheSpec {
     std::string tag;
     uint32_t    seq_size_per_block;         // tokens/physical block of this group
@@ -154,6 +194,11 @@ struct KVCacheSpec {
     }
 
     virtual rtp_llm::DataType memoryLayoutDType() const = 0;
+
+    // State/ring specs remain unsupported unless they provide an entry view.
+    virtual CacheEntryLayout entryLayout() const {
+        return {};
+    }
 
     virtual KVCacheSpecPtr clone() const = 0;
 

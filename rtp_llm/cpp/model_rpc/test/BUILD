@@ -157,6 +157,7 @@ cc_test(
     deps = test_deps + [
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
     ],
     env = {},
     exec_properties = {"gpu": "L20_CU13"},

@@ -282,7 +282,8 @@ bool KVCacheManager::init() {
                                                                      AllocationType::DEVICE,
                                                                      metrics_reporter_,
                                                                      kv_cache_config_.reserve_block_ratio,
-                                                                     pd_sep_config_.role_type);
+                                                                     pd_sep_config_.role_type,
+                                                                     isAllocatorOwner());
 
     if (use_device_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use raw device malloc KV cache block-pool backing");
@@ -513,23 +514,40 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
 // 块操作相关
 
 void KVCacheManager::blockCopy(int src_block_index, int dest_block_index) {
-    return coordinator_manager_->blockCopy(src_block_index, dest_block_index);
+    const BlockIdPair mapping{src_block_index, dest_block_index};
+    blockBatchCopy(&mapping, &mapping + 1);
 }
 
 void KVCacheManager::blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping) {
-    return coordinator_manager_->blockBatchCopy(copy_mapping);
+    blockBatchCopy(copy_mapping.data(), copy_mapping.data() + copy_mapping.size());
 }
 
 void KVCacheManager::blockBatchCopy(const torch::Tensor& copy_mapping) {
-    return coordinator_manager_->blockBatchCopy(copy_mapping);
+    RTP_LLM_CHECK_WITH_INFO(copy_mapping.device().is_cpu() && copy_mapping.scalar_type() == torch::kInt32
+                                && copy_mapping.is_contiguous() && copy_mapping.dim() == 2 && copy_mapping.size(1) == 2,
+                            "cache block copy mapping must be a contiguous CPU int32 [N,2] matrix");
+    const auto* begin = reinterpret_cast<const BlockIdPair*>(copy_mapping.data_ptr());
+    blockBatchCopy(begin, begin + copy_mapping.size(0));
 }
 
 void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) {
-    return coordinator_manager_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
+    coordinator_manager_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
+    if (hasSparseKvOffload()) {
+        BlockIndicesType targets;
+        for (auto it = copy_mapping_begin; it != copy_mapping_end; ++it) {
+            targets.push_back(it->dst);
+        }
+        for (const auto& tag : config_.groupTags()) {
+            markOffloadOverwrite(tag, targets);
+        }
+    }
 }
 
 void KVCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {
-    return coordinator_manager_->blockBatchCopyByGroup(copy_mapping);
+    coordinator_manager_->blockBatchCopyByGroup(copy_mapping);
+    for (const auto& copy : copy_mapping) {
+        markOffloadOverwrite(copy.tag, {copy.dst});
+    }
 }
 
 void KVCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
@@ -544,7 +562,91 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cach
     RTP_LLM_PROFILE_FUNCTION();
     const bool updated = coordinator_manager_->updateKVBlock(
         batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+    if (updated) {
+        for (const auto& copy : block_update_mapping) {
+            markOffloadOverwrite(copy.tag, {copy.dst});
+        }
+    }
     return updated;
+}
+
+void KVCacheManager::markOffloadOverwrite(const std::string& tag, const BlockIndicesType& blocks) {
+    if (!hasSparseKvOffload() || !isAllocatorOwner()) {
+        return;
+    }
+    const auto& tags = config_.groupTags();
+    const auto  it   = std::find(tags.begin(), tags.end(), tag);
+    RTP_LLM_CHECK_WITH_INFO(it != tags.end(), "unknown offload overwrite tag=%s", tag.c_str());
+    coordinator_manager_->groupBlockPools()[it - tags.begin()]->markOffloadOverwrite(blocks);
+}
+
+torch::Tensor KVCacheManager::takeOffloadVersionUpdates() {
+    RTP_LLM_CHECK_WITH_INFO(isAllocatorOwner(), "only TP0 may take offload version updates");
+    std::vector<std::vector<std::pair<BlockIdxType, int64_t>>> snapshots;
+    size_t                                                     count = 0;
+    for (const auto& pool : coordinator_manager_->groupBlockPools()) {
+        snapshots.push_back(pool->takeOffloadVersionUpdates());
+        RTP_LLM_CHECK_WITH_INFO(snapshots.back().size()
+                                    <= static_cast<size_t>(INT64_MAX / (3 * sizeof(int64_t))) - count,
+                                "offload version snapshot size overflow");
+        count += snapshots.back().size();
+    }
+    auto snapshot = torch::empty({static_cast<int64_t>(std::max<size_t>(count, 1)), 3},
+                                 torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true))
+                        .narrow(0, 0, count);
+    auto* output = snapshot.data_ptr<int64_t>();
+    for (size_t group = 0; group < snapshots.size(); ++group) {
+        for (const auto& [block, version] : snapshots[group]) {
+            *output++ = group;
+            *output++ = block;
+            *output++ = version;
+        }
+    }
+    return snapshot;
+}
+
+void KVCacheManager::publishOffloadVersions(const torch::Tensor& updates, const std::vector<std::string>& group_tags) {
+    if (!updates.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(updates.device().is_cpu() && updates.scalar_type() == torch::kInt64
+                                && updates.is_contiguous() && updates.dim() == 2 && updates.size(1) == 3,
+                            "offload versions must be a contiguous CPU int64 [M,3] snapshot");
+    if (updates.numel() == 0) {
+        return;
+    }
+    const auto&                tags = config_.groupTags();
+    std::vector<torch::Tensor> generations(group_tags.size());
+    for (size_t row = 0; row < group_tags.size(); ++row) {
+        const auto it = std::find(tags.begin(), tags.end(), group_tags[row]);
+        RTP_LLM_CHECK_WITH_INFO(it != tags.end(), "unknown offload version tag=%s", group_tags[row].c_str());
+        const auto& storages = coordinator_manager_->groupBlockPools()[it - tags.begin()]->allLayerOffloadStorage();
+        if (!storages.empty()) {
+            generations[row] = storages.front()->generations;
+        }
+    }
+    const auto* rows = updates.data_ptr<int64_t>();
+    for (int64_t i = 0; i < updates.size(0); ++i) {
+        const auto tag   = rows[i * 3];
+        const auto block = rows[i * 3 + 1];
+        RTP_LLM_CHECK_WITH_INFO(tag >= 0 && static_cast<size_t>(tag) < generations.size() && generations[tag].defined()
+                                    && block > 0 && block < generations[tag].numel() && rows[i * 3 + 2] > 0,
+                                "invalid offload version update at row=%ld",
+                                i);
+    }
+    // Snapshot rows stay grouped by tag across TP row-label translation. One
+    // H2D copy and index_copy per tag update every owning layer's shared tensor.
+    auto payload = updates.to(generations[rows[0]].device(), /*non_blocking=*/true);
+    for (int64_t begin = 0; begin < updates.size(0);) {
+        const auto tag = rows[begin * 3];
+        int64_t    end = begin + 1;
+        while (end < updates.size(0) && rows[end * 3] == tag) {
+            ++end;
+        }
+        const auto values = payload.narrow(0, begin, end - begin);
+        generations[tag].index_copy_(0, values.select(1, 1), values.select(1, 2));
+        begin = end;
+    }
 }
 
 // 地址转换和缓冲区访问

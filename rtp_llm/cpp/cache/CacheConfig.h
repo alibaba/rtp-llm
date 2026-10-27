@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -20,6 +21,43 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
+
+struct TieredCacheConfig {
+    uint32_t total_blocks      = 0;
+    uint32_t hbm_blocks        = 0;
+    uint32_t max_selected_rows = 0;
+
+    uint64_t residentRows(uint32_t rows_per_page) const {
+        return (static_cast<uint64_t>(max_selected_rows) + rows_per_page - 1) / rows_per_page * rows_per_page;
+    }
+};
+
+struct TieredCacheBudget {
+    size_t   gpu_bytes            = 0;
+    size_t   host_bytes           = 0;
+    size_t   offload_block_bytes  = 0;
+    size_t   device_block_bytes   = 0;
+    size_t   metadata_block_bytes = 0;
+    size_t   fixed_gpu_bytes      = 0;
+    size_t   swa_block_bytes      = 0;
+    uint32_t swa_step             = 1;
+    uint32_t max_selected_rows    = 0;
+    uint32_t test_hbm_blocks      = 0;
+    uint32_t max_blocks           = std::numeric_limits<int32_t>::max();
+};
+
+struct TieredCacheCapacity {
+    TieredCacheConfig config;
+    size_t            host_bytes     = 0;
+    size_t            gpu_bytes      = 0;
+    size_t            hbm_bytes      = 0;
+    size_t            device_bytes   = 0;
+    size_t            metadata_bytes = 0;
+    size_t            fixed_bytes    = 0;
+    size_t            swa_bytes      = 0;
+};
+
+TieredCacheCapacity solveTieredCacheCapacity(const TieredCacheBudget& budget);
 
 // Residency (memory_placement) and budget (charge_to_paged_budget) are independent.
 inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std::string& tag) {
@@ -57,6 +95,8 @@ public:
 
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    std::map<std::string, TieredCacheConfig> tiered_cache_configs;
+    std::map<std::string, size_t>            offload_runtime_counts;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
