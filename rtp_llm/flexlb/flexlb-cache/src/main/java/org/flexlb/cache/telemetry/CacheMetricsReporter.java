@@ -1,5 +1,6 @@
 package org.flexlb.cache.telemetry;
 
+import com.google.common.net.HostAndPort;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.dao.route.RoleType;
@@ -12,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
 import static org.flexlb.constant.MetricConstant.CACHE_DIFF_ADDED_BLOCKS_SIZE;
@@ -77,6 +79,7 @@ public class CacheMetricsReporter {
     private static final long LONG_OBJECT_BYTES = 24;
 
     @Autowired private FlexMonitor monitor;
+    private final ConcurrentHashMap<String, FlexMetricTags> engineTags = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -162,25 +165,32 @@ public class CacheMetricsReporter {
         // Calculate cache count and bytes
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", ipIndex, "role", role);
+        FlexMetricTags tags = engineTags.computeIfAbsent(
+                ipIndex, address -> FlexMetricTags.of("engineIp", address, "role", role));
 
         monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
     }
 
-    /**
-     * Report global cache metrics
-     *
-     * @param totalBlocks   Total global cache block count
-     * @param totalMappings Total global cache mapping count
-     */
-    public void reportGlobalCacheMetrics(long totalBlocks, long totalMappings) {
+    /** Cache mutation/retirement is serialized by the owning generation's cache lock. */
+    public void removeEngineLocalMetrics(String engineAddress) {
+        var tags = engineTags.remove(engineAddress);
+        if (tags != null) {
+            monitor.removeGauge(CACHE_ENGINE_LOCAL_COUNT, tags);
+            monitor.removeGauge(CACHE_ENGINE_LOCAL_BYTES, tags);
+        }
+    }
 
-        // Use statistics-based estimation
-        long totalBytes = calculateGlobalCacheBytes(totalBlocks, totalMappings);
+    /** Called after cache updates have stopped for shutdown. */
+    public void clearEngineLocalMetrics() {
+        engineTags.keySet().forEach(this::removeEngineLocalMetrics);
+    }
 
+    /** Publish the index counts captured by KvCacheManager's single metric publisher. */
+    public void reportIndexMetrics(long totalBlocks, long totalMappings, int views) {
         monitor.report(CACHE_GLOBAL_TOTAL_COUNT, totalBlocks);
-        monitor.report(CACHE_GLOBAL_BYTES, totalBytes);
+        monitor.report(CACHE_GLOBAL_BYTES, calculateGlobalCacheBytes(totalBlocks, totalMappings));
+        monitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, views);
     }
 
     /**
@@ -522,14 +532,5 @@ public class CacheMetricsReporter {
 
         monitor.report(CACHE_DIFF_ADDED_BLOCKS_SIZE, tags, addedBlocksSize);
         monitor.report(CACHE_DIFF_REMOVED_BLOCKS_SIZE, tags, removedBlocksSize);
-    }
-
-    /**
-     * Report engine view map size
-     *
-     * @param mapSize Engine view map size (number of current engines)
-     */
-    public void reportEngineViewsMapSize(int mapSize) {
-        monitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, mapSize);
     }
 }

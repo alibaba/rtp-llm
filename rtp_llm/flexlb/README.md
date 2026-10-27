@@ -116,6 +116,23 @@ cd rtp_llm/flexlb
 
 ### Configuration
 
+For deployments using `APP-META`'s `appctl.sh` / `setenv.sh`, G1 tuning is
+controlled by `FLEXLB_JVM_GC_PAUSE_MS` (default `150`) and
+`FLEXLB_JVM_G1_MIN_YOUNG_PERCENT` (default `20`). A latency-oriented configuration
+tested with a 64 GiB heap and 750 Prefill / 750 Decode workers is:
+
+```bash
+export FLEXLB_JVM_HEAP_SIZE=64g
+export FLEXLB_JVM_GC_PAUSE_MS=20
+export FLEXLB_JVM_G1_MIN_YOUNG_PERCENT=5
+```
+
+The pause target is a goal, not a hard limit. A smaller young-generation floor
+allows shorter, more frequent collections and may increase CPU usage. Direct
+`java -jar` launches do not read these environment variables; pass
+`-XX:+UnlockExperimentalVMOptions -XX:MaxGCPauseMillis=20 -XX:G1NewSizePercent=5`
+before `-jar` when using this configuration with G1.
+
 `FLEXLB_CONFIG` is a required JSON environment variable. It configures scheduling,
 delivery, routing, worker synchronization, and observability; file paths are not accepted.
 The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,

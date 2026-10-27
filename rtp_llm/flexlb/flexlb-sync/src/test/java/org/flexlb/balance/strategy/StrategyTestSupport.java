@@ -5,7 +5,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRoute;
@@ -264,13 +263,7 @@ final class StrategyTestSupport {
     }
 
     private static final CapacityBoundary PARKED_BOUNDARY =
-            CapacityBoundary.unavailable(
-                    CapacityBoundary.Resource.PREFILL_BATCH,
-                    new RequestTimeEstimation.AdmissionBlockSemantics(
-                            "test delivery parked",
-                            RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
+            CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
 
     private static final DeliveryMetricsReporter NOOP_METRICS =
             Mockito.mock(DeliveryMetricsReporter.class);

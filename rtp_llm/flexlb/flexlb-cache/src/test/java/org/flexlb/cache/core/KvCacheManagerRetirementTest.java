@@ -1,14 +1,26 @@
 package org.flexlb.cache.core;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.config.MetricsCardinalityConfig;
+import org.flexlb.metric.MicrometerFlexMonitor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
+import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_VIEWS_MAP_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,6 +39,122 @@ import static org.mockito.Mockito.spy;
 
 class KvCacheManagerRetirementTest {
     private static final String ADDRESS = "127.0.0.1:8080";
+
+    @Test
+    void delayedViewsReportCannotOverwriteConcurrentRetirement() throws Exception {
+        var registry = new SimpleMeterRegistry();
+        var local = new EngineLocalView();
+        var captured = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var monitor = spy(new MicrometerFlexMonitor(registry));
+            var reporter = new CacheMetricsReporter();
+            inject(reporter, "monitor", monitor);
+            reporter.init();
+            inject(local, "cacheMetricsReporter", reporter);
+            inject(
+                    local,
+                    "dynamicIntervalManager",
+                    mock(org.flexlb.cache.service.DynamicCacheIntervalService.class));
+            var manager = manager(local, new GlobalCacheIndex());
+            inject(manager, "cacheMetricsReporter", reporter);
+            manager.updateEngineCache(ADDRESS, "PREFILL", Set.of(1L));
+            doAnswer(
+                            call -> {
+                                captured.countDown();
+                                assertTrue(release.await(5, TimeUnit.SECONDS));
+                                return call.callRealMethod();
+                            })
+                    .when(monitor)
+                    .report(CACHE_ENGINE_VIEWS_MAP_SIZE, 2.0);
+            var update =
+                    executor.submit(
+                            () ->
+                                    manager.updateEngineCache(
+                                            "127.0.0.2:8080", "PREFILL", Set.of(2L)));
+            try {
+                assertTrue(captured.await(5, TimeUnit.SECONDS));
+                manager.removeEngineCache(ADDRESS);
+            } finally {
+                release.countDown();
+            }
+            update.get(5, TimeUnit.SECONDS);
+            assertEquals(1, local.getEngineViewsMapSize());
+            assertEquals(1, registry.get("flexlb." + CACHE_ENGINE_VIEWS_MAP_SIZE).gauge().value());
+            assertEquals(1, registry.get("flexlb." + CACHE_GLOBAL_TOTAL_COUNT).gauge().value());
+        } finally {
+            release.countDown();
+            var field = EngineLocalView.class.getDeclaredField("customPool");
+            field.setAccessible(true);
+            ((ForkJoinPool) field.get(local)).shutdownNow();
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void retirementRemovesOnlyItsSourceAndRefreshesViews(boolean collapsed, boolean clear)
+            throws Exception {
+        var registry = new SimpleMeterRegistry();
+        var local = new EngineLocalView();
+        try {
+            if (collapsed) {
+                registry.config()
+                        .meterFilter(new MetricsCardinalityConfig().removeEngineTagsFilter());
+            }
+            var reporter = new CacheMetricsReporter();
+            inject(reporter, "monitor", new MicrometerFlexMonitor(registry));
+            reporter.init();
+            inject(local, "cacheMetricsReporter", reporter);
+            inject(
+                    local,
+                    "dynamicIntervalManager",
+                    mock(org.flexlb.cache.service.DynamicCacheIntervalService.class));
+            var global = new GlobalCacheIndex();
+            var manager = manager(local, global);
+            inject(manager, "cacheMetricsReporter", reporter);
+            String otherPort = "127.0.0.1:8081";
+            manager.updateEngineCache(ADDRESS, "PREFILL", Set.of(1L, 2L, 3L));
+            manager.updateEngineCache(otherPort, "PREFILL", Set.of(4L, 5L));
+            assertEquals(
+                    5,
+                    registry.find("flexlb." + CACHE_ENGINE_LOCAL_COUNT).gauges().stream()
+                            .mapToDouble(io.micrometer.core.instrument.Gauge::value)
+                            .sum());
+
+            manager.removeEngineCache(ADDRESS);
+            manager.removeEngineCache(ADDRESS);
+            // An unchanged surviving worker must not be needed to repair retirement metrics.
+            manager.updateEngineCache(otherPort, "PREFILL", Set.of(4L, 5L));
+            assertEquals(1, registry.find("flexlb." + CACHE_ENGINE_LOCAL_COUNT).gauges().size());
+            assertEquals(2, registry.get("flexlb." + CACHE_ENGINE_LOCAL_COUNT).gauge().value());
+            assertEquals(272, registry.get("flexlb." + CACHE_ENGINE_LOCAL_BYTES).gauge().value());
+            assertEquals(1, registry.get("flexlb." + CACHE_ENGINE_VIEWS_MAP_SIZE).gauge().value());
+            assertEquals(2, global.totalBlocks());
+            // A replacement at the same address publishes fresh values, not the retired ones.
+            manager.updateEngineCache(ADDRESS, "PREFILL", Set.of(6L));
+            assertEquals(
+                    3,
+                    registry.find("flexlb." + CACHE_ENGINE_LOCAL_COUNT).gauges().stream()
+                            .mapToDouble(io.micrometer.core.instrument.Gauge::value)
+                            .sum());
+            if (clear) {
+                manager.clear();
+            } else {
+                manager.removeEngineCache(ADDRESS);
+                manager.removeEngineCache(otherPort);
+            }
+            assertTrue(registry.find("flexlb." + CACHE_ENGINE_LOCAL_COUNT).gauges().isEmpty());
+            assertTrue(registry.find("flexlb." + CACHE_ENGINE_LOCAL_BYTES).gauges().isEmpty());
+            assertEquals(0, registry.get("flexlb." + CACHE_ENGINE_VIEWS_MAP_SIZE).gauge().value());
+            assertEquals(0, registry.get("flexlb." + CACHE_GLOBAL_TOTAL_COUNT).gauge().value());
+        } finally {
+            var field = EngineLocalView.class.getDeclaredField("customPool");
+            field.setAccessible(true);
+            ((ForkJoinPool) field.get(local)).shutdownNow();
+            registry.close();
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})

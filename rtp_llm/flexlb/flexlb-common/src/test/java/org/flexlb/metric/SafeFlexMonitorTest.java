@@ -39,6 +39,7 @@ class SafeFlexMonitorTest {
                         monitor -> monitor.report("metric", 2),
                         monitor -> monitor.report("metric", tags, 2),
                         monitor -> monitor.prepare("metric", tags),
+                        monitor -> monitor.removeGauge("metric", tags),
                         FlexMonitor::close);
         return operations.stream()
                 .flatMap(
@@ -84,6 +85,7 @@ class SafeFlexMonitorTest {
         monitor.report("gauge", 2);
         monitor.report("timer", tags, 3);
         monitor.prepare("timer", tags);
+        monitor.removeGauge("gauge", tags);
         monitor.close();
         verify(delegate).register("gauge", FlexMetricType.GAUGE);
         verify(delegate).register("timer", FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -91,6 +93,7 @@ class SafeFlexMonitorTest {
         verify(delegate).report("gauge", 2);
         verify(delegate).report("timer", tags, 3);
         verify(delegate).prepare("timer", tags);
+        verify(delegate).removeGauge("gauge", tags);
         verify(delegate).close();
         verifyNoMoreInteractions(delegate);
     }

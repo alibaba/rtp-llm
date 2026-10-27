@@ -28,21 +28,17 @@ import java.util.concurrent.atomic.AtomicLong;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.scheduler.ContextResult.Abandonment;
-import static org.flexlb.balance.scheduler.ContextResult.CancelEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
-import static org.flexlb.balance.scheduler.ContextResult.CancelPermit;
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
 import static org.flexlb.balance.scheduler.ContextResult.Claim;
 import static org.flexlb.balance.scheduler.ContextResult.ClaimKind;
 import static org.flexlb.balance.scheduler.ContextResult.CleanupAcknowledgement;
-import static org.flexlb.balance.scheduler.ContextResult.ClosePermit;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.End;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EndToken;
 import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Granted;
@@ -51,14 +47,11 @@ import static org.flexlb.balance.scheduler.ContextResult.PlacementToken;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
-import static org.flexlb.balance.scheduler.ContextResult.ProgressKind;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
-import static org.flexlb.balance.scheduler.ContextResult.ReconciliationPermit;
 import static org.flexlb.balance.scheduler.ContextResult.Rejected;
 import static org.flexlb.balance.scheduler.ContextResult.Rejection;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseCandidate;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
-import static org.flexlb.balance.scheduler.ContextResult.ResponseSelection;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 import static org.flexlb.balance.scheduler.ContextResult.RoutePermit;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
@@ -198,7 +191,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (accepted == null) {
                 return null;
             }
-            Claim<CancelPermit> claim;
+            Update update;
             synchronized (ctx) {
                 var state = ctx.snapshot();
                 if (state.phase() == Phase.CLOSED) {
@@ -212,7 +205,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                 : reason == CancelReason.DEADLINE_EXCEEDED
                                         ? StrategyErrorType.BATCH_SLO_EXPIRED
                                         : StrategyErrorType.REQUEST_CANCELLED;
-                claim =
+                update =
                         ctx.requestCancel(
                                 new Cancellation(
                                         batchId,
@@ -223,50 +216,29 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                         evidence == null
                                                 ? message
                                                 : String.valueOf(evidence.get("cause"))));
-                if (claim instanceof Granted<?> && evidence != null) {
+                if (update.kind() == UpdateKind.APPLIED && evidence != null) {
                     ctx.data().setSchedulingDiagnostics(evidence);
                 }
             }
-            if (claim instanceof Granted<CancelPermit> granted) {
-                var permission = granted.value();
-                switch (permission.kind()) {
-                    case GLOBAL_QUEUE, WAIT_PLACEMENT -> queueControl(ctx, null);
-                    case WORKER_QUEUE -> {
-                        if (!permission
-                                .route()
-                                .prefillEp()
-                                .control(permission.route(), PrefillQueueRunner.Control.WAKE)) {
-                            accepted.submit(
-                                    () ->
-                                            onQueueEvent(
-                                                    permission.route(),
-                                                    QueueKind.CONTROL,
-                                                    null,
-                                                    null));
-                        }
-                    }
-                    case REMOTE -> {
-                        closeRequest(
-                                ctx,
-                                EndEvidence.failure(
-                                        permission.route(),
-                                        EndKind.FRONTEND,
-                                        StrategyErrorType.REQUEST_CANCELLED,
-                                        reason.getMessage()));
-                        return requests.getRequestState(ctx.data().getRequestId(), batchId);
-                    }
-                }
+            Throwable failure = null;
+            if (update.kind() == UpdateKind.APPLIED) {
+                failure = Failures.run(null, () -> queueControl(ctx, null));
+                failure = Failures.run(failure, () -> closeRequest(ctx, null));
             }
             var deadlines = ctx.snapshot().deadlines();
-            if (runtime.deadlines().needsUpdate(ctx, deadlines)) {
-                runtime.deadlines().update(ctx, deadlines);
+            if (ctx.snapshot().phase() == Phase.OPEN
+                    && runtime.deadlines().needsUpdate(ctx, deadlines)) {
+                failure = Failures.run(failure, () -> runtime.deadlines().update(ctx, deadlines));
             }
+            if (failure != null) {
+                runtime.recordFailure(failure);
+            }
+            Failures.rethrow(failure, "cancellation effects failed");
             return requests.getRequestState(ctx.data().getRequestId(), batchId);
         }
     }
 
     public enum QueueKind {
-        CONTROL,
         EXPIRED,
         PREEMPTED,
         REJECTED
@@ -308,18 +280,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                                 ? "endpoint publication failed"
                                                 : cause.getMessage())
                                 : "queued request cancelled";
-        if (kind == QueueKind.CONTROL) {
-            synchronized (ctx) {
-                var cancellation = ctx.snapshot().cancellation();
-                if (cancellation == null || cancellation.operation() == null) {
-                    return;
-                }
-                ctx.completeCancel(
-                        cancellation.operation(),
-                        new CancelEvidence(CancelEvidenceKind.LOCAL_WITHDRAWN, false, false),
-                        System.currentTimeMillis());
-            }
-        }
         failure =
                 Failures.run(
                         failure,
@@ -327,12 +287,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                 closeRequest(
                                         ctx,
                                         EndEvidence.failure(
-                                                route,
-                                                kind == QueueKind.CONTROL
-                                                        ? EndKind.FRONTEND
-                                                        : EndKind.FAILURE,
-                                                error,
-                                                detail)));
+                                                route, EndKind.FAILURE, error, detail)));
         Failures.rethrow(failure, "queue event processing failed");
     }
 
@@ -419,8 +374,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                             : StrategyErrorType.RESOURCE_EXHAUSTED,
                                     evidence == null
                                             ? detail
-                                            : String.valueOf(evidence.get("cause")),
-                                    null);
+                                            : String.valueOf(evidence.get("cause")));
                     if (evidence != null) {
                         ctx.data().setSchedulingDiagnostics(evidence);
                     }
@@ -437,11 +391,13 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                             runtime.deadlines().update(ctx, current.deadlines());
                             return;
                         }
-                        if (exact.kind() == ExpirationTimer.Kind.REQUEST) {
-                            cancel(ctx, 0L, CancelReason.DEADLINE_EXCEEDED);
-                        } else {
-                            advanceRequest(ctx, current);
+                        Throwable failure = null;
+                        if (update.before().cancellation() == null
+                                && update.after().cancellation() != null) {
+                            failure = Failures.run(null, () -> queueControl(ctx, null));
                         }
+                        failure = Failures.run(failure, () -> advanceRequest(ctx, ctx.snapshot()));
+                        Failures.rethrow(failure, "deadline effects failed");
                     });
         }
     }
@@ -555,8 +511,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 try {
                     checkState(previous != null, "withdrawal requires an exact old route");
                     checkState(
-                            previous.prefillEp()
-                                    .control(previous, PrefillQueueRunner.Control.REMOVE),
+                            previous.prefillEp().removeQueued(previous),
                             "withdrawn route is no longer queued: %s",
                             ctx.data().getRequestId());
                 } catch (Throwable detachFailure) {
@@ -593,18 +548,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (end != null) {
                 var actual = end;
                 problem = Failures.run(problem, () -> closeRequest(ctx, actual));
-            } else if (after.cancellation() != null && ctx.data().getFuture().isCancelled()) {
-                var cancelled = after.cancellation();
-                var frontend =
-                        EndEvidence.failure(
-                                after.route(),
-                                EndKind.FRONTEND,
-                                cancelled.errorType(),
-                                cancelled.detail());
-                problem = Failures.run(problem, () -> closeRequest(ctx, frontend));
-            } else if (after.cancellation() != null) {
-                problem =
-                        Failures.run(problem, () -> cancel(ctx, 0L, after.cancellation().reason()));
             } else if (result == PublicationResult.WITHDRAWN
                     && after.phase() == Phase.OPEN
                     && !ctx.data().getFuture().isDone()) {
@@ -646,73 +589,91 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             long batchId,
             DecodeEndpoint.EngineDispatchPermit permit) {
         var ctx = route.ctx();
-        Claim<DeliveryClaim> claim;
-        synchronized (ctx) {
-            if (!requests.isCurrent(ctx)
-                    || ctx.data().getScheduler() != this
-                    || ctx.data().getFuture().isDone()) {
-                return null;
-            }
-            long nowMs = System.currentTimeMillis();
-            var before = ctx.snapshot();
-            boolean inactive = nowMs >= before.inactivityExpiresAtMs();
-            boolean expired = nowMs >= ctx.data().getRequestExpiresAtMs();
-            if (before.preparedDelivery()
-                    && before.cancellation() == null
-                    && (inactive || expired)) {
-                String detail =
-                        inactive
-                                ? "REQUEST_INACTIVE: no matching Engine request status before"
-                                        + " inactivity timeout"
-                                : "request scheduling deadline exceeded before delivery";
-                var evidence = cancellationDiagnostics(ctx, CancelReason.DEADLINE_EXCEEDED, detail);
-                var diagnosis =
-                        new CancellationFacts(
-                                CancelReason.DEADLINE_EXCEEDED,
-                                evidence == null
-                                        ? StrategyErrorType.BATCH_SLO_EXPIRED
-                                        : StrategyErrorType.RESOURCE_EXHAUSTED,
-                                evidence == null ? detail : String.valueOf(evidence.get("cause")),
-                                null);
-                var deadline =
-                        inactive ? before.deadlines().inactivity() : before.deadlines().request();
-                if (deadline != null) {
-                    ctx.recordDeadline(deadline, nowMs, diagnosis);
+        DecodeResources.ResourceChange<DecodeResources.EngineDispatchPermitTransferStatus>
+                transfer = null;
+        DeliveryClaim transferred = null;
+        try {
+            synchronized (ctx) {
+                if (!requests.isCurrent(ctx)
+                        || ctx.data().getScheduler() != this
+                        || ctx.data().getFuture().isDone()) {
+                    return null;
                 }
-                if (evidence != null) {
-                    ctx.data().setSchedulingDiagnostics(evidence);
+                long nowMs = System.currentTimeMillis();
+                var before = ctx.snapshot();
+                boolean inactive = nowMs >= before.inactivityExpiresAtMs();
+                boolean expired = nowMs >= ctx.data().getRequestExpiresAtMs();
+                if (before.preparedDelivery()
+                        && before.cancellation() == null
+                        && (inactive || expired)) {
+                    String detail =
+                            inactive
+                                    ? "REQUEST_INACTIVE: no matching Engine request status before"
+                                            + " inactivity timeout"
+                                    : "request scheduling deadline exceeded before delivery";
+                    var evidence =
+                            cancellationDiagnostics(ctx, CancelReason.DEADLINE_EXCEEDED, detail);
+                    var diagnosis =
+                            new CancellationFacts(
+                                    CancelReason.DEADLINE_EXCEEDED,
+                                    evidence == null
+                                            ? StrategyErrorType.BATCH_SLO_EXPIRED
+                                            : StrategyErrorType.RESOURCE_EXHAUSTED,
+                                    evidence == null
+                                            ? detail
+                                            : String.valueOf(evidence.get("cause")));
+                    var deadline =
+                            inactive
+                                    ? before.deadlines().inactivity()
+                                    : before.deadlines().request();
+                    if (deadline != null) {
+                        ctx.recordDeadline(deadline, nowMs, diagnosis);
+                    }
+                    if (evidence != null) {
+                        ctx.data().setSchedulingDiagnostics(evidence);
+                    }
                 }
-            }
-            claim = ctx.beginDelivery(route, kind, batchId, nowMs);
-            if (claim instanceof Granted<DeliveryClaim> granted) {
-                boolean transferred = false;
-                try {
+                var claim = ctx.prepareDelivery(route, kind, batchId, nowMs);
+                if (claim instanceof Granted<ContextResult.DeliveryFacts> granted) {
                     if (permit != null) {
                         checkArgument(
                                 permit.belongsTo(route.decodeEp(), route.decodeReservation()),
                                 "foreign Decode dispatch permit");
-                        if (permit.dispatch().status()
+                        transfer = permit.dispatch();
+                        if (transfer.status()
                                 != DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED) {
                             throw new IllegalStateException("Decode dispatch ownership lost");
                         }
                     }
-                    transferred = true;
-                    ctx.commitDelivery(granted.value(), true, System.currentTimeMillis());
-                    return granted.value();
-                } finally {
-                    if (!transferred) {
-                        ctx.commitDelivery(granted.value(), false, System.currentTimeMillis());
-                    }
+                    transferred = granted.value().identity();
+                    ctx.publishDelivery(granted.value());
+                    return granted.value().identity();
                 }
             }
-        }
-        if (System.currentTimeMillis() >= ctx.data().getRequestExpiresAtMs()) {
-            cancel(ctx, 0L, CancelReason.DEADLINE_EXCEEDED);
-        } else {
-            var pending = ctx.snapshot().pendingEnd();
-            if (pending != null) {
-                closeRequest(ctx, pending);
+        } catch (RuntimeException | Error failure) {
+            if (transferred != null) {
+                onDeliveryEvidence(
+                        transferred,
+                        new PreparationFailure(
+                                transferred,
+                                route,
+                                failure.getMessage(),
+                                System.currentTimeMillis()));
             }
+            throw failure;
+        } finally {
+            if (transfer != null && transfer.capacityReleased()) {
+                recover(
+                        runtime::recordFailure,
+                        () ->
+                                route.decodeEp()
+                                        .publishCapacity(DecodeEndpoint.CapacityEdge.DISPATCH));
+            }
+        }
+        if (ctx.snapshot().pendingEnd() != null) {
+            closeRequest(ctx, null);
+        } else if (System.currentTimeMillis() >= ctx.data().getRequestExpiresAtMs()) {
+            cancel(ctx, 0L, CancelReason.DEADLINE_EXCEEDED);
         }
         return null;
     }
@@ -776,9 +737,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             try {
                 if (evidence instanceof PreparationFailure
                         || evidence instanceof TransportResult result && result.result().failed()) {
-                    var route =
-                            claim == null ? ((PreparationFailure) evidence).route() : claim.item();
-                    closeRequest(ctx, EndEvidence.deliveryFailure(route, evidence));
+                    closeRequest(ctx, null);
                 } else {
                     advanceRequest(ctx, update.after());
                 }
@@ -801,7 +760,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         || state.pendingEnd() != null
                         || state.cancellation() != null
                         || delivery == null
-                        || !delivery.transferred()
                         || delivery.acknowledged()
                         || delivery.abandonment() != null
                         || !(delivery.send() == SendState.DELIVERED
@@ -823,8 +781,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                             : StrategyErrorType.RESOURCE_EXHAUSTED,
                                     evidence == null
                                             ? detail
-                                            : String.valueOf(evidence.get("cause")),
-                                    null);
+                                            : String.valueOf(evidence.get("cause")));
                     if (state.deadlines().inactivity() != null) {
                         ctx.recordDeadline(
                                 state.deadlines().inactivity(),
@@ -880,7 +837,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             publishSelected(publication, candidate, RESPONSE, response, null, false);
             return true;
         } catch (RuntimeException | Error failed) {
-            new CloseTask(ctx, null, publication, candidate, null).fail(failed, true);
+            new CloseTask(ctx, publication, candidate, null).fail(failed);
             throw failed;
         } finally {
             if (publication != null) {
@@ -1053,6 +1010,23 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
+    /** Interpret one remote cancel reply at the scheduler boundary. */
+    PreemptionRegistration.Reply onCancelReply(
+            PreemptionRegistration attempt,
+            DeliveryClaim delivery,
+            DecodeEndpoint endpoint,
+            CancelReply reply,
+            String detail) {
+        if (attempt != null) {
+            var event = PreemptionEvent.receipt(attempt, endpoint, reply, detail, delivery);
+            return event.progress(onPreemption(attempt, event));
+        }
+        if (delivery != null) {
+            onDeliveryEvidence(delivery, PreemptionEvent.acknowledgement(delivery, reply));
+        }
+        return PreemptionRegistration.Reply.UNKNOWN;
+    }
+
     /** Select one effect owner after recording facts; that owner also handles its failures. */
     private void advanceRequest(RequestContext ctx, Snapshot state) {
         Throwable failure = null;
@@ -1064,23 +1038,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             state = ctx.snapshot();
         }
-        var end =
-                state.cancellation() != null
-                                && state.delivery() != null
-                                && state.delivery().prefillProof()
-                        ? EndEvidence.failure(
-                                state.route(),
-                                EndKind.FRONTEND,
-                                state.cancellation().errorType(),
-                                state.cancellation().detail())
-                        : state.pendingEnd();
         try {
-            if (end != null || state.phase() == Phase.ENDING) {
-                closeRequest(ctx, end);
+            if (state.pendingEnd() != null || state.phase() == Phase.ENDING) {
+                closeRequest(ctx, null);
             } else if (state.phase() == Phase.OPEN) {
-                if (state.preemption() != null && state.cancellation() != null) {
-                    cancel(ctx, 0L, state.cancellation().reason());
-                } else if (!confirmDelivery(ctx)) {
+                if (!confirmDelivery(ctx)) {
                     var deadlines = ctx.snapshot().deadlines();
                     if (runtime.deadlines().needsUpdate(ctx, deadlines)) {
                         recover(
@@ -1097,21 +1059,22 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     /** The exact reconciliation owns ledger retries and its post-commit capacity/resumption effects. */
     private void reconcilePreemption(RequestContext ctx) {
-        ReconciliationPermit permit;
+        ContextResult.Snapshot current;
+        PreemptionRegistration attempt;
         DecodeEndpoint decode;
         boolean capacityChanged;
         synchronized (ctx) {
-            var current = ctx.snapshot();
+            current = ctx.snapshot();
             if (current.preemption() == null) {
                 return;
             }
-            var claim = ctx.beginReconciliation(current.preemption().identity());
-            if (!(claim instanceof Granted<ReconciliationPermit> granted)) {
+            var claim = ctx.prepareReconciliation(current.preemption().identity());
+            if (!(claim instanceof Granted<PreemptionRegistration> granted)) {
                 return;
             }
-            permit = granted.value();
-            decode = permit.route().decodeEp();
-            var terminal = permit.terminal();
+            attempt = granted.value();
+            decode = current.route().decodeEp();
+            var terminal = current.preemption().pendingTerminal();
             capacityChanged =
                     decode != null && !(terminal != null && current.close().decodeSettled());
             var mutation =
@@ -1121,23 +1084,23 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                     runtime::recordFailure,
                                     () -> {
                                         return decode.updatePreemption(
-                                                permit.attempt().attemptToken(),
+                                                attempt.attemptToken(),
                                                 terminal == null
                                                         ? DecodeResources.PreemptionUpdate.active(
-                                                                permit.route().decodeReservation())
+                                                                attempt.reservation())
                                                         : terminal.kind() == EndKind.PRIORITY
                                                                 ? DecodeResources.PreemptionUpdate
                                                                         .canceled(
-                                                                                permit.route()
-                                                                                        .decodeReservation())
+                                                                                attempt
+                                                                                        .reservation())
                                                                 : DecodeResources.PreemptionUpdate
                                                                         .finished(
-                                                                                permit.route()
-                                                                                        .decodeReservation()));
+                                                                                attempt
+                                                                                        .reservation()));
                                     });
             boolean committed = !capacityChanged || mutation != null && mutation.status().applied();
             ctx.completePreemption(
-                    permit,
+                    attempt,
                     new PreemptionReport(
                             null, committed, committed && terminal != null, false, terminal),
                     System.currentTimeMillis());
@@ -1150,13 +1113,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     runtime::recordFailure,
                     () -> decode.publishCapacity(DecodeEndpoint.CapacityEdge.BOTH));
         }
-        if (permit.terminal() == null && permit.confirmationPending()) {
+        if (current.preemption().pendingTerminal() == null
+                && current.preemption().confirmationPending()) {
             recover(
                     runtime::recordFailure,
                     () ->
                             runtime.signals()
                                     .resolvePreemption(
-                                            permit.attempt(),
+                                            attempt,
                                             new VictimResolution(
                                                     ctx.data().getRequestId(),
                                                     VictimResolution.Outcome.DELIVERY_RESUMED)));
@@ -1172,14 +1136,15 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         try (var execution = deferred ? runtime.registerRequestWork(ctx) : null) {
             ResponsePublication publication = null;
             boolean handedOff = false;
-            EndToken token = null;
             ResponseCandidate candidate = null;
             try {
                 Response response = null;
                 synchronized (ctx) {
                     var before = ctx.snapshot();
                     if (before.phase() == Phase.CLOSED
-                            || evidence == null && before.phase() != Phase.ENDING
+                            || evidence == null
+                                    && before.phase() != Phase.ENDING
+                                    && before.pendingEnd() == null
                             || evidence != null
                                     && evidence.route() != null
                                     && before.route() != evidence.route()) {
@@ -1206,10 +1171,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                             && !ctx.data().getFuture().isDone()) {
                         publication = CloseTask.registerPublication(runtime, ctx, false);
                     }
-                    var claim = ctx.beginClose(evidence, System.currentTimeMillis());
-                    if (claim instanceof Granted<EndToken> granted) {
-                        token = granted.value();
-                        var outcome = granted.after().outcome();
+                    var update = ctx.beginClose(evidence, System.currentTimeMillis());
+                    if (update.after().outcome() != null) {
+                        var outcome = update.after().outcome();
                         if (publication != null) {
                             candidate =
                                     new ResponseCandidate(
@@ -1221,17 +1185,17 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                 ctx.selectResponse(candidate);
                             }
                             boolean batched =
-                                    granted.after().delivery() != null
-                                            && granted.after().delivery().identity().kind()
+                                    update.after().delivery() != null
+                                            && update.after().delivery().identity().kind()
                                                     == DeliveryClaimKind.BATCH_ENQUEUE;
-                            response = CloseTask.response(outcome, token.route(), batched);
+                            response = CloseTask.response(outcome, before.route(), batched);
                         }
                     } else if (publication != null) {
                         publication.close();
                         publication = null;
                     }
                 }
-                var task = new CloseTask(ctx, token, publication, candidate, response);
+                var task = new CloseTask(ctx, publication, candidate, response);
                 if (deferred) {
                     execution.submit(task);
                     handedOff = true;
@@ -1241,7 +1205,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 }
             } catch (RuntimeException | Error failed) {
                 if (!handedOff && (execution == null || !execution.hasTaskOwner())) {
-                    new CloseTask(ctx, token, publication, candidate, null).fail(failed, false);
+                    new CloseTask(ctx, publication, candidate, null).fail(failed);
+                    Failures.run(failed, () -> scheduleClose(ctx));
                 }
                 throw failed;
             } finally {
@@ -1254,22 +1219,19 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** Owns close effects and response-publication cleanup after terminal selection. */
+    /** Publishes the selected response; physical effects run through the request's close lane. */
     private final class CloseTask implements Runnable {
         private final RequestContext ctx;
-        private final EndToken token;
         private final ResponsePublication publication;
         private final ResponseCandidate candidate;
         private final Response response;
 
         private CloseTask(
                 RequestContext ctx,
-                EndToken token,
                 ResponsePublication publication,
                 ResponseCandidate candidate,
                 Response response) {
             this.ctx = ctx;
-            this.token = token;
             this.publication = publication;
             this.candidate = candidate;
             this.response = response;
@@ -1303,11 +1265,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
         @Override
         public void run() {
-            boolean reported = false;
             try {
-                Throwable failure = notifyOwners(3);
-                reported = true;
-                failure = Failures.run(failure, () -> requestCleanup(ctx));
+                Throwable failure = Failures.run(null, () -> scheduleClose(ctx));
                 if (publication != null) {
                     failure =
                             Failures.run(
@@ -1326,7 +1285,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 }
                 Failures.rethrow(failure, "request close failed");
             } catch (RuntimeException | Error failed) {
-                fail(failed, reported);
+                fail(failed);
                 throw failed;
             } finally {
                 if (publication != null) {
@@ -1335,18 +1294,15 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         }
 
-        private Throwable notifyOwners(int attempts) {
+        private static Throwable notifyOwners(AbstractRequestScheduler owner, RequestContext ctx) {
+            var runtime = owner.runtime;
             var deadlines = ctx.snapshot().deadlines();
-            Throwable timerFailure = null;
-            for (int retry = 0;
-                    retry < attempts && runtime.deadlines().needsUpdate(ctx, deadlines);
-                    retry++) {
-                timerFailure =
-                        Failures.run(
-                                timerFailure, () -> runtime.deadlines().update(ctx, deadlines));
-            }
+            Throwable timerFailure =
+                    runtime.deadlines().needsUpdate(ctx, deadlines)
+                            ? Failures.run(null, () -> runtime.deadlines().update(ctx, deadlines))
+                            : null;
             var state = ctx.snapshot();
-            if (token == null || state.close().endOperation() != token) {
+            if (state.phase() != Phase.ENDING) {
                 return timerFailure;
             }
             boolean timersDone = !runtime.deadlines().needsUpdate(ctx, deadlines);
@@ -1355,19 +1311,10 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!state.close().notificationsAttempted()
                     && delivery != null
                     && (delivery.abandonment() != null || state.cancellation() != null)) {
-                failure =
-                        recover(
-                                runtime::recordFailure,
-                                (Runnable) () -> runtime.dispatcher.stop(delivery.identity()));
+                failure = Failures.run(null, () -> runtime.dispatcher.stop(delivery.identity()));
                 if (failure != null) {
                     ctx.completeClose(
-                            token,
-                            new CloseProgress(
-                                    ProgressKind.NOTIFICATION_REJECTED,
-                                    false,
-                                    false,
-                                    false,
-                                    timersDone),
+                            new CloseProgress(false, false, false, false, timersDone),
                             System.currentTimeMillis());
                     return Failures.append(timerFailure, failure);
                 }
@@ -1378,8 +1325,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     && preemption != null
                     && preemption.finished()) {
                 failure =
-                        recover(
-                                runtime::recordFailure,
+                        Failures.run(
+                                null,
                                 () ->
                                         runtime.signals()
                                                 .resolvePreemption(
@@ -1389,49 +1336,24 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                                                 VictimResolution.Outcome
                                                                         .REQUEST_END)));
             }
-            var update =
-                    ctx.completeClose(
-                            token,
-                            new CloseProgress(
-                                    ProgressKind.NOTIFICATIONS,
-                                    false,
-                                    false,
-                                    failure == null
-                                            && timersDone
-                                            && (preemption == null || preemption.finished()),
-                                    timersDone),
-                            System.currentTimeMillis());
-            if (preemption != null
-                    && !preemption.finished()
-                    && update.after().preemption() != null
-                    && update.after().preemption().finished()
-                    && !update.after().close().notificationsDone()) {
-                closeRequest(ctx, null);
-            }
+            ctx.completeClose(
+                    new CloseProgress(
+                            true,
+                            false,
+                            false,
+                            failure == null
+                                    && timersDone
+                                    && (preemption == null || preemption.finished()),
+                            timersDone),
+                    System.currentTimeMillis());
             return Failures.append(timerFailure, failure);
         }
 
         private boolean publishExternal(
-                SchedulerRuntime.WorkRegistration accepted,
-                RequestFuture.Completion completion,
-                Throwable failure,
-                boolean synchronous) {
+                RequestFuture.Completion completion, Throwable failure, boolean synchronous) {
             try {
-                Throwable cleanup =
-                        completion == RequestFuture.Completion.CANCELLATION
-                                ? Failures.run(null, () -> queueControl(ctx, null))
-                                : null;
-                var after = ctx.snapshot();
-                if (token != null) {
-                    cleanup = Failures.append(cleanup, notifyOwners(3));
-                    cleanup = Failures.run(cleanup, () -> requestCleanup(ctx));
-                } else if (after.route() != null
-                        && !after.route()
-                                .prefillEp()
-                                .control(after.route(), PrefillQueueRunner.Control.WAKE)) {
-                    accepted.submit(
-                            () -> onQueueEvent(after.route(), QueueKind.CONTROL, null, null));
-                }
+                Throwable cleanup = Failures.run(null, () -> queueControl(ctx, null));
+                cleanup = Failures.run(cleanup, () -> closeRequest(ctx, null));
                 if (cleanup != null) {
                     runtime.recordFailure(cleanup);
                 }
@@ -1461,25 +1383,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         }
 
-        private void fail(Throwable failed, boolean reported) {
-            if (token == null) {
-                Failures.run(
-                        failed,
-                        () -> Failures.rethrow(notifyOwners(3), "deadline recovery failed"));
-            }
-            if (token != null && !reported) {
-                Failures.run(
-                        failed,
-                        () ->
-                                ctx.completeClose(
-                                        token,
-                                        new CloseProgress(
-                                                ProgressKind.NOTIFICATION_REJECTED,
-                                                false,
-                                                false,
-                                                false,
-                                                false),
-                                        System.currentTimeMillis()));
+        private void fail(Throwable failed) {
+            if (ctx.snapshot().phase() == Phase.OPEN) {
+                recover(
+                        runtime::recordFailure,
+                        () -> runtime.deadlines().update(ctx, ctx.snapshot().deadlines()));
             }
             if (publication != null && !publication.hasCompletionOwner() && candidate != null) {
                 Failures.run(
@@ -1497,21 +1405,16 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                             }
                         });
             }
-            if (token != null && !reported) {
-                Failures.run(failed, () -> requestCleanup(ctx));
-            }
         }
     }
 
-    void requestCleanup(RequestContext ctx) {
+    void scheduleClose(RequestContext ctx) {
         if (Thread.holdsLock(ctx)) {
             throw new IllegalStateException(
-                    "resource cleanup requires the Context lock to be released");
+                    "request closing requires the Context lock to be released");
         }
         var state = ctx.snapshot();
-        if (state.phase() == Phase.OPEN
-                || state.placement() != null
-                || !state.deliveryReleasable()) {
+        if (state.phase() == Phase.OPEN) {
             return;
         }
         boolean inline =
@@ -1524,7 +1427,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             SchedulerRuntime.WorkRegistration accepted = null;
             try {
                 accepted = runtime.registerRequestWork(ctx);
-                accepted.submitSettlement(() -> settle(ctx), inline);
+                accepted.submitClose(() -> finishClose(ctx), inline);
                 break;
             } catch (RuntimeException | Error failed) {
                 failure = Failures.append(failure, failed);
@@ -1537,87 +1440,70 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 }
             }
         }
-        Failures.rethrow(failure, "settlement submission failed");
+        Failures.rethrow(failure, "close submission failed");
     }
 
-    private void settle(RequestContext ctx) {
-        var claim = ctx.beginSettlement();
-        if (!(claim instanceof Granted<ClosePermit> granted)) {
-            var terminal = claim.after().terminalRecord();
-            if (terminal != null) {
-                if (claim.after().delivery() != null) {
-                    runtime.signals().completeDelivery(claim.after().delivery().identity());
-                }
-                requests.archive(ctx, terminal);
-                runtime.deadlines().remove(ctx);
-            }
-            return;
-        }
-        var permit = granted.value();
-        var settled = releaseResources(permit);
-        Throwable failure = settled.failure();
-        for (int retry = 1; retry < 3 && settled.failure() != null; retry++) {
-            settled =
-                    releaseResources(
-                            new ClosePermit(
-                                    ctx,
-                                    permit.sequence(),
-                                    permit.route(),
-                                    permit.releaseReason(),
-                                    settled.prefillSettled(),
-                                    settled.decodeSettled(),
-                                    permit.notificationsDone(),
-                                    permit.timersDone()));
-            failure = Failures.append(failure, settled.failure());
-        }
-        var update =
+    private void finishClose(RequestContext ctx) {
+        Throwable failure = null;
+        for (int pass = 0; pass < 3 && ctx.snapshot().phase() == Phase.ENDING; pass++) {
+            Throwable problem = CloseTask.notifyOwners(this, ctx);
+            var reason = ctx.releaseReason();
+            var state = ctx.snapshot();
+            if (reason != null) {
+                var settled =
+                        releaseResources(
+                                state.route(),
+                                reason,
+                                state.close().prefillSettled(),
+                                state.close().decodeSettled());
+                problem = Failures.append(problem, settled.failure());
                 ctx.completeClose(
-                        permit,
                         new CloseProgress(
-                                ProgressKind.RELEASE,
+                                false,
                                 settled.prefillSettled(),
                                 settled.decodeSettled(),
                                 false,
                                 false),
                         System.currentTimeMillis());
-        var after = update.after();
+            }
+            failure = Failures.append(failure, problem);
+            var after = ctx.snapshot();
+            boolean notificationReady =
+                    after.preemption() != null
+                            && after.preemption().finished()
+                            && !after.close().notificationsDone();
+            if (problem == null && !notificationReady) {
+                break;
+            }
+        }
+        var after = ctx.snapshot();
         var delivery = after.delivery();
-        if (delivery != null && after.close().prefillSettled() && after.close().decodeSettled()) {
+        if (delivery != null
+                && after.deliveryReleasable()
+                && after.close().prefillSettled()
+                && after.close().decodeSettled()) {
             failure =
                     Failures.run(
                             failure, () -> runtime.signals().completeDelivery(delivery.identity()));
-        }
-        for (int attempt = 1;
-                attempt < 3
-                        && after.close().endOperation() == null
-                        && (!after.close().notificationsDone() || !after.close().timersDone());
-                attempt++) {
-            var continuationClaim = ctx.beginClose(null, System.currentTimeMillis());
-            if (!(continuationClaim instanceof Granted<EndToken> continuation)) {
-                after = continuationClaim.after();
-                break;
-            }
-            var task = new CloseTask(ctx, continuation.value(), null, null, null);
-            failure = Failures.append(failure, task.notifyOwners(1));
-            after = ctx.snapshot();
         }
         if (after.terminalRecord() != null) {
             var terminal = after.terminalRecord();
             failure = Failures.run(failure, () -> requests.archive(ctx, terminal));
             failure = Failures.run(failure, () -> runtime.deadlines().remove(ctx));
         }
-        Failures.rethrow(failure, "request settlement failed");
+        Failures.rethrow(failure, "request closing failed");
     }
 
     record Settlement(boolean prefillSettled, boolean decodeSettled, Throwable failure) {}
 
-    static Settlement releaseResources(ClosePermit permit) {
-        var route = permit.route();
+    static Settlement releaseResources(
+            RequestRoute route,
+            DecodeResources.ReleaseReason reason,
+            boolean prefill,
+            boolean decode) {
         if (route == null) {
             return new Settlement(true, true, null);
         }
-        boolean prefill = permit.prefillSettled();
-        boolean decode = permit.decodeSettled();
         Throwable failure = null;
         try {
             if (!prefill) {
@@ -1631,11 +1517,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             if (!decode) {
                 if (route.decodeEp() == null || route.decodeReservation() == null) {
                     decode = true;
-                } else if (permit.releaseReason() != null) {
+                } else if (reason != null) {
                     var released =
-                            route.decodeEp()
-                                    .release(route.decodeReservation(), permit.releaseReason())
-                                    .status();
+                            route.decodeEp().release(route.decodeReservation(), reason).status();
                     decode =
                             released == DecodeResources.ReservationReleaseResult.RELEASED
                                     || released == DecodeResources.ReservationReleaseResult.STALE;
@@ -1664,7 +1548,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             boolean synchronous) {
         var ctx = publication.owner;
         var task =
-                (java.util.function.Supplier<Boolean>)
+                (java.util.function.BooleanSupplier)
                         () -> {
                             if (publication.delivery && ctx.data().getAckAtMs() > 0L) {
                                 var delivery = ctx.snapshot().delivery();
@@ -1682,7 +1566,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                 }
                             }
                             var selected = ctx.selectResponse(candidate);
-                            return selected instanceof Granted<ResponseSelection>
+                            return selected instanceof Granted<ResponseCandidate>
                                     && publication.complete(completion, response, failure);
                         };
         if (synchronous) {
@@ -1711,7 +1595,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             ResponsePublication publication;
             ResponseCandidate candidate;
-            EndToken notifications = null;
             synchronized (ctx) {
                 var before = ctx.snapshot();
                 boolean cancelled = completion == RequestFuture.Completion.CANCELLATION;
@@ -1750,7 +1633,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                                             ? null
                                                             : String.valueOf(
                                                                     diagnostics.get("cause"))));
-                            if (!(cancel instanceof Granted<?>)) {
+                            if (cancel.kind() != UpdateKind.APPLIED) {
                                 publication.close();
                                 return false;
                             }
@@ -1767,18 +1650,17 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                         EndEvidence.externalFailure(
                                                 before.route(), response, failure),
                                         System.currentTimeMillis());
-                        if (!(end instanceof Granted<EndToken> granted)) {
+                        if (end.after().outcome() == null) {
                             publication.close();
                             return false;
                         }
-                        notifications = granted.value();
                         candidate =
                                 new ResponseCandidate(
                                         ctx,
                                         completion == RequestFuture.Completion.FAILURE
                                                 ? ResponseKind.EXTERNAL_FAILURE
                                                 : ResponseKind.TERMINAL,
-                                        granted.after().outcome(),
+                                        end.after().outcome(),
                                         System.currentTimeMillis());
                     }
                     ctx.selectResponse(candidate);
@@ -1787,8 +1669,8 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     throw error;
                 }
             }
-            return new CloseTask(ctx, notifications, publication, candidate, response)
-                    .publishExternal(accepted, completion, failure, synchronous);
+            return new CloseTask(ctx, publication, candidate, response)
+                    .publishExternal(completion, failure, synchronous);
         }
     }
 
@@ -1815,28 +1697,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     void closePlacement() {}
 
     protected boolean queueControl(RequestContext ctx, RequestRoute withdrawn) {
-        if (withdrawn != null) {
-            return false;
-        }
-        var state = ctx.snapshot();
-        var cancellation = state.cancellation();
-        if (cancellation == null || cancellation.operation() == null) {
-            return false;
-        }
-        if (state.placement() == null && state.route() == null) {
-            ctx.completeCancel(
-                    cancellation.operation(),
-                    new CancelEvidence(CancelEvidenceKind.LOCAL_WITHDRAWN, false, false),
-                    System.currentTimeMillis());
-        }
-        closeRequest(
-                ctx,
-                EndEvidence.failure(
-                        state.route(),
-                        EndKind.FRONTEND,
-                        cancellation.errorType(),
-                        cancellation.detail()));
-        return true;
+        return false;
     }
 
     protected Map<String, Object> cancellationDiagnostics(

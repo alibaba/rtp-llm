@@ -60,7 +60,7 @@ class DeliverySettlementSignalContractTest {
         try (var fixture = new Fixture(side, false)) {
             fixture.cancelWithRemoteProof();
             assertTrue(fixture.releaseEntered.await(2, TimeUnit.SECONDS));
-            RequestProtocolTestSupport.awaitCondition(() -> fixture.pendingWork() == 1);
+            assertTrue(fixture.pendingWork() > 0, "the blocked release must retain its work owner");
             assertEquals(ContextResult.Phase.ENDING, fixture.context.snapshot().phase());
             assertTrue(fixture.scheduler.requests.isCurrent(fixture.context));
             assertEquals(1, fixture.decode.routingView().totalLoad());
@@ -109,7 +109,7 @@ class DeliverySettlementSignalContractTest {
 
             fixture.failRelease.set(false);
             fixture.allowRelease.countDown();
-            fixture.scheduler.requestCleanup(fixture.context);
+            fixture.scheduler.scheduleClose(fixture.context);
             fixture.assertPhysicallySettledAndArchived();
             assertEquals(4, fixture.releaseAttempts.get());
             assertEquals(
@@ -347,7 +347,7 @@ class DeliverySettlementSignalContractTest {
             failRelease.set(false);
             allowRelease.countDown();
             if (context.snapshot().phase() == ContextResult.Phase.ENDING) {
-                scheduler.requestCleanup(context);
+                scheduler.scheduleClose(context);
             }
             try {
                 if (expectsFailure) {

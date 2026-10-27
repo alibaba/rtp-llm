@@ -18,7 +18,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
-import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -36,7 +35,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A failed physical reconciliation must give back its exact state-only operation token. */
+/** A failed physical reconciliation retains its facts for the next ledger attempt. */
 class RequestReconciliationFailureOwnershipTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -116,7 +115,6 @@ class RequestReconciliationFailureOwnershipTest {
             if (matchingDecodeTerminal) {
                 var retained = context.snapshot();
                 assertSame(registration, retained.preemption().identity());
-                assertNull(retained.preemption().reconciliation());
                 assertEquals(PreemptionCancelPhase.CANCEL_IN_FLIGHT, retained.preemption().phase());
                 assertNotNull(retained.preemption().pendingTerminal());
                 assertFalse(retained.preemption().finished());
@@ -149,15 +147,6 @@ class RequestReconciliationFailureOwnershipTest {
                     ((Number) ReflectionTestUtils.getField(owner.runtime, "pendingWork"))
                             .longValue());
         } finally {
-            // Preserve bounded cleanup even when the pre-fix regression assertion fails.
-            var state = context.snapshot();
-            if (state.preemption() != null && state.preemption().reconciliation() != null) {
-                context.completePreemption(
-                        state.preemption().reconciliation(),
-                        new PreemptionReport(
-                                null, false, false, false, state.preemption().pendingTerminal()),
-                        System.currentTimeMillis());
-            }
             if (context.snapshot().phase() != Phase.CLOSED) {
                 when(decode.updatePreemption(4L, proof))
                         .thenReturn(

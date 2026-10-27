@@ -16,6 +16,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -25,11 +26,172 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 class MicrometerFlexMonitorTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void removalFailureOrCallbackKeepsTheSourceReusable(boolean backendFailure) throws Exception {
+        var registry = spy(new SimpleMeterRegistry());
+        try {
+            var monitor = new MicrometerFlexMonitor(registry);
+            var tags = FlexMetricTags.ofEngine("worker", "role", "PREFILL");
+            var replace = new java.util.concurrent.atomic.AtomicBoolean(true);
+            if (backendFailure) {
+                doThrow(new IllegalStateException("backend removal failed"))
+                        .doCallRealMethod()
+                        .when(registry)
+                        .remove(org.mockito.ArgumentMatchers.any(Meter.class));
+            } else {
+                registry.config()
+                        .onMeterRemoved(
+                                meter -> {
+                                    if (replace.getAndSet(false))
+                                        monitor.report("worker.depth", tags, 9);
+                                });
+            }
+            monitor.report("worker.depth", tags, 4);
+            monitor.removeGauge("worker.depth", tags);
+            if (backendFailure) {
+                assertEquals(0, registry.get("flexlb.worker.depth").gauge().value());
+                monitor.report("worker.depth", tags, 9);
+            }
+            assertEquals(9, registry.get("flexlb.worker.depth").gauge().value());
+            monitor.removeGauge("worker.depth", tags);
+            assertNull(registry.find("flexlb.worker.depth").gauge());
+            assertGaugeCachesEmpty(monitor);
+        } finally {
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void removalPreservesOtherSourcesAndReleasesTheLastMeter(boolean collapsed) throws Exception {
+        var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try {
+            if (collapsed) {
+                registry.config()
+                        .meterFilter(new MetricsCardinalityConfig().removeEngineTagsFilter());
+            }
+            var monitor = new MicrometerFlexMonitor(registry);
+            var first = FlexMetricTags.ofEngine("worker-a", "role", "PREFILL");
+            var second = FlexMetricTags.ofEngine("worker-b", "role", "PREFILL");
+            monitor.report("worker.depth", first, 4);
+            monitor.report("worker.depth", second, 6);
+            monitor.removeGauge("worker.depth", first);
+            monitor.removeGauge("worker.depth", first);
+            assertEquals(1, registry.find("flexlb.worker.depth").gauges().size());
+            assertEquals(6, registry.get("flexlb.worker.depth").gauge().value());
+            monitor.report("worker.depth", second, 7);
+            assertEquals(7, registry.get("flexlb.worker.depth").gauge().value());
+            // Cleanup must still work when an allowlist changes after registration.
+            MicrometerFlexMonitor.setAllowedMetrics(java.util.Set.of());
+            monitor.removeGauge("worker.depth", second);
+            assertNull(registry.find("flexlb.worker.depth").gauge());
+            assertGaugeCachesEmpty(monitor);
+            MicrometerFlexMonitor.setAllowedMetrics(null);
+            monitor.report("worker.depth", first, 9);
+            assertEquals(9, registry.get("flexlb.worker.depth").gauge().value());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void concurrentLastRemovalAndRegistrationLeaveNoOrphanedMeters() throws Exception {
+        var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            registry.config().meterFilter(new MetricsCardinalityConfig().removeEngineTagsFilter());
+            var monitor = new MicrometerFlexMonitor(registry);
+            var start = new CountDownLatch(1);
+            var tasks = new ArrayList<Future<?>>();
+            for (int worker = 0; worker < 2; worker++) {
+                var tags = FlexMetricTags.ofEngine("worker-" + worker, "role", "PREFILL");
+                tasks.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    for (int i = 0; i < 1500; i++) {
+                                        monitor.report("worker.depth", tags, 1);
+                                        monitor.removeGauge("worker.depth", tags);
+                                    }
+                                    return null;
+                                }));
+            }
+            start.countDown();
+            for (var task : tasks) task.get(10, TimeUnit.SECONDS);
+            assertNull(registry.find("flexlb.worker.depth").gauge());
+            assertGaugeCachesEmpty(monitor);
+        } finally {
+            registry.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void membershipChangesKeepConcurrentUpdatesAndScrapesVisible(boolean retire) throws Exception {
+        var registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        try (var executor = Executors.newFixedThreadPool(3)) {
+            registry.config().meterFilter(new MetricsCardinalityConfig().removeEngineTagsFilter());
+            var monitor = new MicrometerFlexMonitor(registry);
+            var first = FlexMetricTags.ofEngine("worker-0", "role", "PREFILL");
+            monitor.prepare("worker.depth", first);
+            var gauge = registry.get("flexlb.worker.depth").gauge();
+            var start = new CountDownLatch(1);
+            var register =
+                    executor.submit(
+                            () -> {
+                                start.await();
+                                for (int worker = 1; worker < 1500; worker++) {
+                                    var tags =
+                                            FlexMetricTags.ofEngine(
+                                                    "worker-" + worker, "role", "PREFILL");
+                                    monitor.report("worker.depth", tags, 1);
+                                    if (retire) monitor.removeGauge("worker.depth", tags);
+                                }
+                                return null;
+                            });
+            var update =
+                    executor.submit(
+                            () -> {
+                                start.await();
+                                for (int i = 0; i <= 10000; i++)
+                                    monitor.report("worker.depth", first, i);
+                                return null;
+                            });
+            var scrape =
+                    executor.submit(
+                            () -> {
+                                start.await();
+                                for (int i = 0; i < 10000; i++) {
+                                    double value = gauge.value();
+                                    assertTrue(
+                                            value >= 0 && value <= 11499,
+                                            "invalid partial aggregate: " + value);
+                                }
+                                return null;
+                            });
+            start.countDown();
+            register.get(10, TimeUnit.SECONDS);
+            update.get(10, TimeUnit.SECONDS);
+            scrape.get(10, TimeUnit.SECONDS);
+            assertExportedDepth(registry, "PREFILL", retire ? 10000 : 11499);
+            if (retire) {
+                monitor.removeGauge("worker.depth", first);
+                assertNull(registry.find("flexlb.worker.depth").gauge());
+                assertGaugeCachesEmpty(monitor);
+            }
+        } finally {
+            registry.close();
+        }
+    }
 
     @Test
     void absentAndEmptyTagsAreTheSameGaugeSource() {
@@ -43,6 +205,8 @@ class MicrometerFlexMonitorTest {
             assertEquals(6, registry.get("flexlb.worker.depth").gauge().value());
             monitor.report("worker.depth", 3);
             assertEquals(3, registry.get("flexlb.worker.depth").gauge().value());
+            monitor.removeGauge("worker.depth", FlexMetricTags.of());
+            assertNull(registry.find("flexlb.worker.depth").gauge());
         } finally {
             registry.close();
         }
@@ -178,6 +342,7 @@ class MicrometerFlexMonitorTest {
             monitor.register("worker.activity", type);
             monitor.report("worker.activity", FlexMetricTags.ofEngine("10.0.0.1"), 4);
             monitor.report("worker.activity", FlexMetricTags.ofEngine("10.0.0.2"), 6);
+            monitor.removeGauge("worker.activity", FlexMetricTags.ofEngine("10.0.0.1"));
             if (type == FlexMetricType.COUNTER) {
                 assertEquals(10, registry.get("flexlb.worker.activity").counter().count());
             } else {
@@ -205,6 +370,14 @@ class MicrometerFlexMonitorTest {
         assertEquals(1, samples.size());
         assertFalse(samples.getFirst().contains("engineIp="));
         assertTrue(samples.getFirst().endsWith(" " + expected), samples.getFirst());
+    }
+
+    private static void assertGaugeCachesEmpty(MicrometerFlexMonitor monitor) throws Exception {
+        for (String name : java.util.List.of("gaugeCache", "gaugeSources", "tagsCache")) {
+            var field = MicrometerFlexMonitor.class.getDeclaredField(name);
+            field.setAccessible(true);
+            assertTrue(((Map<?, ?>) field.get(monitor)).isEmpty(), name);
+        }
     }
 
     @AfterEach

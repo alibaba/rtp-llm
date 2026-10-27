@@ -80,15 +80,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private static final PrefillTimePredictor.Evaluator DEFAULT_BATCH_PREDICTOR =
             new FormulaPredictor(new RoutingConfig.ExecutionTimeEstimatorConfig().getExpression());
+    private static final GroupPlanner.Constraints DIRECT_CONSTRAINTS =
+            new GroupPlanner.Constraints(1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L);
 
     public final PrefillTimePredictor predictor;
 
     public final long requestLimit;
 
     private volatile PrefillQueueRunner queueRunner;
+    // Guarded by ownership.queueGuard(); policy exists before the execution thread starts.
+    private QueueExecutionSettings queueSettings;
     private final DeliveryDispatcher dispatcher;
     private final DispatcherConfig.Type dispatcherType;
-    public final RequestTimeEstimation.DeliveryProjection deliveryProjection;
+    public final DispatcherConfig.Type deliveryMode;
     private volatile Comparator<GroupPlanner.Item> projectionOrder;
     private volatile ProjectionSource projectionSource;
 
@@ -128,11 +132,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         : new FormulaPredictor(estimator.getExpression());
         this.dispatcher = dispatcher;
         this.dispatcherType = config.getDispatcher().getType();
+        this.queueSettings = config.isQueue() ? QueueExecutionSettings.capture(config) : null;
         this.requestLimit =
                 config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                         ? config.getDispatcher().getMaxInflightPerPrefillWorker()
                         : 0L;
-        this.deliveryProjection = RequestTimeEstimation.forDelivery(dispatcher.mode());
+        this.deliveryMode = dispatcher.mode();
         this.projectionOrder =
                 config.isPriorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.ownership =
@@ -149,18 +154,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
         private final GroupPlanner.Constraints constraints;
         private final AdmissionBlock admissionBlock;
         private final boolean queueEnabled;
-        private final org.flexlb.balance.planner.GroupingPolicy grouping;
+        private final org.flexlb.balance.planner.GroupPlanner grouping;
         private final Comparator<GroupPlanner.Item> capturedOrder;
         private volatile RequestTimeEstimation.Inputs materialized;
 
-        private ProjectionSource(
-                PrefillState.Snapshot ownership, PrefillQueueRunner.PlanningView planning) {
+        private ProjectionSource(PrefillState.Snapshot ownership, AdmissionBlock admissionBlock) {
             this.version = ownership.version();
             this.ownership = ownership;
-            this.constraints = planning.constraints();
-            this.admissionBlock = planning.block();
-            this.queueEnabled = queueRunner != null;
-            this.grouping = planning.grouping();
+            this.constraints =
+                    queueSettings == null
+                            ? DIRECT_CONSTRAINTS
+                            : queueSettings.constraints(getStatus().committedEngineObservation());
+            this.admissionBlock = admissionBlock;
+            this.queueEnabled = queueSettings != null;
+            this.grouping = queueSettings == null ? null : queueSettings.groupingPolicy();
             this.capturedOrder = projectionOrder;
         }
 
@@ -200,15 +207,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             try {
                 source = projectionSource;
                 if (source == null || source.version != ownership.progress()) {
-                    var planning =
-                            queueRunner == null
-                                    ? new PrefillQueueRunner.PlanningView(
-                                            null,
-                                            new GroupPlanner.Constraints(
-                                                    1, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L),
-                                            null)
-                                    : queueRunner.planningViewLocked();
-                    source = new ProjectionSource(ownership.snapshotLocked(), planning);
+                    var block = queueRunner == null ? null : queueRunner.admissionBlockLocked();
+                    source = new ProjectionSource(ownership.snapshotLocked(), block);
                     projectionSource = source;
                 }
             } finally {
@@ -247,6 +247,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             : PrefillQueueRunner.FIFO_QUEUE_ORDER);
             PrefillQueueRunner newRunner =
                     new PrefillQueueRunner(ipPort(), this, settings, dispatcher, ownership);
+            queueSettings = settings;
             projectionOrder =
                     settings.priorityOrdering() ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
             projectionSource = null;
@@ -296,8 +297,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    public boolean control(RequestRoute exact, PrefillQueueRunner.Control kind) {
-        return queueRunner != null && queueRunner.control(exact, kind);
+    public boolean removeQueued(RequestRoute exact) {
+        return queueRunner != null && queueRunner.removeQueued(exact);
     }
 
     public Map<String, Object> getLatestQueueWaitSnapshot() {
@@ -461,20 +462,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             var before = ws.committedEngineObservation();
                             var after = observation.engine();
                             inputsChanged =
-                                    PrefillQueueRunner.schedulingCapacity(
+                                    QueueExecutionSettings.schedulingCapacity(
                                                             before,
-                                                            PrefillQueueRunner.PlanningResource
+                                                            QueueExecutionSettings.PlanningResource
                                                                     .TOKENS)
-                                                    != PrefillQueueRunner.schedulingCapacity(
+                                                    != QueueExecutionSettings.schedulingCapacity(
                                                             after,
-                                                            PrefillQueueRunner.PlanningResource
+                                                            QueueExecutionSettings.PlanningResource
                                                                     .TOKENS)
-                                            || PrefillQueueRunner.schedulingCapacity(
+                                            || QueueExecutionSettings.schedulingCapacity(
                                                             before,
-                                                            PrefillQueueRunner.PlanningResource.KV)
-                                                    != PrefillQueueRunner.schedulingCapacity(
+                                                            QueueExecutionSettings.PlanningResource
+                                                                    .KV)
+                                                    != QueueExecutionSettings.schedulingCapacity(
                                                             after,
-                                                            PrefillQueueRunner.PlanningResource.KV);
+                                                            QueueExecutionSettings.PlanningResource
+                                                                    .KV);
                         }
                         if (prepared != null) {
                             ws.publishPreparedStatus(prepared);
