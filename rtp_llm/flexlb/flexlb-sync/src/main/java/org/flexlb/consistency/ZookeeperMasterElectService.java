@@ -26,9 +26,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
-import java.net.InetAddress;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
@@ -97,14 +95,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         if (electionEnabled) {
             checkArgument(!StringUtils.isBlank(role), "HIPPO_ROLE is required when needConsistency=true");
         }
-        String hostIp;
-        try {
-            hostIp = InetAddress.getLocalHost().getHostAddress();
-        } catch (UnknownHostException e) {
-            throw electionEnabled
-                    ? new RuntimeException("Failed to retrieve local host address", e)
-                    : new RuntimeException(e);
-        }
+        String hostIp = MasterHost.resolve(environment);
         String serverPort = environment.getProperty("server.port");
         if (serverPort == null) { serverPort = System.getProperty("server.port", "7001"); }
         localNode = new LocalNodeIdentity(hostIp, serverPort, role);
