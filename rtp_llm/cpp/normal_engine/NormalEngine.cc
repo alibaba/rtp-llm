@@ -623,10 +623,10 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     normalizeSystemPromptCacheConfig();
     const bool use_device_malloc_block_pool =
         shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
-    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
-                                                  &propose_params_->getEngineInitParams().model_config_ :
-                                                  nullptr;
-    auto               config               = CacheConfigCreator::createConfig(
+    const ModelConfig* draft_model_config = propose_params_ && propose_params_->draftModel() ?
+                                                &propose_params_->getEngineInitParams().model_config_ :
+                                                nullptr;
+    auto               config             = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
@@ -686,16 +686,24 @@ absl::Status NormalEngine::startLoop() {
 
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
-    RETURN_IF_STATUS_ERROR(scheduler_->stop());
+    running_                    = false;
+    const auto scheduler_status = scheduler_->stop();
+    if (!scheduler_status.ok()) {
+        RTP_LLM_LOG_ERROR("scheduler stop failed: %s", scheduler_status.ToString().c_str());
+    }
+    // A scheduler error must not permit executor destruction before its thread exits.
     if (loop_thread_) {
         loop_thread_->join();
         loop_thread_.reset();
     }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
+    const auto finalize_status = scheduler_->finalizeStop();
+    if (!finalize_status.ok()) {
+        RTP_LLM_LOG_ERROR("scheduler stop finalization failed: %s", finalize_status.ToString().c_str());
+    }
     resource_context_.cache_manager->stopMetricsReporter();
-    return absl::OkStatus();
+    return scheduler_status.ok() ? finalize_status : scheduler_status;
 }
 
 void NormalEngine::loop() {

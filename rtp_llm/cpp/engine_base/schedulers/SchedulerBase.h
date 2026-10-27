@@ -31,10 +31,15 @@ public:
     virtual absl::StatusOr<std::list<GenerateStreamPtr>> scheduleConservative(int /*propose_step*/) {
         return schedule();
     }
-    virtual absl::Status stop()             = 0;
-    virtual bool         empty()            = 0;
-    virtual int64_t      lastScheduleTime() = 0;
-    virtual int64_t      onflightStreams()  = 0;
+    virtual absl::Status stop() = 0;
+    // Invoked after the engine thread and executor-owned workers have exited.
+    // Schedulers that retain in-flight stream resources during stop release them here.
+    virtual absl::Status finalizeStop() {
+        return absl::OkStatus();
+    }
+    virtual bool    empty()            = 0;
+    virtual int64_t lastScheduleTime() = 0;
+    virtual int64_t onflightStreams()  = 0;
 
     virtual std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() {
         return {};
