@@ -57,3 +57,19 @@ py_test(
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
 )
+
+py_test(
+    name = "pynccl_symm_gather_test",
+    srcs = ["pynccl_symm_gather_test.py"],
+    deps = ["//rtp_llm/models_py/distributed:collective_torch"],
+    timeout = "short",
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "glm53_allgather_benchmark",
+    srcs = ["glm53_allgather_benchmark.py"],
+    deps = ["//rtp_llm/models_py/distributed:collective_torch"],
+    tags = ["manual"],
+    timeout = "long",
+)
