@@ -291,6 +291,13 @@ def _register_builtin_lazy_models() -> None:
         "rtp_llm.models.qwen4_exp.qwen4_exp",
         ["Qwen4ExpForConditionalGeneration"],
     )
+    # "qwen_exp" is the pre-rename model type still passed by whale runners
+    # that derive the engine model type from the platform registry; keep it as
+    # an alias of qwen4_exp so both names resolve to the same implementation.
+    register_lazy_model(
+        "qwen_exp",
+        "rtp_llm.models.qwen4_exp.qwen4_exp",
+    )
     register_lazy_model(
         "qwen4_exp_mtp",
         "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
