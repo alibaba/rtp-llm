@@ -197,8 +197,15 @@ public:
     }
 
     // Only used in C++ world.
-    int                  reuseBlockSize() const;
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
+    int  reuseBlockSize() const;
+    void fakeInitKVBlock(size_t reserved_blocks = 0);
+    enum class CachePrepareResult {
+        DONE,
+        WAIT,
+        LACK_MEM
+    };
+    CachePrepareResult prepareCache();
+
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
@@ -252,6 +259,7 @@ public:
     int     seqSizePerBlock() const;
     int     contextLength() const;
     int     prefixLength() const;
+    int     synchronizedPrefixLength() const;
     int     reuseLength() const;
     int     initialReuseLength() const;
     size_t  maxTokenNum() const;
@@ -280,7 +288,7 @@ public:
     // When useChunkWindow() is true, contextLength() returns the current chunk length.
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
-        chunk_size_ = chunk_size;
+        chunk_size_     = chunk_size;
         max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
     }
     int maxChunkSize() const {
@@ -919,8 +927,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
