@@ -101,6 +101,32 @@ def _mqa_accepts_logits_dtype(operation) -> bool:
     return "logits_dtype:" in (operation.__doc__ or "")
 
 
+@lru_cache(maxsize=2)
+def _mqa_accepts_schedule_meta(operation) -> bool:
+    """Use the native BF16 ABI whose bounded output layout is known."""
+    return "schedule_meta:" in (operation.__doc__ or "") and not (
+        _mqa_accepts_logits_dtype(operation)
+    )
+
+
+def supports_fp8_fp4_mqa_schedule(device: torch.device, num_heads: int) -> bool:
+    """Qualify the SM100 H32 scheduler without probing a kernel launch.
+
+    Older wheels and SM90 retain their existing scorer, output dtype and
+    chunking. Missing signature information is conservatively unsupported.
+    """
+    if torch.device(device).type != "cuda" or torch.version.hip or num_heads != 32:
+        return False
+    operation = getattr(_deep_gemm, "fp8_fp4_mqa_logits", None)
+    metadata = getattr(_deep_gemm, "get_mqa_logits_metadata", None)
+    return (
+        callable(operation)
+        and callable(metadata)
+        and _mqa_accepts_schedule_meta(operation)
+        and torch.cuda.get_device_capability(device)[0] == 10
+    )
+
+
 def fp8_fp4_mqa_indexer_score(
     q_payload: torch.Tensor,  # [M, H, 64] int8
     q_sf: torch.Tensor,  # [M, H] int32
@@ -113,6 +139,7 @@ def fp8_fp4_mqa_indexer_score(
     clean_logits: bool = True,
     max_seqlen_k: int = 0,
     return_bf16: bool = False,
+    use_schedule: bool = False,
 ) -> torch.Tensor:
     """MX-mode FP4 prefill indexer logits via DeepGEMM.
 
@@ -139,12 +166,25 @@ def fp8_fp4_mqa_indexer_score(
         if _mqa_accepts_logits_dtype(operation)
         else {}
     )
+    starts = cu_seqlen_ks.contiguous()
+    ends = cu_seqlen_ke.contiguous()
+    if (
+        return_bf16
+        and use_schedule
+        and supports_fp8_fp4_mqa_schedule(q_payload.device, q_payload.shape[1])
+    ):
+        # Build from this invocation's exact bounds on the current stream.
+        # Keep the metadata alive through enqueue, without cross-input caching
+        # or catching execution errors after this path has been selected.
+        options["schedule_meta"] = _deep_gemm.get_mqa_logits_metadata(
+            starts, ends, k_payload.shape[0], q_payload.shape[1]
+        )
     scores = operation(
         (q_payload.contiguous(), q_sf.contiguous()),
         (k_payload.contiguous(), k_sf.contiguous()),
         weights.to(torch.bfloat16).contiguous(),
-        cu_seqlen_ks.contiguous(),
-        cu_seqlen_ke.contiguous(),
+        starts,
+        ends,
         max_seqlen_k=width,
         **options,
     )
