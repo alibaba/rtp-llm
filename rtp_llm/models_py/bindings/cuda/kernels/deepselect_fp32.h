@@ -29,12 +29,12 @@ void deepselect_fp32(const torch::Tensor& logits,
 torch::Tensor
 markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bias, const torch::Tensor& temperature);
 
-// K<=512 uses DeepSelect on supported Blackwell inputs. K4096 uses ATen topk
-// so sparse -INF rows retain valid indices. Returned indices are int64.
+// K<=512 and K4096 use DeepSelect on supported Blackwell inputs; other
+// shapes use ATen topk. Returned indices are int64.
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tensor& logits, int64_t k);
 
-// Compatibility entry points for DSV4.1 K4096 selection. Both use exact
-// full-vocabulary ATen topk, including after the optional Markov transform.
+// Compatibility entry points for DSV4.1 K4096 selection. Both use the
+// general selector, including after the optional Markov transform.
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk_prefilter(const torch::Tensor& logits);
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_markov_topk_prefilter(const torch::Tensor& logits,
                                                                                const torch::Tensor& markov_bias,

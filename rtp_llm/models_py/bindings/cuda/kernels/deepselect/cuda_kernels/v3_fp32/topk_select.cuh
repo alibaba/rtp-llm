@@ -76,6 +76,62 @@ public:
         dst_ptr                                       = __float_as_uint(__uint_as_float(dst_ptr) + __uint_as_float(8u));
     }
 
+    // Only a row whose final cutoff is -inf needs this path. Its survivors
+    // already contain every value above -inf; fill the rest from distinct real
+    // -inf tokens, without letting padded tail slots enter the output.
+    static __device__ __noinline__ void select_sparse_row(const TopkSelectArgs& args,
+                                                          uint32_t              batch_idx,
+                                                          uint32_t              end_vocab_idx,
+                                                          const uint64_t*       survivors,
+                                                          uint32_t*             selected_count,
+                                                          OutIdxT*              output,
+                                                          float*                output_values) {
+        const float* input = static_cast<const float*>(args.input) + uint64_t(batch_idx) * args.stride_input_batch;
+        if (threadIdx.x == 0) {
+            *selected_count = 0;
+        }
+        __syncthreads();
+        const uint32_t lane   = threadIdx.x & 31u;
+        auto           append = [&](bool pick, uint32_t index, float value) {
+            const uint32_t mask  = __ballot_sync(0xffffffffu, pick);
+            const uint32_t count = __popc(mask);
+            uint32_t       first = 0;
+            if (lane == 0 && count != 0) {
+                first = atomicAdd_block(selected_count, count);
+            }
+            first = __shfl_sync(0xffffffffu, first, 0);
+            if (pick) {
+                const uint32_t slot = first + __popc(mask & ((1u << lane) - 1u));
+                if (slot < args.topk) {
+                    output[slot] = static_cast<OutIdxT>(
+                        args.index_map ? args.index_map[uint64_t(batch_idx) * args.stride_index_map_batch + index] :
+                                         index);
+                    if constexpr (Config::return_value) {
+                        output_values[slot] = value;
+                    }
+                }
+            }
+        };
+        for (uint32_t base = 0; base < args.topk; base += NUM_THREADS) {
+            const uint64_t pair  = survivors[base + threadIdx.x];
+            const uint32_t index = static_cast<uint32_t>(pair);
+            const uint32_t bits  = static_cast<uint32_t>(pair >> 32);
+            const bool     pick  = index < end_vocab_idx && canonicalize_nan(bits) != NEG_INF_BITS;
+            append(pick, index, pick ? __ldg(input + index) : 0.0f);
+        }
+        __syncthreads();
+        for (uint32_t base = 0; base < end_vocab_idx; base += NUM_THREADS) {
+            if (*selected_count >= args.topk) {
+                break;
+            }
+            const uint32_t index = base + threadIdx.x;
+            const bool     valid = index < end_vocab_idx;
+            const float    value = valid ? __ldg(input + index) : 0.0f;
+            append(valid && __float_as_uint(value) == NEG_INF_BITS, index, value);
+            __syncthreads();
+        }
+    }
+
     static __device__ __forceinline__ void topk_select_kernel_devfunc(const TopkSelectArgs& args,
                                                                       const TmaParams&      tma_params) {
         uint32_t batch_idx = blockIdx.x;
@@ -630,8 +686,8 @@ public:
         }
 
         if (num_incomers > 0) {
-            reconstruct(num_incomers);
-            num_incomers = 0;
+            threshold_bits = reconstruct(num_incomers);
+            num_incomers   = 0;
         }
 
         // Publish the final reconstruction before reading other threads' pairs.
@@ -642,6 +698,18 @@ public:
         float* output_values = Config::return_value ? static_cast<float*>(args.output_value)
                                                           + uint64_t(batch_idx) * args.stride_output_value_batch :
                                                       nullptr;
+        if constexpr (!FILTER_FINITE) {
+            if (args.topk == 4096 && threshold_bits == NEG_INF_BITS) {
+                select_sparse_row(args,
+                                  batch_idx,
+                                  end_vocab_idx,
+                                  smem.surviving_topk_pairs[survivor_buf_idx],
+                                  smem.warp_cnt,
+                                  output,
+                                  output_values);
+                return;
+            }
+        }
         for (uint32_t slot = threadIdx.x; slot < args.topk; slot += NUM_THREADS) {
             uint64_t pair  = smem.surviving_topk_pairs[survivor_buf_idx][slot];
             uint32_t index = static_cast<uint32_t>(pair);

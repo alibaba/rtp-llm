@@ -171,6 +171,66 @@ TEST_F(CudaSamplerTest, testDeepSelect4096SparseLogitsKeepValidUniqueIndices) {
     }
 }
 
+TEST_F(CudaSamplerTest, testDeepSelect4096SparseAndBoundaryWidths) {
+    const auto* properties = at::cuda::getDeviceProperties(0);
+    if (!torch_ext::deepselect_fp32_available() || properties->major != 10
+        || (properties->minor != 0 && properties->minor != 3)) {
+        GTEST_SKIP() << "DeepSelect FP32 requires SM100 or SM103";
+    }
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t vocab : {8192, 128256, 129280, 130048, 131072}) {
+        for (int64_t finite_count : {1, 4095, 4096, 4097}) {
+            SCOPED_TRACE(vocab);
+            SCOPED_TRACE(finite_count);
+            std::vector<float> host(vocab, -std::numeric_limits<float>::infinity());
+            host[vocab - 1] = 5000.0f;
+            for (int64_t i = 1; i < finite_count; ++i) {
+                host[i - 1] = static_cast<float>(5000 - i);
+            }
+            auto logits   = cudaTensor(host, {1, vocab});
+            auto selected = torch_ext::deepselect_fp32_topk(logits, 4096);
+            if (finite_count == 1) {
+                assertSparseTopKPreservesDistribution(logits, torch_ext::deepselect_fp32_topk_prefilter(logits));
+                auto bias        = torch::zeros_like(logits, options.dtype(torch::kBFloat16));
+                auto temperature = torch::ones({1}, options);
+                assertSparseTopKPreservesDistribution(
+                    logits, torch_ext::deepselect_fp32_markov_topk_prefilter(logits, bias, temperature));
+            }
+            auto                 indices = std::get<1>(selected).cpu().contiguous();
+            std::vector<int64_t> ids(indices.data_ptr<int64_t>(), indices.data_ptr<int64_t>() + 4096);
+            std::sort(ids.begin(), ids.end());
+            ASSERT_GE(ids.front(), 0);
+            ASSERT_LT(ids.back(), vocab);
+            ASSERT_EQ(std::adjacent_find(ids.begin(), ids.end()), ids.end());
+            EXPECT_TRUE(torch::equal(std::get<0>(selected), logits.gather(1, std::get<1>(selected))));
+            EXPECT_EQ(torch::isfinite(std::get<0>(selected)).sum().item<int64_t>(), std::min(finite_count, 4096L));
+            for (int64_t i = 0; i < std::min(finite_count, 4096L); ++i) {
+                EXPECT_TRUE(std::binary_search(ids.begin(), ids.end(), i == 0 ? vocab - 1 : i - 1));
+            }
+        }
+    }
+
+    // Exercise an unaligned logical width and different valid ends per row
+    // while the backing row stride still satisfies the TMA alignment contract.
+    auto backing = torch::full({2, 130304}, -std::numeric_limits<float>::infinity(), options);
+    auto logits  = backing.narrow(1, 0, 130049);
+    logits.select(1, 7).fill_(5.0f);
+    auto ends    = cudaIntTensor({130049, 128257}, {2});
+    auto indices = torch::empty({2, 4096}, options.dtype(torch::kInt32));
+    auto values  = torch::empty({2, 4096}, options);
+    torch_ext::deepselect_fp32(logits, ends, indices, false, &values);
+    auto ids_cpu = indices.cpu().contiguous();
+    for (int64_t row = 0; row < 2; ++row) {
+        std::vector<int32_t> ids(ids_cpu.data_ptr<int32_t>() + row * 4096,
+                                 ids_cpu.data_ptr<int32_t>() + (row + 1) * 4096);
+        std::sort(ids.begin(), ids.end());
+        ASSERT_GE(ids.front(), 0);
+        ASSERT_LT(ids.back(), ends[row].item<int32_t>());
+        ASSERT_EQ(std::adjacent_find(ids.begin(), ids.end()), ids.end());
+    }
+    EXPECT_TRUE(torch::equal(values, logits.gather(1, indices.to(torch::kLong))));
+}
+
 TEST_F(CudaSamplerTest, testMarkovSoftmaxRejectsBadOutputRank) {
     const auto              options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     MarkovSoftmaxStepParams params{torch::zeros({1, 4}, options),

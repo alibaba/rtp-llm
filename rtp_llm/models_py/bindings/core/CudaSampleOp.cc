@@ -442,14 +442,9 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     torch::Tensor probs_t;
     if (!fused_greedy_top1) {
         if (force_topk > 0) {
-            const auto* device_properties = at::cuda::getDeviceProperties(params.logits.get_device());
-            auto        selected          = force_topk == 4096 && batch_size >= 16 && params.logits.size(1) == 129280
-                                    && device_properties->major == 10
-                                    && (device_properties->minor == 0 || device_properties->minor == 3) ?
-                                                torch_ext::deepselect_fp32_topk_prefilter(params.logits) :
-                                                torch_ext::deepselect_fp32_topk(params.logits, force_topk);
-            topk_indices                  = std::get<1>(selected);
-            probs_t                       = torch::softmax(std::get<0>(selected), -1);
+            auto selected = torch_ext::deepselect_fp32_topk(params.logits, force_topk);
+            topk_indices  = std::get<1>(selected);
+            probs_t       = torch::softmax(std::get<0>(selected), -1);
         } else {
             probs_t = torch::softmax(params.logits, -1);
             params.logits.copy_(probs_t, true);

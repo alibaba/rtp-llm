@@ -53,8 +53,7 @@ __global__ void markovScaledLogitsKernel(const float* __restrict__ logits,
     }
 }
 
-constexpr int kPrefilterVocab   = 129280;
-constexpr int kPrefilterK       = 4096;
+constexpr int kPrefilterK = 4096;
 }  // namespace
 #endif
 
@@ -266,17 +265,21 @@ void deepselect_fp32(const torch::Tensor& logits,
 
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tensor& logits, int64_t k) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if (k > 0 && k <= 512 && logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
-        && logits.size(1) >= 512 && logits.is_contiguous() && logits.stride(0) % 256 == 0
+    if ((k == 4096 || (k > 0 && k <= 512)) && logits.is_cuda() && logits.scalar_type() == torch::kFloat32
+        && logits.dim() == 2 && logits.size(1) >= (k == 4096 ? 4096 : 512) && logits.size(1) < MAX_VOCAB_SIZE
+        && logits.is_contiguous() && logits.stride(0) % 256 == 0
         && at::cuda::getDeviceProperties(logits.get_device())->major == 10
         && (at::cuda::getDeviceProperties(logits.get_device())->minor == 0
             || at::cuda::getDeviceProperties(logits.get_device())->minor == 3)) {
-        constexpr int64_t width   = 512;
-        auto              indices = torch::empty({logits.size(0), width}, logits.options().dtype(torch::kInt32));
-        auto              ends = torch::full({logits.size(0)}, logits.size(1), logits.options().dtype(torch::kInt32));
-        deepselect_fp32(logits, ends, indices, /*filter_finite=*/false);
+        const int64_t width   = k == 4096 ? 4096 : 512;
+        auto          indices = torch::empty({logits.size(0), width}, logits.options().dtype(torch::kInt32));
+        auto          ends    = torch::full({logits.size(0)}, logits.size(1), logits.options().dtype(torch::kInt32));
+        auto          values  = k == 4096 ? torch::empty({logits.size(0), width}, logits.options()) : torch::Tensor();
+        deepselect_fp32(logits, ends, indices, /*filter_finite=*/false, values.defined() ? &values : nullptr);
         auto indices64 = indices.to(torch::kInt64);
-        auto values    = logits.gather(1, indices64);
+        if (!values.defined()) {
+            values = logits.gather(1, indices64);
+        }
         if (k == width) {
             return {values, indices64};
         }
@@ -284,8 +287,6 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tenso
         return {std::get<0>(selected), indices64.gather(1, std::get<1>(selected))};
     }
 #endif
-    // K4096 DeepSelect can select padded -INF entries on sparse masked rows.
-    // Keep the candidate cap, but require valid, unique vocabulary indices.
     auto selected = torch::topk(logits, k, -1, /*largest=*/true, /*sorted=*/false);
     return {std::get<0>(selected), std::get<1>(selected)};
 }
@@ -295,8 +296,8 @@ static std::tuple<torch::Tensor, torch::Tensor>
 prefilter_topk4096(const torch::Tensor& logits, const torch::Tensor* markov_bias, const torch::Tensor* temperature) {
     const bool with_markov = markov_bias != nullptr;
     TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
-                    && logits.size(1) == kPrefilterVocab && logits.stride(1) == 1 && logits.stride(0) % 256 == 0,
-                "K4096 prefilter requires aligned CUDA FP32 [B,129280] logits");
+                    && logits.size(1) >= kPrefilterK,
+                "K4096 prefilter requires CUDA FP32 [B,V] logits with V >= 4096");
     if (with_markov) {
         TORCH_CHECK(markov_bias->is_cuda() && markov_bias->device() == logits.device()
                         && markov_bias->scalar_type() == torch::kBFloat16 && markov_bias->sizes() == logits.sizes()
