@@ -779,7 +779,10 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    # AllGather overwrites the entire rank-major output before it is consumed
+    # on this stream. Pre-zeroing adds a full-buffer write ahead of NCCL and
+    # can prevent communication from overlapping a GEMM on another stream.
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,

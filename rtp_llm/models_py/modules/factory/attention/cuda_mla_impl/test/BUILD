@@ -4,6 +4,14 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement(["torch", "triton", "flash-mla"])
 
 py_test(
+    name = "cp_kv_padded_pack_test",
+    srcs = ["cp_kv_padded_pack_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "history_remap_collective_test",
     srcs = ["history_remap_collective_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
@@ -167,4 +175,12 @@ py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
+)
+
+py_test(
+    name = "layered_prefill_cache_test",
+    srcs = ["layered_prefill_cache_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )

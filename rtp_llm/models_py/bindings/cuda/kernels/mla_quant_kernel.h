@@ -54,4 +54,13 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,    
                                              int64_t              batch_size,
                                              int64_t              total_tokens);
 
+// Same FP8 arithmetic as v2; writes each request directly into its padded
+// interval, including zeros for padding. Starts/lengths are the CP device plan.
+void cp_gather_and_upconvert_fp8_kv_cache_padded(const torch::Tensor& src_cache,
+                                               torch::Tensor& dst_fused,
+                                               const torch::Tensor& block_table,
+                                               const torch::Tensor& actual_lens,
+                                               const torch::Tensor& padded_lens,
+                                               const torch::Tensor& padded_starts);
+
 }  // namespace rtp_llm
