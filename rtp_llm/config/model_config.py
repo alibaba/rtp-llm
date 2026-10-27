@@ -81,6 +81,7 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "qwen3_reranker_fixed_head",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -566,6 +567,7 @@ class ModelConfig(CppModelConfig):
         )
         self.enable_w4a16_sm120_dense_ffn: bool = False
         self.enable_int8_allreduce_fp16_scale: bool = False
+        self.qwen3_reranker_fixed_head: bool = True
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
 
@@ -922,6 +924,10 @@ def build_model_config(
         model_config.ckpt_path,
         embedding_config,
     )
+    if embedding_config is not None:
+        model_config.qwen3_reranker_fixed_head = (
+            embedding_config.qwen3_reranker_fixed_head
+        )
 
     # Set quantization from quantization_config
     if quantization_config is not None:

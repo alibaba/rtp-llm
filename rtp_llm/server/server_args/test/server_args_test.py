@@ -914,17 +914,20 @@ class EmbeddingRerankerConfigTest(TestCase):
         self.assertIs(config.embedding_share_grpc_channel, True)
         self.assertIs(config.embedding_grpc_keepalive, False)
         self.assertIsNone(config.embedding_rpc_timeout_s)
+        self.assertIs(config.qwen3_reranker_fixed_head, True)
 
     def test_env_and_cli_precedence(self):
         env = {
             "RTP_LLM_EMBEDDING_SHARE_CHANNEL": "0",
             "RTP_LLM_EMBEDDING_GRPC_KEEPALIVE": "1",
             "RTP_LLM_EMBEDDING_RPC_TIMEOUT_S": "12.5",
+            "RTP_LLM_QWEN3_RERANKER_FIXED_HEAD": "0",
         }
         config = self._setup_args(env, [])
         self.assertIs(config.embedding_share_grpc_channel, False)
         self.assertIs(config.embedding_grpc_keepalive, True)
         self.assertEqual(config.embedding_rpc_timeout_s, 12.5)
+        self.assertIs(config.qwen3_reranker_fixed_head, False)
 
         config = self._setup_args(
             env,
@@ -935,11 +938,14 @@ class EmbeddingRerankerConfigTest(TestCase):
                 "false",
                 "--embedding_rpc_timeout_s",
                 "0",
+                "--qwen3_reranker_fixed_head",
+                "true",
             ],
         )
         self.assertIs(config.embedding_share_grpc_channel, True)
         self.assertIs(config.embedding_grpc_keepalive, False)
         self.assertEqual(config.embedding_rpc_timeout_s, 0.0)
+        self.assertIs(config.qwen3_reranker_fixed_head, True)
 
     def _assert_rejected(self, env, args):
         with patch("sys.stderr"), self.assertRaises(SystemExit) as error:
@@ -955,6 +961,44 @@ class EmbeddingRerankerConfigTest(TestCase):
                     {"RTP_LLM_EMBEDDING_RPC_TIMEOUT_S": value},
                     ["--embedding_share_grpc_channel", "true"],
                 )
+
+    def test_reranker_switches_propagate_to_model_config(self):
+        from rtp_llm.config.model_config import ModelConfig, build_model_config
+        from rtp_llm.ops import TaskType
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(os.environ, self.device_env, clear=True):
+            configs = setup_args(
+                [
+                    "--model_type",
+                    "qwen_3",
+                    "--checkpoint_path",
+                    "/unused-checkpoint",
+                    "--qwen3_reranker_fixed_head",
+                    "false",
+                ]
+            )
+        model_config = ModelConfig()
+        kv_config = SimpleNamespace(
+            seq_size_per_block=16,
+            kernel_seq_size_per_block=0,
+            ssm_state_dtype="fp32",
+        )
+        with (
+            patch.object(ModelConfig, "init_precision_config"),
+            patch(
+                "rtp_llm.config.model_config.get_task_type_from_ckpt_path",
+                return_value=TaskType.LANGUAGE_MODEL,
+            ),
+        ):
+            build_model_config(
+                model_config,
+                configs.model_args,
+                kv_config,
+                SimpleNamespace(hack_layer_num=0),
+                embedding_config=configs.embedding_config,
+            )
+        self.assertIs(model_config.qwen3_reranker_fixed_head, False)
 
 
 if __name__ == "__main__":

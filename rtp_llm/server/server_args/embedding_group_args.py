@@ -42,3 +42,11 @@ def init_embedding_group_args(parser, embedding_config):
         help="Embedding/Reranker frontend 到 backend 的 gRPC deadline（秒），默认不设 deadline；"
         "<=0 同样表示不设。注意 backend 目前不处理 gRPC 取消，deadline 到期后 backend 仍会算完该请求",
     )
+    embedding_group.add_argument(
+        "--qwen3_reranker_fixed_head",
+        env_name="RTP_LLM_QWEN3_RERANKER_FIXED_HEAD",
+        bind_to=(embedding_config, "qwen3_reranker_fixed_head"),
+        type=str2bool,
+        default=True,
+        help="Qwen3 Reranker 只使用 lm_head 的 no/yes 两行、无 bias、fp32 计算 sigmoid(yes - no)",
+    )

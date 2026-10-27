@@ -22,9 +22,7 @@ from rtp_llm.utils.util import to_torch_dtype
 
 class Qwen3RerankerModule(CustomModule):
 
-    def __init__(
-        self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase):
         super().__init__(config, tokenizer)
         self.renderer = Qwen3RerankerRenderer(self.config_, self.tokenizer_)
         token_false_id = self.tokenizer_.convert_tokens_to_ids("no")
@@ -33,9 +31,7 @@ class Qwen3RerankerModule(CustomModule):
 
 
 class Qwen3RerankerRenderer(RerankerRenderer):
-    def __init__(
-        self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase
-    ):
+    def __init__(self, config: ModelConfig, tokenizer: PreTrainedTokenizerBase):
         super().__init__(config, tokenizer)
         prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
         suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -101,9 +97,7 @@ class Qwen3RerankerRenderer(RerankerRenderer):
 
 class Qwen3RerankerHandler(CustomHandler):
 
-    def __init__(
-        self, config: ModelConfig, token_false_id: int, token_true_id: int
-    ):
+    def __init__(self, config: ModelConfig, token_false_id: int, token_true_id: int):
         super().__init__(config)
         self.token_false_id = token_false_id
         self.token_true_id = token_true_id
@@ -113,7 +107,13 @@ class Qwen3RerankerHandler(CustomHandler):
             if self.tie_word_embeddings
             else "lm_head.weight"
         )
-        
+        # Score with only the [no, yes] lm_head rows, without bias, in fp32.
+        self.fixed_head: bool = config.qwen3_reranker_fixed_head
+        # Set by init(): yes_no_weight ([2, hidden], fp32, rows [no, yes]) for the
+        # fixed head, linear for the legacy full-vocab head.
+        self.yes_no_weight: Optional[torch.Tensor] = None
+        self.linear: Optional[torch.nn.Linear] = None
+
     def custom_weight_info(self) -> List[CustomAtomicWeight]:
         w_list = [self.lm_head_weight_name]
         weights = []
@@ -126,6 +126,17 @@ class Qwen3RerankerHandler(CustomHandler):
     def init(self, tensor_map: Dict[str, torch.Tensor]):
         data_type = to_torch_dtype(self.config_.data_type)
         linear_weight = tensor_map[self.lm_head_weight_name]
+        if self.fixed_head:
+            row_ids = torch.tensor(
+                [self.token_false_id, self.token_true_id], device=linear_weight.device
+            )
+            self.yes_no_weight = (
+                linear_weight.index_select(0, row_ids)
+                .float()
+                .to(self.device)
+                .contiguous()
+            )
+            return
         self.linear = torch.nn.Linear(linear_weight.shape[1], linear_weight.shape[0])
         self.linear.weight.data = linear_weight
         self.linear = self.linear.to(data_type).eval().to(self.device)
@@ -138,6 +149,10 @@ class Qwen3RerankerHandler(CustomHandler):
         input_lengths: torch.Tensor,
     ) -> torch.Tensor:
         last_token = get_last_token_from_combo_tokens(hidden_states, input_lengths)
+        if self.fixed_head:
+            # [batch, 2] logits ordered as [no, yes]
+            logits = last_token.float() @ self.yes_no_weight.t()
+            return torch.sigmoid(logits[:, 1] - logits[:, 0])
         last_token_logits = self.linear(last_token)
         true_vector = last_token_logits[:, self.token_true_id]
         false_vector = last_token_logits[:, self.token_false_id]
