@@ -142,8 +142,18 @@ def get_ip():
     return socket.gethostbyname(socket.gethostname())
 
 
-def get_gpu_ids():
-    cuda_info = get_cuda_info()
+def get_gpu_ids(cuda_info: Optional[Tuple[str, int]] = None):
+    """Visible GPU ids, honouring CUDA/HIP_VISIBLE_DEVICES when set.
+
+    cuda_info: a (device_name, count) pair already probed by get_cuda_info()
+    in this process. Passing it skips a second CUDA probe subprocess -- a
+    fresh python that imports torch, ~3s per test action -- which the
+    GPU-lock wrapper would otherwise pay once in main() and again here when
+    DeviceResource is constructed. None (the default) probes as before, so
+    the 803 compat-retry path in get_cuda_info() stays fully intact.
+    """
+    if cuda_info is None:
+        cuda_info = get_cuda_info()
     logging.info(f"{cuda_info}")
 
     if not cuda_info:
@@ -215,9 +225,13 @@ def _gpu_free_memory_mib() -> int:
 
 
 class DeviceResource:
-    def __init__(self, required_gpu_count: int):
+    def __init__(
+        self, required_gpu_count: int, cuda_info: Optional[Tuple[str, int]] = None
+    ):
         self.required_gpu_count = required_gpu_count
-        self.total_gpus = get_gpu_ids()
+        # Reuse the wrapper's earlier get_cuda_info() probe instead of paying
+        # a second probe subprocess here; see get_gpu_ids().
+        self.total_gpus = get_gpu_ids(cuda_info)
         if required_gpu_count > len(self.total_gpus):
             raise ValueError(
                 f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
@@ -1010,7 +1024,7 @@ def main():
 
     device_name, _ = cuda_info
     require_count = int(os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1")))
-    with DeviceResource(require_count) as gpu_resource:
+    with DeviceResource(require_count, cuda_info=cuda_info) as gpu_resource:
         if "308" in device_name:
             env_name = "HIP_VISIBLE_DEVICES"
         else:
