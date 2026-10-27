@@ -9,7 +9,6 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import java.util.concurrent.ConcurrentHashMap;
@@ -476,8 +475,10 @@ public class CacheMetricsReporter {
         }
         FlexMetricTags tags =
                 FlexMetricTags.of(
-                        "role", roleType.name(),
-                        "engineIp", engineAddress == null ? "unknown" : engineAddress);
+                        "role",
+                        roleType.name(),
+                        "engineIp",
+                        engineAddress == null ? "unknown" : engineAddress);
         monitor.report(CACHE_HIT_RATIO, tags, hitRatio);
         if (inputTokens > 0L) {
             monitor.report(CACHE_HIT_COUNT, tags, hitTokens);
@@ -506,7 +507,8 @@ public class CacheMetricsReporter {
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", engineAddress);
         monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, hitTokens);
         if (inputTokens > 0L) {
-            monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
+            monitor.report(
+                    CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
         }
     }
 
@@ -598,7 +600,8 @@ public class CacheMetricsReporter {
             return;
         }
         reportCacheDiffMetrics(
-                FlexMetricTags.of("engineIp", engineAddress, "role", role == null ? "unknown" : role),
+                FlexMetricTags.of(
+                        "engineIp", engineAddress, "role", role == null ? "unknown" : role),
                 addedBlocksSize,
                 removedBlocksSize);
     }
