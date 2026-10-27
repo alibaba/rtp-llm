@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.mockito.Mockito;
 
@@ -39,9 +38,9 @@ public final class DeliveryTestSupport {
         };
     }
 
-    public static RequestTimeEstimation.DeliveryProjection projection(
+    public static org.flexlb.config.DispatcherConfig.Type projection(
             DeliveryDispatcher dispatcher) {
-        return RequestTimeEstimation.forDelivery(dispatcher.mode());
+        return dispatcher.mode();
     }
 
     static class StubDispatcher extends DeliveryDispatcher {
@@ -232,12 +231,6 @@ public final class DeliveryTestSupport {
     }
 
     static CapacityBoundary unavailable() {
-        return CapacityBoundary.unavailable(
-                CapacityBoundary.Resource.DISPATCH_EXECUTOR,
-                new RequestTimeEstimation.AdmissionBlockSemantics(
-                        "TEST_CAPACITY",
-                        RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
-                        "TEST_CAPACITY",
-                        org.flexlb.dao.route.RoleType.PREFILL));
+        return CapacityBoundary.unavailable(CapacityBoundary.Resource.DISPATCH_EXECUTOR);
     }
 }

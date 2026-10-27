@@ -24,7 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -50,6 +49,34 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DeliveryClaimTest {
+    @Test
+    void queueNotificationFailureCannotStrandAnAcceptedCancellation() throws Exception {
+        try (var f = new Fixture()) {
+            var failure = new IllegalStateException("queue notification failed");
+            doThrow(failure).when(f.owner).queueControl(f.context, null);
+
+            assertSame(
+                    failure,
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED)));
+
+            assertFalse(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
+            assertFalse(f.owner.tryStartSend(f.claim));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            DeliveryResult.notSent(
+                                    new java.util.concurrent.CancellationException()),
+                            System.currentTimeMillis()));
+            f.settlement().get(2, TimeUnit.SECONDS);
+            f.awaitArchive();
+            assertFalse(f.prefillOwned.get());
+            assertFalse(f.decodeOwned.get());
+        }
+    }
+
     @Test
     void deliveredAckUpdatesDeadlineOnceAndReplayHasNoEffects() throws Exception {
         try (var f = new Fixture()) {
@@ -91,7 +118,7 @@ class DeliveryClaimTest {
                 f.context.data().getFuture().get(2, TimeUnit.SECONDS);
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             }
-            org.mockito.Mockito.doNothing().when(f.owner).requestCleanup(f.context);
+            org.mockito.Mockito.doNothing().when(f.owner).scheduleClose(f.context);
             org.mockito.Mockito.clearInvocations(f.owner);
             try {
                 if (failedDelivery) {
@@ -107,10 +134,10 @@ class DeliveryClaimTest {
                 }
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
                 assertEquals(ContextResult.Phase.ENDING, f.context.snapshot().phase());
-                verify(f.owner, times(1)).requestCleanup(f.context);
+                verify(f.owner, times(1)).scheduleClose(f.context);
             } finally {
-                org.mockito.Mockito.doCallRealMethod().when(f.owner).requestCleanup(f.context);
-                f.owner.requestCleanup(f.context);
+                org.mockito.Mockito.doCallRealMethod().when(f.owner).scheduleClose(f.context);
+                f.owner.scheduleClose(f.context);
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             }
         }
@@ -158,6 +185,7 @@ class DeliveryClaimTest {
             var failure = new IllegalStateException("stop submission failed");
             doThrow(failure).doCallRealMethod().when(dispatcher).stop(f.claim);
             f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             verify(dispatcher, times(2)).stop(f.claim);
             assertSame(failure, ReflectionTestUtils.getField(f.owner.runtime, "failure"));
             f.owner.onDeliveryEvidence(
@@ -191,8 +219,6 @@ class DeliveryClaimTest {
             if (signalFails) {
                 var failure = new IllegalStateException("terminal notification unavailable");
                 doThrow(failure)
-                        .doThrow(failure)
-                        .doThrow(failure)
                         .doCallRealMethod()
                         .when(signals)
                         .resolvePreemption(eq(registration), any());
@@ -229,13 +255,7 @@ class DeliveryClaimTest {
                             })
                     .when(dispatcher)
                     .stop(f.claim);
-            if (signalFails) {
-                assertThrows(
-                        IllegalStateException.class,
-                        () -> f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED));
-            } else {
-                f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
-            }
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
             f.settlement().get(2, TimeUnit.SECONDS);
             f.awaitArchive();
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
@@ -245,7 +265,7 @@ class DeliveryClaimTest {
                             .toCompletableFuture()
                             .get(2, TimeUnit.SECONDS)
                             .outcome());
-            verify(signals, times(signalFails ? 4 : 1)).resolvePreemption(eq(registration), any());
+            verify(signals, times(signalFails ? 2 : 1)).resolvePreemption(eq(registration), any());
             verify(dispatcher, times(1)).stop(f.claim);
         }
     }
@@ -257,7 +277,7 @@ class DeliveryClaimTest {
             var publisher =
                     org.mockito.Mockito.spy(
                             SchedulerTestSupport.responseCompletions(f.owner.runtime));
-            org.mockito.Mockito.doReturn(null).doCallRealMethod().when(publisher).tryRegister();
+            org.mockito.Mockito.doReturn(false).doCallRealMethod().when(publisher).register(any());
             ReflectionTestUtils.setField(f.owner.runtime, "responseCompletions", publisher);
             var delivered =
                     new ContextResult.TransportResult(
@@ -266,7 +286,7 @@ class DeliveryClaimTest {
             assertTrue(f.context.data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             verify(f.owner, times(1)).onDeliveryEvidence(f.claim, delivered);
-            verify(publisher, times(2)).tryRegister();
+            verify(publisher, times(2)).register(any());
             finishOwnershipRequest(f);
         }
     }
@@ -306,7 +326,6 @@ class DeliveryClaimTest {
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             var retained = f.context.snapshot();
             assertSame(registration, retained.preemption().identity());
-            assertNull(retained.preemption().reconciliation());
             assertFalse(retained.close().decodeSettled());
             assertNull(retained.outcome());
             verify(f.decode, times(3)).updatePreemption(4L, proof);
@@ -394,12 +413,6 @@ class DeliveryClaimTest {
             throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            f.owner.onDeliveryEvidence(
-                    f.claim,
-                    new ContextResult.TransportResult(
-                            f.claim,
-                            DeliveryResult.uncertain(new IllegalStateException("reply lost")),
-                            System.currentTimeMillis()));
             var dispatcher = SchedulerTestSupport.dispatcher(f.owner.runtime);
             var failure = new IllegalStateException("stop admission unavailable");
             doThrow(failure)
@@ -408,13 +421,16 @@ class DeliveryClaimTest {
                     .doCallRealMethod()
                     .when(dispatcher)
                     .stop(f.claim);
-            assertSame(
-                    failure,
-                    assertThrows(
-                            IllegalStateException.class,
-                            () -> f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED)));
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim,
+                            DeliveryResult.uncertain(new IllegalStateException("reply lost")),
+                            System.currentTimeMillis()));
+            f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            assertSame(failure, SchedulerTestSupport.failure(f.owner));
             var retained = f.context.snapshot();
-            assertNull(retained.close().endOperation());
             assertFalse(
                     retained.close().notificationsAttempted(), "rejection is not stop acceptance");
             verify(dispatcher, times(3)).stop(f.claim);
@@ -457,7 +473,7 @@ class DeliveryClaimTest {
                 f.settlement().get(2, TimeUnit.SECONDS);
                 f.awaitArchive();
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-                verify(f.owner, times(1)).requestCleanup(f.context);
+                verify(f.owner, times(1)).scheduleClose(f.context);
                 verify(queue, times(2)).execute(eq(f.context), any(), any(), any());
                 assertFalse(f.prefillOwned.get());
                 assertFalse(f.decodeOwned.get());
@@ -465,7 +481,7 @@ class DeliveryClaimTest {
             } finally {
                 ReflectionTestUtils.setField(f.owner.runtime, "requestWorkQueue", originalQueue);
                 if (f.owner.requests.isCurrent(f.context)) {
-                    f.owner.requestCleanup(f.context);
+                    f.owner.scheduleClose(f.context);
                     f.settlement().get(2, TimeUnit.SECONDS);
                     f.awaitArchive();
                 }
@@ -482,18 +498,13 @@ class DeliveryClaimTest {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             var original = f.owner.runtime.deadlines();
+            original.remove(f.context);
             var timer = org.mockito.Mockito.spy(original);
             var failure = new IllegalStateException("terminal deadline installation failed");
             doThrow(failure).doCallRealMethod().when(timer).update(eq(f.context), any());
             ReflectionTestUtils.setField(f.owner.runtime, "timer", timer);
             try {
-                assertSame(
-                        failure,
-                        assertThrows(
-                                IllegalStateException.class,
-                                () ->
-                                        f.owner.cancel(
-                                                f.context, 0L, CancelReason.CLIENT_CANCELLED)));
+                f.owner.cancel(f.context, 0L, CancelReason.CLIENT_CANCELLED);
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
                 verify(timer, times(2)).update(eq(f.context), any());
                 var state = f.context.snapshot();
@@ -628,15 +639,11 @@ class DeliveryClaimTest {
     }
 
     @Test
-    void terminalBeforeSenderFinishesQueuesCleanupOnlyAfterProofAndShutdownDrainsIt()
-            throws Exception {
+    void terminalBeforeSenderExitRetainsResourcesAndShutdownDrainsCleanup() throws Exception {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
-            var executor = observeWorkers(f.owner.runtime);
-
             f.applyDecodeTerminal();
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-            verify(executor, times(1)).execute(any(Runnable.class));
             assertFalse(f.settlement().isDone());
             assertTrue(f.owner.requests.isCurrent(f.context));
             assertTrue(f.prefillOwned.get(), "the sender still pins Prefill ownership");
@@ -732,9 +739,7 @@ class DeliveryClaimTest {
             f.clearDecodeStateOwnership();
             f.recordDecodeStatus(
                     f.decode, DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
-            Runnable terminal = f.prepareTerminalEffects();
-            f.owner.requestCleanup(f.claim.owner());
-            assertNotNull(terminal);
+            f.prepareClose();
             var executor = observeWorkers(f.owner.runtime);
             var rejected = new IllegalStateException("queue acceptance rejected");
             doAnswer(
@@ -742,8 +747,8 @@ class DeliveryClaimTest {
                                 assertFalse(
                                         Thread.holdsLock(f.context),
                                         "queue submission must run outside the request monitor");
-                                f.owner.requestCleanup(f.context);
-                                f.owner.requestCleanup(f.context);
+                                f.owner.scheduleClose(f.context);
+                                f.owner.scheduleClose(f.context);
                                 assertTrue(
                                         f.prefillOwned.get(),
                                         "a synchronous event cannot consume an unaccepted queue"
@@ -753,15 +758,15 @@ class DeliveryClaimTest {
                     .when(executor)
                     .execute(any(Runnable.class));
 
-            f.owner.requestCleanup(f.context);
+            f.owner.scheduleClose(f.context);
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             assertFalse(
                     f.prefillOwned.get(),
                     "accepted cleanup recovers without losing its queue claim");
-            assertTrue(
+            assertFalse(
                     f.owner.requests.isCurrent(f.context),
-                    "terminal effects still own the archive gate");
-            terminal.run();
+                    "the accepted finish owner completes notifications and settlement");
+            f.owner.scheduleClose(f.context);
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             assertFalse(f.owner.requests.isCurrent(f.context));
             verify(f.prefill, times(1)).release(null, f.claim.item());
@@ -804,10 +809,10 @@ class DeliveryClaimTest {
             try {
                 f.applyDecodeTerminal();
                 assertTrue(entered.await(2, TimeUnit.SECONDS));
-                f.owner.requestCleanup(f.context);
+                f.owner.scheduleClose(f.context);
                 int submissions = mockingDetails(executor).getInvocations().size();
                 for (int i = 0; i < 100; i++) {
-                    f.owner.requestCleanup(f.context);
+                    f.owner.scheduleClose(f.context);
                 }
                 assertEquals(
                         submissions,
@@ -853,8 +858,7 @@ class DeliveryClaimTest {
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             f.clearDecodeStateOwnership();
-            Runnable terminal = f.prepareTerminalEffects();
-            assertNotNull(terminal);
+            f.prepareClose();
             var delegate = SchedulerTestSupport.requestWorkers(f.owner.runtime);
             var workers = observeWorkers(f.owner.runtime);
             var entered = new java.util.concurrent.CountDownLatch(1);
@@ -869,7 +873,7 @@ class DeliveryClaimTest {
                             })
                     .when(workers)
                     .execute(any(Runnable.class));
-            var producer = new Thread(() -> f.owner.requestCleanup(f.context));
+            var producer = new Thread(() -> f.owner.scheduleClose(f.context));
             var closer = new Thread(() -> SchedulerTestSupport.closeRequestWork(f.owner.runtime));
             try {
                 producer.start();
@@ -883,7 +887,7 @@ class DeliveryClaimTest {
                 assertFalse(
                         f.decodeOwned.get(),
                         "DecodeState already supplied exact terminal settlement");
-                terminal.run();
+                f.owner.scheduleClose(f.context);
                 closer.start();
                 RequestProtocolTestSupport.awaitCondition(
                         () -> closer.getState() == Thread.State.WAITING);
@@ -1029,13 +1033,13 @@ class DeliveryClaimTest {
             f.recordDecodeStatus(
                     RequestProtocolTestSupport.decodeEndpoint(),
                     DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L));
-            f.owner.requestCleanup(f.claim.owner());
+            f.owner.scheduleClose(f.claim.owner());
             assertFalse(f.settlement().isDone(), "another endpoint is not proof");
             f.recordDecodeStatus(
                     f.decode,
                     DecodeResources.DecodeRequestStatus.terminal(
                             new DecodeResources.ReservationHandle(1L, 41L, 99L), 0L));
-            f.owner.requestCleanup(f.claim.owner());
+            f.owner.scheduleClose(f.claim.owner());
             assertFalse(f.settlement().isDone(), "another reservation is not proof");
             f.applyDecodeTerminal();
             f.settlement().get(2, TimeUnit.SECONDS);
@@ -1107,10 +1111,7 @@ class DeliveryClaimTest {
                                     f.settlement().isDone(),
                                     "cleanup execution failure is not resource settlement"),
                     () -> assertTrue(f.owner.requests.isCurrent(f.context)),
-                    () ->
-                            assertEquals(
-                                    ContextResult.ClaimKind.BLOCKED,
-                                    f.context.beginSettlement().kind()),
+                    () -> assertNull(f.context.releaseReason()),
                     () -> verify(f.prefill, never()).release(isNull(), any()),
                     () -> verify(f.decode, never()).release(any(), any()));
         }
@@ -1492,7 +1493,7 @@ class DeliveryClaimTest {
             assertFalse(f.owner.tryStartSend(f.claim), "uncertain delivery must not be sent again");
             assertFalse(f.settlement().isDone());
             assertTrue(f.owner.requests.isCurrent(f.context));
-            assertEquals(ContextResult.ClaimKind.BLOCKED, f.context.beginSettlement().kind());
+            assertNull(f.context.releaseReason());
             verify(f.prefill, never()).release(isNull(), any());
             verify(f.decode, never()).release(any(), any());
 
@@ -1709,10 +1710,10 @@ class DeliveryClaimTest {
                             ? DecodeResources.DecodeRequestStatus.active(reservation)
                             : DecodeResources.DecodeRequestStatus.terminal(reservation, 0L);
             f.recordDecodeStatus(source, requestStatus);
-            f.owner.requestCleanup(f.claim.owner());
+            f.owner.scheduleClose(f.claim.owner());
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
             assertFalse(f.settlement().isDone());
-            assertEquals(ContextResult.ClaimKind.BLOCKED, f.context.beginSettlement().kind());
+            assertNull(f.context.releaseReason());
             assertTrue(f.decodeOwned.get(), "foreign facts cannot release the exact Decode owner");
             verify(f.prefill, never()).release(isNull(), any());
             verify(f.decode, never()).release(any(), any());
@@ -1946,7 +1947,7 @@ class DeliveryClaimTest {
                             argThat(request -> request.getRequestId() == 41L),
                             anyLong());
             assertTrue(f.owner.requests.isCurrent(f.context));
-            assertEquals(ContextResult.ClaimKind.BLOCKED, f.context.beginSettlement().kind());
+            assertNull(f.context.releaseReason());
             verify(f.prefill, never()).release(isNull(), any());
             verify(f.decode, never()).release(any(), any());
         }
@@ -2706,34 +2707,13 @@ class DeliveryClaimTest {
                     System.currentTimeMillis());
         }
 
-        /**
-         * Deliberately pause the real notification owner while independently testing resource
-         * settlement.
-         */
-        Runnable prepareTerminalEffects() {
+        /** Freeze the outcome before the test controls submission of its closing effects. */
+        void prepareClose() {
             recordDecodeStatus(
                     decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L));
             var closing =
                     context.beginClose(context.snapshot().pendingEnd(), System.currentTimeMillis());
-            assertInstanceOf(ContextResult.Granted.class, closing);
-            var token = ((ContextResult.Granted<ContextResult.EndToken>) closing).value();
-            return () -> {
-                owner.runtime.deadlines().update(context, context.snapshot().deadlines());
-                var completed =
-                        context.completeClose(
-                                token,
-                                new ContextResult.CloseProgress(
-                                        ContextResult.ProgressKind.NOTIFICATIONS,
-                                        false,
-                                        false,
-                                        true,
-                                        true),
-                                System.currentTimeMillis());
-                if (completed.after().terminalRecord() != null) {
-                    owner.requests.archive(context, completed.after().terminalRecord());
-                }
-                owner.requestCleanup(context);
-            };
+            assertNotNull(closing.after().outcome());
         }
 
         void applyDecodeTerminal() {
@@ -2809,9 +2789,10 @@ class DeliveryClaimTest {
             return SchedulerTestSupport.dispatcher(owner.runtime).stop(claim);
         }
 
-        Object stopRecord() {
+        Object stopRecord() throws InterruptedException {
             var cleanup = SchedulerTestSupport.dispatcher(owner.runtime);
             var records = (java.util.Map<?, ?>) ReflectionTestUtils.getField(cleanup, "sessions");
+            RequestProtocolTestSupport.awaitCondition(() -> records.containsKey(claim));
             return java.util.Objects.requireNonNull(records.get(claim));
         }
 

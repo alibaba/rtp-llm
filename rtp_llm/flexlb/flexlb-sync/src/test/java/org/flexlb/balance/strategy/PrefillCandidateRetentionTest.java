@@ -11,6 +11,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 
+import java.lang.ref.Reference;
 import java.lang.ref.WeakReference;
 import java.util.List;
 import java.util.Map;
@@ -24,14 +25,14 @@ import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PrefillCandidateRetentionTest {
     @Test
     void completedSelectionReleasesTheRetiredFleetOnAnIdlePlannerThread() throws Exception {
-        WeakReference<WorkerEndpoint> retired = selectThenRetire();
+        CacheAwareService cache = mock(CacheAwareService.class);
+        WeakReference<WorkerEndpoint> retired = selectThenRetire(cache);
         try {
             for (int attempt = 0; attempt < 30 && !retired.refersTo(null); attempt++) {
                 System.gc();
@@ -44,6 +45,7 @@ class PrefillCandidateRetentionTest {
             var field = CostBasedPrefillStrategy.class.getDeclaredField("CANDIDATES");
             field.setAccessible(true);
             ((ThreadLocal<?>) field.get(null)).remove();
+            Reference.reachabilityFence(cache);
         }
     }
 
@@ -122,7 +124,7 @@ class PrefillCandidateRetentionTest {
         }
     }
 
-    private WeakReference<WorkerEndpoint> selectThenRetire() {
+    private WeakReference<WorkerEndpoint> selectThenRetire(CacheAwareService cache) {
         var config = StrategyTestSupport.config();
         config.setDispatcher(ConfigTestSupport.nonBatch());
         config.getRouter()
@@ -139,7 +141,6 @@ class PrefillCandidateRetentionTest {
         WorkerEndpoint endpoint =
                 StrategyTestSupport.publishEndpoint(
                         registry, RoleType.PREFILL, status.getIpPort(), status);
-        CacheAwareService cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         var strategy =
                 new CostBasedPrefillStrategy(
@@ -165,7 +166,6 @@ class PrefillCandidateRetentionTest {
             return new WeakReference<>(endpoint);
         } finally {
             registry.close();
-            reset(cache); // Mockito records the lazy address view, which also owns its fleet.
         }
     }
 }

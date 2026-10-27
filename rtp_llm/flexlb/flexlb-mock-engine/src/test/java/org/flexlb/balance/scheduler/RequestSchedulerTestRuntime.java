@@ -80,7 +80,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         invocation ->
                                 deliveryPaused
                                         ? CapacityBoundary.Attempt.rejected(
-                                                CapacityBoundary.deliveryUnavailable(
+                                                CapacityBoundary.unavailable(
                                                         CapacityBoundary.Resource
                                                                 .DISPATCH_EXECUTOR))
                                         : invocation.callRealMethod())

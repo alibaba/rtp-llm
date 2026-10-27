@@ -61,6 +61,47 @@ class QueuedDeliveryWithdrawalRaceTest {
 
     @Test
     @Timeout(15)
+    void cancellationDoesNotWaitForTheQueuePreparationThread() throws Exception {
+        try (var fixture = new Fixture();
+                var executor = Executors.newSingleThreadExecutor()) {
+            var prepared = new CountDownLatch(1);
+            var allowCommit = new CountDownLatch(1);
+            var selection =
+                    executor.submit(
+                            () ->
+                                    fixture.select(
+                                            evaluator(
+                                                    () -> {
+                                                        prepared.countDown();
+                                                        await(allowCommit);
+                                                    })));
+            try {
+                assertTrue(prepared.await(5, TimeUnit.SECONDS));
+                fixture.owner.cancel(fixture.context, 0L, CancelReason.CLIENT_CANCELLED);
+                assertFalse(fixture.future.get(2, TimeUnit.SECONDS).isSuccess());
+                SchedulerTestSupport.awaitRequestWork(fixture.runtime);
+                assertEquals(ContextResult.Phase.CLOSED, fixture.context.snapshot().phase());
+                assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
+                assertTrue(fixture.prefill.ownership.batchCapacityAvailable(1));
+                verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
+            } finally {
+                allowCommit.countDown();
+                selection.get(5, TimeUnit.SECONDS);
+                if (fixture.context.snapshot().phase() == ContextResult.Phase.OPEN) {
+                    fixture.owner.closeRequest(
+                            fixture.context,
+                            ContextResult.EndEvidence.failure(
+                                    fixture.route,
+                                    ContextResult.EndKind.FRONTEND,
+                                    StrategyErrorType.REQUEST_CANCELLED,
+                                    "test cleanup"));
+                }
+            }
+        }
+    }
+
+    @Test
+    @Timeout(15)
     void preparedDispatchExcludesWithdrawalUntilTheQueueCommitGetsItsSender() throws Exception {
         try (var fixture = new Fixture();
                 var executor = Executors.newSingleThreadExecutor()) {

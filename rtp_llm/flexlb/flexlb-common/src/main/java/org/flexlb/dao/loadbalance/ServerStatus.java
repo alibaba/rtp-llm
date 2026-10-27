@@ -76,6 +76,7 @@ public class ServerStatus {
     @ToString.Exclude
     private WorkerIdentity workerIdentity = new WorkerIdentity(null, 0, 0);
 
+    /** Selection-time known work cost in ms, excluding collection and transport waits. */
     @JsonProperty("prefill_time")
     private long prefillTime;
 

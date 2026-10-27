@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * KV cache manager
@@ -48,6 +49,8 @@ public class KvCacheManager implements EngineCacheInvalidator {
     private final Map<String, String> physicalIpPortByLogicalIpPort = new ConcurrentHashMap<>();
     /** The owning generation's cache lock serializes each address and its retry. */
     private final Map<String, Long> pendingAdditions = new ConcurrentHashMap<>();
+
+    private final AtomicInteger indexReports = new AtomicInteger();
 
     @PostConstruct
     public void init() {
@@ -152,19 +155,26 @@ public class KvCacheManager implements EngineCacheInvalidator {
                 "cache.local",
                 () ->
                         cacheMetricsReporter.reportEngineLocalMetrics(
-                                metricIpPort,
-                                role,
-                                engineLocalView.size(engineIPort)));
-        SafeFlexMonitor.run(
-                "cache.global",
-                () ->
-                        cacheMetricsReporter.reportGlobalCacheMetrics(
-                                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings()));
-        SafeFlexMonitor.run(
-                "cache.views",
-                () ->
-                        cacheMetricsReporter.reportEngineViewsMapSize(
-                                engineLocalView.getEngineViewsMapSize()));
+                                metricIpPort, role, engineLocalView.size(engineIPort)));
+        reportIndexMetrics();
+    }
+
+    private void reportIndexMetrics() {
+        // Coalesce concurrent changes; an older size report cannot overwrite retirement forever.
+        if (indexReports.getAndIncrement() != 0) {
+            return;
+        }
+        int pending = 1;
+        do {
+            SafeFlexMonitor.run(
+                    "cache.index",
+                    () ->
+                            cacheMetricsReporter.reportIndexMetrics(
+                                    globalCacheIndex.totalBlocks(),
+                                    globalCacheIndex.totalMappings(),
+                                    engineLocalView.getEngineViewsMapSize()));
+            pending = indexReports.addAndGet(-pending);
+        } while (pending != 0);
     }
 
     private void addCacheBlock(String address, Long key) {
@@ -188,10 +198,9 @@ public class KvCacheManager implements EngineCacheInvalidator {
         physicalIpPortByLogicalIpPort.remove(engineIpPort);
         pendingAdditions.remove(engineIpPort);
         SafeFlexMonitor.run(
-                "cache.global",
-                () ->
-                        cacheMetricsReporter.reportGlobalCacheMetrics(
-                                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings()));
+                "cache.local.remove",
+                () -> cacheMetricsReporter.removeEngineLocalMetrics(engineIpPort));
+        reportIndexMetrics();
     }
 
     /**
@@ -232,11 +241,8 @@ public class KvCacheManager implements EngineCacheInvalidator {
         pendingAdditions.clear();
 
         // Report
-        SafeFlexMonitor.run(
-                "cache.global",
-                () ->
-                        cacheMetricsReporter.reportGlobalCacheMetrics(
-                                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings()));
+        SafeFlexMonitor.run("cache.local.clear", cacheMetricsReporter::clearEngineLocalMetrics);
+        reportIndexMetrics();
 
         log.info("Cleared all cache data");
     }

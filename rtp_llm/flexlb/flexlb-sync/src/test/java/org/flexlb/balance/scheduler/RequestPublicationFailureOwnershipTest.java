@@ -46,7 +46,6 @@ import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -58,6 +57,135 @@ import static org.mockito.Mockito.when;
 
 @Timeout(15)
 class RequestPublicationFailureOwnershipTest {
+    @Test
+    void deliveryPublicationFailureSettlesTheTransferredOwnership() throws Exception {
+        try (var f = new Fixture()) {
+            var context = spy(RequestProtocolTestSupport.context(f.config, 9305L));
+            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var endpoint = mock(PrefillEndpoint.class);
+            var route =
+                    SchedulingTestConfig.createRoute(
+                            context,
+                            new Response(),
+                            null,
+                            null,
+                            endpoint,
+                            null,
+                            null,
+                            System.currentTimeMillis());
+            RequestProtocolTestSupport.bind(
+                    f.owner, new RequestProtocolTestSupport.Registered(route, future));
+            var failure = new IllegalStateException("publication failed after transfer");
+            doAnswer(
+                            call -> {
+                                call.callRealMethod();
+                                throw failure;
+                            })
+                    .when(context)
+                    .publishDelivery(any());
+            try {
+                assertSame(
+                        failure,
+                        assertThrows(
+                                IllegalStateException.class,
+                                () ->
+                                        f.owner.claimDelivery(
+                                                route,
+                                                DeliveryClaimKind.ROUTE_DECISION,
+                                                0L,
+                                                null)));
+                assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
+                SchedulerTestSupport.awaitRequestWork(f.runtime);
+                assertEquals(Phase.CLOSED, context.snapshot().phase());
+                verify(endpoint, times(1)).release(null, route);
+            } finally {
+                var delivery = context.snapshot().delivery();
+                if (delivery != null && context.snapshot().phase() != Phase.CLOSED) {
+                    f.owner.onDeliveryEvidence(
+                            delivery.identity(),
+                            new ContextResult.PreparationFailure(
+                                    delivery.identity(),
+                                    route,
+                                    "test cleanup",
+                                    System.currentTimeMillis()));
+                }
+            }
+        }
+    }
+
+    @Test
+    void resourceSettlementCannotOvertakeTheRunningCloseNotification() throws Exception {
+        try (var f = new Fixture();
+                var workers = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+            var context = RequestProtocolTestSupport.context(f.config, 9304L);
+            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var endpoint = mock(PrefillEndpoint.class);
+            var route =
+                    SchedulingTestConfig.createRoute(
+                            context,
+                            new Response(),
+                            null,
+                            null,
+                            endpoint,
+                            null,
+                            null,
+                            System.currentTimeMillis());
+            RequestProtocolTestSupport.bind(
+                    f.owner, new RequestProtocolTestSupport.Registered(route, future));
+            var notificationEntered = new CountDownLatch(1);
+            var finishNotification = new CountDownLatch(1);
+            var released = new CountDownLatch(1);
+            var needsTimer = new AtomicBoolean(true);
+            var timer = mock(ExpirationTimer.class);
+            when(timer.needsUpdate(eq(context), any())).thenAnswer(call -> needsTimer.get());
+            doAnswer(
+                            call -> {
+                                notificationEntered.countDown();
+                                assertTrue(finishNotification.await(5, TimeUnit.SECONDS));
+                                needsTimer.set(false);
+                                return null;
+                            })
+                    .when(timer)
+                    .update(eq(context), any());
+            when(endpoint.release(null, route))
+                    .thenAnswer(
+                            call -> {
+                                released.countDown();
+                                return true;
+                            });
+            var originalTimer = f.runtime.deadlines();
+            ReflectionTestUtils.setField(f.runtime, "timer", timer);
+            var closing =
+                    workers.submit(
+                            () ->
+                                    f.owner.closeRequest(
+                                            context,
+                                            EndEvidence.failure(
+                                                    route,
+                                                    EndKind.FAILURE,
+                                                    StrategyErrorType.DISPATCH_FAILED,
+                                                    "test")));
+            java.util.concurrent.Future<?> settlement = null;
+            try {
+                assertTrue(notificationEntered.await(5, TimeUnit.SECONDS));
+                settlement = workers.submit(() -> f.owner.scheduleClose(context));
+                assertFalse(
+                        released.await(250, TimeUnit.MILLISECONDS),
+                        "one request must serialize notification and resource settlement");
+            } finally {
+                finishNotification.countDown();
+                closing.get(5, TimeUnit.SECONDS);
+                if (settlement != null) {
+                    settlement.get(5, TimeUnit.SECONDS);
+                }
+                SchedulerTestSupport.awaitRequestWork(f.runtime);
+                ReflectionTestUtils.setField(f.runtime, "timer", originalTimer);
+            }
+            assertEquals(Phase.CLOSED, context.snapshot().phase());
+            verify(endpoint, times(1)).release(null, route);
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void closePreparationFailureReturnsPublicationAndFrozenOutcomeStillCompletes(
@@ -303,8 +431,7 @@ class RequestPublicationFailureOwnershipTest {
     }
 
     @Test
-    void externalCancelControlFailureStillCompletesTheAlreadySelectedCancellation()
-            throws Exception {
+    void externalCancelCompletesWhileTheAdmissionOwnerFinishes() throws Exception {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9303L);
             var future = RequestProtocolTestSupport.register(f.owner, context);
@@ -319,22 +446,14 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
-            var failure = new IllegalStateException("control notification failed");
             try (var admission = f.owner.claimAdmissionHandle(9303L, future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
                         f.owner.commitRoute(
                                 route, RequestProtocolTestSupport.publication(() -> true)));
-                doThrow(failure)
-                        .when(endpoint)
-                        .control(
-                                route,
-                                org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE);
                 try {
-                    assertSame(
-                            failure,
-                            assertThrows(IllegalStateException.class, () -> future.cancel(false)));
+                    assertTrue(future.cancel(false));
                     assertTrue(future.isCancelled());
                     assertEquals(
                             ResponseKind.CANCELLATION,
@@ -347,11 +466,6 @@ class RequestPublicationFailureOwnershipTest {
                             context.snapshot().placement(),
                             "the real admission owner must remain until it finishes");
                 } finally {
-                    doReturn(false)
-                            .when(endpoint)
-                            .control(
-                                    route,
-                                    org.flexlb.balance.scheduler.PrefillQueueRunner.Control.WAKE);
                     admission.finish();
                 }
             }
@@ -466,10 +580,9 @@ class RequestPublicationFailureOwnershipTest {
     }
 
     @SuppressWarnings("unchecked")
-    private static Set<ResponseCompletionExecutor.CompletionRegistration> registrations(
-            SchedulerRuntime runtime) {
+    private static Set<ResponsePublication> registrations(SchedulerRuntime runtime) {
         var registered =
-                (Set<ResponseCompletionExecutor.CompletionRegistration>)
+                (Set<ResponsePublication>)
                         ReflectionTestUtils.getField(
                                 SchedulerTestSupport.responseCompletions(runtime), "registrations");
         synchronized (registered) {
@@ -499,9 +612,7 @@ class RequestPublicationFailureOwnershipTest {
         @Override
         public void close() {
             // A failed mutant must report its leaked obligation without hanging fixture shutdown.
-            for (var registration :
-                    registrations(runtime)
-                            .toArray(ResponseCompletionExecutor.CompletionRegistration[]::new)) {
+            for (var registration : registrations(runtime).toArray(ResponsePublication[]::new)) {
                 registration.close();
             }
             org.flexlb.util.Failures.run(null, runtime::shutdown);

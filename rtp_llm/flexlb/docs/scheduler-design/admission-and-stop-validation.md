@@ -271,12 +271,12 @@ leak detection, workloads and thresholds: **22/25 pass, 3 failures, 0 errors**.
 Sync passes 5/5, API 15/16, BATCH matrix 0/2, NON_BATCH matrix 2/2. The API burst
 fails at server P99 545ms against 50ms. The 750P/750D measurements are:
 
-| Mode / target QPS  | Client QPS | Client P99 | Server P99 | Result                                            |
-| ------------------ | ---------: | ---------: | ---------: | ------------------------------------------------- |
-| BATCH / 3,000      |    2,996.7 |   66.973ms |       13ms | Fail: client P99                                  |
-| BATCH / 10,000     |    9,989.3 |  277.153ms |       60ms | Fail: client P99; server P99 also exceeds ceiling |
-| NON_BATCH / 3,000  |    2,998.1 |   14.104ms |        3ms | Pass                                              |
-| NON_BATCH / 10,000 |    9,991.8 |   26.367ms |        4ms | Pass                                              |
+| Mode / target QPS | Client QPS | Client P99 | Server P99 | Result |
+| --- | ---: | ---: | ---: | --- |
+| BATCH / 3,000 | 2,996.7 | 66.973ms | 13ms | Fail: client P99 |
+| BATCH / 10,000 | 9,989.3 | 277.153ms | 60ms | Fail: client P99; server P99 also exceeds ceiling |
+| NON_BATCH / 3,000 | 2,998.1 | 14.104ms | 3ms | Pass |
+| NON_BATCH / 10,000 | 9,991.8 | 26.367ms | 4ms | Pass |
 
 **Performance remains unaccepted.** The change removes demonstrated redundant
 effects and passes ownership/recovery contracts; these runs do not establish a

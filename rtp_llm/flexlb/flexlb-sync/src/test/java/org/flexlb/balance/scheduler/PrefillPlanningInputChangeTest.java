@@ -135,7 +135,7 @@ class PrefillPlanningInputChangeTest {
                         invocation -> {
                             List<RequestRoute> candidates = invocation.getArgument(0);
                             RequestRoute exact = candidates.getFirst();
-                            assertTrue(worker.control(exact, PrefillQueueRunner.Control.REMOVE));
+                            assertTrue(worker.removeQueued(exact));
                             selected.countDown();
                             return null;
                         })

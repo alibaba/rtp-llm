@@ -2,7 +2,6 @@ package org.flexlb.metric;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
-import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
@@ -11,6 +10,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 
 import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -64,8 +64,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, GaugeEntry> gaugeCache = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<Meter.Id, GaugeSources> gaugeSources =
-            new ConcurrentHashMap<>();
+    // This monitor serializes only source registration/removal, never cached reports or scrapes.
+    private final Map<Gauge, GaugeSources> gaugeSources = new IdentityHashMap<>();
     private final ConcurrentHashMap<MetricKey, Counter> counterCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Timer> timerCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<FlexMetricTags, Tags> tagsCache = new ConcurrentHashMap<>();
@@ -115,9 +115,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
             if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
                 return;
             }
-            String prefixedName = METRIC_PREFIX + metricName;
             FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
-            MetricKey key = new MetricKey(prefixedName, metricsTags);
+            MetricKey key = new MetricKey(metricName, metricsTags);
             switch (metricType) {
                 case QPS:
                 case COUNTER:
@@ -134,7 +133,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     break;
                 case GAUGE:
                 default:
-                    reportGauge(key, value);
+                    gaugeEntry(key).value = value;
                     break;
             }
         } catch (Throwable failure) {
@@ -149,9 +148,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
             if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
                 return;
             }
-            String prefixedName = METRIC_PREFIX + metricName;
             FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
-            MetricKey key = new MetricKey(prefixedName, metricsTags);
+            MetricKey key = new MetricKey(metricName, metricsTags);
             switch (metricType) {
                 case QPS:
                 case COUNTER:
@@ -180,7 +178,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return counterCache.computeIfAbsent(
                 key,
                 ignored ->
-                        Counter.builder(key.name())
+                        Counter.builder(METRIC_PREFIX + key.name())
                                 .tags(resolveTags(key.metricsTags()))
                                 .register(meterRegistry));
     }
@@ -189,23 +187,11 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return timerCache.computeIfAbsent(
                 key,
                 ignored ->
-                        Timer.builder(key.name())
+                        Timer.builder(METRIC_PREFIX + key.name())
                                 .tags(resolveTags(key.metricsTags()))
                                 .publishPercentileHistogram(true)
                                 .publishPercentiles(0.5, 0.9, 0.95, 0.99)
                                 .register(meterRegistry));
-    }
-
-    /**
-     * Replace this source's latest value. Sources collapsed by registry filters are summed on scrape.
-     *
-     * @param value absolute gauge value
-     */
-    private void reportGauge(MetricKey key, double value) {
-        GaugeEntry entry = gaugeEntry(key);
-        if (entry != null) {
-            entry.value = value;
-        }
     }
 
     private GaugeEntry gaugeEntry(MetricKey key) {
@@ -213,21 +199,54 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         if (cached != null) {
             return cached;
         }
-        return gaugeCache.computeIfAbsent(
-                key,
-                ignored -> {
-                    GaugeEntry entry = new GaugeEntry();
-                    Gauge gauge =
-                            Gauge.builder(key.name(), entry, GaugeEntry::read)
-                                    .tags(resolveTags(key.metricsTags()))
-                                    .register(meterRegistry);
-                    // Registration returns the canonical meter after all tag filters have run.
-                    entry.sources =
-                            gaugeSources.computeIfAbsent(
-                                    gauge.getId(), unused -> new GaugeSources());
-                    entry.sources.add(entry);
-                    return entry;
-                });
+        synchronized (gaugeSources) {
+            cached = gaugeCache.get(key);
+            if (cached != null) {
+                return cached;
+            }
+            var created = new GaugeSources();
+            Gauge gauge =
+                    Gauge.builder(METRIC_PREFIX + key.name(), created, GaugeSources::read)
+                            .tags(resolveTags(key.metricsTags()))
+                            .register(meterRegistry);
+            // Registration resolves all tag filters; the canonical group owns the gauge callback.
+            GaugeSources sources = gaugeSources.get(gauge);
+            if (sources == null) {
+                sources = created;
+                sources.meter = gauge;
+                gaugeSources.put(gauge, sources);
+            }
+            var entry = new GaugeEntry(sources);
+            sources.add(entry);
+            gaugeCache.put(key, entry);
+            return entry;
+        }
+    }
+
+    @Override
+    public void removeGauge(String metricName, FlexMetricTags metricsTags) {
+        try {
+            var key = new MetricKey(metricName, metricsTags);
+            synchronized (gaugeSources) {
+                GaugeEntry entry = gaugeCache.remove(key);
+                if (entry == null) {
+                    return;
+                }
+                GaugeSources sources = entry.sources;
+                sources.remove(entry);
+                if (key.metricsTags() != null) {
+                    tagsCache.remove(key.metricsTags());
+                }
+                if (sources.entries == null) {
+                    // Retain an empty group if backend removal fails, so a later report can reuse
+                    // it.
+                    meterRegistry.remove(sources.meter);
+                    gaugeSources.remove(sources.meter);
+                }
+            }
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
+        }
     }
 
     /**
@@ -257,46 +276,52 @@ public class MicrometerFlexMonitor implements FlexMonitor {
 
     private static final class GaugeEntry {
         private volatile double value;
-        private volatile GaugeSources sources;
+        private final GaugeSources sources;
 
-        private double read() {
-            var current = sources;
-            return current == null ? 0.0 : current.read();
+        private GaugeEntry(GaugeSources sources) {
+            this.sources = sources;
         }
     }
 
     private static final class GaugeSources {
-        private GaugeEntry first;
-        private volatile GaugeEntry[] entries;
-        private volatile int size;
+        private Gauge meter;
+        // Null, one entry, or an immutable array of two or more entries.
+        private volatile Object entries;
 
-        private synchronized void add(GaugeEntry entry) {
-            int count = size;
-            if (count == 0) {
-                first = entry;
-            } else if (count == 1) {
-                entries = new GaugeEntry[] {first, entry};
+        // Writers hold gaugeSources. Readers capture one published membership value.
+        private void add(GaugeEntry entry) {
+            if (entries instanceof GaugeEntry[] current) {
+                var next = Arrays.copyOf(current, current.length + 1);
+                next[next.length - 1] = entry;
+                entries = next;
             } else {
-                if (count == entries.length) {
-                    entries = Arrays.copyOf(entries, entries.length * 2);
-                }
-                entries[count] = entry;
+                entries = entries == null ? entry : new GaugeEntry[] {(GaugeEntry) entries, entry};
             }
-            // Publish the array and its populated prefix to readers without locking
-            // updates/scrapes.
-            size = count + 1;
+        }
+
+        private void remove(GaugeEntry entry) {
+            if (entries == entry) {
+                entries = null;
+                return;
+            }
+            var current = (GaugeEntry[]) entries;
+            for (int i = 0; i < current.length; i++) {
+                if (current[i] == entry) {
+                    var next = new GaugeEntry[current.length - 1];
+                    System.arraycopy(current, 0, next, 0, i);
+                    System.arraycopy(current, i + 1, next, i, next.length - i);
+                    entries = next.length == 1 ? next[0] : next;
+                    return;
+                }
+            }
         }
 
         private double read() {
-            int count = size;
-            if (count <= 1) {
-                return count == 0 ? 0.0 : first.value;
-            }
-            // A later array can only contain a longer initialized prefix than the captured size.
-            GaugeEntry[] current = entries;
+            Object current = entries;
+            if (current instanceof GaugeEntry entry) return entry.value;
             double total = 0.0;
-            for (int i = 0; i < count; i++) {
-                total += current[i].value;
+            if (current instanceof GaugeEntry[] group) {
+                for (GaugeEntry entry : group) total += entry.value;
             }
             return total;
         }

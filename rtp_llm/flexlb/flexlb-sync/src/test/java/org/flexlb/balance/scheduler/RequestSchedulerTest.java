@@ -37,14 +37,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -214,190 +212,6 @@ class RequestSchedulerTest {
     }
 
     @Test
-    void futureCancelBeforeGlobalOfferSettlesOnIngressHandoff() throws Exception {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        ConfigService service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle =
-                org.flexlb.balance.scheduler.SchedulerTestSupport.create(
-                        service,
-                        mock(DeliveryMetricsReporter.class),
-                        mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        RequestContext context = context(config, 990008L);
-        CountDownLatch decisionControlEntered = new CountDownLatch(1);
-        CountDownLatch releaseDecisionControl = new CountDownLatch(1);
-        Thread ingressThread = Thread.currentThread();
-        AtomicReference<Thread> ingressOwner = new AtomicReference<>();
-        doAnswer(
-                        invocation -> {
-                            if (Thread.currentThread() == ingressThread) {
-                                ingressOwner.set(Thread.currentThread());
-                            } else {
-                                assertEquals(
-                                        "flexlb-global-decision", Thread.currentThread().getName());
-                                decisionControlEntered.countDown();
-                                assertTrue(releaseDecisionControl.await(5, TimeUnit.SECONDS));
-                            }
-                            return invocation.callRealMethod();
-                        })
-                .when((QueuedRequestScheduler) lifecycle)
-                .resolveControl(
-                        org.mockito.ArgumentMatchers.eq(context),
-                        org.mockito.ArgumentMatchers.eq(false));
-        doAnswer(
-                        invocation -> {
-                            @SuppressWarnings("unchecked")
-                            CompletableFuture<Response> future =
-                                    (CompletableFuture<Response>) invocation.callRealMethod();
-                            assertTrue(future.cancel(false));
-                            assertTrue(
-                                    decisionControlEntered.await(5, TimeUnit.SECONDS),
-                                    "hold the competing decision callback before it can claim the end owner");
-                            return future;
-                        })
-                .when(lifecycle)
-                .register(
-                        org.mockito.ArgumentMatchers.eq(context),
-                        org.mockito.ArgumentMatchers.any(Runnable.class),
-                        any());
-        RequestScheduler scheduler =
-                RequestProtocolTestSupport.injectPlacementDependencies(
-                        lifecycle,
-                        service,
-                        router,
-                        mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
-                        new PlacementAvailability());
-        try {
-            CompletableFuture<Response> future = scheduler.submit(context);
-            assertTrue(future.isCancelled());
-            assertSame(
-                    ingressThread,
-                    ingressOwner.get(),
-                    "the ingress handoff must actually settle this request");
-            assertEquals(
-                    RequestState.Phase.CANCELLED,
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990008L, 0L)
-                            .state());
-            assertEquals(
-                    0,
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                            .liveRequestCount());
-            verify(router, never()).select(any(), any());
-        } finally {
-            releaseDecisionControl.countDown();
-            RequestProtocolTestSupport.close(scheduler);
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
-                lifecycle.closeOutstandingAndTerminalize();
-                SchedulerTestSupport.timer(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                        lifecycle))
-                        .close();
-                SchedulerTestSupport.closeRequestExecutors(
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-            }
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void futureCancelCompletesSynchronouslyButGlobalOwnerSettlesResources(
-            boolean priorBusinessCancel) throws Exception {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        ConfigService service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        AbstractRequestScheduler lifecycle =
-                org.flexlb.balance.scheduler.SchedulerTestSupport.create(
-                        service,
-                        mock(DeliveryMetricsReporter.class),
-                        mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        CountDownLatch controlStarted = new CountDownLatch(1);
-        CountDownLatch releaseControl = new CountDownLatch(1);
-        AtomicReference<Thread> targetOwner = new AtomicReference<>();
-        doAnswer(
-                        invocation -> {
-                            long id =
-                                    ((RequestContext) invocation.getArgument(0))
-                                            .data()
-                                            .getRequestId();
-                            if (id == 990006L) {
-                                controlStarted.countDown();
-                                assertTrue(releaseControl.await(5, TimeUnit.SECONDS));
-                            } else if (id == 990007L) {
-                                targetOwner.set(Thread.currentThread());
-                            }
-                            return invocation.callRealMethod();
-                        })
-                .when((QueuedRequestScheduler) lifecycle)
-                .resolveControl(any(), org.mockito.ArgumentMatchers.eq(false));
-        QueuedRequestScheduler coordinator =
-                (QueuedRequestScheduler)
-                        RequestProtocolTestSupport.injectPlacementDependencies(
-                                lifecycle,
-                                service,
-                                mockRouter(),
-                                mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
-                                new PlacementAvailability());
-        try {
-            RequestContext gate = context(config, 990006L);
-            CompletableFuture<Response> gateFuture =
-                    RequestProtocolTestSupport.register(lifecycle, gate);
-            lifecycle.cancel(990006L, 0L, CancelReason.CLIENT_CANCELLED);
-            assertTrue(coordinator.trySubmitRegistered(gate));
-            assertTrue(controlStarted.await(5, TimeUnit.SECONDS));
-            RequestContext target = context(config, 990007L);
-            CompletableFuture<Response> future =
-                    RequestProtocolTestSupport.register(lifecycle, target);
-            assertTrue(coordinator.trySubmitRegistered(target));
-            if (priorBusinessCancel) {
-                lifecycle.cancel(990007L, 0L, CancelReason.CLIENT_CANCELLED);
-                Response success = new Response();
-                success.setSuccess(true);
-                assertFalse(future.complete(success));
-                assertFalse(
-                        future.completeExceptionally(new IllegalStateException("late completion")));
-            }
-            assertTrue(future.cancel(false));
-            assertTrue(future.isCancelled());
-            assertEquals(
-                    RequestState.Phase.CANCEL_REQUESTED,
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990007L, 0L)
-                            .state());
-            assertEquals(
-                    1,
-                    RequestProtocolTestSupport.queuedCount(coordinator),
-                    "the decision owner has not consumed the ticket");
-            releaseControl.countDown();
-            RequestProtocolTestSupport.awaitCondition(
-                    () ->
-                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
-                                            .getRequestState(990007L, 0L)
-                                            .state()
-                                    == RequestState.Phase.CANCELLED);
-            assertThrows(java.util.concurrent.CancellationException.class, future::join);
-            assertEquals("flexlb-global-decision", targetOwner.get().getName());
-        } finally {
-            releaseControl.countDown();
-            coordinator.close();
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
-                lifecycle.closeOutstandingAndTerminalize();
-                SchedulerTestSupport.timer(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                        lifecycle))
-                        .close();
-                SchedulerTestSupport.closeRequestExecutors(
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-            }
-        }
-    }
-
-    @Test
     void closeSettlesInFlightAdmissionAfterLatePlanReleasesItsHandle() throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
@@ -428,9 +242,9 @@ class RequestSchedulerTest {
                             return result;
                         })
                 .when((QueuedRequestScheduler) lifecycle)
-                .resolveControl(
+                .closeRequest(
                         org.mockito.ArgumentMatchers.same(context),
-                        org.mockito.ArgumentMatchers.eq(true));
+                        any(ContextResult.EndEvidence.class));
         QueuedRequestScheduler coordinator =
                 (QueuedRequestScheduler)
                         RequestProtocolTestSupport.injectPlacementDependencies(
@@ -486,215 +300,6 @@ class RequestSchedulerTest {
                 secondCloser.join(5_000);
                 assertFalse(secondCloser.isAlive());
             }
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
-                lifecycle.closeOutstandingAndTerminalize();
-                SchedulerTestSupport.timer(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                        lifecycle))
-                        .close();
-                SchedulerTestSupport.closeRequestExecutors(
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-            }
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void closePreservesAcceptedCancellationBeforeGlobalControlRuns(boolean futureCancellation)
-            throws Exception {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        ConfigService service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        AbstractRequestScheduler lifecycle =
-                org.flexlb.balance.scheduler.SchedulerTestSupport.create(
-                        service,
-                        mock(DeliveryMetricsReporter.class),
-                        mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        CountDownLatch controlStarted = new CountDownLatch(1);
-        CountDownLatch releaseControl = new CountDownLatch(1);
-        doAnswer(
-                        invocation -> {
-                            if (((RequestContext) invocation.getArgument(0)).data().getRequestId()
-                                    == 990003L) {
-                                controlStarted.countDown();
-                                assertTrue(releaseControl.await(5, TimeUnit.SECONDS));
-                            }
-                            return invocation.callRealMethod();
-                        })
-                .when((QueuedRequestScheduler) lifecycle)
-                .resolveControl(any(), org.mockito.ArgumentMatchers.eq(false));
-        doAnswer(
-                        invocation -> {
-                            if (((RequestContext) invocation.getArgument(0)).data().getRequestId()
-                                    == 990004L) {
-                                if (futureCancellation) {
-                                    CompletableFuture<Response> future =
-                                            ((RequestContext) invocation.getArgument(0))
-                                                    .data()
-                                                    .getFuture();
-                                    assertTrue(future.cancel(false));
-                                } else {
-                                    assertEquals(
-                                            RequestState.Phase.CANCEL_REQUESTED,
-                                            lifecycle
-                                                    .cancel(
-                                                            990004L,
-                                                            0L,
-                                                            CancelReason.CLIENT_CANCELLED)
-                                                    .state());
-                                }
-                            }
-                            return invocation.callRealMethod();
-                        })
-                .when((QueuedRequestScheduler) lifecycle)
-                .resolveControl(any(), org.mockito.ArgumentMatchers.eq(true));
-        QueuedRequestScheduler coordinator =
-                (QueuedRequestScheduler)
-                        RequestProtocolTestSupport.injectPlacementDependencies(
-                                lifecycle,
-                                service,
-                                mockRouter(),
-                                mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
-                                new PlacementAvailability());
-        Thread closer = null;
-        try {
-            RequestContext gate = context(config, 990003L);
-            CompletableFuture<Response> gateFuture =
-                    RequestProtocolTestSupport.register(lifecycle, gate);
-            lifecycle.cancel(990003L, 0L, CancelReason.CLIENT_CANCELLED);
-            assertTrue(coordinator.trySubmitRegistered(gate));
-            assertTrue(controlStarted.await(5, TimeUnit.SECONDS));
-            RequestContext target = context(config, 990004L);
-            CompletableFuture<Response> future =
-                    RequestProtocolTestSupport.register(lifecycle, target);
-            assertTrue(coordinator.trySubmitRegistered(target));
-            closer = new Thread(coordinator::close);
-            closer.start();
-            RequestProtocolTestSupport.awaitCondition(
-                    () -> {
-                        var closed =
-                                (java.util.concurrent.atomic.AtomicBoolean)
-                                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                                coordinator, "closed");
-                        return closed.get();
-                    });
-            releaseControl.countDown();
-            if (futureCancellation) {
-                RequestProtocolTestSupport.awaitCondition(
-                        () ->
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                                        lifecycle)
-                                                .getRequestState(990004L, 0L)
-                                                .state()
-                                        == RequestState.Phase.CANCELLED);
-                assertThrows(java.util.concurrent.CancellationException.class, future::join);
-            } else {
-                assertEquals(
-                        StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                        future.get(5, TimeUnit.SECONDS).getCode());
-            }
-            verify((QueuedRequestScheduler) lifecycle).resolveControl(target, true);
-            verify((QueuedRequestScheduler) lifecycle, never()).resolveControl(target, false);
-        } finally {
-            releaseControl.countDown();
-            coordinator.close();
-            if (closer != null) {
-                closer.join(5_000);
-                assertFalse(closer.isAlive());
-            }
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
-                lifecycle.closeOutstandingAndTerminalize();
-                SchedulerTestSupport.timer(
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
-                                        lifecycle))
-                        .close();
-                SchedulerTestSupport.closeRequestExecutors(
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-            }
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void cancellationBetweenRegistrationAndOfferGetsAnExactControlTicket(boolean futureCancellation)
-            throws Exception {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        ConfigService service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        RequestWorkerSelector router = mockRouter();
-        AbstractRequestScheduler lifecycle =
-                org.flexlb.balance.scheduler.SchedulerTestSupport.create(
-                        service,
-                        mock(DeliveryMetricsReporter.class),
-                        mock(RequestSchedulerReporter.class),
-                        mock(RecentCacheKeyTraceReporter.class));
-        QueuedRequestScheduler coordinator =
-                (QueuedRequestScheduler)
-                        RequestProtocolTestSupport.injectPlacementDependencies(
-                                lifecycle,
-                                service,
-                                router,
-                                mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
-                                new PlacementAvailability());
-        RequestContext context = context(config, 990002L);
-        CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
-        CountDownLatch controlEntered = new CountDownLatch(1);
-        CountDownLatch releaseControl = new CountDownLatch(1);
-        AtomicReference<Thread> controlOwner = new AtomicReference<>();
-        doAnswer(
-                        invocation -> {
-                            controlOwner.set(Thread.currentThread());
-                            controlEntered.countDown();
-                            assertTrue(releaseControl.await(5, TimeUnit.SECONDS));
-                            return invocation.callRealMethod();
-                        })
-                .when(coordinator)
-                .resolveControl(
-                        org.mockito.ArgumentMatchers.eq(context),
-                        org.mockito.ArgumentMatchers.eq(false));
-        try {
-            if (futureCancellation) {
-                assertTrue(future.cancel(false));
-                assertTrue(future.isCancelled());
-            } else {
-                assertEquals(
-                        RequestState.Phase.CANCEL_REQUESTED,
-                        lifecycle.cancel(990002L, 0L, CancelReason.CLIENT_CANCELLED).state());
-                assertFalse(future.isDone());
-            }
-            assertTrue(controlEntered.await(5, TimeUnit.SECONDS));
-            assertEquals("flexlb-global-decision", controlOwner.get().getName());
-            assertEquals(
-                    RequestState.Phase.CANCEL_REQUESTED,
-                    SchedulerTestSupport.repository(lifecycle)
-                            .getRequestState(990002L, 0L)
-                            .state());
-            assertTrue(coordinator.trySubmitRegistered(context));
-            releaseControl.countDown();
-            if (futureCancellation) {
-                RequestProtocolTestSupport.awaitCondition(
-                        () ->
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                                        lifecycle)
-                                                .getRequestState(990002L, 0L)
-                                                .state()
-                                        == RequestState.Phase.CANCELLED);
-                assertThrows(java.util.concurrent.CancellationException.class, future::join);
-            } else {
-                assertEquals(
-                        StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                        future.get(5, TimeUnit.SECONDS).getCode());
-            }
-            RequestProtocolTestSupport.awaitCondition(
-                    () -> RequestProtocolTestSupport.queuedCount(coordinator) == 0);
-            verify(router, never()).select(any(), any());
-        } finally {
-            releaseControl.countDown();
-            coordinator.close();
             if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
                 lifecycle.closeOutstandingAndTerminalize();
                 SchedulerTestSupport.timer(
@@ -1616,7 +1221,7 @@ class RequestSchedulerTest {
     }
 
     @Test
-    void completedActiveRetryHandsOffWithoutItsDelayedCompletionCallback() throws Exception {
+    void completedActiveRetryHandsOffWithoutRegisteringACompletionCallback() throws Exception {
         ConcurrentLinkedQueue<Runnable> callbacks = new ConcurrentLinkedQueue<>();
         CompletableFuture<Response> headFuture =
                 new CompletableFuture<>() {
@@ -1645,9 +1250,9 @@ class RequestSchedulerTest {
                 fixture.releaseSlots(1);
                 assertTrue(headFuture.complete(new Response()));
                 assertEquals(
-                        1,
+                        0,
                         callbacks.size(),
-                        "the completed active request's cleanup must still be deferred");
+                        "the queue must not attach a second lifecycle callback");
                 CapacityRequest second = fixture.createRequest(841L, independent);
                 fixture.scheduler.submit(second.context);
                 allowPublication.countDown();
@@ -1655,13 +1260,9 @@ class RequestSchedulerTest {
                 // Ready waiters progress without another event or completion callback.
                 fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
                 assertEquals(
-                        1,
+                        0,
                         callbacks.size(),
                         "handoff must not rely on running completion callbacks");
-                Runnable callback;
-                while ((callback = callbacks.poll()) != null) {
-                    callback.run();
-                }
                 // Even a subsequent edge must not be swallowed by an active request
                 // that was removed from the ordered queue during pruning.
                 fixture.availability.changed(fixture.key);

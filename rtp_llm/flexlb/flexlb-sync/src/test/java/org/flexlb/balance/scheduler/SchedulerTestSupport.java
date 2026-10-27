@@ -14,7 +14,6 @@ import java.util.WeakHashMap;
 
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
@@ -22,6 +21,17 @@ import static org.mockito.Mockito.withSettings;
 
 /** Builds real request owners and shared facilities; contains no request state machine. */
 public final class SchedulerTestSupport {
+    public static void useRealCancelReply(AbstractRequestScheduler scheduler) {
+        org.mockito.Mockito.doCallRealMethod()
+                .when(scheduler)
+                .onCancelReply(
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
+    }
+
     /** Empty Decode ownership uses typed domain results, including in tests without a real ledger. */
     public static org.flexlb.balance.endpoint.DecodeEndpoint mockDecodeEndpoint() {
         return RequestProtocolTestSupport.decodeEndpoint();
@@ -178,8 +188,8 @@ public final class SchedulerTestSupport {
     }
 
     /** Response/timer fixtures explicitly supply resource proof; production has no manual close path. */
-    static FixtureSettlement settleTerminalFixture(
-            RequestContext context, ContextResult.EndToken terminal) {
+    static RequestState settleTerminalFixture(RequestContext context, ContextResult.End terminal) {
+        org.junit.jupiter.api.Assertions.assertSame(terminal, context.snapshot().outcome());
         var delivery = context.snapshot().delivery();
         if (delivery != null) {
             if (delivery.send() == ContextResult.SendState.NOT_STARTED
@@ -199,30 +209,15 @@ public final class SchedulerTestSupport {
                             System.currentTimeMillis()));
         }
         context.completeClose(
-                terminal,
-                new ContextResult.CloseProgress(
-                        ContextResult.ProgressKind.NOTIFICATIONS, false, false, true, true),
+                new ContextResult.CloseProgress(true, false, false, true, true),
                 System.currentTimeMillis());
-        var claim =
-                org.junit.jupiter.api.Assertions.assertInstanceOf(
-                        ContextResult.Granted.class, context.beginSettlement());
-        var permit = (ContextResult.ClosePermit) claim.value();
+        org.junit.jupiter.api.Assertions.assertNotNull(context.releaseReason());
         var update =
                 context.completeClose(
-                        permit,
-                        new ContextResult.CloseProgress(
-                                ContextResult.ProgressKind.RELEASE, true, true, false, false),
+                        new ContextResult.CloseProgress(false, true, true, false, false),
                         System.currentTimeMillis());
         org.junit.jupiter.api.Assertions.assertNotNull(update.after().terminalRecord());
-        return new FixtureSettlement(permit, update);
-    }
-
-    record FixtureSettlement(ContextResult.ClosePermit permit, ContextResult.Update update) {
-        void releaseAndArchive(AbstractRequestScheduler scheduler, RequestContext context) {
-            org.junit.jupiter.api.Assertions.assertFalse(Thread.holdsLock(context));
-            scheduler.requests.archive(context, update.after().terminalRecord());
-            scheduler.runtime.deadlines().remove(context);
-        }
+        return update.after().terminalRecord();
     }
 
     enum Stage {
@@ -243,7 +238,7 @@ public final class SchedulerTestSupport {
         if (state.phase() == ContextResult.Phase.ENDING) {
             return Stage.FINALIZING;
         }
-        if (state.delivery() != null && state.delivery().transferred()) {
+        if (state.delivery() != null) {
             return state.delivery().acknowledged() || state.engine().decodeAccepted()
                     ? Stage.RESULT_PENDING
                     : Stage.DELIVERING;
@@ -392,22 +387,15 @@ public final class SchedulerTestSupport {
                                 withSettings()
                                         .useConstructor(router, runtime, snapshot, capacity, trace)
                                         .defaultAnswer(CALLS_REAL_METHODS));
-        if (owner instanceof QueuedRequestScheduler queue && !startPlacement) {
-            doAnswer(
-                            call -> {
-                                queue.resolveControl(call.getArgument(0), false);
-                                return null;
-                            })
-                    .when(queue)
-                    .queueControl(
-                            org.mockito.ArgumentMatchers.any(),
-                            org.mockito.ArgumentMatchers.isNull());
-        }
         runtime.registerScheduler(owner);
         if (owner instanceof QueuedRequestScheduler queue && startPlacement) {
             queue.start();
         }
         return owner;
+    }
+
+    static ResponsePublication responsePublication(ResponseCompletionExecutor executor) {
+        return new ResponsePublication(executor, mock(RequestContext.class), false);
     }
 
     static DeliveryDispatcher createDispatcher(

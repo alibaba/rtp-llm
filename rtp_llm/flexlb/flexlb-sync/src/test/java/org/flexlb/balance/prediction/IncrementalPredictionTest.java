@@ -79,7 +79,7 @@ class IncrementalPredictionTest {
             if (round % 5 == 0) java.util.Collections.reverse(source);
             var constraints = new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700);
             var full =
-                    GroupPlanner.selectWithPrediction(
+                    GroupPlanner.FIXED_WINDOW.select(
                             source,
                             constraints,
                             (added, items) ->
@@ -90,14 +90,14 @@ class IncrementalPredictionTest {
                                                     GroupPlanner.Item::hitCache)));
             var batch = model.newBatchPrediction();
             var incremental =
-                    GroupPlanner.selectWithPrediction(
+                    GroupPlanner.FIXED_WINDOW.select(
                             source,
                             constraints,
                             (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));
             assertEquals(full, incremental);
             assertEquals(
-                    GroupPlanner.dispatchReason(full, constraints, 2000),
-                    GroupPlanner.dispatchReason(incremental, constraints, 2000));
+                    GroupPlanner.FIXED_WINDOW.dispatchReason(full, constraints, 2000),
+                    GroupPlanner.FIXED_WINDOW.dispatchReason(incremental, constraints, 2000));
         }
         var oldSession = model.newBatchPrediction();
         var replacement = new FormulaPredictor("42");
@@ -107,8 +107,7 @@ class IncrementalPredictionTest {
     @Test
     void projectionMatchesFullEvaluationAcrossExpiryPriorityAndProbePositions() throws Exception {
         var model = new FormulaPredictor(formula());
-        var policy =
-                RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
+        var policy = org.flexlb.config.DispatcherConfig.Type.BATCH;
         var full =
                 new PrefillTimePredictor.Evaluator() {
                     public long estimateMs(long t, long h) {
@@ -138,7 +137,7 @@ class IncrementalPredictionTest {
                     new QueueSnapshot(
                             1000,
                             true,
-                            org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
+                            org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
                             order,
                             new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700),
                             items,
@@ -206,7 +205,7 @@ class IncrementalPredictionTest {
             items.add(request);
         }
         var selected =
-                GroupPlanner.selectWithPrediction(
+                GroupPlanner.FIXED_WINDOW.select(
                         items,
                         new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
                         RequestTimeEstimation.newGroupPredictor(mode, evaluator));
@@ -220,7 +219,7 @@ class IncrementalPredictionTest {
         // A second snapshot must receive fresh accumulation state.
         assertEquals(
                 selected,
-                GroupPlanner.selectWithPrediction(
+                GroupPlanner.FIXED_WINDOW.select(
                         items,
                         new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
                         RequestTimeEstimation.newGroupPredictor(mode, evaluator)));
@@ -228,26 +227,16 @@ class IncrementalPredictionTest {
 
     @Test
     void serviceReusesOnlyEvaluatedPrefixesFromItsOwnPlanningCursor() {
-        var mode = org.flexlb.config.DispatcherConfig.Type.BATCH;
         int[] fullCalls = {0};
-        var predictions =
-                new RequestTimeEstimation.Predictions() {
-                    public long itemDurationMs(GroupPlanner.Item i) {
+        var evaluator =
+                new PrefillTimePredictor.Evaluator() {
+                    public long estimateMs(long seqLen, long hitCache) {
                         return 100;
                     }
 
-                    public long itemDurationMs(long seqLen, long hitCache) {
-                        throw new AssertionError("prefix test must not predict a singleton");
-                    }
-
-                    public long singletonBatchDurationMs(long seqLen, long hitCache) {
-                        throw new AssertionError("prefix test must not predict a singleton");
-                    }
-
-                    public long batchDurationMs(List<GroupPlanner.Item> items) {
+                    public double predictBatchMs(PrefillBatchFeatures features) {
                         fullCalls[0]++;
-                        return PrefillPredictionBoundary.committedDecisionGroupMs(
-                                items.size() * 100.25);
+                        return features.batchSize() * 100.25;
                     }
 
                     public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
@@ -255,77 +244,65 @@ class IncrementalPredictionTest {
                         return (t, h) -> ++size[0] * 100.25;
                     }
                 };
-        var items =
-                List.of(
-                        item(1, 100, 0, 100_000),
-                        item(2, 100, 0, 100_000),
-                        item(3, 100, 0, 100_000));
-        var policy = RequestTimeEstimation.forDelivery(mode);
-        var cursor = policy.planning(predictions);
-        assertEquals(200.5, cursor.durationMs(items, 1)); // only through probe, not suffix
-        assertEquals(201, policy.completionOffsetMs(items, 1, predictions, cursor));
+        assertEquals(201, project(evaluator, 2, 1000).projectedTtftMsValue());
         assertEquals(0, fullCalls[0]);
-        assertEquals(
-                301,
-                policy.completionOffsetMs(
-                        items,
-                        items.size() - 1,
-                        predictions,
-                        cursor)); // must not mistake P2 for P3
+        assertEquals(401, project(evaluator, 4, 1000).projectedTtftMsValue());
+        assertEquals(0, fullCalls[0], "a new group must not reuse the earlier probe's prefix");
+        assertEquals(401, project(evaluator, 4, 0).projectedTtftMsValue());
         assertEquals(1, fullCalls[0]);
-        assertEquals(301, policy.completionOffsetMs(items, items.size() - 1, predictions, null));
-        assertEquals(2, fullCalls[0]);
     }
 
     @Test
-    void appendCursorKeepsLatestAndOvershootPredecessorAndRecomputesOlderPrefixes() {
-        var policy =
-                RequestTimeEstimation.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH);
+    void selectedPredictionKeepsTheOvershootPredecessorAndResetsForTheNextGroup() {
         int[] appended = {0};
         int[] recomputed = {0};
-        var predictions =
-                new RequestTimeEstimation.Predictions() {
-                    public long itemDurationMs(GroupPlanner.Item item) {
+        var evaluator =
+                new PrefillTimePredictor.Evaluator() {
+                    public long estimateMs(long seqLen, long hitCache) {
                         return 11;
                     }
 
-                    public long itemDurationMs(long seqLen, long hitCache) {
-                        throw new AssertionError("prefix test must not predict a singleton");
-                    }
-
-                    public long singletonBatchDurationMs(long seqLen, long hitCache) {
-                        throw new AssertionError("prefix test must not predict a singleton");
-                    }
-
-                    public long batchDurationMs(List<GroupPlanner.Item> items) {
+                    public double predictBatchMs(PrefillBatchFeatures features) {
                         recomputed[0]++;
-                        return (long) Math.ceil(items.size() * 10.25);
+                        return features.batchSize() * 10.25;
                     }
 
                     public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
-                        return (tokens, hit) -> ++appended[0] * 10.25;
+                        int[] size = {0};
+                        return (tokens, hit) -> {
+                            appended[0]++;
+                            return ++size[0] * 10.25;
+                        };
                     }
                 };
-        var items =
-                List.of(
-                        item(1, 100, 0, 100_000),
-                        item(2, 100, 0, 100_000),
-                        item(3, 100, 0, 100_000),
-                        item(4, 100, 0, 100_000));
-        var cursor = policy.planning(predictions);
-        assertEquals(41, cursor.durationMs(items, 3)); // Jump directly over several prefixes.
-        assertEquals(
-                41, cursor.durationMs(items, 3)); // Probe boundary reached: no further appends.
-        assertEquals(4, appended[0]);
-        assertEquals(41, cursor.predictedPrefixMs(4).orElseThrow());
-        assertEquals(30.75, cursor.predictedPrefixMs(3).orElseThrow());
-        assertTrue(cursor.predictedPrefixMs(2).isEmpty());
-        assertTrue(cursor.predictedPrefixMs(0).isEmpty());
-        assertTrue(cursor.predictedPrefixMs(5).isEmpty());
-        var selected = items.subList(0, 2);
-        assertEquals(
-                21, policy.completionOffsetMs(selected, selected.size() - 1, predictions, cursor));
+        assertEquals(42, project(evaluator, 4, 31).projectedTtftMsValue());
+        assertEquals(5, appended[0]);
+        assertEquals(0, recomputed[0]);
+        assertEquals(41, project(evaluator, 4, 0).projectedTtftMsValue());
         assertEquals(1, recomputed[0]);
+    }
+
+    private static RequestTimeEstimation.Candidate project(
+            PrefillTimePredictor.Evaluator evaluator, int probeId, long budget) {
+        var active = new ArrayList<GroupPlanner.Item>();
+        for (int id = 1; id <= 4; id++) {
+            if (id != probeId) active.add(item(id, 100, 0, 100_000));
+        }
+        var queue =
+                new QueueSnapshot(
+                        1000,
+                        true,
+                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        new GroupPlanner.Constraints(64, 100_000, 100_000, budget, 0),
+                        active,
+                        null);
+        return RequestTimeEstimationTestSupport.project(
+                new RequestTimeEstimation.Inputs(
+                        queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0),
+                new RequestTimeEstimationTestSupport.Probe(probeId, 0, 1000, 100_000, 100, 0, 0),
+                evaluator,
+                org.flexlb.config.DispatcherConfig.Type.BATCH);
     }
 
     private static GroupPlanner.Item item(long id, long input, int priority, long expires) {

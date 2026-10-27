@@ -205,7 +205,7 @@ class GlobalQueueProgressTest {
     }
 
     @Test
-    void nonTerminalControlFactRestoresTheExactGlobalQueueEntry() throws Exception {
+    void schedulerInvalidationOnlyRemovesTheExactGlobalQueueEntry() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             doAnswer(
                             call -> {
@@ -219,16 +219,17 @@ class GlobalQueueProgressTest {
                     .when(f.lifecycle)
                     .register(any(), any(Runnable.class), any());
             f.submit(991L, "a");
-            awaitCondition(() -> f.selected.contains(991L));
+            RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 1);
             QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
             RequestContext context = f.contexts.get(991L);
             queue.queueControl(context, null);
-            verify((QueuedRequestScheduler) f.lifecycle, timeout(5_000))
-                    .resolveControl(context, false);
+            awaitCondition(() -> RequestProtocolTestSupport.queuedCount(queue) == 0);
 
             f.aSlots.set(1);
             f.release("a");
-            awaitCondition(() -> f.admitted.contains(991L));
+            f.submit(992L, "b");
+            awaitCondition(() -> f.admitted.contains(992L));
+            assertFalse(f.admitted.contains(991L));
         }
     }
 
@@ -366,6 +367,7 @@ class GlobalQueueProgressTest {
                 f.submit(2, "c");
                 await(started);
                 f.requests.get(1L).cancel(false);
+                ((QueuedRequestScheduler) f.scheduler).queueControl(f.contexts.get(1L), null);
                 f.submit(3, "d");
                 assertFalse(
                         thirdStarted.await(100, TimeUnit.MILLISECONDS),
@@ -691,6 +693,7 @@ class GlobalQueueProgressTest {
                             "close must retain the pending preemption responsibility");
                 } else {
                     assertTrue(f.requests.get(id).cancel(false));
+                    ((QueuedRequestScheduler) f.scheduler).queueControl(f.contexts.get(id), null);
                     awaitCondition(() -> RequestProtocolTestSupport.queuedCount(f.scheduler) == 0);
                     f.submit(1105L, "b");
                     awaitCondition(() -> f.admitted.contains(1105L));

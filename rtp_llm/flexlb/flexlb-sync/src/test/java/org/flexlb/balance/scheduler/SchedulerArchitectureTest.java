@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.planner.GroupingPolicy;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.junit.jupiter.api.Test;
 import org.springframework.asm.ClassReader;
 import org.springframework.asm.ClassVisitor;
@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Protect the migrated consumer boundaries, without constraining unrelated endpoint APIs. */
 class SchedulerArchitectureTest {
     @Test
-    void placementAndDeliveryConsumersCannotRetainOrAcceptTheWholeScheduler() {
+    void placementAndDeliveryConsumersCannotRetainOrAcceptTheWholeScheduler() throws IOException {
         for (Class<?> consumer :
                 new Class<?>[] {
                     DirectRequestScheduler.class,
@@ -28,13 +28,15 @@ class SchedulerArchitectureTest {
                 }) {
             assertNoDependency(consumer, RequestScheduler.class);
         }
+        assertNoImplementationDependency(
+                DeliveryDispatcher.class, AbstractRequestScheduler.PreemptionEvent.class);
         assertNoDependency(AbstractRequestScheduler.class, RequestWorkerSelector.class);
     }
 
     @Test
     void groupingPoliciesAreStatelessAndPlacementDoesNotPretendToHaveACommonLifecycle() {
         assertTrue(
-                Arrays.stream(GroupingPolicy.class.getDeclaredFields())
+                Arrays.stream(GroupPlanner.class.getDeclaredFields())
                         .allMatch(f -> Modifier.isStatic(f.getModifiers())));
         assertTrue(RequestScheduler.class.isAssignableFrom(DirectRequestScheduler.class));
         assertTrue(RequestScheduler.class.isAssignableFrom(QueuedRequestScheduler.class));

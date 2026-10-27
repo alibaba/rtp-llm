@@ -37,8 +37,7 @@ class RequestDeadlineTokenRefreshTest {
                 new CancellationFacts(
                         CancelReason.DEADLINE_EXCEEDED,
                         StrategyErrorType.RESOURCE_EXHAUSTED,
-                        "diagnosis must not be used early",
-                        null);
+                        "diagnosis must not be used early");
         var update = context.recordDeadline(previous, previous.atMs() - 1L, diagnosis);
         assertEquals(UpdateKind.APPLIED, update.kind());
         assertSame(before, update.before());

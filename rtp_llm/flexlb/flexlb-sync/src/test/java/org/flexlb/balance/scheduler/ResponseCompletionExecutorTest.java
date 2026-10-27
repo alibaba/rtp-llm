@@ -33,6 +33,41 @@ import static org.mockito.Mockito.mock;
 
 @Timeout(15)
 class ResponseCompletionExecutorTest {
+    @Test
+    void synchronousCompletionCannotStealAnAcceptedAsynchronousTask() {
+        try (var f = new Fixture()) {
+            var queued = new AtomicReference<Runnable>();
+            var executions = new AtomicInteger();
+            var primary = mock(ThreadPoolExecutor.class);
+            doAnswer(
+                            call -> {
+                                queued.set(call.getArgument(0));
+                                return null;
+                            })
+                    .when(primary)
+                    .execute(any());
+            ReflectionTestUtils.setField(f.executor, "completionWorkers", primary);
+            var registration = SchedulerTestSupport.responsePublication(f.executor);
+            registration.submit(
+                    () -> {
+                        executions.incrementAndGet();
+                        return true;
+                    });
+            try {
+                assertFalse(
+                        registration.completeNow(
+                                () -> {
+                                    executions.addAndGet(100);
+                                    return true;
+                                }));
+            } finally {
+                queued.get().run();
+            }
+            assertEquals(1, executions.get());
+            assertTrue(registrations(f.executor).isEmpty());
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void rejectedWorkersKeepAnAsynchronousCompletionOwner(boolean rejectRecovery) throws Exception {
@@ -52,7 +87,7 @@ class ResponseCompletionExecutorTest {
                         .execute(any());
                 ReflectionTestUtils.setField(f.executor, "rejectedTaskWorker", recovery);
             }
-            var registration = f.executor.tryRegister();
+            var registration = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(registration);
             registration.submit(
                     () -> {
@@ -81,7 +116,7 @@ class ResponseCompletionExecutorTest {
                     .when(failed)
                     .execute(any());
             ReflectionTestUtils.setField(f.executor, "completionWorkers", failed);
-            var registration = f.executor.tryRegister();
+            var registration = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(registration);
             assertSame(
                     failure,
@@ -131,7 +166,7 @@ class ResponseCompletionExecutorTest {
             ReflectionTestUtils.setField(f.executor, "completionWorkers", primary);
             ReflectionTestUtils.setField(f.executor, "rejectedTaskWorker", recovery);
             ReflectionTestUtils.setField(f.executor, "emergencyWorkers", factory);
-            var abandoned = f.executor.tryRegister();
+            var abandoned = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(abandoned);
             assertSame(
                     first,
@@ -151,7 +186,7 @@ class ResponseCompletionExecutorTest {
             assertTrue(registrations(f.executor).isEmpty());
             f.restore();
             var completed = new CompletableFuture<Boolean>();
-            var actual = f.executor.tryRegister();
+            var actual = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(actual);
             actual.submit(
                     () -> {
@@ -180,12 +215,12 @@ class ResponseCompletionExecutorTest {
                     .execute(any());
             ReflectionTestUtils.setField(f.executor, "completionWorkers", primary);
             ReflectionTestUtils.setField(f.executor, "rejectedTaskWorker", recovery);
-            var actual = f.executor.tryRegister();
+            var actual = SchedulerTestSupport.responsePublication(f.executor);
             assertNotNull(actual);
             actual.submit(
                     () -> {
                         assertThrows(IllegalStateException.class, f.executor::close);
-                        var stillAccepting = f.executor.tryRegister();
+                        var stillAccepting = SchedulerTestSupport.responsePublication(f.executor);
                         assertNotNull(
                                 stillAccepting,
                                 "self-wait rejection must precede shutdown mutation");
@@ -221,11 +256,9 @@ class ResponseCompletionExecutorTest {
     }
 
     @SuppressWarnings("unchecked")
-    private static Set<ResponseCompletionExecutor.CompletionRegistration> registrations(
-            ResponseCompletionExecutor executor) {
+    private static Set<ResponsePublication> registrations(ResponseCompletionExecutor executor) {
         var registrations =
-                (Set<ResponseCompletionExecutor.CompletionRegistration>)
-                        ReflectionTestUtils.getField(executor, "registrations");
+                (Set<ResponsePublication>) ReflectionTestUtils.getField(executor, "registrations");
         synchronized (registrations) {
             return Set.copyOf(registrations);
         }

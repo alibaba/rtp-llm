@@ -76,8 +76,7 @@ class RequestAcknowledgementPreemptionRaceTest {
         assertTrue(owner.tryStartSend(delivery));
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
-        publisher
-                .tryRegister()
+        SchedulerTestSupport.responsePublication(publisher)
                 .submit(
                         () -> {
                             entered.countDown();
@@ -100,8 +99,7 @@ class RequestAcknowledgementPreemptionRaceTest {
                     RequestProtocolTestSupport.preemptionPhase(
                             owner, registration, PreemptionCancelPhase.CANCEL_IN_FLIGHT));
             var drained = new CompletableFuture<Void>();
-            publisher
-                    .tryRegister()
+            SchedulerTestSupport.responsePublication(publisher)
                     .submit(
                             () -> {
                                 drained.complete(null);
