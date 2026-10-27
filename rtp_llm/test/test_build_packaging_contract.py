@@ -84,6 +84,9 @@ class BuildPackagingContractTest(TestCase):
     def test_ppu_native_install_matches_main_sdk_and_ml_pins(self):
         from packaging.specifiers import SpecifierSet
 
+        if not (PROJECT_ROOT / "internal_source/pyproject_internal.toml").is_file():
+            self.skipTest("PPU installation is supplied by the internal overlay")
+
         setup_module = _load_setup_module()
         with patch.object(setup_module, "detect_build_config", return_value="ppu"):
             requirements = {
