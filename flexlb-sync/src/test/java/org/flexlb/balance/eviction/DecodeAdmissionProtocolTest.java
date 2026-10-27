@@ -1232,23 +1232,22 @@ class DecodeAdmissionProtocolTest {
                         invocation -> {
                             var fact = invocation.getArgument(0, org.flexlb.balance.scheduler.ContextResult.DeliveryFact.class);
                             if (fact instanceof org.flexlb.balance.scheduler.ContextResult.PreemptionFact preemption) {
-                                var receipt = preemption.receipt();
-                                if (receipt.phase()
+                                if (preemption.phase()
                                         != org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_UNKNOWN) {
                                     requests.onPreemption(
                                             preemption.attempt(),
                                             new AbstractRequestScheduler.PreemptionEvent(
-                                                    receipt.phase(),
-                                                    receipt.release(),
-                                                    receipt.endpoint(),
-                                                    receipt.reservation(),
-                                                    receipt.detail(),
-                                                    receipt.cleanup()));
+                                                    preemption.phase(),
+                                                    preemption.release(),
+                                                    preemption.endpoint(),
+                                                    preemption.reservation(),
+                                                    preemption.detail(),
+                                                    preemption.cleanup()));
                                 }
-                                return receipt.phase()
+                                return preemption.phase()
                                                 == org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE
                                         ? PreemptionRegistration.Reply.NOT_FOUND
-                                        : receipt.phase()
+                                        : preemption.phase()
                                                         == org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_UNKNOWN
                                                 ? PreemptionRegistration.Reply.UNKNOWN
                                                 : PreemptionRegistration.Reply.WAITING;

@@ -707,15 +707,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             return null;
         }
         if (fact instanceof ContextResult.PreemptionFact preemption) {
-            var receipt = preemption.receipt();
             var event =
                     new PreemptionEvent(
-                            receipt.phase(),
-                            receipt.release(),
-                            receipt.endpoint(),
-                            receipt.reservation(),
-                            receipt.detail(),
-                            receipt.cleanup());
+                            preemption.phase(),
+                            preemption.release(),
+                            preemption.endpoint(),
+                            preemption.reservation(),
+                            preemption.detail(),
+                            preemption.cleanup());
             return event.progress(onPreemption(preemption.attempt(), event));
         }
         throw new IllegalArgumentException("unsupported delivery fact: " + fact.getClass());
@@ -918,7 +917,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
 
         static PreemptionEvent receipt(
-                PreemptionRegistration attempt,
+                DecodeResources.ReservationHandle reservation,
                 DecodeEndpoint endpoint,
                 CancelReply reply,
                 String detail,
@@ -934,7 +933,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                     phase,
                     false,
                     reply == CancelReply.REQUEST_CLEANED ? endpoint : null,
-                    reply == CancelReply.REQUEST_CLEANED ? attempt.reservation() : null,
+                    reply == CancelReply.REQUEST_CLEANED ? reservation : null,
                     reply == CancelReply.REQUEST_CLEANED ? detail : null,
                     delivery == null ? null : acknowledgement(delivery, reply));
         }

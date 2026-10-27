@@ -927,7 +927,7 @@ public class DeliveryDispatcher {
                 if (operation != null) {
                     var event =
                             AbstractRequestScheduler.PreemptionEvent.receipt(
-                                    operation.registration(),
+                                    operation.registration().reservation(),
                                     operation.endpoint(),
                                     reply,
                                     operation.detail(),
@@ -936,13 +936,12 @@ public class DeliveryDispatcher {
                             scheduler.onDeliveryFact(
                                     new ContextResult.PreemptionFact(
                                             operation.registration(),
-                                            new ContextResult.PreemptionReceipt(
-                                                    event.phase(),
-                                                    event.release(),
-                                                    event.endpoint(),
-                                                    event.reservation(),
-                                                    event.detail(),
-                                                    event.cleanup())));
+                                            event.phase(),
+                                            event.release(),
+                                            event.endpoint(),
+                                            event.reservation(),
+                                            event.detail(),
+                                            event.cleanup()));
                 } else if (claim != null) {
                     scheduler.onDeliveryFact(
                             AbstractRequestScheduler.PreemptionEvent.acknowledgement(claim, reply));

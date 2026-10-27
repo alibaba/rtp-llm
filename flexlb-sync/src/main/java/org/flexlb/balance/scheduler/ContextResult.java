@@ -288,22 +288,17 @@ public final class ContextResult {
             DeliveryClaim delivery, RequestRoute route, String detail, long nowMs)
             implements DeliveryEvidence {}
 
-    /** Immutable remote preemption receipt; Scheduler interprets it at the fact ingress. */
-    public record PreemptionReceipt(
+    public record PreemptionFact(
+            PreemptionRegistration attempt,
             PreemptionCancelPhase phase,
             boolean release,
             DecodeEndpoint endpoint,
             DecodeResources.ReservationHandle reservation,
             String detail,
-            CleanupAcknowledgement cleanup) {}
-
-    public record PreemptionFact(
-            PreemptionRegistration attempt,
-            PreemptionReceipt receipt)
+            CleanupAcknowledgement cleanup)
             implements DeliveryFact {
         public PreemptionFact {
             Objects.requireNonNull(attempt, "attempt");
-            Objects.requireNonNull(receipt, "receipt");
         }
     }
 

@@ -555,7 +555,7 @@ class DeliveryClaimTest {
                 f.owner.onPreemption(
                         attempt,
                         AbstractRequestScheduler.PreemptionEvent.receipt(
-                                attempt,
+                                attempt.reservation(),
                                 f.decode,
                                 EngineGrpcClient.CancelReply.REQUEST_FENCED,
                                 "mixed cancellation receipt",

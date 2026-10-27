@@ -38,10 +38,9 @@ class DeliveryStopTest {
         var scheduler = claim.owner().data().getScheduler();
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            var receipt =
-                                    call.getArgument(0, ContextResult.PreemptionFact.class)
-                                            .receipt();
-                            return receipt.phase()
+                            var fact =
+                                    call.getArgument(0, ContextResult.PreemptionFact.class);
+                            return fact.phase()
                                             == org.flexlb.balance.preemption.PreemptionCancelPhase
                                                     .NOT_FOUND_STALE
                                     ? PreemptionRegistration.Reply.NOT_FOUND
@@ -975,8 +974,7 @@ class DeliveryStopTest {
                             if (!(fact instanceof ContextResult.PreemptionFact preemption)) {
                                 return PreemptionRegistration.Reply.UNKNOWN;
                             }
-                            var receipt = preemption.receipt();
-                            return receipt.phase()
+                            return preemption.phase()
                                             == org.flexlb.balance.preemption.PreemptionCancelPhase
                                                     .NOT_FOUND_STALE
                                     ? PreemptionRegistration.Reply.NOT_FOUND
