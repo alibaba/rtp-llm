@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import concat_0
 
@@ -54,6 +55,16 @@ class _SharedWithCudaWeight(_Shared):
 
 def _quant_weight(weight_bf16: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     out_features, in_features = weight_bf16.shape
+    if is_sm120(weight_bf16.device):
+        return (
+            weight_bf16.to(torch.float8_e4m3fn),
+            torch.ones(
+                (out_features + 127) // 128,
+                (in_features + 127) // 128,
+                dtype=torch.float32,
+                device=weight_bf16.device,
+            ).to(torch.float8_e8m0fnu),
+        )
     if is_deep_gemm_e8m0_used():
         k_packed = (in_features + 511) // 512
         aligned_rows = FusedSharedExpertFastPath._tma_aligned_rows(
@@ -293,20 +304,26 @@ class TestSharedExpertExecutor(unittest.TestCase):
         self.assertIn(device_index, _SHARED_EXPERT_STREAM_CACHE)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_capture_requires_precreated_stream(self):
+    def test_overlap_capture_without_precreated_stream_is_sequential(self):
         _SHARED_EXPERT_STREAM_CACHE.clear()
         x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
         shared = _Shared().cuda()
         executor = OverlapSharedExpertExecutor()
 
-        with _env("DSV4_MOE_STRICT_FUSED", "0"), mock.patch(
-            "torch.cuda.is_current_stream_capturing",
-            return_value=True,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError, "not created before CUDA graph capture"
-            ):
+        out = torch.empty(x.shape, device=x.device, dtype=torch.float32)
+        shared(x)
+        torch.cuda.synchronize()
+        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
                 executor.start(shared, x)
+                self.assertIsNone(executor._active_stream)
+                out.copy_(executor.finish())
+            self.assertEqual(_SHARED_EXPERT_STREAM_CACHE, {})
+            x.mul_(2.0)
+            graph.replay()
+            torch.cuda.synchronize()
+        self.assertTrue(torch.equal(out, shared(x).float()))
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_overlap_executor_captures_with_precreated_stream(self):
@@ -326,8 +343,9 @@ class TestSharedExpertExecutor(unittest.TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 executor.start(shared, x)
-                self.assertIs(executor._active_stream, warmup_stream)
+                self.assertIsNone(executor._active_stream)
                 out.copy_(executor.finish())
+            self.assertIs(_SHARED_EXPERT_STREAM_CACHE[x.device.index], warmup_stream)
 
             x.mul_(2.0)
             graph.replay()
@@ -353,13 +371,17 @@ class TestSharedExpertExecutor(unittest.TestCase):
         self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    @mock.patch(
+        "rtp_llm.models_py.modules.dsv4.moe.shared_expert._SM120_FUSED_ENABLED", True
+    )
     def test_merged_w13_matches_split_reference(self):
         swiglu_limit = 1.5
-        shared, split_ref = _make_shared_expert(swiglu_limit=swiglu_limit)
+        inter = 512 if is_sm120(torch.device("cuda")) else 256
+        shared, split_ref = _make_shared_expert(inter=inter, swiglu_limit=swiglu_limit)
         executor = FusedSharedExpertExecutor(
             max_tokens_per_rank=64,
             dim=256,
-            inter_dim=256,
+            inter_dim=inter,
             swiglu_limit=swiglu_limit,
         )
         executor.prepare(shared)
@@ -367,9 +389,9 @@ class TestSharedExpertExecutor(unittest.TestCase):
         w13_w, w13_s = FusedSharedExpertFastPath._linear_parts(shared.w13)
         self.assertEqual(
             w13_w.shape,
-            (512, 256),
+            (2 * inter, 256),
         )
-        self.assertEqual(w13_s.shape[0], 512)
+        self.assertEqual(w13_s.shape[0], 2 * inter)
         if w13_s.dtype == torch.int32:
             self.assertEqual(w13_s.stride(0), 1)
         self.assertFalse(hasattr(shared, "w1"))
@@ -405,8 +427,8 @@ class TestSharedExpertExecutor(unittest.TestCase):
                 self.assertEqual(
                     merged_calls,
                     [
-                        ((tokens, 256), (512, 256), (tokens, 512)),
-                        ((tokens, 256), (256, 256), (tokens, 256)),
+                        ((tokens, 256), (2 * inter, 256), (tokens, 2 * inter)),
+                        ((tokens, inter), (256, inter), (tokens, 256)),
                     ],
                 )
                 self.assertLess(calc_diff(got, ref), 0.0011)
@@ -414,7 +436,8 @@ class TestSharedExpertExecutor(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_w13_generic_forward_matches_split_expert(self):
         swiglu_limit = 1.5
-        shared, split_ref = _make_shared_expert(swiglu_limit=swiglu_limit)
+        inter = 512 if is_sm120(torch.device("cuda")) else 256
+        shared, split_ref = _make_shared_expert(inter=inter, swiglu_limit=swiglu_limit)
         x = torch.randn((5, 256), device="cuda", dtype=torch.bfloat16)
         self.assertFalse(hasattr(shared, "w1"))
         self.assertFalse(hasattr(shared, "w3"))
@@ -501,9 +524,10 @@ class TestSharedExpertSM120FusedPath(unittest.TestCase):
             self.assertFalse(fp.can_run(shared, x))
 
     def test_can_run_requires_packed_scales(self):
-        # Without e8m0 originals (the generic fixture) nothing is packed, so
-        # the SM120 gate stays closed and the generic fallback is preserved.
+        # Missing checkpoint scales must keep the fused capability gate closed.
         shared, _ = _make_shared_expert()
+        shared._dsv4_w13_scale_e8m0 = None
+        shared._dsv4_w2_scale_e8m0 = None
         fp = FusedSharedExpertFastPath(dim=256, inter_dim=256)
         fp.prepare(shared)
         x = torch.randn((4, 256), device="cuda", dtype=torch.bfloat16)

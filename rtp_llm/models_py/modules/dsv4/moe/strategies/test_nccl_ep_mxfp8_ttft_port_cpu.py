@@ -96,6 +96,32 @@ def _stub_packages():
         comb,
     )
 
+    comb_tri = types.ModuleType(
+        "rtp_llm.models_py.modules.dsv4.moe._nccl_ep_combine_triton"
+    )
+    comb_tri.calls = []
+
+    def _peer_sum_reference(src, world, out):
+        """Pure-torch stand-in: peer-major ordered sum with FP32 accumulation."""
+        comb_tri.calls.append(
+            (src.dtype, int(world), out.dtype, tuple(src.shape), tuple(out.shape))
+        )
+        n_rows = int(out.size(0))
+        acc = torch.zeros_like(out)
+        for peer in range(int(world)):
+            begin = peer * n_rows
+            acc += src[begin : begin + n_rows].to(torch.float32)
+        out.copy_(acc)
+        return out
+
+    comb_tri.fp32_peer_sum = _peer_sum_reference
+    sys.modules[comb_tri.__name__] = comb_tri
+    setattr(
+        sys.modules["rtp_llm.models_py.modules.dsv4.moe"],
+        "_nccl_ep_combine_triton",
+        comb_tri,
+    )
+
     ws = types.ModuleType("rtp_llm.models_py.modules.dsv4.moe.warmup_sync")
     ws.cuda_graph_warmup_forward_enabled = lambda: False
     sys.modules[ws.__name__] = ws
@@ -789,6 +815,149 @@ for label, capture, warmup in (("capture", True, False), ("warmup", False, True)
         required_queries == expected_queries,
         required_queries,
     )
+
+# ---------------- 10. bf16 return wire contract ------------------------------
+comb_tri = sys.modules["rtp_llm.models_py.modules.dsv4.moe._nccl_ep_combine_triton"]
+
+
+def pack_probe(return_dtype, local_out, hidden, scale_cols):
+    probe = object.__new__(cand.NcclEpMxfp8Strategy)
+    probe._return_dtype = return_dtype
+    return probe._pack_return(local_out, hidden, scale_cols, int(local_out.size(0)))
+
+
+def combine_probe(return_dtype, received, n_rows, hidden, world):
+    probe = object.__new__(cand.NcclEpMxfp8Strategy)
+    probe._return_dtype = return_dtype
+    return probe._combine_return(received, n_rows, hidden, world)
+
+
+hidden10, scale10, world10, n_rows10 = 64, 2, 4, 3
+torch.manual_seed(10)
+partials = torch.randn(world10 * n_rows10, hidden10, dtype=torch.float32) * 3.0
+
+payload_bf16 = pack_probe("bf16", partials, hidden10, scale10)
+ck(
+    "bf16_pack_byte_layout",
+    payload_bf16.dtype == torch.uint8
+    and payload_bf16.shape == (world10 * n_rows10, hidden10 * 2),
+    repr(tuple(payload_bf16.shape)),
+)
+ck(
+    "bf16_pack_is_a_single_cast",
+    bool(
+        torch.equal(
+            payload_bf16, partials.to(torch.bfloat16).contiguous().view(torch.uint8)
+        )
+    ),
+    "pack must round each FP32 partial once to BF16, with no quantization step",
+)
+
+out_bf16 = combine_probe("bf16", payload_bf16, n_rows10, hidden10, world10)
+expected_bf16 = torch.zeros((n_rows10, hidden10), dtype=torch.float32)
+for peer in range(world10):
+    begin = peer * n_rows10
+    expected_bf16 += (
+        partials[begin : begin + n_rows10].to(torch.bfloat16).to(torch.float32)
+    )
+ck(
+    "bf16_combine_ordered_fp32_sum",
+    out_bf16.dtype == torch.float32 and bool(torch.equal(out_bf16, expected_bf16)),
+    "combine must sum BF16 partials in peer order with FP32 accumulation",
+)
+ck(
+    "bf16_combine_passes_bf16_src_fp32_out",
+    comb_tri.calls[-1][0] == torch.bfloat16
+    and comb_tri.calls[-1][2] == torch.float32
+    and comb_tri.calls[-1][3] == (world10 * n_rows10, hidden10),
+    repr(comb_tri.calls[-1]),
+)
+ck(
+    "bf16_combine_deterministic",
+    bool(
+        torch.equal(
+            out_bf16, combine_probe("bf16", payload_bf16, n_rows10, hidden10, world10)
+        )
+    ),
+    "same values in the same peer order must be bitwise reproducible",
+)
+
+payload_fp32 = pack_probe("fp32", partials, hidden10, scale10)
+out_fp32 = combine_probe("fp32", payload_fp32, n_rows10, hidden10, world10)
+expected_fp32 = torch.zeros((n_rows10, hidden10), dtype=torch.float32)
+for peer in range(world10):
+    begin = peer * n_rows10
+    expected_fp32 += partials[begin : begin + n_rows10]
+ck(
+    "fp32_arm_keeps_lossless_contract",
+    comb_tri.calls[-1][0] == torch.float32
+    and bool(torch.equal(out_fp32, expected_fp32)),
+    "the bf16 arm must not perturb the existing fp32 path",
+)
+abs_err = float((out_bf16 - out_fp32).abs().max())
+bound = float(4 * 2**-8 * partials.abs().max())
+ck(
+    "bf16_within_bf16_rounding_of_fp32",
+    abs_err <= bound,
+    "abs_err=%.3e bound=%.3e" % (abs_err, bound),
+)
+
+empty = torch.zeros((0, hidden10), dtype=torch.float32)
+ck(
+    "bf16_pack_empty_rows",
+    pack_probe("bf16", empty, hidden10, scale10).shape == (0, hidden10 * 2),
+    "empty stage chunks must pass through",
+)
+out_empty = combine_probe(
+    "bf16", torch.zeros((0, hidden10 * 2), dtype=torch.uint8), 0, hidden10, world10
+)
+ck(
+    "bf16_combine_empty_rows",
+    out_empty.shape == (0, hidden10) and out_empty.dtype == torch.float32,
+    repr(tuple(out_empty.shape)),
+)
+
+err = None
+try:
+    pack_probe("bf16", partials.to(torch.bfloat16), hidden10, scale10)
+except ValueError as exc:
+    err = exc
+ck(
+    "bf16_pack_rejects_non_fp32_partials",
+    err is not None and "BF16" in str(err),
+    repr(err),
+)
+err = None
+try:
+    combine_probe("bf16", payload_fp32, n_rows10, hidden10, world10)
+except ValueError as exc:
+    err = exc
+ck(
+    "bf16_combine_rejects_wrong_row_width",
+    err is not None and "2 bytes per element" in str(err),
+    repr(err),
+)
+
+for value, expected_dtype in (("bf16", "bf16"), ("fp32", "fp32"), ("mxfp8", "mxfp8")):
+    os.environ["DSV4_MOE_RETURN_DTYPE"] = value
+    strat = StratDouble(SimGroup([0, 1, 2, 3], 0, [4096] * 4))
+    ck(
+        "env_selects_%s_return" % expected_dtype,
+        strat._return_dtype == expected_dtype,
+        strat._return_dtype,
+    )
+os.environ["DSV4_MOE_RETURN_DTYPE"] = "fp16"
+err = None
+try:
+    StratDouble(SimGroup([0, 1, 2, 3], 0, [4096] * 4))
+except ValueError as exc:
+    err = exc
+ck(
+    "env_rejects_unknown_return_dtype",
+    err is not None and "mxfp8, bf16, or fp32" in str(err),
+    repr(err),
+)
+os.environ.pop("DSV4_MOE_RETURN_DTYPE", None)
 
 os.environ.pop("DSV4_MOE_PREQUANT_INPUT", None)
 os.environ.pop("DSV4_MOE_PREQUANT_INPUT_REQUIRED", None)

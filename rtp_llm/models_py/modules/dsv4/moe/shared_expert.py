@@ -118,7 +118,10 @@ class W13SharedExpert(nn.Module):
         swiglu_limit: float = 0.0,
     ) -> None:
         super().__init__()
-        from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
+        from rtp_llm.models_py.modules.dsv4.utils import (
+            _sm120_linear_backend,
+            _v4_fp8_linear,
+        )
 
         w13_w = expert_weights["w13_w"]
         w13_s = expert_weights["w13_s"]
@@ -129,8 +132,12 @@ class W13SharedExpert(nn.Module):
                 "shared w13 weight shape mismatch: "
                 f"got {tuple(w13_w.shape)}, expected {(2 * inter_dim, dim)}"
             )
-        self.w13 = _v4_fp8_linear(w13_w, w13_s)
-        self.w2 = _v4_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+        backend = _sm120_linear_backend("DSV4_SM120_SHARED_EXPERT_BACKEND")
+        self.w13 = _v4_fp8_linear(w13_w, w13_s, sm120_backend=backend)
+        self.w2 = _v4_fp8_linear(
+            expert_weights["w2_w"], expert_weights["w2_s"], sm120_backend=backend
+        )
+        self._sm120_gemm_backend = backend
         self.swiglu_limit = swiglu_limit
         # Keep the original checkpoint UE8M0 scales for the SM120 fused path:
         # the CUTLASS linear decodes its scales to fp32, while the fused path's
@@ -221,6 +228,10 @@ class FusedSharedExpertFastPath:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
             return False
         if _requires_sm120_linear(x):
+            # This alternative changes only the two linears. Fused activation
+            # quantization is a separate policy and must not bypass this arm.
+            if getattr(shared_experts, "_sm120_gemm_backend", "default") == "deepgemm":
+                return False
             if not _SM120_FUSED_ENABLED:
                 return False
             # SM120 capability decision: the fused path engages only when both
