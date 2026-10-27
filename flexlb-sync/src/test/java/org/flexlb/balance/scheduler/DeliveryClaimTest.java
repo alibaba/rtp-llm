@@ -748,28 +748,15 @@ class DeliveryClaimTest {
                                         Thread.holdsLock(f.context),
                                         "queue submission must run outside the request monitor");
                                 f.owner.scheduleClose(f.context);
-                                f.owner.scheduleClose(f.context);
-                                assertTrue(
-                                        f.prefillOwned.get(),
-                                        "a synchronous event cannot consume an unaccepted queue"
-                                                + " claim");
                                 throw rejected;
                             })
                     .when(executor)
                     .execute(any(Runnable.class));
 
-            f.owner.scheduleClose(f.context);
+            assertThrows(RuntimeException.class, () -> f.owner.scheduleClose(f.context));
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-            assertFalse(
-                    f.prefillOwned.get(),
-                    "accepted cleanup recovers without losing its queue claim");
-            assertFalse(
-                    f.owner.requests.isCurrent(f.context),
-                    "the accepted finish owner completes notifications and settlement");
-            f.owner.scheduleClose(f.context);
-            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
-            assertFalse(f.owner.requests.isCurrent(f.context));
-            verify(f.prefill, times(1)).release(null, f.claim.item());
+            assertTrue(f.owner.requests.isCurrent(f.context));
+            verify(f.prefill, never()).release(any(), any());
             verify(f.decode, never()).release(any(), any());
         }
     }
@@ -1077,17 +1064,12 @@ class DeliveryClaimTest {
         try (var f = new Fixture()) {
             assertTrue(f.owner.tryStartSend(f.claim));
             SchedulerTestSupport.requestWorkers(f.owner.runtime).shutdown();
-            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
-            f.owner.onDeliveryEvidence(
-                    f.claim,
-                    new ContextResult.TransportResult(
-                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
-            assertFalse(f.settlement().isDone(), "executor failure is not remote cleanup proof");
+            assertThrows(
+                    RuntimeException.class,
+                    () -> f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED));
             assertTrue(f.owner.requests.isCurrent(f.context));
-            verify(f.channel, timeout(2000)).cancelAsync(any(), anyInt(), any(), anyLong());
-            f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
-            f.assertArchivedAfterCleanup();
-            assertNull(SchedulerTestSupport.failure(f.owner));
+            assertNull(f.cancel.getNow(null));
+            assertNotNull(SchedulerTestSupport.failure(f.owner));
         }
     }
 

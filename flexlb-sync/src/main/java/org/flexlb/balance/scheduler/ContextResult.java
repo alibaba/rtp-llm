@@ -252,7 +252,10 @@ public final class ContextResult {
     public record ResponseCandidate(RequestContext owner, ResponseKind kind, End result, long nowMs)
             implements GrantValue {}
 
-    public sealed interface DeliveryEvidence
+    /** A delivery fact is already immutable; callers must not wrap it in an event object. */
+    public interface DeliveryFact {}
+
+    public sealed interface DeliveryEvidence extends DeliveryFact
             permits TransportResult,
                     Prediction,
                     RouteDelivered,
@@ -283,6 +286,18 @@ public final class ContextResult {
     public record PreparationFailure(
             DeliveryClaim delivery, RequestRoute route, String detail, long nowMs)
             implements DeliveryEvidence {}
+
+    /** Scheduler-owned preemption receipt, kept as a fact so it uses the same ingress. */
+    public record PreemptionFact(
+            PreemptionRegistration attempt,
+            AbstractRequestScheduler.PreemptionEvent event)
+            implements DeliveryFact {
+        public PreemptionFact {
+            Objects.requireNonNull(attempt, "attempt");
+            Objects.requireNonNull(event, "event");
+        }
+
+    }
 
     public interface GrantValue {
         RequestContext owner();

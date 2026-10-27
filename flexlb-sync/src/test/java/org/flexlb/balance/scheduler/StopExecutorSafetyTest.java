@@ -12,8 +12,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.any;
@@ -203,10 +203,8 @@ class StopExecutorSafetyTest {
     }
 
     @Test
-    void rejectedStopSubmissionRecoversOffCallerAndRemainsTracked() throws Exception {
+    void rejectedStopSubmissionIsReportedAndRemainsDrained() throws Exception {
         var runtime = runtime();
-        var caller = Thread.currentThread();
-        var worker = new CompletableFuture<Thread>();
         ReflectionTestUtils.setField(
                 runtime,
                 "stopWorkers",
@@ -215,11 +213,12 @@ class StopExecutorSafetyTest {
                             throw new java.util.concurrent.RejectedExecutionException();
                         });
         try {
-            runtime.executeStopWork(context(), () -> worker.complete(Thread.currentThread()));
-            assertNotSame(caller, worker.get(3, TimeUnit.SECONDS));
+            assertThrows(
+                    java.util.concurrent.RejectedExecutionException.class,
+                    () -> runtime.executeStopWork(context(), () -> {}));
             SchedulerTestSupport.awaitRequestWork(runtime);
         } finally {
-            runtime.shutdown();
+            assertThrows(RuntimeException.class, runtime::shutdown);
         }
     }
 

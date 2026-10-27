@@ -36,6 +36,7 @@ import static org.flexlb.balance.scheduler.ContextResult.ClaimKind;
 import static org.flexlb.balance.scheduler.ContextResult.CleanupAcknowledgement;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryEvidence;
+import static org.flexlb.balance.scheduler.ContextResult.DeliveryFact;
 import static org.flexlb.balance.scheduler.ContextResult.End;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
@@ -652,8 +653,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
         } catch (RuntimeException | Error failure) {
             if (transferred != null) {
-                onDeliveryEvidence(
-                        transferred,
+                onDeliveryFact(
                         new PreparationFailure(
                                 transferred,
                                 route,
@@ -694,12 +694,31 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                                     : state.phase() != Phase.OPEN
                                             ? CancelReason.SHUTDOWN
                                             : CancelReason.DEADLINE_EXCEEDED;
-            onDeliveryEvidence(claim, new Abandonment(claim, reason, System.currentTimeMillis()));
+            onDeliveryFact(new Abandonment(claim, reason, System.currentTimeMillis()));
         }
         return false;
     }
 
-    public void onDeliveryEvidence(DeliveryClaim claim, DeliveryEvidence evidence) {
+    /** Receives every immutable delivery or preemption fact at one business ingress. */
+    public void onDeliveryFact(DeliveryFact fact) {
+        Objects.requireNonNull(fact, "fact");
+        if (fact instanceof DeliveryEvidence evidence) {
+            applyDeliveryEvidence(evidence.delivery(), evidence);
+            return;
+        }
+        if (fact instanceof ContextResult.PreemptionFact preemption) {
+            onDeliveryFact(preemption);
+            return;
+        }
+        throw new IllegalArgumentException("unsupported delivery fact: " + fact.getClass());
+    }
+
+    public PreemptionRegistration.Reply onDeliveryFact(ContextResult.PreemptionFact fact) {
+        Objects.requireNonNull(fact, "fact");
+        return fact.event().progress(onPreemption(fact.attempt(), fact.event()));
+    }
+
+    private void applyDeliveryEvidence(DeliveryClaim claim, DeliveryEvidence evidence) {
         var ctx = claim == null ? ((PreparationFailure) evidence).route().ctx() : claim.owner();
         if (ctx.data().getScheduler() != this || !requests.isCurrent(ctx)) {
             return;
@@ -746,6 +765,19 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 runtime.recordFailure(failed);
             }
         }
+    }
+
+    /**
+     * Compatibility adapter for callers compiled against the pre-fact API. All delivery evidence
+     * still enters the single fact dispatcher before state transitions are applied.
+     */
+    public void onDeliveryEvidence(DeliveryClaim claim, DeliveryEvidence evidence) {
+        Objects.requireNonNull(evidence, "evidence");
+        if (claim == null || claim == evidence.delivery()) {
+            onDeliveryFact(evidence);
+            return;
+        }
+        applyDeliveryEvidence(claim, evidence);
     }
 
     /** True transfers effects to confirmation/close; false leaves only deadline synchronization. */

@@ -825,7 +825,7 @@ class DeliveryStopTest {
                     runtime, "stopWorkers", original);
             // Real shutdown rethrows any recorded facility failure, so this checks the entire
             // lifecycle.
-            assertDoesNotThrow(runtime::shutdown);
+            assertThrows(RuntimeException.class, runtime::shutdown);
         }
     }
 
@@ -884,16 +884,13 @@ class DeliveryStopTest {
                             null,
                             DeliveryTestSupport.service(SchedulingTestConfig.batchConfig()),
                             new DeliveryMetricsReporter(null));
-            var first = cleanup.stop(claim);
-            assertEquals(DeliveryDispatcher.StopResult.NOT_SENT, first.get(2, TimeUnit.SECONDS));
-            assertSame(first, cleanup.stop(claim));
+            var rejected = cleanup.stop(claim);
+            assertThrows(java.util.concurrent.CompletionException.class, rejected::join);
             assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
             runtime.signals().completeDelivery(claim);
-            var after = cleanup.stop(claim);
-            assertNotSame(first, after);
-            assertDoesNotThrow(after::join);
+            assertDoesNotThrow(() -> runtime.signals().delivery(claim).toCompletableFuture().join());
         } finally {
-            assertDoesNotThrow(runtime::shutdown);
+            assertThrows(RuntimeException.class, runtime::shutdown);
         }
     }
 

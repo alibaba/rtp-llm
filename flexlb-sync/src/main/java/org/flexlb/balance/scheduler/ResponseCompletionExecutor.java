@@ -6,10 +6,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -23,16 +20,8 @@ import java.util.function.BooleanSupplier;
  */
 final class ResponseCompletionExecutor implements AutoCloseable {
 
-    private final ThreadFactory emergencyWorkers =
-            Thread.ofPlatform().daemon().name("response-completion-emergency-", 1).factory();
     private final ThreadLocal<Boolean> completing = new ThreadLocal<>();
     private final ThreadPoolExecutor completionWorkers;
-    private final ExecutorService rejectedTaskWorker =
-            Executors.newSingleThreadExecutor(
-                    Thread.ofPlatform()
-                            .daemon()
-                            .name("response-completion-recovery-", 1)
-                            .factory());
 
     /** Null while accepting registrations; otherwise the shared final close result. */
     private CompletableFuture<Throwable> closeResult;
@@ -91,24 +80,10 @@ final class ResponseCompletionExecutor implements AutoCloseable {
         try {
             completionWorkers.execute(task);
         } catch (RuntimeException | Error rejected) {
-            if (!publication.isSubmitted()) {
-                throw rejected;
+            if (publication.isSubmitted()) {
+                publication.reject(rejected);
             }
-            try {
-                rejectedTaskWorker.execute(task);
-            } catch (RuntimeException | Error recoveryRejected) {
-                Throwable failure = Failures.append(rejected, recoveryRejected);
-                if (!publication.isSubmitted()) {
-                    throw Failures.propagate(failure, "response submission failed");
-                }
-                try {
-                    emergencyWorkers.newThread(task).start();
-                } catch (RuntimeException | Error startFailure) {
-                    publication.reject();
-                    throw Failures.propagate(
-                            Failures.append(failure, startFailure), "response submission failed");
-                }
-            }
+            throw Failures.propagate(rejected, "response submission failed");
         }
     }
 
@@ -154,12 +129,9 @@ final class ResponseCompletionExecutor implements AutoCloseable {
         Throwable failure = null;
         try {
             failure = Failures.run(null, completionWorkers::shutdown);
-            failure = Failures.run(failure, rejectedTaskWorker::shutdown);
-            while (failure == null
-                    && (!completionWorkers.isTerminated() || !rejectedTaskWorker.isTerminated())) {
+            while (failure == null && !completionWorkers.isTerminated()) {
                 try {
                     completionWorkers.awaitTermination(1, TimeUnit.DAYS);
-                    rejectedTaskWorker.awaitTermination(1, TimeUnit.DAYS);
                 } catch (InterruptedException interruption) {
                     interrupted = true;
                 }

@@ -230,18 +230,7 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         }
 
         private void dispatch(Runnable task) {
-            try {
-                (stop ? stopWorkers : requestWorkers).execute(task);
-            } catch (RuntimeException | Error rejected) {
-                if (rejected instanceof Error) {
-                    recordFailure(rejected);
-                }
-                if (stop) {
-                    Thread.ofVirtual().name("delivery-stop-recovery").start(task);
-                    return;
-                }
-                Thread.ofVirtual().name("request-work-recovery").start(task);
-            }
+            (stop ? stopWorkers : requestWorkers).execute(task);
         }
 
         private void reject(Throwable cause) {

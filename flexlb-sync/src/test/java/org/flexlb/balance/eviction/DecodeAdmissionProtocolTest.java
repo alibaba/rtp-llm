@@ -1073,15 +1073,8 @@ class DecodeAdmissionProtocolTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void cancellationReceiptDoesNotHopThroughRequestWorkers(boolean rejected) throws Exception {
-        if (rejected) {
-            ((java.util.concurrent.ExecutorService)
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    runtime, "requestWorkers"))
-                    .shutdown();
-        }
+    @Test
+    void cancellationReceiptDoesNotHopThroughRequestWorkers() throws Exception {
         var fixture = fixture();
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(fixture.requests(), 11L, terminal);
