@@ -244,10 +244,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
-    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                  "forward";
-    py_forward_method_         = py_model_.attr(forward_method);
+    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                      "forward";
+    py_forward_method_             = py_model_.attr(forward_method);
     if (weights_.lm_head && weights_.lm_head->kernel.dtype() == torch::kUInt8) {
         RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "compute_quantized_logits"),
                                 "Packed LM head requires Python compute_quantized_logits");
