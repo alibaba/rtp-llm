@@ -3,7 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
-#include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcCaller.h"
 #include "autil/LoopThread.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/model_rpc/ShutdownCoordinator.h"
@@ -50,7 +50,8 @@ private:
     grpc::Status                      preparePDRequest(const GenerateInputPB&          request,
                                                        int64_t                         deadline_ms,
                                                        std::shared_ptr<GenerateInput>& input,
-                                                       GenerateInputPB&                prefill_request,
+                                                       std::string&                    prefill_ip,
+                                                       uint32_t&                       prefill_port,
                                                        PrefillPeerInfo&                peer_info,
                                                        grpc::ServerContext*            server_context);
     static grpc::Status               parsePrefillDpAddr(const std::string& addr, std::string* ip, uint32_t* port);
@@ -64,7 +65,7 @@ private:
     std::unique_ptr<ShutdownCoordinator> shutdown_coordinator_;
     bool                                 requires_group_drain_ = false;
     std::atomic<int64_t>                 unique_key_id_{0};
-    std::shared_ptr<PrefillServerCaller> prefill_server_caller_;
+    std::shared_ptr<DecodeRpcCaller>     decode_rpc_caller_;
 };
 
 }  // namespace rtp_llm

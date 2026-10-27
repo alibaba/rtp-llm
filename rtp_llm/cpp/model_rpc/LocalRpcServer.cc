@@ -264,11 +264,11 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
     }
 }
 
-grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*                              context,
-                                              const string&                                     request_key,
-                                              WriterInterface*                                  writer,
-                                              std::shared_ptr<GenerateStream>&                  stream,
-                                              const std::function<FirstError::Snapshot(bool&)>& check_remote) {
+grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*                   context,
+                                              const string&                          request_key,
+                                              WriterInterface*                       writer,
+                                              std::shared_ptr<GenerateStream>&       stream,
+                                              const std::function<ErrorInfo(bool&)>& check_remote) {
     RTP_LLM_PROFILE_FUNCTION();
     // Observe local and remote failures before waiting for another token.
     bool remote_done = !check_remote;
@@ -279,11 +279,14 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
         stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE && !stream->isStreaming();
     BatchStreamOutputCollector complete_output(stream->generateConfig()->logits_index);
     while (true) {
-        auto remote_error = check_remote ? check_remote(remote_done) : FirstError::Snapshot{};
-        auto first        = FirstError::earlier(stream->firstError(), remote_error);
-        if (first.error.hasError()) {
-            stream->reportError(first.error.code(), first.error.ToString());
-            return serializeErrorMsg(request_key, stream->generateInput()->request_info, first.error);
+        auto remote_error = check_remote ? check_remote(remote_done) : ErrorInfo{};
+        auto error        = stream->statusInfo();
+        if (error.ok()) {
+            error = remote_error;
+        }
+        if (error.hasError()) {
+            stream->reportError(error.code(), error.ToString());
+            return serializeErrorMsg(request_key, stream->generateInput()->request_info, error);
         }
         const auto result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
@@ -363,34 +366,34 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
 grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*                                context,
                                                    const std::vector<std::shared_ptr<GenerateStream>>& streams,
                                                    BatchGenerateOutputsPB*                             response,
-                                                   const std::function<FirstError::Snapshot(bool&)>&   check_remote) {
+                                                   const std::function<ErrorInfo(bool&)>&              check_remote) {
     std::vector<BatchStreamOutputCollector> collectors;
     collectors.reserve(streams.size());
     for (const auto& stream : streams) {
         collectors.emplace_back(stream->generateConfig()->logits_index);
     }
-    FirstError::Snapshot                    observed_error;
-    auto                                    fail = [&](const grpc::Status& status) {
-        FirstError failure;
-        failure.record(errorInfoFromGrpcStatus(status));
-        auto first = FirstError::earlier(observed_error, failure.snapshot());
-        for (const auto& stream : streams)
-            first = FirstError::earlier(first, stream->firstError());
+    auto fail = [&](const grpc::Status& status) {
+        const auto error = errorInfoFromGrpcStatus(status);
         for (const auto& stream : streams) {
             if (!stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
-                stream->reportError(first.error.code(), first.error.ToString());
+                stream->reportError(error.code(), error.ToString());
             }
         }
-        return grpcStatusFromErrorInfo(first.error);
+        return grpcStatusFromErrorInfo(error);
     };
     while (true) {
         bool remote_done = true;
-        auto first       = check_remote ? check_remote(remote_done) : FirstError::Snapshot{};
-        for (const auto& stream : streams)
-            first = FirstError::earlier(first, stream->firstError());
-        observed_error = first;
-        if (first.error.hasError())
-            return fail(grpcStatusFromErrorInfo(first.error));
+        auto error       = check_remote ? check_remote(remote_done) : ErrorInfo{};
+        for (const auto& stream : streams) {
+            const auto local_error = stream->statusInfo();
+            if (local_error.hasError()) {
+                error = local_error;
+                break;
+            }
+        }
+        if (error.hasError()) {
+            return fail(grpcStatusFromErrorInfo(error));
+        }
         if (context->IsCancelled()) {
             return fail(grpcStatusFromErrorInfo(ErrorInfo(ErrorCode::CANCELLED, "BatchGenerateCall cancelled")));
         }
@@ -443,7 +446,6 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*         
     }
     return grpc::Status::OK;
 }
-
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                                              input_pb,
                                        std::shared_ptr<GenerateInput>&                                     output,

@@ -368,7 +368,6 @@ public:
     void         clearCanRun();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
-    FirstError::Snapshot firstError();
     std::string  stopReason();
 
     void   setReserveStep(size_t reserve_step);

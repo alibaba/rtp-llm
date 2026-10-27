@@ -144,7 +144,10 @@ protected:
         // refCount() rejects reclaimed blocks; refCountNoCheck() reports the raw
         // count under the pool lock so released blocks can still be observed.
         return std::all_of(allocated.blocks.begin(), allocated.blocks.end(), [&](BlockIdxType block) {
-            return block_pool->refCountNoCheck(block) == expected;
+            if (expected == 0) {
+                return !block_pool->isAllocated(block);
+            }
+            return block_pool->isAllocated(block) && block_pool->refCount(block) == expected;
         });
     }
 

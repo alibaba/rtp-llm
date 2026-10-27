@@ -174,8 +174,7 @@ P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<R
         std::unique_lock<std::mutex> lock(task_group->completion_mutex);
         task_group->completion_cv.wait_until(
             lock, std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms)), [&]() {
-                return task_group->cancelled.load() || all_done()
-                       || task_group->first_error.snapshot().error.hasError();
+                return task_group->cancelled.load() || all_done() || task_group->errorInfo().hasError();
             });
         if (task_group->cancelled.load()) {
             return ReadWaitOutcome::Cancelled;
@@ -183,12 +182,12 @@ P2PWorkerDecodeRead::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<R
         if (all_done()) {
             return ReadWaitOutcome::AllDone;
         }
-        if (task_group->first_error.snapshot().error.hasError())
+        if (task_group->errorInfo().hasError())
             return ReadWaitOutcome::Failed;
     }
-    task_group->first_error.record(ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
-                                             "Decode recv transfer deadline exceeded key=" + unique_key
-                                                 + " deadline_ms=" + std::to_string(deadline_ms)));
+    task_group->recordError(ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
+                                      "Decode recv transfer deadline exceeded key=" + unique_key
+                                          + " deadline_ms=" + std::to_string(deadline_ms)));
     // Cancel outside completion_mutex: cancel() may synchronously invoke the
     // completion callback, which takes that mutex to prevent a lost wakeup.
     for (const auto& key : task_group->partition_keys) {
@@ -307,7 +306,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     }
 
     if (pending_cancel) {
-        task_group->first_error.record(
+        task_group->recordError(
             ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED, "Decode recv cancelled key=" + unique_key));
         task_group->cancelled.store(true);
         for (const auto& task : task_group->tasks) {
@@ -341,7 +340,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
             }
         }
         reportReadMetrics(collector, false, read_start_time_us, task_group);
-        const auto        first = task_group->first_error.snapshot().error;
+        const auto        first = task_group->errorInfo();
         const std::string msg   = first.ToString();
         RTP_LLM_LOG_WARNING("read failed, request_id: %ld, unique_key: %s, %s, done_tasks=%d/%zu",
                             request_id,
@@ -384,7 +383,7 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
 P2PWorkerDecodeRead::RecvResultInfo
 P2PWorkerDecodeRead::aggregateRecvTaskResults(const std::shared_ptr<ReadTaskGroup>& task_group) const {
     RecvResultInfo result;
-    const auto     first = task_group->first_error.snapshot().error;
+    const auto     first = task_group->errorInfo();
     if (first.hasError())
         return {false, first.code(), first.ToString()};
     for (const auto& task : task_group->tasks) {
@@ -436,7 +435,7 @@ bool P2PWorkerDecodeRead::cancelRead(const std::string& unique_key, int64_t requ
 
     {
         std::lock_guard<std::mutex> lock(task_group->completion_mutex);
-        task_group->first_error.record(
+        task_group->recordError(
             ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED, "Decode recv cancelled key=" + unique_key));
         task_group->cancelled.store(true);
     }
@@ -471,10 +470,10 @@ void P2PWorkerDecodeRead::registerTaskCompletionCallback(
         // teardown, and must also run before lease_map_ registration completes.
         if (auto group = weak_task_group.lock()) {
             if (completed && !completed->success()) {
-                group->first_error.record(ErrorInfo(transfer::toErrorCode(completed->errorCode()),
-                                                    "Decode recv key=" + task_key + " transfer_code="
-                                                        + std::to_string(static_cast<int>(completed->errorCode()))
-                                                        + ": " + completed->errorMessage()));
+                group->recordError(ErrorInfo(transfer::toErrorCode(completed->errorCode()),
+                                             "Decode recv key=" + task_key + " transfer_code="
+                                                 + std::to_string(static_cast<int>(completed->errorCode())) + ": "
+                                                 + completed->errorMessage()));
             }
             std::lock_guard<std::mutex> lock(group->completion_mutex);
             if (completed && completed->success()) {

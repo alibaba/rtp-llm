@@ -206,28 +206,16 @@ void P2PConnectorAsyncReadContext::checkDone() {
         return;
     }
     tp_sync_result_->checkDone();  // Non-blocking metric snapshot.
-    const auto first = FirstError::earlier(tp_sync_result_->firstError(), server_call_result_->firstError());
-    if (first.error.hasError()) {
-        const auto  read_observed    = tp_sync_result_->firstError();
-        const auto  prefill_observed = server_call_result_->firstError();
-        const char* selected_path    = first.order == read_observed.order ? "decode_read" : "prefill_start_load";
-        RTP_LLM_LOG_WARNING("P2P error selection, key=%s selected_path=%s selected_code=%d selected_order=%llu "
-                            "observed_after_selection_read_code=%d read_order=%llu read_error=%s "
-                            "observed_after_selection_prefill_code=%d prefill_order=%llu prefill_error=%s",
-                            uniqueKey().c_str(),
-                            selected_path,
-                            static_cast<int>(first.error.code()),
-                            static_cast<unsigned long long>(first.order),
-                            static_cast<int>(read_observed.error.code()),
-                            static_cast<unsigned long long>(read_observed.order),
-                            read_observed.error.ToString().c_str(),
-                            static_cast<int>(prefill_observed.error.code()),
-                            static_cast<unsigned long long>(prefill_observed.order),
-                            prefill_observed.error.ToString().c_str());
-        const std::string message =
-            "observer_role=DECODE stage=p2p_read_merge selected_path=" + std::string(selected_path)
-            + " key=" + uniqueKey() + " selected_order=" + std::to_string(first.order) + ": " + first.error.ToString();
-        applyMergedReadOutcome({false, first.error.code(), message});
+    auto        error         = tp_sync_result_->errorInfo();
+    const char* selected_path = "decode_read";
+    if (error.ok()) {
+        error         = server_call_result_->errorInfo();
+        selected_path = "prefill_start_load";
+    }
+    if (error.hasError()) {
+        const std::string message = "observer_role=DECODE stage=p2p_read_merge selected_path="
+                                    + std::string(selected_path) + " key=" + uniqueKey() + ": " + error.ToString();
+        applyMergedReadOutcome({false, error.code(), message});
         return;
     }
     if (tp_sync_result_->done() && server_call_result_->done()) {

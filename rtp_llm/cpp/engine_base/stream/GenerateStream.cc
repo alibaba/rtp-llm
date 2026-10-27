@@ -780,10 +780,7 @@ void GenerateStream::checkTimeoutWithoutLock() {
 
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
-    const bool timed_out = generate_input_->request_deadline_ms > 0 ?
-                               autil::TimeUtility::currentTimeInMicroSeconds() / 1000 >= deadlineMs() :
-                               timeout_ms > 0 && timeout_ms < running_time_ms;
-    if (timed_out) {
+    if (timeout_ms > 0 && timeout_ms < running_time_ms) {
         reportTimeoutWithoutLock(running_time_ms, timeout_ms);
     }
 }
@@ -1095,10 +1092,6 @@ bool GenerateStream::hasErrorWithoutLock() const {
 
 bool GenerateStream::isSubGenerateDoneWithoutLock(int batch_id) const {
     return getStatus() == StreamState::FINISHED || sub_generate_status_[batch_id] == StreamState::FINISHED;
-}
-
-FirstError::Snapshot GenerateStream::firstError() {
-    return generate_status_->first_error.snapshot();
 }
 
 ErrorInfo GenerateStream::statusInfo() {

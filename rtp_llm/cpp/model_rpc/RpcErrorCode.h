@@ -46,7 +46,7 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
 // grpc::StatusCode received over the wire. Lossy by design — multiple
 // ErrorCodes share the same grpc status (e.g. MALLOC_FAILED and
 // DECODE_MALLOC_FAILED both → RESOURCE_EXHAUSTED), so we pick the most
-// common producer for each status. Used by PrefillServerCallerContext
+// common producer for each status. Used by DecodeRpcCallerContext
 // when wrapping prefill's gRPC failures back into ErrorInfo for downstream
 // consumers, so they don't all collapse to UNKNOWN_ERROR.
 inline ErrorCode transGrpcStatusToErrorCode(grpc::StatusCode status_code) {

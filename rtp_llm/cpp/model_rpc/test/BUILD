@@ -242,7 +242,7 @@ cc_test(
         "DecodeRpcServerTest.cc",
         "PrefillRpcServerTest.cc",
         "RemoteRpcServiceImplTest.cc",
-        "PrefillServerCallerTest.cc",
+        "DecodeRpcCallerTest.cc",
         "PDRequestUtilsTest.cc",
         "RpcTimeoutUtilsTest.cc",
         "RpcEngineStartupTest.cc",

@@ -13,9 +13,9 @@
 
 namespace rtp_llm {
 
-class PrefillServerCaller;
+class DecodeRpcCaller;
 
-struct PrefillServerCallerAsyncState {
+struct DecodeRpcCallerAsyncState {
     std::shared_ptr<grpc::ClientContext>                        client_context;
     std::shared_ptr<grpc::CompletionQueue>                      completion_queue;
     std::shared_ptr<RpcService::Stub>                           stub;
@@ -29,12 +29,12 @@ struct PrefillServerCallerAsyncState {
     bool                                                        completion_queue_shutdown_drained_{false};
 };
 
-class PrefillServerCallerContext {
+class DecodeRpcCallerContext {
 public:
-    ~PrefillServerCallerContext();
+    ~DecodeRpcCallerContext();
 
     // Constructor (only friends can create instances)
-    PrefillServerCallerContext(const std::string& prefill_addr, const std::string& unique_key);
+    DecodeRpcCallerContext(const std::string& prefill_addr, const std::string& unique_key);
 
     // Non-blocking check if Prefill is complete
     void checkDone();
@@ -64,21 +64,15 @@ public:
                    && async_state_->status.error_code() != grpc::StatusCode::CANCELLED);
     }
 
-    FirstError::Snapshot firstError() {
-        first_error_.record(errorInfo());
-        return first_error_.snapshot();
-    }
-
     ErrorInfo errorInfo() {
         checkDone();
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
         if (error_info_.ok() && finished_ && async_state_ && !async_state_->status.ok()) {
             error_info_ = errorInfoFromGrpcStatus(
                 async_state_->status,
-                "location=PrefillServerCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
+                "location=DecodeRpcCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
                     + prefill_addr_ + " request_id=" + std::to_string(async_state_->request.request_id())
                     + " key=" + unique_key_);
-            first_error_.record(error_info_);
         }
         return error_info_;
     }
@@ -90,7 +84,7 @@ public:
     void wait();
 
 private:
-    friend class PrefillServerCaller;
+    friend class DecodeRpcCaller;
     void handleReadChunkLocked(const GenerateOutputsPB& response);
     bool waitWithTimeoutMs(int64_t timeout_ms);
     void shutdownAndDrainCompletionQueue();
@@ -100,11 +94,10 @@ private:
     std::string unique_key_;
 
     // gRPC infrastructure
-    std::shared_ptr<PrefillServerCallerAsyncState> async_state_;
+    std::shared_ptr<DecodeRpcCallerAsyncState> async_state_;
 
     // Request/Response
     ErrorInfo         error_info_;
-    FirstError        first_error_;
 
     // State
     bool              finished_          = false;

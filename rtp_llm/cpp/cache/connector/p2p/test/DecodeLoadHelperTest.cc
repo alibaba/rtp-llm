@@ -345,6 +345,15 @@ TEST_F(DecodeLoadHelperTest, CompletionRejectsMissingPayload) {
     EXPECT_FALSE(result->side_channel_payload.has_data);
 }
 
+TEST_F(DecodeLoadHelperTest, CompletionDoesNotInferFirstTokenFromNonzeroId) {
+    auto result = std::make_shared<DecodeLoadHelper::Result>();
+    result->response.mutable_payload()->set_first_generate_token_id(42);
+    result->complete(true);
+    EXPECT_FALSE(result->success());
+    EXPECT_FALSE(result->side_channel_payload.has_first_token);
+    EXPECT_EQ(result->error_code, ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED);
+}
+
 TEST_F(DecodeLoadHelperTest, CompletionPreservesRngOffsetPresence) {
     for (uint64_t offset : {uint64_t{0}, uint64_t{1} << 63}) {
         auto  result  = std::make_shared<DecodeLoadHelper::Result>();
@@ -359,7 +368,6 @@ TEST_F(DecodeLoadHelperTest, CompletionPreservesRngOffsetPresence) {
         EXPECT_EQ(result->side_channel_payload.rng_offset, offset);
     }
 }
-
 
 TEST_F(DecodeLoadHelperTest, CompletionAcceptsExplicitZeroFirstToken) {
     auto  result  = std::make_shared<DecodeLoadHelper::Result>();

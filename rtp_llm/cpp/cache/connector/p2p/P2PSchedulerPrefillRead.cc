@@ -194,7 +194,7 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     if (deadline_exceeded) {
         std::string error_msg =
             "sendKVCache: broadcast wait exceeded deadline_ms, request_id: " + std::to_string(request_id);
-        const auto observed_error = result->firstError().error;
+        const auto observed_error = result->errorInfo();
         error_msg += " unique_key=" + unique_key + " observed_error_code="
                      + std::to_string(static_cast<int>(observed_error.code()))
                      + " observed_error=" + observed_error.ToString();
@@ -210,7 +210,7 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
 
     if (cancel_result) {
         std::string error_msg = "sendKVCache: cancelled by client, request_id: " + std::to_string(request_id);
-        const auto observed_error = result->firstError().error;
+        const auto  observed_error = result->errorInfo();
         error_msg += " unique_key=" + unique_key + " observed_error_code="
                      + std::to_string(static_cast<int>(observed_error.code()))
                      + " observed_error=" + observed_error.ToString();

@@ -731,7 +731,7 @@ TEST_F(BroadcastManagerTest, ImmediateProgressCallbackExceptionDoesNotEscapeRegi
     EXPECT_EQ(progress_calls, 2);
     EXPECT_TRUE(result->done());
     EXPECT_TRUE(result->success());
-    EXPECT_TRUE(result->firstError().error.ok());
+    EXPECT_TRUE(result->errorInfo().ok());
 }
 
 TEST_F(BroadcastManagerTest, LateCompletionCallbackExceptionPreservesFatalRpcError) {
@@ -774,7 +774,7 @@ TEST_F(BroadcastManagerTest, WorkerNum) {
     EXPECT_EQ(manager_->workerNum(), 2u);
 }
 
-TEST(BroadcastFirstErrorTest, FirstRankFailureIsAvailableBeforeOtherRanksFinish) {
+TEST(BroadcastErrorInfoTest, FirstRankFailureIsAvailableBeforeOtherRanksFinish) {
     using Result   = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
     auto a         = std::make_shared<Result::WorkerRpcContext>();
     auto b         = std::make_shared<Result::WorkerRpcContext>();
@@ -784,18 +784,18 @@ TEST(BroadcastFirstErrorTest, FirstRankFailureIsAvailableBeforeOtherRanksFinish)
     Result result({a, b});
     result.finishRank(1, true);
     EXPECT_FALSE(result.done());
-    const auto first = result.firstError();
-    EXPECT_EQ(first.error.code(), ErrorCode::CONNECT_FAILED);
-    EXPECT_NE(first.error.ToString().find("rank=1 peer=worker-1:9000"), std::string::npos);
-    EXPECT_NE(first.error.ToString().find("connection reset by peer"), std::string::npos);
+    const auto first = result.errorInfo();
+    EXPECT_EQ(first.code(), ErrorCode::CONNECT_FAILED);
+    EXPECT_NE(first.ToString().find("rank=1 peer=worker-1:9000"), std::string::npos);
+    EXPECT_NE(first.ToString().find("connection reset by peer"), std::string::npos);
     a->status = grpc::Status(grpc::StatusCode::CANCELLED, "cleanup");
     result.finishRank(0, true);
     EXPECT_TRUE(result.done());
-    EXPECT_EQ(result.firstError().order, first.order);
-    EXPECT_EQ(result.firstError().error.ToString(), first.error.ToString());
+    EXPECT_EQ(result.errorInfo().code(), first.code());
+    EXPECT_EQ(result.errorInfo().ToString(), first.ToString());
 }
 
-TEST(BroadcastFirstErrorTest, ApplicationFailurePrecedesLaterTransportFailure) {
+TEST(BroadcastErrorInfoTest, ApplicationFailurePrecedesLaterTransportFailure) {
     using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
     auto a       = std::make_shared<Result::WorkerRpcContext>();
     auto b       = std::make_shared<Result::WorkerRpcContext>();
@@ -806,8 +806,8 @@ TEST(BroadcastFirstErrorTest, ApplicationFailurePrecedesLaterTransportFailure) {
     result.finishRank(1, true);
     a->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "later timeout");
     result.finishRank(0, true);
-    EXPECT_EQ(result.firstError().error.code(), ErrorCode::MM_PROCESS_ERROR);
-    EXPECT_NE(result.firstError().error.ToString().find("first worker error"), std::string::npos);
+    EXPECT_EQ(result.errorInfo().code(), ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_NE(result.errorInfo().ToString().find("first worker error"), std::string::npos);
 }
 
 }  // namespace rtp_llm::test

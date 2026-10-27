@@ -53,7 +53,19 @@ public:
 
 private:
     struct ReadTaskGroup {
-        FirstError                                 first_error;
+        ErrorInfo          error_info;
+        mutable std::mutex error_mutex;
+
+        void recordError(const ErrorInfo& error) {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            if (error_info.ok() && !error.ok()) {
+                error_info = error;
+            }
+        }
+        ErrorInfo errorInfo() const {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            return error_info;
+        }
         std::vector<std::string>                   partition_keys;
         std::vector<transfer::IKVCacheRecvTaskPtr> tasks;
         std::atomic<bool>                          cancelled{false};

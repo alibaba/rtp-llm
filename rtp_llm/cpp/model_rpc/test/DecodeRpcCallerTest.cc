@@ -14,7 +14,7 @@
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
 
-#include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcCaller.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
@@ -316,7 +316,7 @@ private:
     int                                    listen_port_{0};
 };
 
-class PrefillServerCallerTest: public ::testing::Test {
+class DecodeRpcCallerTest: public ::testing::Test {
 protected:
     GenerateInputPB makeSyncRequest(FakePrefillRpcServer& server, int64_t request_id, int32_t timeout_ms) {
         GenerateInputPB request;
@@ -330,20 +330,20 @@ protected:
         return request;
     }
 
-    std::shared_ptr<PrefillServerCallerContext> callPrefill(FakePrefillRpcServer& server,
-                                                            int64_t               request_id,
-                                                            const std::string&    unique_key,
-                                                            int64_t               deadline_us = 5 * 1000 * 1000) {
+    std::shared_ptr<DecodeRpcCallerContext> callPrefill(FakePrefillRpcServer& server,
+                                                        int64_t               request_id,
+                                                        const std::string&    unique_key,
+                                                        int64_t               deadline_us = 5 * 1000 * 1000) {
         GenerateInputPB request;
         request.set_request_id(request_id);
         request.add_token_ids(1);
         request.mutable_generate_config()->set_timeout_ms(5000);
         const auto request_deadline_ms = currentTimeMs() + deadline_us / 1000;
-        return caller_.callPrefill(&request, "127.0.0.1", server.port(), unique_key, request_deadline_ms, {}).value();
+        return caller_.startPrefill(&request, "127.0.0.1", server.port(), unique_key, request_deadline_ms, {}).value();
     }
 
-    bool waitDone(const std::shared_ptr<PrefillServerCallerContext>& context,
-                  std::chrono::milliseconds                          timeout = std::chrono::seconds(3)) {
+    bool waitDone(const std::shared_ptr<DecodeRpcCallerContext>& context,
+                  std::chrono::milliseconds                      timeout = std::chrono::seconds(3)) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             if (context->done()) {
@@ -355,10 +355,10 @@ protected:
     }
 
 protected:
-    PrefillServerCaller caller_;
+    DecodeRpcCaller caller_;
 };
 
-TEST_F(PrefillServerCallerTest, AsyncClientTracePropagatesAndWaitsForRpcTerminalState) {
+TEST_F(DecodeRpcCallerTest, AsyncClientTracePropagatesAndWaitsForRpcTerminalState) {
     namespace memory = opentelemetry::exporter::memory;
     telemetry::TelemetryRuntime::shutdown(5000);
     std::shared_ptr<memory::InMemorySpanData> span_data;
@@ -375,7 +375,7 @@ TEST_F(PrefillServerCallerTest, AsyncClientTracePropagatesAndWaitsForRpcTerminal
         ASSERT_TRUE(server.start());
         auto request      = makeSyncRequest(server, 1020, 5000);
         auto request_span = telemetry::TelemetryRuntime::tracer()->StartSpan("decode-client-trace-test");
-        auto result       = caller_.callPrefill(
+        auto result       = caller_.startPrefill(
             &request, "127.0.0.1", server.port(), "trace-test", currentTimeMs() + 5000, request_span);
         ASSERT_TRUE(result.ok());
         auto context = result.value();
@@ -428,7 +428,7 @@ TEST_F(PrefillServerCallerTest, AsyncClientTracePropagatesAndWaitsForRpcTerminal
     EXPECT_EQ(errors, 2u);
 }
 
-TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailed) {
+TEST_F(DecodeRpcCallerTest, ErrorChunkMarksContextFailed) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kFirstChunkSnapshot));
     ASSERT_TRUE(server.start());
@@ -443,7 +443,7 @@ TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailed) {
     EXPECT_NE(context->errorInfo().ToString().find("[received_at "), std::string::npos);
 }
 
-TEST_F(PrefillServerCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish) {
+TEST_F(DecodeRpcCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kErrorChunkThenWaitForCancel));
     ASSERT_TRUE(server.start());
@@ -459,7 +459,7 @@ TEST_F(PrefillServerCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
-TEST_F(PrefillServerCallerTest, MultipleChunksCompleteSuccessfully) {
+TEST_F(DecodeRpcCallerTest, MultipleChunksCompleteSuccessfully) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kLaterChunkSnapshot));
     ASSERT_TRUE(server.start());
@@ -471,7 +471,7 @@ TEST_F(PrefillServerCallerTest, MultipleChunksCompleteSuccessfully) {
     EXPECT_FALSE(context->failed());
 }
 
-TEST_F(PrefillServerCallerTest, CancelMarksContextDoneAndUnsuccessful) {
+TEST_F(DecodeRpcCallerTest, CancelMarksContextDoneAndUnsuccessful) {
     FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
     ASSERT_TRUE(server.start());
 
@@ -486,7 +486,7 @@ TEST_F(PrefillServerCallerTest, CancelMarksContextDoneAndUnsuccessful) {
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
-TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationRequestShape) {
+TEST_F(DecodeRpcCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationRequestShape) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest));
     ASSERT_TRUE(server.start());
@@ -502,7 +502,7 @@ TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationR
 
     const auto request_deadline_ms = currentTimeMs() + 1000;
     auto       context =
-        caller_.callPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request_deadline_ms, {})
+        caller_.startPrefill(&request, "127.0.0.1", server.port(), "decode-entrance-key", request_deadline_ms, {})
             .value();
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(waitDone(context));
@@ -516,7 +516,7 @@ TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationR
     EXPECT_EQ(captured_request.generate_config().unique_key(), "decode-entrance-key");
 }
 
-TEST_F(PrefillServerCallerTest, DestroyContextCancelsOutstandingPrefillRpc) {
+TEST_F(DecodeRpcCallerTest, DestroyContextCancelsOutstandingPrefillRpc) {
     FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
     ASSERT_TRUE(server.start());
 
@@ -529,15 +529,15 @@ TEST_F(PrefillServerCallerTest, DestroyContextCancelsOutstandingPrefillRpc) {
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
-TEST_F(PrefillServerCallerTest, UnstartedContextDoneReturnsImmediately) {
-    auto context = std::make_shared<PrefillServerCallerContext>("127.0.0.1:1", "never-started");
+TEST_F(DecodeRpcCallerTest, UnstartedContextDoneReturnsImmediately) {
+    auto context = std::make_shared<DecodeRpcCallerContext>("127.0.0.1:1", "never-started");
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(context->failed());
 }
 
-TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailurePreservesCause) {
+TEST_F(DecodeRpcCallerTest, AsyncReaderCreationFailurePreservesCause) {
     caller_.async_reader_factory_ = [](const std::shared_ptr<RpcService::Stub>&,
                                        grpc::ClientContext*,
                                        const GenerateInputPB&,
@@ -551,40 +551,40 @@ TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailurePreservesCause) {
     request.mutable_generate_config()->set_timeout_ms(5000);
 
     const auto request_deadline_ms = currentTimeMs() + 5000;
-    auto       result = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", request_deadline_ms, {});
+    auto       result = caller_.startPrefill(&request, "127.0.0.1", 1, "null-reader", request_deadline_ms, {});
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::RPC_FINISH_FAILED);
     EXPECT_NE(result.status().ToString().find("null-reader"), std::string::npos);
     EXPECT_NE(result.status().ToString().find("127.0.0.1:1"), std::string::npos);
 }
 
-TEST_F(PrefillServerCallerTest, AsyncPrefillNormalizesRawIpv6TargetAddress) {
+TEST_F(DecodeRpcCallerTest, AsyncPrefillNormalizesRawIpv6TargetAddress) {
     GenerateInputPB request;
     request.set_request_id(1013);
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(1);
 
     const auto request_deadline_ms = currentTimeMs() + 5000;
-    auto       context = caller_.callPrefill(&request, "::1", 65535, "ipv6-target", request_deadline_ms, {}).value();
+    auto       context = caller_.startPrefill(&request, "::1", 65535, "ipv6-target", request_deadline_ms, {}).value();
     ASSERT_NE(context, nullptr);
     EXPECT_EQ(context->prefill_addr_, "[::1]:65535");
     context->cancel();
 }
 
-TEST_F(PrefillServerCallerTest, AsyncPrefillRejectsInvalidTargetPort) {
+TEST_F(DecodeRpcCallerTest, AsyncPrefillRejectsInvalidTargetPort) {
     GenerateInputPB request;
     request.set_request_id(1014);
     request.add_token_ids(1);
     request.mutable_generate_config()->set_timeout_ms(1);
 
     const auto request_deadline_ms = currentTimeMs() + 5000;
-    auto       result              = caller_.callPrefill(&request, "::1", 0, "bad-port", request_deadline_ms, {});
+    auto       result              = caller_.startPrefill(&request, "::1", 0, "bad-port", request_deadline_ms, {});
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_NE(result.status().ToString().find("bad-port"), std::string::npos);
 }
 
-TEST_F(PrefillServerCallerTest, PeerInfoCallsRpcEveryTimeAndUsesLatestResponse) {
+TEST_F(DecodeRpcCallerTest, PeerInfoCallsRpcEveryTimeAndUsesLatestResponse) {
     auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
     service->setPeerInfoResponses({{2, 1}, {4, 2}, {8, 4}});
     FakePrefillRpcServer server(std::move(service));
@@ -609,7 +609,7 @@ TEST_F(PrefillServerCallerTest, PeerInfoCallsRpcEveryTimeAndUsesLatestResponse) 
     EXPECT_EQ(server.service()->peerInfoCallCount(), 3);
 }
 
-TEST_F(PrefillServerCallerTest, PeerInfoFailureDoesNotReusePreviousSuccessAndNextCallReprobes) {
+TEST_F(DecodeRpcCallerTest, PeerInfoFailureDoesNotReusePreviousSuccessAndNextCallReprobes) {
     auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
     service->setPeerInfoResponses({{2, 1}, {4, 2}});
     FakePrefillRpcServer server(std::move(service));
@@ -637,7 +637,7 @@ TEST_F(PrefillServerCallerTest, PeerInfoFailureDoesNotReusePreviousSuccessAndNex
     EXPECT_EQ(server.service()->peerInfoCallCount(), 3);
 }
 
-TEST_F(PrefillServerCallerTest, PeerInfoCarriesCpSizeIndependentlyFromTpSize) {
+TEST_F(DecodeRpcCallerTest, PeerInfoCarriesCpSizeIndependentlyFromTpSize) {
     auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
     service->setPeerInfoResponses({{4, 2}});
     FakePrefillRpcServer server(std::move(service));
@@ -649,7 +649,7 @@ TEST_F(PrefillServerCallerTest, PeerInfoCarriesCpSizeIndependentlyFromTpSize) {
     EXPECT_EQ(info.cp_size, 2);
 }
 
-TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
+TEST_F(DecodeRpcCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kReturnErrorWithoutChunk));
     ASSERT_TRUE(server.start());
@@ -663,20 +663,20 @@ TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {
     EXPECT_NE(context->errorInfo().ToString().find("prefill failed before any response"), std::string::npos);
 }
 
-TEST_F(PrefillServerCallerTest, SyncFallbackTimeoutCancelsPrefillRpc) {
+TEST_F(DecodeRpcCallerTest, SyncFallbackTimeoutCancelsPrefillRpc) {
     FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
     ASSERT_TRUE(server.start());
 
     grpc::ServerContext server_context;
     auto                request = makeSyncRequest(server, 1005, 50);
 
-    auto status = caller_.callPrefill(&server_context, &request, nullptr);
+    auto status = caller_.forwardGenerate(&server_context, &request, nullptr);
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
-TEST_F(PrefillServerCallerTest, ConcurrentSyncCancellationKeepsOtherRequestAndRetiresCallback) {
+TEST_F(DecodeRpcCallerTest, ConcurrentSyncCancellationKeepsOtherRequestAndRetiresCallback) {
     FakePrefillRpcServer first(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
     FakePrefillRpcServer second(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
     ASSERT_TRUE(first.start());
@@ -687,13 +687,13 @@ TEST_F(PrefillServerCallerTest, ConcurrentSyncCancellationKeepsOtherRequestAndRe
     std::atomic<bool> cancel_second{false};
     std::atomic<int>  first_callback_count{0};
     auto              first_call  = std::async(std::launch::async, [&] {
-        return caller_.callPrefill(nullptr, &first_request, nullptr, [&] {
+        return caller_.forwardGenerate(nullptr, &first_request, nullptr, [&] {
             first_callback_count.fetch_add(1);
             return cancel_first.load();
         });
     });
     auto              second_call = std::async(std::launch::async, [&] {
-        return caller_.callPrefill(nullptr, &second_request, nullptr, [&] { return cancel_second.load(); });
+        return caller_.forwardGenerate(nullptr, &second_request, nullptr, [&] { return cancel_second.load(); });
     });
     EXPECT_TRUE(first.service()->waitStarted(std::chrono::seconds(1)));
     EXPECT_TRUE(second.service()->waitStarted(std::chrono::seconds(1)));
@@ -707,7 +707,7 @@ TEST_F(PrefillServerCallerTest, ConcurrentSyncCancellationKeepsOtherRequestAndRe
     EXPECT_EQ(first_callback_count.load(), retired_count);
 }
 
-TEST_F(PrefillServerCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
+TEST_F(DecodeRpcCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
     FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
     ASSERT_TRUE(server.start());
 
@@ -720,7 +720,7 @@ TEST_F(PrefillServerCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
         cancelled.store(true);
     });
 
-    auto status = caller_.callPrefill(nullptr, &request, nullptr, [&cancelled]() { return cancelled.load(); });
+    auto status = caller_.forwardGenerate(nullptr, &request, nullptr, [&cancelled]() { return cancelled.load(); });
     cancel_thread.join();
 
     EXPECT_TRUE(started.load());
@@ -731,7 +731,7 @@ TEST_F(PrefillServerCallerTest, SyncFallbackClientCancelCancelsPrefillRpc) {
 }  // namespace rtp_llm::test
 
 namespace rtp_llm::test {
-TEST_F(PrefillServerCallerTest, PeerInfoRejectsMissingCpSizeWithoutFallback) {
+TEST_F(DecodeRpcCallerTest, PeerInfoRejectsMissingCpSizeWithoutFallback) {
     auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
     service->setPeerInfoResponses({{4, 0}});
     FakePrefillRpcServer server(std::move(service));
@@ -743,7 +743,7 @@ TEST_F(PrefillServerCallerTest, PeerInfoRejectsMissingCpSizeWithoutFallback) {
     EXPECT_NE(result.status().ToString().find(std::to_string(server.port())), std::string::npos);
 }
 
-TEST_F(PrefillServerCallerTest, PeerInfoAcceptsTpCpWithoutDpAddresses) {
+TEST_F(DecodeRpcCallerTest, PeerInfoAcceptsTpCpWithoutDpAddresses) {
     auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
     service->setPeerInfoResponses({{4, 1}});
     FakePrefillRpcServer server(std::move(service));

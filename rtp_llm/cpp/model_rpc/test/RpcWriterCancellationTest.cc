@@ -136,7 +136,7 @@ TEST(RpcWriterCancellationTest, ContextMetricsPreserveTypedRpcErrorWithoutStream
     }
 }
 
-TEST(RpcWriterCancellationTest, ContextMetricsKeepExplicitFirstErrorAheadOfGrpcFallback) {
+TEST(RpcWriterCancellationTest, ContextMetricsKeepExplicitErrorAheadOfGrpcFallback) {
     kmonitor::MetricsReporterPtr metrics_reporter;
     auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
     GenerateContext              context(53, 0, nullptr, metrics_reporter, meta);
@@ -276,9 +276,7 @@ TEST(RpcWriterCancellationTest, KvLoadTraceKeepsCompletedSuccessAndAttributesDep
             stream->reportError(ErrorCode::CANCELLED, "later generation cancellation");
             context.error_status = grpcStatusFromErrorInfo(stream->statusInfo());
         } else {
-            FirstError dependency;
-            dependency.record({ErrorCode::CONNECT_TIMEOUT, "Prefill dependency timed out"});
-            context.dependency_failure = dependency.snapshot();
+            context.dependency_failure = {ErrorCode::CONNECT_TIMEOUT, "Prefill dependency timed out"};
             stream->reportError(ErrorCode::CONNECT_TIMEOUT, "Prefill dependency timed out");
             stream->recordLoadingCacheDoneTime();
             context.error_status = grpcStatusFromErrorInfo(stream->statusInfo());

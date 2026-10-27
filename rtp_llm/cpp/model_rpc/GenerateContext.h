@@ -64,8 +64,6 @@ public:
 public:
     int64_t                               request_id;
     std::string                           request_key;
-    int64_t                               retry_times           = 0;
-    int64_t                               retry_cost_time_ms    = 0;
     const std::atomic<size_t>*            onflight_requests     = nullptr;
     int64_t                               request_timeout_ms    = 0;
     bool                                  finished              = false;
@@ -74,7 +72,7 @@ public:
     RequestDeadline                       retry_deadline;
     ErrorInfo                             error_info;
     grpc::Status                          error_status = grpc::Status::OK;
-    FirstError::Snapshot                   dependency_failure;
+    ErrorInfo                             dependency_failure;
     RequestInfo                           request_info;
     grpc::ServerContext*                  server_context;
     kmonitor::MetricsReporterPtr          metrics_reporter;

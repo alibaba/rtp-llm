@@ -124,8 +124,9 @@ public:
         }
     }
 
-    FirstError::Snapshot firstError() const {
-        return first_error_.snapshot();
+    ErrorInfo errorInfo() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return error_info_;
     }
 
     void setProgressCallback(DoneCallback callback) {
@@ -230,7 +231,9 @@ public:
                         }
                     }
                 }
-                first_error_.record(error);
+                if (error_info_.ok() && error.hasError()) {
+                    error_info_ = error;
+                }
                 if constexpr (std::is_same_v<RequestPB, FunctionRequestPB>) {
                     if (!error.ok() && ctx && ctx->request.has_p2p_request()) {
                         RTP_LLM_LOG_WARNING("P2P ExecuteFunction failed, request_id=%ld unique_key=%s type=%d "
@@ -313,7 +316,7 @@ private:
     std::condition_variable                        wait_done_cv_;
     std::vector<DoneCallback>                      callbacks_;
     DoneCallback                                   progress_callback_;
-    FirstError                                     first_error_;
+    ErrorInfo                                      error_info_;
 };
 
 class BroadcastManager {

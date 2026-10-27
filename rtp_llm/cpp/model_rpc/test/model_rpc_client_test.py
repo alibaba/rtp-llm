@@ -178,15 +178,9 @@ class _FakeChannelPool:
 
 
 class _RoutingStub:
-    def __init__(self, fetch_responses=None, generate_responses=None):
-        self.fetch_iterator = _FakeResponseIterator(fetch_responses or [])
+    def __init__(self, generate_responses=None):
         self.generate_iterator = _FakeResponseIterator(generate_responses or [])
-        self.fetch_calls = []
         self.generate_calls = []
-
-    def FetchResponse(self, request, **kwargs):
-        self.fetch_calls.append((request, kwargs))
-        return self.fetch_iterator
 
     def GenerateStreamCall(self, request, **kwargs):
         self.generate_calls.append((request, kwargs))
@@ -1795,7 +1789,6 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(len(stub.generate_calls), 1)
         self.assertEqual(stub.generate_calls[0][0].request_id, 321)
         self.assertEqual(stub.generate_calls[0][1]["timeout"], 1.0)
-        self.assertEqual(stub.fetch_calls, [])
         start_span.assert_called_once_with(
             "rtp_llm.generate_stream_call", "decode-worker:9001"
         )
@@ -1831,7 +1824,6 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(len(responses), 1)
         self.assertEqual(len(stub.generate_calls), 1)
         self.assertEqual(stub.generate_calls[0][0].request_id, 322)
-        self.assertEqual(stub.fetch_calls, [])
         start_span.assert_called_once_with(
             "rtp_llm.generate_stream_call", "worker:9000"
         )
@@ -2058,7 +2050,6 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(run_and_close())
 
         self.assertEqual(client._channel_pool.targets, ["decode-worker:9001"])
-        self.assertEqual(stub.fetch_calls, [])
         self.assertEqual(len(stub.generate_calls), 1)
         self.assertTrue(stub.generate_calls[0][0].enqueued_by_master)
 
@@ -2544,13 +2535,6 @@ class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
         self.metadata_ready.set()
         yield self._response()
 
-    async def FetchResponse(self, request, context):
-        self.method = "FetchResponse"
-        self.metadata = {item.key: item.value for item in context.invocation_metadata()}
-        self.metadata_ready.set()
-        yield self._response()
-
-
 class _DelayedTerminalServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
     def __init__(self, terminal_delay):
         self.terminal_delay = terminal_delay
@@ -3000,9 +2984,6 @@ class _SpanAwareStub:
         self._terminal_delay = terminal_delay
         self._terminal_never = terminal_never
         self.iterator = None
-
-    def FetchResponse(self, request, timeout=None, metadata=None):
-        return self.GenerateStreamCall(request, timeout=timeout, metadata=metadata)
 
     def GenerateStreamCall(self, input_pb, timeout=None, metadata=None):
         total, finish_last, terminal_error, terminal_delay, terminal_never = (

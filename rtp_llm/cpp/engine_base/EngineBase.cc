@@ -19,10 +19,6 @@ EngineBase::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& i
     throw std::runtime_error("not implemeted");
 }
 
-std::vector<GenerateStreamPtr> EngineBase::batchEnqueue(const std::vector<GenerateStreamPtr>& streams) {
-    throw std::runtime_error("batch enqueue of prepared streams is not implemented");
-}
-
 std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<GenerateInput>& input) {
     throw std::runtime_error("not implemeted");
 }

@@ -955,7 +955,7 @@ protected:
         decode_engine_ =
             makePayloadEngine(cache_config, RoleType::DECODE, *decode_rpc_, transport == "rdma", timeouts_.load_ms);
         decode_.engine_                = decode_engine_;
-        decode_.prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
+        decode_.decode_rpc_caller_ = std::make_shared<DecodeRpcCaller>();
         decode_engine_->start();
     }
 

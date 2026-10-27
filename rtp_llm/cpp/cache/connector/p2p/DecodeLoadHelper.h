@@ -63,8 +63,9 @@ public:
             std::lock_guard<std::mutex> lock(state_mutex_);
             return done_;
         }
-        FirstError::Snapshot firstError() const {
-            return first_error_.snapshot();
+        ErrorInfo errorInfo() const {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            return ErrorInfo(error_code, error_message);
         }
         void    complete(bool ok);
         void    setDoneCallback(std::function<void()> callback);
@@ -75,7 +76,6 @@ public:
         }
 
     private:
-        FirstError first_error_;
         void updateStreamFromResponse();
 
     public:

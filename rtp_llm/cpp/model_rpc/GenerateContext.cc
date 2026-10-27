@@ -51,12 +51,14 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
                                            (int64_t)stream->inputLength(),
                                            (int64_t)(stream->outputTokenLen() * returned_sequence_count));
     }
-    const auto local_error = stream->firstError();
-    const auto first_error = FirstError::earlier(local_error, dependency_failure);
-    const bool dependency_selected = dependency_failure.error.hasError()
-                                     && first_error.order == dependency_failure.order;
-    const bool priority_preempted = first_error.error.code() == ErrorCode::PRIORITY_PREEMPTED
-                                    || error_info.code() == ErrorCode::PRIORITY_PREEMPTED;
+    const auto local_error         = stream->statusInfo();
+    const bool dependency_selected = dependency_failure.hasError()
+                                     && (local_error.ok()
+                                         || (local_error.code() == dependency_failure.code()
+                                             && local_error.ToString() == dependency_failure.ToString()));
+    const auto selected_error = local_error.hasError() ? local_error : dependency_failure;
+    const bool priority_preempted =
+        selected_error.code() == ErrorCode::PRIORITY_PREEMPTED || error_info.code() == ErrorCode::PRIORITY_PREEMPTED;
     phase_timing.error_type = request_ok ? nullptr :
                                priority_preempted ? "PRIORITY_PREEMPTED" :
                                dependency_selected ? "DependencyFailure" :
@@ -66,8 +68,9 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
         const bool load_finished = time_info.loading_cache_done_time_us > 0;
         if (load_finished || !request_ok) {
             const bool load_ok = load_finished && time_info.loading_cache_succeeded;
-            const auto error = first_error.error.hasError() ? first_error.error :
-                               error_info.hasError() ? error_info : errorInfoFromGrpcStatus(error_status);
+            const auto error   = selected_error.hasError() ? selected_error :
+                                 error_info.hasError()     ? error_info :
+                                                             errorInfoFromGrpcStatus(error_status);
             const auto reason = error.hasError() ? ErrorCodeToString(error.code()) : std::string{};
             telemetry::synthesizeKvLoadSpan(
                 trace_span_guard->sharedSpan(), time_info.loading_cache_start_time_us,
@@ -82,8 +85,8 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
 
 void GenerateContext::recordRpcFailure(const ErrorInfo& error) {
     if (!error_info.hasError()) {
-        const auto first = stream_ ? stream_->firstError() : FirstError::Snapshot{};
-        error_info = first.error.hasError() ? first.error : error;
+        const auto local_error = stream_ ? stream_->statusInfo() : ErrorInfo{};
+        error_info             = local_error.hasError() ? local_error : error;
     }
     error_status = grpcStatusFromErrorInfo(error_info);
 }
@@ -207,8 +210,8 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     collector.onflight_request   = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
     collector.loading_cache_request = meta ? meta->loadingCacheRequestCount() : 0;
     collector.total_rt_us        = executeTimeMs() * 1000;
-    collector.retry_times        = retry_times;
-    collector.retry_cost_time_ms = retry_cost_time_ms;
+    collector.retry_times           = 0;
+    collector.retry_cost_time_ms    = 0;
 }
 
 void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {

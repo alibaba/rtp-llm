@@ -49,8 +49,7 @@ public:
         bool done() const {
             const bool completed = locally_completed_ || (tp_broadcast_result_ && tp_broadcast_result_->done());
             if (completed) {
-                // P2P consumes firstError() while retaining KV until lease confirmation.
-                // Observing completion must not throw before cancellation can progress.
+                // Keep terminal observation nonthrowing so lease cleanup can finish.
                 int64_t expected = 0;
                 total_cost_time_us_.compare_exchange_strong(expected, currentTimeUs() - start_time_us_);
             }
@@ -70,15 +69,15 @@ public:
             return total_cost_time_us_.load();
         }
 
-        FirstError::Snapshot firstError() const {
-            auto first = tp_broadcast_result_ ? tp_broadcast_result_->firstError() : FirstError::Snapshot{};
-            if (first.error.hasError()) {
-                const auto rpc_failure = tp_broadcast_result_->failureSummary();
-                if (!rpc_failure.empty()) {
-                    first.error = ErrorInfo(first.error.code(), first.error.ToString() + "; " + rpc_failure);
+        ErrorInfo errorInfo() const {
+            auto error = tp_broadcast_result_ ? tp_broadcast_result_->errorInfo() : ErrorInfo{};
+            if (error.hasError()) {
+                const auto summary = tp_broadcast_result_->failureSummary();
+                if (!summary.empty()) {
+                    error = ErrorInfo(error.code(), error.ToString() + "; " + summary);
                 }
             }
-            return first;
+            return error;
         }
         ErrorCode              errorCode() const;
         std::string            errorMessage() const;

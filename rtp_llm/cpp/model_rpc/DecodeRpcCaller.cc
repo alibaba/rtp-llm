@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcCaller.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -143,7 +143,7 @@ private:
 
 }  // namespace
 
-PrefillServerCaller::PrefillServerCaller():
+DecodeRpcCaller::DecodeRpcCaller():
     rpc_pool_(std::make_shared<RPCPool>()),
     async_reader_factory_([](const std::shared_ptr<RpcService::Stub>& stub,
                              grpc::ClientContext*                     client_context,
@@ -155,13 +155,13 @@ PrefillServerCaller::PrefillServerCaller():
         return stub->AsyncGenerateStreamCall(client_context, request, completion_queue, reinterpret_cast<void*>(0));
     }) {}
 
-ErrorResult<std::shared_ptr<PrefillServerCallerContext>>
-PrefillServerCaller::callPrefill(const GenerateInputPB* request,
-                                 const std::string&     ip,
-                                 uint32_t               port,
-                                 const std::string&     unique_key,
-                                 int64_t                request_deadline_ms,
-                                 const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& request_span) {
+ErrorResult<std::shared_ptr<DecodeRpcCallerContext>>
+DecodeRpcCaller::startPrefill(const GenerateInputPB*                                              request,
+                              const std::string&                                                  ip,
+                              uint32_t                                                            port,
+                              const std::string&                                                  unique_key,
+                              int64_t                                                             request_deadline_ms,
+                              const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& request_span) {
     if (request_deadline_ms <= currentTimeMs()) {
         return ErrorInfo(ErrorCode::GENERATE_TIMEOUT,
                          "Prefill GenerateStreamCall request deadline exceeded key=" + unique_key);
@@ -174,7 +174,7 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
                          "Prefill GenerateStreamCall invalid peer=" + ip + ":" + std::to_string(port)
                              + " key=" + unique_key);
     }
-    auto context     = std::make_shared<PrefillServerCallerContext>(prefill_addr, unique_key);
+    auto context     = std::make_shared<DecodeRpcCallerContext>(prefill_addr, unique_key);
     auto client_span = telemetry::startChildClientSpan(
         "rtp_llm.call_prefill", request_span, ip, port, request->request_id(), 0, "RpcService/GenerateStreamCall");
     if (client_span) {
@@ -226,15 +226,15 @@ PrefillServerCaller::callPrefill(const GenerateInputPB* request,
     return std::move(context);
 }
 
-grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
+grpc::Status DecodeRpcCaller::forwardGenerate(grpc::ServerContext*                   server_context,
                                               const GenerateInputPB*                 request,
                                               grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
-    return callPrefill(server_context, request, response_writer, [server_context]() {
+    return forwardGenerate(server_context, request, response_writer, [server_context]() {
         return server_context && server_context->IsCancelled();
     });
 }
 
-grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
+grpc::Status DecodeRpcCaller::forwardGenerate(grpc::ServerContext*                   server_context,
                                               const GenerateInputPB*                 request,
                                               grpc::ServerWriter<GenerateOutputsPB>* response_writer,
                                               const std::function<bool()>&           is_cancelled) {
@@ -249,10 +249,10 @@ grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*              
         RTP_LLM_LOG_WARNING("request [%lld] no prefill server address found in role_addrs", request->request_id());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "no prefill server address found in role_addrs");
     }
-    return callPrefillToAddr(server_context, request, response_writer, prefill_addr, is_cancelled);
+    return forwardGenerateToAddr(server_context, request, response_writer, prefill_addr, is_cancelled);
 }
 
-grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*                   server_context,
+grpc::Status DecodeRpcCaller::forwardGenerateToAddr(grpc::ServerContext*                   server_context,
                                                     const GenerateInputPB*                 request,
                                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer,
                                                     const std::string&                     prefill_addr,
@@ -320,11 +320,11 @@ grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*        
     return status;
 }
 
-ErrorResult<PrefillPeerInfo> PrefillServerCaller::getPrefillPeerInfo(const std::string&           ip,
-                                                                     uint32_t                     port,
-                                                                     int32_t                      request_timeout_ms,
-                                                                     const GenerateInputPB&       input,
-                                                                     const std::function<bool()>& is_cancelled) {
+ErrorResult<PrefillPeerInfo> DecodeRpcCaller::getPrefillPeerInfo(const std::string&           ip,
+                                                                 uint32_t                     port,
+                                                                 int32_t                      request_timeout_ms,
+                                                                 const GenerateInputPB&       input,
+                                                                 const std::function<bool()>& is_cancelled) {
     std::string addr = formatGrpcHostPort(ip, port);
     if (addr.empty()) {
         RTP_LLM_LOG_WARNING("getPrefillPeerInfo: invalid prefill grpc address, ip: %s, port: %u", ip.c_str(), port);
@@ -388,7 +388,7 @@ ErrorResult<PrefillPeerInfo> PrefillServerCaller::getPrefillPeerInfo(const std::
     return std::move(info);
 }
 
-grpc::Status PrefillServerCaller::enqueueBatch(const EnqueueBatchRequestPB& request,
+grpc::Status DecodeRpcCaller::enqueueBatch(const EnqueueBatchRequestPB& request,
                                            EnqueueBatchResponsePB*      response,
                                            const std::string&           prefill_address,
                                            int64_t                      deadline_ms,
@@ -403,7 +403,7 @@ grpc::Status PrefillServerCaller::enqueueBatch(const EnqueueBatchRequestPB& requ
     return connection->stub->EnqueueBatch(&context, request, response);
 }
 
-grpc::Status PrefillServerCaller::forwardBatchGenerate(const BatchGenerateInputPB&  request,
+grpc::Status DecodeRpcCaller::forwardBatchGenerate(const BatchGenerateInputPB&  request,
                                                    BatchGenerateOutputsPB*      response,
                                                    const std::string&           prefill_address,
                                                    int64_t                      deadline_ms,

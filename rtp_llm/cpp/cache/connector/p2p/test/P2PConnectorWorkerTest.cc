@@ -2599,7 +2599,7 @@ TEST_F(P2PConnectorWorkerTest, RecvFirstCallbackWinsOverTaskOrderAndLaterCancel)
     group->lease->onTransferStarted();
     decode_->registerTaskCompletionCallback(b, "first-recv", group);
     b->setDone(false);
-    const auto first = group->first_error.snapshot();
+    const auto first = group->errorInfo();
     EXPECT_EQ(decode_->waitRecvTasksWithReadDeadlinePolicy(group, currentTimeMs() + 5000, 1, "first-recv"),
               P2PWorkerDecodeRead::ReadWaitOutcome::Failed);
     a->cancel();
@@ -2607,7 +2607,7 @@ TEST_F(P2PConnectorWorkerTest, RecvFirstCallbackWinsOverTaskOrderAndLaterCancel)
     auto outcome = decode_->aggregateRecvTaskResults(group);
     EXPECT_EQ(outcome.error_code, ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED);
     EXPECT_NE(outcome.error_msg.find("task-1"), std::string::npos);
-    EXPECT_EQ(outcome.error_msg, first.error.ToString());
+    EXPECT_EQ(outcome.error_msg, first.ToString());
 }
 
 TEST_F(P2PConnectorWorkerTest, LateLayerUsesInstalledLocalHorizonWithSourceClockBehind) {

@@ -147,7 +147,7 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
         return CANCEL_STATUS_TOMBSTONED;
     }
     const auto& e = found->second;
-    const auto prior_error = e->stream ? e->stream->firstError().error : ErrorInfo::OkStatus();
+    const auto  prior_error = e->stream ? e->stream->statusInfo() : ErrorInfo::OkStatus();
     if (reason.code() == ErrorCode::PRIORITY_PREEMPTED
         && ((e->canceled.load() && e->cancel_reason.code() != ErrorCode::PRIORITY_PREEMPTED)
             || (!e->canceled.load() && prior_error.hasError()

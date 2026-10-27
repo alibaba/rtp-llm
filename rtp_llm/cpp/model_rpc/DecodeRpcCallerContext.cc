@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/model_rpc/PrefillServerCallerContext.h"
+#include "rtp_llm/cpp/model_rpc/DecodeRpcCallerContext.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -16,13 +16,13 @@ namespace {
 constexpr int64_t kPrefillWaitBudgetMs  = 100;
 constexpr int64_t kPrefillDrainBudgetMs = 100;
 
-struct PrefillServerCallerAsyncStateDrainTraits {
+struct DecodeRpcCallerAsyncStateDrainTraits {
     static std::shared_ptr<grpc::CompletionQueue>
-    completionQueue(const std::shared_ptr<PrefillServerCallerAsyncState>& async_state) {
+    completionQueue(const std::shared_ptr<DecodeRpcCallerAsyncState>& async_state) {
         return async_state ? async_state->completion_queue : nullptr;
     }
 
-    static void markDrained(const std::shared_ptr<PrefillServerCallerAsyncState>& async_state) {
+    static void markDrained(const std::shared_ptr<DecodeRpcCallerAsyncState>& async_state) {
         if (async_state) {
             async_state->completion_queue_shutdown_drained_ = true;
             if (async_state->trace_guard) async_state->trace_guard->finish();
@@ -30,19 +30,19 @@ struct PrefillServerCallerAsyncStateDrainTraits {
     }
 };
 
-using PrefillServerCallerCqDrainer =
-    DeferredCompletionQueueDrainer<PrefillServerCallerAsyncState, PrefillServerCallerAsyncStateDrainTraits>;
+using DecodeRpcCallerCqDrainer =
+    DeferredCompletionQueueDrainer<DecodeRpcCallerAsyncState, DecodeRpcCallerAsyncStateDrainTraits>;
 
 }  // namespace
 
-PrefillServerCallerContext::PrefillServerCallerContext(const std::string& prefill_addr, const std::string& unique_key):
+DecodeRpcCallerContext::DecodeRpcCallerContext(const std::string& prefill_addr, const std::string& unique_key):
     prefill_addr_(prefill_addr), unique_key_(unique_key), request_begin_time_us_(currentTimeUs()) {
-    async_state_                   = std::make_shared<PrefillServerCallerAsyncState>();
+    async_state_                   = std::make_shared<DecodeRpcCallerAsyncState>();
     async_state_->client_context   = std::make_shared<grpc::ClientContext>();
     async_state_->completion_queue = std::make_shared<grpc::CompletionQueue>();
 }
 
-PrefillServerCallerContext::~PrefillServerCallerContext() {
+DecodeRpcCallerContext::~DecodeRpcCallerContext() {
     {
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
         if (!rpc_started_ || !async_state_ || !async_state_->reader) {
@@ -64,7 +64,7 @@ PrefillServerCallerContext::~PrefillServerCallerContext() {
     shutdownAndDrainCompletionQueue();
 }
 
-void PrefillServerCallerContext::cancel() {
+void DecodeRpcCallerContext::cancel() {
     bool need_cancel = false;
     auto async_state = async_state_;
     {
@@ -76,14 +76,14 @@ void PrefillServerCallerContext::cancel() {
     }
     if (need_cancel && async_state && async_state->client_context) {
         async_state->client_context->TryCancel();
-        RTP_LLM_LOG_DEBUG("PrefillServerCallerContext::cancel: cancelled grpc request, prefill_addr: %s",
+        RTP_LLM_LOG_DEBUG("DecodeRpcCallerContext::cancel: cancelled grpc request, prefill_addr: %s",
                           prefill_addr_.c_str());
     }
 }
 
-void PrefillServerCallerContext::wait() {
+void DecodeRpcCallerContext::wait() {
     if (!waitWithTimeoutMs(kPrefillWaitBudgetMs)) {
-        RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillServerCallerContext::wait timed out, unique_key: %s, prefill_addr: %s, "
+        RTP_LLM_LOG_WARNING("[PD-DIAG] DecodeRpcCallerContext::wait timed out, unique_key: %s, prefill_addr: %s, "
                             "budget_ms: %ld",
                             unique_key_.c_str(),
                             prefill_addr_.c_str(),
@@ -91,23 +91,22 @@ void PrefillServerCallerContext::wait() {
     }
 }
 
-void PrefillServerCallerContext::startPolling() {
+void DecodeRpcCallerContext::startPolling() {
     checkDone();
 }
 
-void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& response) {
+void DecodeRpcCallerContext::handleReadChunkLocked(const GenerateOutputsPB& response) {
     auto async_state = async_state_;
     response_received_ = true;
     if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
         error_info_ = ErrorInfo(
             transRPCErrorCode(response.error_info().error_code()),
             response.error_info().error_message()
-                + " [received_at location=PrefillServerCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
+                + " [received_at location=DecodeRpcCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
                 + prefill_addr_
                 + " request_id=" + (async_state ? std::to_string(async_state->request.request_id()) : "unavailable")
                 + " key=" + unique_key_
                 + " wire_code=" + std::to_string(static_cast<int>(response.error_info().error_code())) + "]");
-        first_error_.record(error_info_);
         if (async_state) {
             async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, error_info_.ToString());
         }
@@ -122,14 +121,14 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
             finish_started_ = true;
         }
         RTP_LLM_LOG_WARNING(
-            "PrefillServerCallerContext::checkDone: prefill response error, unique_key: %s, error_code: %s, error_message: %s",
+            "DecodeRpcCallerContext::checkDone: prefill response error, unique_key: %s, error_code: %s, error_message: %s",
             unique_key_.c_str(),
             ErrorCodeToString(transRPCErrorCode(response.error_info().error_code())).c_str(),
             response.error_info().error_message().c_str());
     }
 }
 
-void PrefillServerCallerContext::checkDone() {
+void DecodeRpcCallerContext::checkDone() {
     autil::ScopeGuard finish_trace([this] {
         try {
             std::unique_lock<std::shared_mutex> lock(state_mutex_);
@@ -146,7 +145,7 @@ void PrefillServerCallerContext::checkDone() {
             // Observability does not change polling or terminal outcomes.
         }
     });
-    std::shared_ptr<PrefillServerCallerAsyncState> async_state;
+    std::shared_ptr<DecodeRpcCallerAsyncState> async_state;
     {
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
         async_state = async_state_;
@@ -160,10 +159,9 @@ void PrefillServerCallerContext::checkDone() {
         }
 
         if (!async_state->completion_queue) {
-            RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: completion_queue is null");
+            RTP_LLM_LOG_WARNING("DecodeRpcCallerContext::checkDone: completion_queue is null");
             finished_  = true;
             error_info_ = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "completion_queue is null");
-            first_error_.record(error_info_);
             return;
         }
     }
@@ -240,7 +238,6 @@ void PrefillServerCallerContext::checkDone() {
             error_info_ = ErrorInfo(ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED,
                                     "Prefill GenerateStreamCall completed without output peer=" + prefill_addr_
                                         + " key=" + unique_key_);
-            first_error_.record(error_info_);
         }
         if (cancel_requested_ && async_state->status.ok()) {
             async_state->status = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
@@ -248,14 +245,13 @@ void PrefillServerCallerContext::checkDone() {
         if (!async_state->status.ok()) {
             error_info_ = errorInfoFromGrpcStatus(
                 async_state->status,
-                "location=PrefillServerCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
+                "location=DecodeRpcCallerContext observer_role=DECODE operation=GenerateStreamCall peer="
                     + prefill_addr_ + " request_id=" + std::to_string(async_state_->request.request_id())
                     + " key=" + unique_key_);
-            first_error_.record(error_info_);
         }
         if (!async_state->status.ok()) {
             RTP_LLM_LOG_WARNING(
-                "PrefillServerCallerContext::checkDone: prefill rpc failed, unique_key: %s, prefill_addr: %s, grpc_status: %d(%s)",
+                "DecodeRpcCallerContext::checkDone: prefill rpc failed, unique_key: %s, prefill_addr: %s, grpc_status: %d(%s)",
                 unique_key_.c_str(),
                 prefill_addr_.c_str(),
                 async_state->status.error_code(),
@@ -266,7 +262,7 @@ void PrefillServerCallerContext::checkDone() {
 
     if (!ok) {
         finished_ = true;
-        RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: async next failed, unique_key: %s",
+        RTP_LLM_LOG_WARNING("DecodeRpcCallerContext::checkDone: async next failed, unique_key: %s",
                             unique_key_.c_str());
         async_state->status =
             grpc::Status(grpc::StatusCode::INTERNAL, "async get next event from grpc completion queue failed");
@@ -277,7 +273,7 @@ void PrefillServerCallerContext::checkDone() {
     async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "unexpected grpc completion tag");
 }
 
-bool PrefillServerCallerContext::waitWithTimeoutMs(int64_t timeout_ms) {
+bool DecodeRpcCallerContext::waitWithTimeoutMs(int64_t timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
         if (done()) {
@@ -288,7 +284,7 @@ bool PrefillServerCallerContext::waitWithTimeoutMs(int64_t timeout_ms) {
     return done();
 }
 
-void PrefillServerCallerContext::shutdownAndDrainCompletionQueue() {
+void DecodeRpcCallerContext::shutdownAndDrainCompletionQueue() {
     std::unique_lock<std::mutex> poll_lock(completion_queue_poll_mutex_);
     auto async_state = async_state_;
     if (!async_state || !async_state->completion_queue || async_state->completion_queue_shutdown_drained_) {
@@ -306,13 +302,13 @@ void PrefillServerCallerContext::shutdownAndDrainCompletionQueue() {
             return;
         }
         if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-            RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillServerCallerContext deferred CQ drain, unique_key: %s, "
+            RTP_LLM_LOG_WARNING("[PD-DIAG] DecodeRpcCallerContext deferred CQ drain, unique_key: %s, "
                                 "prefill_addr: %s, budget_ms: %ld",
                                 unique_key_.c_str(),
                                 prefill_addr_.c_str(),
                                 kPrefillDrainBudgetMs);
             async_state->completion_queue_shutdown_drained_ = true;
-            PrefillServerCallerCqDrainer::instance().enqueue(async_state);
+            DecodeRpcCallerCqDrainer::instance().enqueue(async_state);
             async_state_.reset();
             return;
         }

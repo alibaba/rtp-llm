@@ -465,93 +465,6 @@ message RpcErrorPB {
 
 message EmptyPB {}
 
-enum RemoteStage {
-    ALLOCATE = 0;
-    LOAD = 1;
-    GENERATE = 2;
-    // Prefill completed locally after LOAD; no Decode execution is required.
-    PREFILL_COMPLETE = 3;
-}
-
-// Internal Prefill-to-Decode cache identity for one fully assembled
-// multimodal embedding segment. This deliberately lives on GenerateRequestPB,
-// not GenerateInputPB: model-specific image layout remains a backend concern
-// and cannot be supplied by a frontend request.
-message MultimodalCacheSpanPB {
-    int32 offset = 1;
-    repeated sint32 row_hashes = 2;
-}
-
-message GenerateRequestPB {
-    RemoteStage stage = 1;
-    int64 request_id = 2;
-    string client_id = 3;
-    int64 start_time = 4;
-    int32 first_generate_token_id = 5;
-    GenerateInputPB input = 6;
-    repeated string peer_addrs = 7;
-    repeated int32 propose_token_ids = 8;
-    repeated int32 position_ids = 9;
-    TensorPB propose_probs = 10;
-    TensorPB propose_hidden = 11;
-    repeated MultimodalCacheSpanPB multimodal_cache_spans = 12;
-}
-
-// In the TP case, the decode master broadcasts to decode workers.
-// This request uses the tagged grouped-cache layout. Legacy group-addressing
-// field numbers stay reserved even though mixed-version KV-cache deployment is
-// outside the supported protocol contract documented above.
-message BroadcastLoadRequestPB {
-    int64 request_id = 1;
-    string request_key = 2;
-    repeated string peer_addrs = 3;
-    repeated int64 cache_keys = 4;
-    reserved 5;
-    reserved "block_ids";
-    int64 block_num = 6;
-    int64 reuse_block_size = 7;
-    int64 timeout_ms = 8;
-    int64 dp_rank = 9;
-    int32 partition_count = 10;
-    int32 partition_id = 11;
-    reserved 12;
-    reserved "group_block_ids";
-    int32 prefill_cp_size = 13;
-    repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
-
-}
-
-message BroadcastLoadResponsePB {
-    RpcErrorPB error_info = 1;
-    int64 done_time_us = 2;
-    int64 loaded_cache_block_count = 3;
-}
-
-message RemoteFinishRequestPB {
-    int64 request_id = 1;
-}
-
-message RemoteGenerateRequestPBNew {
-    GenerateInputPB input = 1;
-    string client_id = 2;
-    int64 start_time_us = 3;
-    repeated string addrs = 4;
-    repeated int32 block_ids = 5;
-    int64 reuse_block_size = 6;
-    string mtp_hidden_states_key = 7;
-    bool use_mla = 8;
-    int32 layer_num = 9;
-    int64 deadline_us = 10;
-}
-
-message RemoteGenerateResponsePBNew {
-    ErrorDetailsPB error_info = 1;
-    GenerateOutputsPB output = 2;
-    int32 first_generate_token_id = 3;
-    int64 first_token_rt_us = 4;
-    bool finished = 5;
-}
-
 message RemoteStorePartition {
     string remote_addr = 1;
     int32 remote_partition_id = 2;
@@ -897,6 +810,12 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 cancel_retention_ms = 14;
 }
 
+// Cache identity for one prepared multimodal embedding segment.
+message MultimodalCacheSpanPB {
+    int32 offset = 1;
+    repeated sint32 row_hashes = 2;
+}
+
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
 message P2PPreparedInputPB {
     repeated int32 token_ids = 1;
@@ -1157,20 +1076,9 @@ message EnqueueBatchDpSlotPB {
 message EnqueueBatchRequestPB {
     int64 batch_id = 1;
     repeated EnqueueBatchDpSlotPB dp_slots = 2;
-    // Lease between successful enqueue and FetchResponse attachment. Zero uses
+    // Lease between successful enqueue and Decode StartLoad attachment. Zero uses
     // the Prefill server default.
     int64 fetch_attach_timeout_ms = 3;
-}
-
-message EnqueueGroupInputPB {
-    GenerateInputPB input = 1;
-}
-
-message EnqueueGroupRequestPB {
-    int64 batch_id = 1;
-    int32 dp_rank = 2;
-    repeated EnqueueGroupInputPB requests = 3;
-    int64 fetch_attach_timeout_ms = 4;
 }
 
 message EnqueueBatchSuccessPB {
@@ -1186,10 +1094,6 @@ message EnqueueBatchResponsePB {
     int64 batch_id = 1;
     repeated EnqueueBatchSuccessPB successes = 2;
     repeated EnqueueBatchErrorPB errors = 3;
-}
-
-message FetchRequestPB {
-    int64 request_id = 1;
 }
 
 message CancelRequestPB {
@@ -1226,10 +1130,6 @@ service RpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
-    rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
-    rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
-    rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
-    rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
     rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
     rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
@@ -1243,15 +1143,12 @@ service RpcService {
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
-    rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
-    rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
-    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
     // AutoTPM priority-preemption Cancel targets the selected Decode role.
     // Decode forwards Cancel to Prefill, including cancel-before-attach fences.
     // Prefill cancels only local work. Completion is reported separately

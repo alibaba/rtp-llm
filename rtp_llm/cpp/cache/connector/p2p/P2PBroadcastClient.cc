@@ -208,11 +208,11 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
 }
 
 ErrorCode P2PBroadcastClient::Result::errorCode() const {
-    return firstError().error.code();
+    return errorInfo().code();
 }
 
 std::string P2PBroadcastClient::Result::errorMessage() const {
-    return firstError().error.ToString();
+    return errorInfo().ToString();
 }
 
 P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const std::string& unique_key,

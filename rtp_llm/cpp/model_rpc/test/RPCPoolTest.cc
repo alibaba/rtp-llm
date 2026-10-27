@@ -106,7 +106,7 @@ int64_t elapsedMs(std::chrono::steady_clock::time_point begin) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
 }
 
-TEST(RPCPoolTest, UnreadyRemoteGenerateBlocksUntilClientDeadline) {
+TEST(RPCPoolTest, UnreadyGenerateStreamBlocksUntilClientDeadline) {
     TcpBlackhole blackhole;
     RPCPool      pool;
     auto         connection = pool.getConnection(blackhole.address());
@@ -115,12 +115,13 @@ TEST(RPCPoolTest, UnreadyRemoteGenerateBlocksUntilClientDeadline) {
 
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + 400ms);
-    auto begin      = std::chrono::steady_clock::now();
-    auto stream     = connection->stub->RemoteGenerate(&context);
-    auto elapsed_ms = elapsedMs(begin);
+    auto            begin = std::chrono::steady_clock::now();
+    GenerateInputPB request;
+    auto            stream = connection->stub->GenerateStreamCall(&context, request);
 
     ASSERT_NE(stream, nullptr);
-    auto status = stream->Finish();
+    auto status     = stream->Finish();
+    auto elapsed_ms = elapsedMs(begin);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
     EXPECT_GE(elapsed_ms, 300);
     EXPECT_LT(elapsed_ms, 1500);

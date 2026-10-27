@@ -57,7 +57,7 @@ public:
         try {
             auto& stream = getStream();
             if (stream && stream->hasError()) {
-                recordRpcFailure(stream->firstError().error);
+                recordRpcFailure(stream->statusInfo());
             } else if (!rpc_handling_completed_) {
                 recordRpcFailure(
                     {std::uncaught_exceptions() > 0 ? ErrorCode::EXECUTION_EXCEPTION : ErrorCode::CANCELLED,

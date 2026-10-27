@@ -298,7 +298,6 @@ void DecodeLoadHelper::Result::cancel() {
         success_      = false;
         error_code    = ErrorCode::CANCELLED;
         error_message = "StartLoad cancelled key=" + unique_key + " peer=" + server_addr;
-        first_error_.record(ErrorInfo(error_code, error_message));
         total_cost_time_us = currentTimeUs() - start_time_us;
         callback           = std::move(done_callback_);
     }
@@ -310,11 +309,10 @@ void DecodeLoadHelper::Result::cancel() {
 void DecodeLoadHelper::Result::updateStreamFromResponse() {
     if (response.has_payload()) {
         const auto& payload = response.payload();
-        side_channel_payload.has_rng_state = payload.has_rng_state();
-        side_channel_payload.rng_offset = payload.rng_offset();
-        side_channel_payload.has_first_token =
-            payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
-        side_channel_payload.first_token_id   = payload.first_generate_token_id();
+        side_channel_payload.has_rng_state                        = payload.has_rng_state();
+        side_channel_payload.rng_offset                           = payload.rng_offset();
+        side_channel_payload.has_first_token                      = payload.has_first_generate_token();
+        side_channel_payload.first_token_id                       = payload.first_generate_token_id();
         side_channel_payload.generation_prefill_cuda_graph_status = payload.generation_prefill_cuda_graph_status();
         side_channel_payload.prefill_use_independent_block_pools  = payload.prefill_use_independent_block_pools();
         side_channel_payload.total_reuse_len  = payload.total_reuse_len();
@@ -414,7 +412,6 @@ void DecodeLoadHelper::Result::complete(bool ok) {
                 error_code = ErrorCode::NONE_ERROR;
             }
         }
-        first_error_.record(ErrorInfo(error_code, error_message));
         if (!success_) {
             RTP_LLM_LOG_WARNING("P2P Decode StartLoad failed, unique_key=%s peer=%s grpc_code=%d "
                                 "wire_code=%d error_code=%d error_name=%s error=%s",
