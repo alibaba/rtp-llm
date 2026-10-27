@@ -6,6 +6,7 @@ import torch
 from transformers import PreTrainedTokenizerBase
 
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs
+from rtp_llm.config.exceptions import EmbeddingInputException, ExceptionType
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
@@ -56,6 +57,8 @@ class Qwen3RerankerRenderer(RerankerRenderer):
         return output
 
     def create_input(self, formated_request: VoyageRerankerRequest):
+        if self.config_.qwen3_reranker_input_format == "raw":
+            return self._create_raw_input(formated_request)
         with self.lock:
             begin_time = current_time_ms()
             input: List[str] = [
@@ -93,6 +96,94 @@ class Qwen3RerankerRenderer(RerankerRenderer):
                 input_lengths=input_lengths_t,
                 multimodal_inputs=[],
             )
+
+    def _create_raw_input(self, formated_request: VoyageRerankerRequest):
+        """Concatenate query and document tokens without the reranker prompt template.
+
+        This is the token stream vLLM scores for score(query, doc) when a Qwen3
+        reranker is served with is_original_qwen3_reranker and no chat template.
+        Query and document are encoded separately, so the tokens at the boundary
+        can differ from encoding the concatenated string.
+
+        Length handling (max_seq_len budget per pair):
+        - truncation=False: a pair over the budget is rejected, like vLLM without
+          truncate_prompt_tokens.
+        - truncation=True: the pair is cut with the "longest_first" pair strategy
+          of HF fast tokenizers (tokens are removed from the end of the longer
+          side first), so a long query cannot drop the document entirely.
+        Requests with no documents or with an empty (zero-token) pair are rejected.
+        """
+        if not formated_request.documents:
+            raise EmbeddingInputException(
+                ExceptionType.EMPTY_PROMPT_ERROR, "documents should not be empty"
+            )
+        max_len = self.config_.max_seq_len
+        with self.lock:
+            begin_time = current_time_ms()
+            query_tokens = self.tokenizer_.encode(
+                formated_request.query, add_special_tokens=False
+            )
+            inputs = []
+            for index, doc in enumerate(formated_request.documents):
+                doc_tokens = self.tokenizer_.encode(doc, add_special_tokens=False)
+                total_len = len(query_tokens) + len(doc_tokens)
+                if total_len == 0:
+                    raise EmbeddingInputException(
+                        ExceptionType.EMPTY_PROMPT_ERROR,
+                        f"query and documents[{index}] are both empty",
+                    )
+                if total_len > max_len:
+                    if not formated_request.truncation:
+                        raise EmbeddingInputException(
+                            ExceptionType.LONG_PROMPT_ERROR,
+                            f"query + documents[{index}] has {total_len} tokens, "
+                            f"exceeds max_seq_len {max_len} with truncation disabled",
+                        )
+                    query_len, doc_len = _longest_first_lengths(
+                        len(query_tokens), len(doc_tokens), max_len
+                    )
+                    tokens = query_tokens[:query_len] + doc_tokens[:doc_len]
+                else:
+                    tokens = query_tokens + doc_tokens
+                inputs.append(np.array(tokens, dtype=np.int32))
+            input_lengths_t = torch.tensor([len(input) for input in inputs]).to(
+                torch.int32
+            )
+            input_t = torch.from_numpy(np.concatenate(inputs)).to(torch.int32)
+            kmonitor.report(
+                GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time
+            )
+            kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(input_t))
+
+            return EngineInputs(
+                token_ids=input_t,
+                token_type_ids=torch.zeros_like(input_t),
+                input_lengths=input_lengths_t,
+                multimodal_inputs=[],
+            )
+
+
+def _longest_first_lengths(query_len: int, doc_len: int, max_len: int):
+    """Pair lengths after "longest_first" truncation to max_len tokens.
+
+    Mirrors the HF fast (Rust) tokenizers implementation used by Qwen tokenizers
+    and vLLM: the shorter side is kept when it fits in half of the budget,
+    otherwise both sides get half and the originally longer side gets the odd
+    token, with the document winning ties.
+    """
+    if query_len + doc_len <= max_len:
+        return query_len, doc_len
+    short_len, long_len = sorted((query_len, doc_len))
+    if short_len > max_len:
+        long_len = short_len
+    else:
+        long_len = max(short_len, max_len - short_len)
+    if short_len + long_len > max_len:
+        short_len = max_len // 2
+        long_len = short_len + max_len % 2
+    if query_len > doc_len:
+        return long_len, short_len
+    return short_len, long_len
 
 
 class Qwen3RerankerHandler(CustomHandler):

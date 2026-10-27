@@ -189,3 +189,12 @@ class FtRuntimeException(Exception):
 
     def __reduce__(self):
         return self.__class__, (self.exception_type, self.message)
+
+
+class EmbeddingInputException(FtRuntimeException):
+    """Invalid embedding request input that the frontend returns as HTTP 400.
+
+    Only the Qwen3 reranker raw input path raises it. Other embedding input
+    errors keep the legacy contract: wrapped as ERROR_INPUT_FORMAT_ERROR (507)
+    and returned as HTTP 500.
+    """

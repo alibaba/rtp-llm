@@ -11,7 +11,11 @@ import torch
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    EmbeddingInputException,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.py_config_modules import EmbeddingConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.models.downstream_modules.utils import create_custom_module
@@ -148,6 +152,8 @@ class EmbeddingEndpoint(object):
             profile_config = self._extract_profile_config(request)
             formate_request = self.renderer.render_request(request)
             batch_input = self.renderer.create_input(formate_request)
+        except EmbeddingInputException:
+            raise
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
         try:

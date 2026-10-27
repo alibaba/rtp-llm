@@ -915,6 +915,7 @@ class EmbeddingRerankerConfigTest(TestCase):
         self.assertIs(config.embedding_grpc_keepalive, False)
         self.assertIsNone(config.embedding_rpc_timeout_s)
         self.assertIs(config.qwen3_reranker_fixed_head, True)
+        self.assertEqual(config.qwen3_reranker_input_format, "template")
 
     def test_env_and_cli_precedence(self):
         env = {
@@ -922,12 +923,17 @@ class EmbeddingRerankerConfigTest(TestCase):
             "RTP_LLM_EMBEDDING_GRPC_KEEPALIVE": "1",
             "RTP_LLM_EMBEDDING_RPC_TIMEOUT_S": "12.5",
             "RTP_LLM_QWEN3_RERANKER_FIXED_HEAD": "0",
+            "RTP_LLM_QWEN3_RERANKER_INPUT_FORMAT": "raw",
         }
         config = self._setup_args(env, [])
         self.assertIs(config.embedding_share_grpc_channel, False)
         self.assertIs(config.embedding_grpc_keepalive, True)
         self.assertEqual(config.embedding_rpc_timeout_s, 12.5)
         self.assertIs(config.qwen3_reranker_fixed_head, False)
+        self.assertEqual(config.qwen3_reranker_input_format, "raw")
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.qwen3_reranker_input_format, "raw")
+        self.assertIn("qwen3_reranker_input_format: raw", config.to_string())
 
         config = self._setup_args(
             env,
@@ -940,17 +946,31 @@ class EmbeddingRerankerConfigTest(TestCase):
                 "0",
                 "--qwen3_reranker_fixed_head",
                 "true",
+                "--qwen3_reranker_input_format",
+                "template",
             ],
         )
         self.assertIs(config.embedding_share_grpc_channel, True)
         self.assertIs(config.embedding_grpc_keepalive, False)
         self.assertEqual(config.embedding_rpc_timeout_s, 0.0)
         self.assertIs(config.qwen3_reranker_fixed_head, True)
+        self.assertEqual(config.qwen3_reranker_input_format, "template")
 
     def _assert_rejected(self, env, args):
         with patch("sys.stderr"), self.assertRaises(SystemExit) as error:
             self._setup_args(env, args)
         self.assertEqual(error.exception.code, 2)
+
+    def test_invalid_input_format_is_rejected(self):
+        for value in ("chat", "RAW", ""):
+            with self.subTest(source="cli", value=value):
+                self._assert_rejected({}, ["--qwen3_reranker_input_format", value])
+            # The CLI args make setup_args fill this one from env (mixed mode).
+            with self.subTest(source="env", value=value):
+                self._assert_rejected(
+                    {"RTP_LLM_QWEN3_RERANKER_INPUT_FORMAT": value},
+                    ["--embedding_share_grpc_channel", "true"],
+                )
 
     def test_invalid_rpc_timeout_is_rejected(self):
         for value in ("nan", "inf", "-inf", "abc"):
@@ -959,7 +979,7 @@ class EmbeddingRerankerConfigTest(TestCase):
             with self.subTest(source="env", value=value):
                 self._assert_rejected(
                     {"RTP_LLM_EMBEDDING_RPC_TIMEOUT_S": value},
-                    ["--embedding_share_grpc_channel", "true"],
+                    ["--qwen3_reranker_input_format", "raw"],
                 )
 
     def test_reranker_switches_propagate_to_model_config(self):
@@ -976,6 +996,8 @@ class EmbeddingRerankerConfigTest(TestCase):
                     "/unused-checkpoint",
                     "--qwen3_reranker_fixed_head",
                     "false",
+                    "--qwen3_reranker_input_format",
+                    "raw",
                 ]
             )
         model_config = ModelConfig()
@@ -999,6 +1021,7 @@ class EmbeddingRerankerConfigTest(TestCase):
                 embedding_config=configs.embedding_config,
             )
         self.assertIs(model_config.qwen3_reranker_fixed_head, False)
+        self.assertEqual(model_config.qwen3_reranker_input_format, "raw")
 
 
 if __name__ == "__main__":

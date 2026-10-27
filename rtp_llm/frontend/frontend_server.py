@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import EmbeddingInputException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -282,7 +283,10 @@ class FrontendServer(object):
                 usage = {}
             return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
         except BaseException as e:
-            return self._handle_exception(request, e)
+            # Only inputs rejected as EmbeddingInputException are client errors;
+            # all other embedding failures keep the legacy HTTP 500.
+            status_code = 400 if isinstance(e, EmbeddingInputException) else 500
+            return self._handle_exception(request, e, status_code=status_code)
         finally:
             self._global_controller.decrement()
 
@@ -564,7 +568,9 @@ class FrontendServer(object):
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
-    def _handle_exception(self, request: Dict[str, Any], e: BaseException):
+    def _handle_exception(
+        self, request: Dict[str, Any], e: BaseException, status_code: int = 500
+    ):
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
@@ -593,7 +599,7 @@ class FrontendServer(object):
             )
             self._access_logger.log_exception_access(request, e, exception_json)
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        rep = ORJSONResponse(exception_json, status_code=status_code)
         return rep
 
     async def _call_generate_with_report(
