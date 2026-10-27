@@ -208,6 +208,20 @@ def _sanitize_provenance_value(
     return text
 
 
+def _sanitize_nested_provenance(name: str, value: Any) -> Any:
+    """Recursively remove credentials while retaining configuration shape."""
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_nested_provenance(str(key), item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_nested_provenance(name, item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_provenance_value(name, value, allow_plaintext=True)
+    return value
+
+
 def _sanitize_assignment(value: str, *, inline: bool) -> str:
     if "=" not in value:
         return _hash_provenance_value(value)
