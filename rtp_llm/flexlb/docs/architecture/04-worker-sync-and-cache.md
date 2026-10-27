@@ -124,18 +124,21 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 
 `dp_master_address` 保存 Engine 状态上报的 DP master 地址，随同一次状态事务写入
 `WorkerStatus.committedEngineObservation()`；未上报时为 `null`。
-Decode 决策按非空 `dp_master_address` 识别 DP 组，与流量策略的 `group` 分别处理。
+Prefill 和 Decode 决策按非空 `dp_master_address` 识别 DP 组，与流量策略的 `group` 分别处理。
 只有组内可路由 endpoint 覆盖 `dp_size` 指定的全部 rank（从 0 到 `dp_size - 1`，
-各 rank 唯一且成员报告的 `dp_size` 一致），这一组的 Decode 才能进入候选集。
+各 rank 唯一且成员报告的 `dp_size` 一致），这一组的 worker 才能进入候选集。
 任一 rank 的 endpoint 不可路由时，整组暂不参与新请求的选择；地址为 `null` 的
-Decode 作为独立 worker 按原有可用性规则选择。候选过滤只影响新的路由决策，
-WorkerStatus 的发现、退役和任务清理仍由各自的生命周期管理。
+worker 作为独立节点按可用性规则选择。
+任一 worker 进入退役流程时，`WorkerDirectory` 将同角色、同 `dp_master_address` 的其余
+已知成员也置为 `RETIRING` 并关闭各自的 endpoint 调度入口，然后等待 endpoint 退役、
+清理缓存索引并移除对应 WorkerStatus 代际。成员逐个获取状态锁，等待清理时不持有状态锁。
+后续服务发现和有效状态上报可重新发布 worker；整组 rank 齐全后恢复参与路由。
 
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
 对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
 任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
 连续 3 次状态探测失败（RPC 失败或响应转换失败）会把该逻辑 worker 标为不健康并移除其 endpoint；
-同一 frontend 的其他已发布 logical worker 不受影响。任务既没有有效字符串 ID，也没有可兼容读取的
+同 DP 组的其他已发布 logical worker 一并退役。任务既没有有效字符串 ID，也没有可兼容读取的
 旧 int64 编码时，整份状态观测被拒收，不发布部分任务状态，并按上述连续失败规则处理。
 新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
 （`status_version=0`）与响应处理异常跳过本轮更新。

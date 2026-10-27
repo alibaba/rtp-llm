@@ -11,15 +11,19 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -295,7 +299,7 @@ class WorkerDirectoryTest {
     }
 
     @Test
-    void retiringOnePrefillRankHidesItsGroupUntilTheRankIsRepublished() {
+    void retiringOnePrefillRankRequiresTheWholeGroupToBeRepublished() {
         PrefillMember rankZero = prefillMember("routing-a", "10.0.1.2", 0, 2, 8510);
         PrefillMember rankOne = prefillMember("routing-a", "10.0.1.2", 1, 2, 8511);
         PrefillMember independent = prefillMember("routing-a", null, 0, 1, 8512);
@@ -325,7 +329,81 @@ class WorkerDirectoryTest {
 
         publishPrefill(prefillMember("routing-a", "10.0.1.2", 1, 2, 8511));
 
+        assertEquals(1, workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL).size());
+
+        publishPrefill(prefillMember("routing-a", "10.0.1.2", 0, 2, 8510));
+
         assertEquals(3, workerDirectory.prefillRoutingSnapshot(RoleType.PREFILL).size());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {"PREFILL", "DECODE", "PDFUSION"})
+    void retiresEveryDpMemberBeforeDrainingAndKeepsOtherGroups(RoleType role) {
+        WorkerStatus first = publishDpMember(role, "10.0.2.1", 0, 3, 8600);
+        WorkerStatus second = publishDpMember(role, "10.0.2.1", 1, 3, 8601);
+        WorkerStatus third = publishDpMember(role, "10.0.2.1", 2, 3, 8602);
+        WorkerStatus otherGroup = publishDpMember(role, "10.0.2.2", 0, 1, 8603);
+        WorkerStatus independent = publishDpMember(role, null, 0, 1, 8604);
+        WorkerStatus otherRole =
+                publishDpMember(role == RoleType.DECODE ? RoleType.PREFILL : RoleType.DECODE, "10.0.2.1", 0, 1, 8605);
+        CacheAwareService cache = Mockito.mock(CacheAwareService.class);
+
+        EndpointRegistry.DetachedGeneration detached;
+        first.lock.lock();
+        try {
+            detached = Mockito.spy(workerDirectory.beginRetirement(role, first.getLogicalIpPort(), first));
+        } finally {
+            first.lock.unlock();
+        }
+        AtomicBoolean groupRetiringBeforeDrain = new AtomicBoolean();
+        Mockito.doAnswer(invocation -> {
+            groupRetiringBeforeDrain.set(List.of(first, second, third)
+                    .stream()
+                    .allMatch(member -> !member.isActiveGeneration()
+                            && workerDirectory.exactEndpoint(role, member.getLogicalIpPort(), member) == null
+                            && workerDirectory.statusSnapshot(role).get(member.getLogicalIpPort()) == member
+                            && !member.lock.isHeldByCurrentThread()));
+            return invocation.callRealMethod();
+        }).when(detached).retireAndAwait();
+
+        workerDirectory.completeRetirement(role, first.getLogicalIpPort(), first, detached, cache,
+                LoggerFactory.getLogger(WorkerDirectoryTest.class));
+
+        assertTrue(groupRetiringBeforeDrain.get());
+        for (WorkerStatus member : List.of(first, second, third)) {
+            assertNull(workerDirectory.holdEndpoint(role, member.getLogicalIpPort()));
+        }
+        assertEquals(Map.of(otherGroup.getLogicalIpPort(), otherGroup, independent.getLogicalIpPort(), independent),
+                workerDirectory.statusSnapshot(role));
+        assertEquals(2, workerDirectory.routingCapacity(role));
+        assertTrue(otherRole.isActiveGeneration());
+        assertNotNull(workerDirectory.exactEndpoint(otherRole.getRole(), otherRole.getLogicalIpPort(), otherRole));
+        if (role.requiresCacheKeys()) {
+            for (WorkerStatus member : List.of(first, second, third)) {
+                Mockito.verify(cache).removeEngineBlockCache(member.getLogicalIpPort());
+            }
+            Mockito.verifyNoMoreInteractions(cache);
+        } else {
+            Mockito.verifyNoInteractions(cache);
+        }
+    }
+
+    private WorkerStatus publishDpMember(RoleType role, String masterAddress, long rank, long size, int port) {
+        WorkerStatus status = status(role, "routing-a", port);
+        discover(status);
+        WorkerStatusResponse response = RunnerTestSupport.response(status, true, 1L);
+        response.setDpMasterAddress(masterAddress);
+        response.setDpRank(rank);
+        response.setDpSize(size);
+        status.lock.lock();
+        try {
+            registry.publishPreparedEndpoint(status.getLogicalIpPort(), status,
+                    status.prepareNewStatus(status.freezeStatusResponse(response)));
+            status.recordSuccessfulPoll(true);
+        } finally {
+            status.lock.unlock();
+        }
+        return status;
     }
 
     @Test

@@ -152,17 +152,48 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     }
 
     /**
-     * Await endpoint cleanup, clear any detailed cache index, and remove the
-     * exact RETIRING status identity. No replacement can publish in between.
+     * Retire the remaining members of the same role and DP master before awaiting
+     * any endpoint cleanup. The caller must release the source status lock first.
      */
-    public void completeRetirement(
-            RoleType role,
-            String address,
-            WorkerStatus status,
-            EndpointRegistry.DetachedGeneration detached,
-            CacheAwareService cacheAwareService,
-            Logger logger) {
+    public void completeRetirement(RoleType role,
+                                   String address,
+                                   WorkerStatus status,
+                                   EndpointRegistry.DetachedGeneration detached,
+                                   CacheAwareService cacheAwareService,
+                                   Logger logger) {
+        Map<WorkerStatus, EndpointRegistry.DetachedGeneration> dpGroupMap = new HashMap<>();
+        String masterAddress = status.committedEngineObservation().dpMasterAddress();
+        if (masterAddress != null) {
+            for (WorkerStatus member : statusSnapshot(role).values()) {
+                member.lock.lock();
+                try {
+                    if (member.isActiveGeneration()
+                            && masterAddress.equals(member.committedEngineObservation().dpMasterAddress())) {
+                        dpGroupMap.put(member, beginRetirement(role, member.getLogicalIpPort(), member));
+                    }
+                } finally {
+                    member.lock.unlock();
+                }
+            }
+        }
 
+        completeWorkerRetirement(role, address, status, detached, cacheAwareService, logger);
+        for (Map.Entry<WorkerStatus, EndpointRegistry.DetachedGeneration> dpRank : dpGroupMap.entrySet()) {
+            WorkerStatus dpRankWorkStatus = dpRank.getKey();
+            completeWorkerRetirement(role, dpRankWorkStatus.getLogicalIpPort(), dpRankWorkStatus, dpRank.getValue(),
+                    cacheAwareService, logger);
+        }
+    }
+
+    /**
+     * Remove an exact RETIRING status only after its endpoint and cache cleanup finish.
+     */
+    private void completeWorkerRetirement(RoleType role,
+                                          String address,
+                                          WorkerStatus status,
+                                          EndpointRegistry.DetachedGeneration detached,
+                                          CacheAwareService cacheAwareService,
+                                          Logger logger) {
         Throwable cleanupFailure = null;
         try {
             if (detached != null) {
