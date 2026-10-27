@@ -36,7 +36,19 @@ class DeliveryStopTest {
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(firstRpc, secondRpc);
         var scheduler = claim.owner().data().getScheduler();
-        org.mockito.Mockito.doReturn(true).when(scheduler).onPreemption(any(), any());
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            var receipt =
+                                    call.getArgument(0, ContextResult.PreemptionFact.class)
+                                            .receipt();
+                            return receipt.phase()
+                                            == org.flexlb.balance.preemption.PreemptionCancelPhase
+                                                    .NOT_FOUND_STALE
+                                    ? PreemptionRegistration.Reply.NOT_FOUND
+                                    : PreemptionRegistration.Reply.WAITING;
+                        })
+                .when(scheduler)
+                .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         var dispatcher =
                 new DeliveryDispatcher(
                         null,
@@ -87,7 +99,7 @@ class DeliveryStopTest {
 
             rpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.timeout(2_000L))
-                    .onPreemption(any(), any());
+                    .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         } finally {
             runtime.signals().completeDelivery(claim);
             runtime.shutdown();
@@ -105,6 +117,10 @@ class DeliveryStopTest {
                         any(),
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(firstRpc);
+        var scheduler = claim.owner().data().getScheduler();
+        org.mockito.Mockito.doReturn(PreemptionRegistration.Reply.UNKNOWN)
+                .when(scheduler)
+                .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         var dispatcher =
                 new DeliveryDispatcher(
                         null,
@@ -301,7 +317,7 @@ class DeliveryStopTest {
                             return null;
                         })
                 .when(scheduler)
-                .onDeliveryEvidence(any(), any());
+                .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         var dispatcher =
                 new DeliveryDispatcher(
                         null,
@@ -345,15 +361,16 @@ class DeliveryStopTest {
                                                 EngineGrpcClient.CancelReply.FAILED));
         doAnswer(
                         call -> {
-                            var evidence =
-                                    call.getArgument(1, ContextResult.CleanupAcknowledgement.class);
-                            if (evidence.kind() == ContextResult.CancelEvidenceKind.CLEANED) {
+                            var fact = call.getArgument(0, ContextResult.DeliveryFact.class);
+                            if (fact instanceof ContextResult.CleanupAcknowledgement evidence
+                                    && evidence.kind()
+                                            == ContextResult.CancelEvidenceKind.CLEANED) {
                                 proofs.incrementAndGet();
                             }
                             return null;
                         })
                 .when(scheduler)
-                .onDeliveryEvidence(any(), any());
+                .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         var dispatcher =
                 new DeliveryDispatcher(
                         null,
@@ -515,7 +532,8 @@ class DeliveryStopTest {
         doAnswer(
                         call -> {
                             var evidence =
-                                    call.getArgument(1, ContextResult.CleanupAcknowledgement.class);
+                                    call.getArgument(
+                                                    0, ContextResult.CleanupAcknowledgement.class);
                             assertEquals(ContextResult.CancelEvidenceKind.CLEANED, evidence.kind());
                             assertSame(claim, evidence.delivery());
                             int count = applications.incrementAndGet();
@@ -534,7 +552,7 @@ class DeliveryStopTest {
                             return null;
                         })
                 .when(scheduler)
-                .onDeliveryEvidence(any(), any());
+                .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         var client = runtime.engineClient;
         when(client.cancelAsync(
                         any(),
@@ -564,7 +582,9 @@ class DeliveryStopTest {
             runtime.signals().completeDelivery(claim);
             SchedulerTestSupport.awaitRequestWork(runtime);
             org.mockito.Mockito.verify(scheduler, org.mockito.Mockito.never())
-                    .onPreemption(any(), any());
+                    .onDeliveryFact(
+                            org.mockito.ArgumentMatchers.argThat(
+                                    fact -> fact instanceof ContextResult.PreemptionFact));
         } finally {
             runtime.signals().completeDelivery(claim);
             var reported = assertThrows(IllegalStateException.class, runtime::shutdown);
@@ -653,7 +673,8 @@ class DeliveryStopTest {
         when(claim.owner().snapshot().delivery()).thenReturn(null);
         var scheduler = claim.owner().data().getScheduler();
         var rejectedFact = new IllegalStateException("transient fact application failure");
-        when(scheduler.onPreemption(any(), any())).thenThrow(rejectedFact);
+        when(scheduler.onDeliveryFact(any(ContextResult.DeliveryFact.class)))
+                .thenThrow(rejectedFact);
         if (rejectWork) {
             org.mockito.Mockito.doThrow(
                             new java.util.concurrent.RejectedExecutionException(
@@ -689,7 +710,8 @@ class DeliveryStopTest {
                             .preempt(registration, null, "priority preemption", 1000L)
                             .get(2, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(runtime);
-            org.mockito.Mockito.verify(scheduler).onPreemption(any(), any());
+            org.mockito.Mockito.verify(scheduler)
+                    .onDeliveryFact(any(ContextResult.DeliveryFact.class));
             org.mockito.Mockito.verify(client)
                     .cancelAsync(
                             any(),
@@ -946,8 +968,24 @@ class DeliveryStopTest {
 
     private static DeliveryClaim claim(SchedulerRuntime runtime) {
         var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
+        var scheduler = context.data().getScheduler();
+        doAnswer(
+                        call -> {
+                            var fact = call.getArgument(0, ContextResult.DeliveryFact.class);
+                            if (!(fact instanceof ContextResult.PreemptionFact preemption)) {
+                                return PreemptionRegistration.Reply.UNKNOWN;
+                            }
+                            var receipt = preemption.receipt();
+                            return receipt.phase()
+                                            == org.flexlb.balance.preemption.PreemptionCancelPhase
+                                                    .NOT_FOUND_STALE
+                                    ? PreemptionRegistration.Reply.NOT_FOUND
+                                    : PreemptionRegistration.Reply.WAITING;
+                        })
+                .when(scheduler)
+                .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         org.springframework.test.util.ReflectionTestUtils.setField(
-                context.data().getScheduler(), "runtime", runtime);
+                scheduler, "runtime", runtime);
         var claim =
                 new DeliveryClaim(
                         context, 1, mock(RequestRoute.class), DeliveryClaimKind.BATCH_ENQUEUE, 17);

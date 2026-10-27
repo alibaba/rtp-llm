@@ -201,8 +201,7 @@ public final class DeliveryTestSupport {
                                                 return null;
                                             })
                                     .when(requests)
-                                    .onDeliveryEvidence(
-                                            Mockito.eq(claim),
+                                    .onDeliveryFact(
                                             Mockito.isA(ContextResult.RouteDelivered.class));
                             return claim;
                         })

@@ -700,22 +700,25 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     /** Receives every immutable delivery or preemption fact at one business ingress. */
-    public void onDeliveryFact(DeliveryFact fact) {
+    public PreemptionRegistration.Reply onDeliveryFact(DeliveryFact fact) {
         Objects.requireNonNull(fact, "fact");
         if (fact instanceof DeliveryEvidence evidence) {
             applyDeliveryEvidence(evidence.delivery(), evidence);
-            return;
+            return null;
         }
         if (fact instanceof ContextResult.PreemptionFact preemption) {
-            onDeliveryFact(preemption);
-            return;
+            var receipt = preemption.receipt();
+            var event =
+                    new PreemptionEvent(
+                            receipt.phase(),
+                            receipt.release(),
+                            receipt.endpoint(),
+                            receipt.reservation(),
+                            receipt.detail(),
+                            receipt.cleanup());
+            return event.progress(onPreemption(preemption.attempt(), event));
         }
         throw new IllegalArgumentException("unsupported delivery fact: " + fact.getClass());
-    }
-
-    public PreemptionRegistration.Reply onDeliveryFact(ContextResult.PreemptionFact fact) {
-        Objects.requireNonNull(fact, "fact");
-        return fact.event().progress(onPreemption(fact.attempt(), fact.event()));
     }
 
     private void applyDeliveryEvidence(DeliveryClaim claim, DeliveryEvidence evidence) {

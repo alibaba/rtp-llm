@@ -551,8 +551,7 @@ public final class PrefillQueueRunner {
                                                         .ctx()
                                                         .data()
                                                         .getScheduler()
-                                                        .onDeliveryEvidence(
-                                                                null,
+                                                        .onDeliveryFact(
                                                                 new ContextResult
                                                                         .PreparationFailure(
                                                                         null,
@@ -599,8 +598,7 @@ public final class PrefillQueueRunner {
                             .ctx()
                             .data()
                             .getScheduler()
-                            .onDeliveryEvidence(
-                                    null,
+                            .onDeliveryFact(
                                     new ContextResult.PreparationFailure(
                                             null,
                                             member.route(),
@@ -625,8 +623,7 @@ public final class PrefillQueueRunner {
                 claim.owner()
                         .data()
                         .getScheduler()
-                        .onDeliveryEvidence(
-                                claim,
+                        .onDeliveryFact(
                                 new ContextResult.RouteDelivered(
                                         claim,
                                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
@@ -772,8 +769,7 @@ public final class PrefillQueueRunner {
                 item.ctx()
                         .data()
                         .getScheduler()
-                        .onDeliveryEvidence(
-                                null,
+                        .onDeliveryFact(
                                 new ContextResult.PreparationFailure(
                                         null,
                                         item,

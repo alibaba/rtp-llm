@@ -1227,6 +1227,34 @@ class DecodeAdmissionProtocolTest {
         AbstractRequestScheduler requests = mock(AbstractRequestScheduler.class);
         org.springframework.test.util.ReflectionTestUtils.setField(requests, "runtime", runtime);
         when(requests.onPreemption(any(), any())).thenReturn(true);
+        when(requests.onDeliveryFact(any(org.flexlb.balance.scheduler.ContextResult.DeliveryFact.class)))
+                .thenAnswer(
+                        invocation -> {
+                            var fact = invocation.getArgument(0, org.flexlb.balance.scheduler.ContextResult.DeliveryFact.class);
+                            if (fact instanceof org.flexlb.balance.scheduler.ContextResult.PreemptionFact preemption) {
+                                var receipt = preemption.receipt();
+                                if (receipt.phase()
+                                        != org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_UNKNOWN) {
+                                    requests.onPreemption(
+                                            preemption.attempt(),
+                                            new AbstractRequestScheduler.PreemptionEvent(
+                                                    receipt.phase(),
+                                                    receipt.release(),
+                                                    receipt.endpoint(),
+                                                    receipt.reservation(),
+                                                    receipt.detail(),
+                                                    receipt.cleanup()));
+                                }
+                                return receipt.phase()
+                                                == org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE
+                                        ? PreemptionRegistration.Reply.NOT_FOUND
+                                        : receipt.phase()
+                                                        == org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_UNKNOWN
+                                                ? PreemptionRegistration.Reply.UNKNOWN
+                                                : PreemptionRegistration.Reply.WAITING;
+                            }
+                            return null;
+                        });
         DecodeEndpoint endpoint =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
         WorkerStatus status = mock(WorkerStatus.class);

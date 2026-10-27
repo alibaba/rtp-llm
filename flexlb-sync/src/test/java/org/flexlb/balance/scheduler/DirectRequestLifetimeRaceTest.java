@@ -128,8 +128,7 @@ class DirectRequestLifetimeRaceTest {
                                 return result;
                             })
                     .when(requests)
-                    .onDeliveryEvidence(
-                            any(),
+                    .onDeliveryFact(
                             org.mockito.ArgumentMatchers.isA(ContextResult.RouteDelivered.class));
 
             var returned = requests.submit(context);

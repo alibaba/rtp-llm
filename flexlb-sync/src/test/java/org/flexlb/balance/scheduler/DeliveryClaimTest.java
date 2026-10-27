@@ -1788,8 +1788,7 @@ class DeliveryClaimTest {
                         f.settlement().isDone());
                 assertEquals(0, queued.size(), "reply application must not enqueue stop work");
                 verify(f.owner)
-                        .onDeliveryEvidence(
-                                eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+                        .onDeliveryFact(isA(ContextResult.CleanupAcknowledgement.class));
             } finally {
                 ReflectionTestUtils.setField(f.owner.runtime, "stopWorkers", original);
                 Runnable task;
@@ -2400,8 +2399,7 @@ class DeliveryClaimTest {
             doThrow(failure)
                     .doCallRealMethod()
                     .when(f.owner)
-                    .onDeliveryEvidence(
-                            eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+                    .onDeliveryFact(isA(ContextResult.CleanupAcknowledgement.class));
             assertTrue(f.owner.tryStartSend(f.claim));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(
@@ -2412,8 +2410,7 @@ class DeliveryClaimTest {
             f.assertArchivedAfterCleanup();
             verify(f.channel, times(2)).cancelAsync(any(), anyInt(), any(), anyLong());
             verify(f.owner, times(2))
-                    .onDeliveryEvidence(
-                            eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+                    .onDeliveryFact(isA(ContextResult.CleanupAcknowledgement.class));
             assertSame(failure, SchedulerTestSupport.failure(f.owner));
         }
     }
@@ -2511,8 +2508,7 @@ class DeliveryClaimTest {
                                 return call.callRealMethod();
                             })
                     .when(f.owner)
-                    .onDeliveryEvidence(
-                            eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+                    .onDeliveryFact(isA(ContextResult.CleanupAcknowledgement.class));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(
                     f.claim,

@@ -189,8 +189,7 @@ public class DeliveryDispatcher {
                 claim.owner()
                         .data()
                         .getScheduler()
-                        .onDeliveryEvidence(
-                                claim,
+                        .onDeliveryFact(
                                 new ContextResult.Prediction(
                                         claim,
                                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(
@@ -290,8 +289,7 @@ public class DeliveryDispatcher {
                             .ctx()
                             .data()
                             .getScheduler()
-                            .onDeliveryEvidence(
-                                    null,
+                            .onDeliveryFact(
                                     new ContextResult.PreparationFailure(
                                             null,
                                             member.route(),
@@ -403,8 +401,7 @@ public class DeliveryDispatcher {
                 claim.owner()
                         .data()
                         .getScheduler()
-                        .onDeliveryEvidence(
-                                claim,
+                        .onDeliveryFact(
                                 new ContextResult.TransportResult(
                                         claim, result, System.currentTimeMillis()));
             } catch (Throwable failure) {
@@ -434,8 +431,7 @@ public class DeliveryDispatcher {
                             .ctx()
                             .data()
                             .getScheduler()
-                            .onDeliveryEvidence(
-                                    null,
+                            .onDeliveryFact(
                                     new ContextResult.PreparationFailure(
                                             null,
                                             member.route(),
@@ -937,10 +933,18 @@ public class DeliveryDispatcher {
                                     operation.detail(),
                                     claim);
                     progress =
-                            event.progress(scheduler.onPreemption(operation.registration(), event));
+                            scheduler.onDeliveryFact(
+                                    new ContextResult.PreemptionFact(
+                                            operation.registration(),
+                                            new ContextResult.PreemptionReceipt(
+                                                    event.phase(),
+                                                    event.release(),
+                                                    event.endpoint(),
+                                                    event.reservation(),
+                                                    event.detail(),
+                                                    event.cleanup())));
                 } else if (claim != null) {
-                    scheduler.onDeliveryEvidence(
-                            claim,
+                    scheduler.onDeliveryFact(
                             AbstractRequestScheduler.PreemptionEvent.acknowledgement(claim, reply));
                 }
                 evidence = reply;

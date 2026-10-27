@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.loadbalance.Response;
@@ -287,16 +288,23 @@ public final class ContextResult {
             DeliveryClaim delivery, RequestRoute route, String detail, long nowMs)
             implements DeliveryEvidence {}
 
-    /** Scheduler-owned preemption receipt, kept as a fact so it uses the same ingress. */
+    /** Immutable remote preemption receipt; Scheduler interprets it at the fact ingress. */
+    public record PreemptionReceipt(
+            PreemptionCancelPhase phase,
+            boolean release,
+            DecodeEndpoint endpoint,
+            DecodeResources.ReservationHandle reservation,
+            String detail,
+            CleanupAcknowledgement cleanup) {}
+
     public record PreemptionFact(
             PreemptionRegistration attempt,
-            AbstractRequestScheduler.PreemptionEvent event)
+            PreemptionReceipt receipt)
             implements DeliveryFact {
         public PreemptionFact {
             Objects.requireNonNull(attempt, "attempt");
-            Objects.requireNonNull(event, "event");
+            Objects.requireNonNull(receipt, "receipt");
         }
-
     }
 
     public interface GrantValue {
