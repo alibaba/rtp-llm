@@ -12,9 +12,9 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Logger;
-import org.flexlb.util.Failures;
 import org.flexlb.service.VitCacheSelector;
+import org.flexlb.util.Failures;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -50,8 +50,12 @@ public class RequestWorkerSelector {
 
     public int currentPrefillWorkerCount(String group) { return prefillSelector.currentPrefillWorkerCount(group); }
 
-    public List<RequestRoute> hotspotMigrationCandidates() {
-        return prefillSelector.hotspotMigrationCandidates();
+    public List<RequestRoute> hotspotMigrationCandidates(int limit) {
+        return prefillSelector.hotspotMigrationCandidates(limit);
+    }
+
+    public java.util.Set<PlacementKey> hotspotRescueDomains() {
+        return prefillSelector.hotspotRescueDomains();
     }
 
     public PlacementResult<RequestRoute, PlacementKey> select(RequestContext context, String policyGroup) {
@@ -104,8 +108,7 @@ public class RequestWorkerSelector {
         } finally {
             if (!complete) {
                 Throwable cleanup = Failures.close(routing);
-                if (primary != null) { Failures.append(primary, cleanup); }
-                else { Failures.rethrow(cleanup, "route selection cleanup failed"); }
+                if (primary != null) { Failures.append(primary, cleanup); } else { Failures.rethrow(cleanup, "route selection cleanup failed"); }
             }
         }
     }
