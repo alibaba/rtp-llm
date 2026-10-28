@@ -78,6 +78,8 @@ final class JsonWire {
                 }
                 if (spec.containsKey("minimum"))
                     require(node.decimalValue().compareTo(new BigDecimal(spec.get("minimum").toString())) >= 0, "Below minimum");
+                if (spec.containsKey("maximum"))
+                    require(node.decimalValue().compareTo(new BigDecimal(spec.get("maximum").toString())) <= 0, "Above maximum");
             }
             case "boolean" -> require(node.isBoolean(), "Expected boolean");
             case "duration" -> {

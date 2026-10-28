@@ -139,13 +139,15 @@ class LocalPrefillTest {
         }
     }
 
-    @Test void boundedFinishedHistorySignalsCoverageGapInsteadOfReturningPartialHistory() throws Exception {
+    @Test void boundedFinishedHistoryDoesNotBlockCurrentStateOrCursorRecovery() throws Exception {
         var config = config("0");
         try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config, cache)) {
             for (int i = 0; i <= LocalPrefill.LIMIT; i++)
                 engine.submit(input(i, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
-            var error = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.snapshot(0));
-            assertEquals(Status.Code.OUT_OF_RANGE, error.getStatus().getCode());
+            var snapshot = engine.snapshot(0);
+            assertEquals(LocalPrefill.LIMIT, snapshot.finished().size());
+            assertEquals(LocalPrefill.LIMIT + 1, snapshot.finishedVersion());
+            assertTrue(engine.snapshot(snapshot.finishedVersion()).finished().isEmpty());
             assertEquals(LocalPrefill.LIMIT, engine.snapshot(1).finished().size());
         }
     }

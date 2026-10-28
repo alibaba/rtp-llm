@@ -179,7 +179,7 @@ Read 等待计算就绪；D 取消/超时会取消 P 来源，P 取消/关闭也
 
 P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷，不做词表推理。incremental 返回新 token，否则返回累计输出；aux.output_len 始终累计。P 首 token 计入总长度，非推测模式 D 执行 N−1 轮。Client TTFT 必须来自实际接收，不能使用 Engine aux 或计算耗时替代。
 
-请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。Mock 保护上限是 1024 活动请求，TaskHistory 保留 1024 项，缺失旧版本返回 OUT_OF_RANGE，不冒充完整历史。
+请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。Mock 保护上限是 1024 活动请求，TaskHistory 保留 1024 项。旧游标越过历史窗口时，按 real 的恢复方式继续返回完整当前状态、仍保留的完成记录和推进后的游标，不以 OUT_OF_RANGE 阻断健康同步；超前游标不倒退。每次缺口读取在组件日志中记录 `finished_history_gap`，包含 requested_version、dropped_through、latest_version、retained，不能把这段完成记录当成完整请求历史。生产 proto 没有历史完整性字段，缺口证据保存在实验组件日志；需要完整逐请求证据时不能依赖 WorkerStatus 的有限窗口。real 当前为 1000 条/5s 保留，Mock 的 1024 条是明确的模拟边界，不宣称保留策略完全相同。
 
 WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。D 当前要求 input+max_new_tokens<max_seq_len，未实现真实截断/reserveStep。成功且 reuse/device 均开启时写回完整 prompt 块；失败不提交，生成内容不额外建索引。没有完整动态 batch、GPU 或混合 KV 布局模拟。
 
@@ -291,6 +291,6 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ## 如何扩展公共接口
 
-在所属 Java API 加 `@Endpoint` 方法，Master 状态放 MasterStateApi，动作放 MasterApi，Engine/Client 同理。一个方法接收一个 record 参数，无参数用 Types.None；参数注解描述范围/可选性，类型及返回引用直接从 record 生成。重新构建即可更新清单，Python 不新增枚举或改 compiler。
+在所属 Java API 加 `@Endpoint` 方法，Master 状态放 MasterStateApi，动作放 MasterApi，Engine/Client 同理。一个方法接收一个 record 参数，无参数用 Types.None；参数注解描述范围/可选性，类型及返回引用直接从 record 生成。数值 minimum/maximum 为含端点约束，Java 运行端与 Python 编译端共同读取 `tests/fixtures/wire_numbers.json` 验证边界、类型和整数溢出。重新构建即可更新清单，Python 不新增枚举或改 compiler。
 
 实现放组件自己的适配器，使用 ApiServer 绑定；进程生命周期动作由 Runner 适配器执行，不能把管理自身进程的能力放进被管理 JVM。新增整组 API 只在 InterfaceRegistry.standard 登记一次。同名接口或不支持类型生成时失败；跨语言测试验证新增定义可直接编译和拒绝错误参数，业务实现另测。

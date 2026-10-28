@@ -52,9 +52,10 @@ def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
     assert master_environment({'a': {'b': 2}}, [], tmp_path) == {}
 
 
-@pytest.mark.parametrize('replicas', [1, 2], ids=['one-master', 'two-masters'])
-@pytest.mark.parametrize('batched', [False, True], ids=['single-nonbatch', 'fixed-window-batch'])
-def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas):
+@pytest.mark.parametrize('replicas,batched,history_overflow', [
+    (1, False, False), (2, False, False), (1, True, False), (2, True, False), (1, False, True),
+], ids=['single-one-master', 'single-two-masters', 'batch-one-master', 'batch-two-masters', 'late-master-after-history-overflow'])
+def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas, history_overflow):
     from mock_framework.execution.processes import master_port
     try:
         master_port(replicas)
@@ -72,7 +73,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
 
     root = Path(__file__).resolve().parents[1]
     java = Path(os.environ['JAVA_HOME']) / 'bin/java'
-    master_classpath = os.pathsep.join([str(root / 'java/master/target/classes'),
+    master_classpath = os.pathsep.join([str(root / 'java/master/target/test-classes'), str(root / 'java/master/target/classes'),
         (root / 'java/master/target/dependencies.txt').read_text().strip()])
     client_classpath = os.pathsep.join([str(root / 'java/client/target/test-classes'), str(root / 'java/client/target/classes'),
         (root / 'java/engine/rtp/target/rtp-classpath.txt').read_text().strip()])
@@ -96,9 +97,13 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
                        'args': {'role': 'decode'}, 'expect': {'eq': {'instances': [{'id': 'decode-0'}]}}}},
             {'check': {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/leadership/get', 'expect': {'count': 1}}},
             {'call': {'id': 'wait', 'describe': '供外部Client取流', 'interface': 'runtime/wait', 'args': {'duration': '20s' if replicas == 2 else '12s'}}}]}]}
+    if history_overflow:
+        document['phases'][0]['steps'].append({'check': {'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
+            'interface': 'master/engine/get', 'args': {'role': 'prefill'},
+            'expect': {'eq': {'instances': [{'id': 'prefill-0'}]}}}})
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
     registry = Registry.load(root / 'build/interfaces.json'); case = compile_case(case_file, registry)
-    components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
+    components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
     for role in ('prefill', 'decode'):
         components[role] = {'command': [str(java), '-jar', str(root / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')]}
     launch = prepare_launch({'components': components, 'bindings': {'master/': 'master-0'},
@@ -157,6 +162,11 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             if not task.done():
                 task.cancel(); await asyncio.gather(task, return_exceptions=True)
     asyncio.run(exercise())
+    if history_overflow:
+        before = json.loads((output / 'components/master-0/before-master.json').read_text())
+        assert before == {'finished_requests': 1025, 'finished_version': 1025}
+        gap = (output / 'components/prefill-0/stderr.log').read_text()
+        assert 'finished_history_gap requested_version=-1 dropped_through=1 latest_version=1025 retained=1024' in gap
     effective = json.loads((output / 'components/master-0/effective-config.json').read_text())
     assert effective['FLEXLB_CONFIG'] == master_config['FLEXLB_CONFIG']
     events = [json.loads(row) for row in (output / 'events.jsonl').read_text().splitlines()]
