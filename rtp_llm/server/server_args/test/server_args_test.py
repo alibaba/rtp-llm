@@ -299,6 +299,409 @@ class CacheConfigArgumentsTest(TestCase):
                 self.assertEqual(getattr(restored, f"reco_{name}"), type(value)())
 
 
+class RdmaDeviceHealthArgumentsTest(TestCase):
+    # (env_name, field_name, raw_value, expected_value)
+    ENV_CASES = [
+        ("RDMA_DEVICE_HEALTH_ENABLED", "rdma_device_health_enabled", "0", False),
+        (
+            "RDMA_DEVICE_HEALTH_FAULT_HANDLER",
+            "rdma_device_health_fault_handler",
+            "ABORT",
+            "ABORT",
+        ),
+        (
+            "RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS",
+            "rdma_device_health_probe_interval_ms",
+            "500",
+            500,
+        ),
+        (
+            "RDMA_DEVICE_HEALTH_DEVICE_FAULT_CONFIRM_MS",
+            "rdma_device_health_device_fault_confirm_ms",
+            "5000",
+            5000,
+        ),
+        (
+            "RDMA_DEVICE_HEALTH_FAULT_WINDOW_MS",
+            "rdma_device_health_fault_window_ms",
+            "60000",
+            60000,
+        ),
+        (
+            "RDMA_DEVICE_HEALTH_UNAVAILABLE_THRESHOLD_MS",
+            "rdma_device_health_unavailable_threshold_ms",
+            "30000",
+            30000,
+        ),
+        (
+            "RDMA_DEVICE_HEALTH_FLAP_WARN_THRESHOLD",
+            "rdma_device_health_flap_warn_threshold",
+            "3",
+            3,
+        ),
+    ]
+
+    def setUp(self):
+        self._environ_backup = os.environ.copy()
+        self._argv_backup = sys.argv.copy()
+        os.environ.clear()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._environ_backup)
+        sys.argv = self._argv_backup
+
+    def _setup_args(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args.setup_args().cache_store_config
+
+    def test_cpp_default_disabled_and_server_args_default_enabled(self):
+        from rtp_llm.ops import CacheStoreConfig
+
+        self.assertFalse(CacheStoreConfig().rdma_device_health_enabled)
+
+        sys.argv = ["prog"]
+        with patch(
+            "rtp_llm.server.server_args.cache_store_group_args.logging.warning"
+        ) as warning:
+            config = self._setup_args()
+        warning.assert_not_called()
+        self.assertIs(config.rdma_device_health_enabled, True)
+        self.assertEqual(config.rdma_device_health_fault_handler, "LOG")
+        self.assertEqual(config.rdma_device_health_probe_interval_ms, 1000)
+        self.assertEqual(config.rdma_device_health_device_fault_confirm_ms, 3000)
+        self.assertEqual(config.rdma_device_health_fault_window_ms, 600000)
+        self.assertEqual(config.rdma_device_health_unavailable_threshold_ms, 120000)
+        self.assertEqual(config.rdma_device_health_flap_warn_threshold, 10)
+
+    def test_env_vars_bind_to_cache_store_config(self):
+        for env_name, _, raw_value, _ in self.ENV_CASES:
+            os.environ[env_name] = raw_value
+        sys.argv = ["prog"]
+        config = self._setup_args()
+        for _, field_name, _, expected_value in self.ENV_CASES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(getattr(config, field_name), expected_value)
+
+    def test_cli_overrides_env_vars(self):
+        for env_name, _, raw_value, _ in self.ENV_CASES:
+            os.environ[env_name] = raw_value
+        sys.argv = [
+            "prog",
+            "--rdma_device_health_enabled",
+            "1",
+            "--rdma_device_health_fault_handler",
+            "LOG",
+            "--rdma_device_health_probe_interval_ms",
+            "200",
+            "--rdma_device_health_device_fault_confirm_ms",
+            "2000",
+            "--rdma_device_health_fault_window_ms",
+            "20000",
+            "--rdma_device_health_unavailable_threshold_ms",
+            "10000",
+            "--rdma_device_health_flap_warn_threshold",
+            "5",
+        ]
+        config = self._setup_args()
+        self.assertIs(config.rdma_device_health_enabled, True)
+        self.assertEqual(config.rdma_device_health_fault_handler, "LOG")
+        self.assertEqual(config.rdma_device_health_probe_interval_ms, 200)
+        self.assertEqual(config.rdma_device_health_device_fault_confirm_ms, 2000)
+        self.assertEqual(config.rdma_device_health_fault_window_ms, 20000)
+        self.assertEqual(config.rdma_device_health_unavailable_threshold_ms, 10000)
+        self.assertEqual(config.rdma_device_health_flap_warn_threshold, 5)
+
+    def test_invalid_values_reject_startup(self):
+        cases = [
+            ("--rdma_device_health_fault_handler", "abort"),
+            ("--rdma_device_health_fault_handler", "EXIT"),
+            ("--rdma_device_health_probe_interval_ms", "99"),
+            ("--rdma_device_health_probe_interval_ms", "60001"),
+            ("--rdma_device_health_probe_interval_ms", "abc"),
+            ("--rdma_device_health_device_fault_confirm_ms", "999"),
+            ("--rdma_device_health_device_fault_confirm_ms", "600001"),
+            ("--rdma_device_health_fault_window_ms", "9999"),
+            ("--rdma_device_health_fault_window_ms", "3600001"),
+            ("--rdma_device_health_unavailable_threshold_ms", "999"),
+            ("--rdma_device_health_unavailable_threshold_ms", "3600001"),
+            ("--rdma_device_health_flap_warn_threshold", "1"),
+            ("--rdma_device_health_flap_warn_threshold", "1001"),
+        ]
+        for option, value in cases:
+            with self.subTest(option=option, value=value), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                sys.argv = ["prog", option, value]
+                with self.assertRaises(SystemExit):
+                    self._setup_args()
+                self.assertIn(option, stderr.getvalue())
+
+    def test_invalid_env_values_reject_startup(self):
+        cases = [
+            ("RDMA_DEVICE_HEALTH_FAULT_HANDLER", "abort"),
+            ("RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS", "99"),
+            ("RDMA_DEVICE_HEALTH_UNAVAILABLE_THRESHOLD_MS", "999"),
+            ("RDMA_DEVICE_HEALTH_FLAP_WARN_THRESHOLD", "1"),
+        ]
+        # Env values take two parser paths: alone, and mixed with other CLI args.
+        for argv in (["prog"], ["prog", "--rdma_device_health_enabled", "1"]):
+            for env_name, value in cases:
+                with self.subTest(argv=argv, env_name=env_name), patch.dict(
+                    os.environ, {env_name: value}, clear=True
+                ), patch("sys.stderr", new_callable=io.StringIO):
+                    sys.argv = argv
+                    with self.assertRaises(SystemExit):
+                        self._setup_args()
+
+    def test_range_boundaries_are_accepted(self):
+        sys.argv = [
+            "prog",
+            "--rdma_device_health_probe_interval_ms",
+            "100",
+            "--rdma_device_health_device_fault_confirm_ms",
+            "1000",
+            "--rdma_device_health_fault_window_ms",
+            "10000",
+            "--rdma_device_health_unavailable_threshold_ms",
+            "1000",
+            "--rdma_device_health_flap_warn_threshold",
+            "2",
+        ]
+        config = self._setup_args()
+        self.assertEqual(config.rdma_device_health_probe_interval_ms, 100)
+        self.assertEqual(config.rdma_device_health_device_fault_confirm_ms, 1000)
+        self.assertEqual(config.rdma_device_health_fault_window_ms, 10000)
+        self.assertEqual(config.rdma_device_health_unavailable_threshold_ms, 1000)
+        self.assertEqual(config.rdma_device_health_flap_warn_threshold, 2)
+
+        sys.argv = [
+            "prog",
+            "--rdma_device_health_probe_interval_ms",
+            "60000",
+            "--rdma_device_health_device_fault_confirm_ms",
+            "600000",
+            "--rdma_device_health_fault_window_ms",
+            "3600000",
+            "--rdma_device_health_unavailable_threshold_ms",
+            "3600000",
+            "--rdma_device_health_flap_warn_threshold",
+            "1000",
+        ]
+        config = self._setup_args()
+        self.assertEqual(config.rdma_device_health_probe_interval_ms, 60000)
+        self.assertEqual(config.rdma_device_health_device_fault_confirm_ms, 600000)
+        self.assertEqual(config.rdma_device_health_fault_window_ms, 3600000)
+        self.assertEqual(config.rdma_device_health_unavailable_threshold_ms, 3600000)
+        self.assertEqual(config.rdma_device_health_flap_warn_threshold, 1000)
+
+    def test_confirm_durations_must_cover_two_probe_intervals(self):
+        base = ["prog", "--rdma_device_health_probe_interval_ms", "1000"]
+        for option in (
+            "--rdma_device_health_device_fault_confirm_ms",
+            "--rdma_device_health_unavailable_threshold_ms",
+        ):
+            with self.subTest(option=option):
+                sys.argv = base + [option, "1999"]
+                with self.assertRaisesRegex(ValueError, option[2:]):
+                    self._setup_args()
+
+                sys.argv = base + [option, "2000"]
+                config = self._setup_args()
+                self.assertEqual(getattr(config, option[2:]), 2000)
+
+    def test_unavailable_threshold_must_not_exceed_fault_window(self):
+        base = ["prog", "--rdma_device_health_fault_window_ms", "60000"]
+        sys.argv = base + ["--rdma_device_health_unavailable_threshold_ms", "60001"]
+        with self.assertRaisesRegex(
+            ValueError, "rdma_device_health_unavailable_threshold_ms"
+        ):
+            self._setup_args()
+
+        sys.argv = base + ["--rdma_device_health_unavailable_threshold_ms", "60000"]
+        config = self._setup_args()
+        self.assertEqual(config.rdma_device_health_unavailable_threshold_ms, 60000)
+        self.assertEqual(config.rdma_device_health_fault_window_ms, 60000)
+
+    def test_flap_threshold_at_inclusive_window_limit_does_not_warn(self):
+        for window_ms, interval_ms, threshold in (
+            (10000, 1000, 6),
+            (10001, 1000, 6),
+            (11999, 1000, 6),
+            (12000, 1000, 7),
+            (10000, 500, 11),
+            (10000, 1500, 4),
+        ):
+            with self.subTest(window_ms=window_ms, interval_ms=interval_ms), patch(
+                "rtp_llm.server.server_args.cache_store_group_args.logging.warning"
+            ) as warning:
+                sys.argv = [
+                    "prog",
+                    "--rdma_device_health_probe_interval_ms",
+                    str(interval_ms),
+                    "--rdma_device_health_fault_window_ms",
+                    str(window_ms),
+                    "--rdma_device_health_unavailable_threshold_ms",
+                    str(2 * interval_ms),
+                    "--rdma_device_health_flap_warn_threshold",
+                    str(threshold),
+                ]
+                config = self._setup_args()
+                warning.assert_not_called()
+                self.assertEqual(config.rdma_device_health_probe_interval_ms, interval_ms)
+                self.assertEqual(config.rdma_device_health_flap_warn_threshold, threshold)
+
+    def test_unreachable_flap_threshold_warns_without_changing_config(self):
+        for window_ms, threshold, max_recoveries in (
+            (10000, 7, 6),
+            (11999, 7, 6),
+            (12000, 8, 7),
+            (10000, 1000, 6),
+        ):
+            with self.subTest(window_ms=window_ms, threshold=threshold):
+                sys.argv = [
+                    "prog",
+                    "--rdma_device_health_probe_interval_ms",
+                    "1000",
+                    "--rdma_device_health_fault_window_ms",
+                    str(window_ms),
+                    "--rdma_device_health_unavailable_threshold_ms",
+                    "2000",
+                    "--rdma_device_health_flap_warn_threshold",
+                    str(threshold),
+                ]
+                with self.assertLogs(level="WARNING") as logs:
+                    config = self._setup_args()
+                self.assertEqual(len(logs.records), 1)
+                self.assertEqual(logs.records[0].levelname, "WARNING")
+                self.assertEqual(
+                    logs.records[0].getMessage(),
+                    "[RDMA_DEVICE_HEALTH_CONFIG] "
+                    f"rdma_device_health_flap_warn_threshold ({threshold}) "
+                    f"exceeds the theoretical maximum recoveries ({max_recoveries}) within "
+                    f"rdma_device_health_fault_window_ms ({window_ms}) at "
+                    "rdma_device_health_probe_interval_ms (1000); flapping warnings cannot "
+                    "trigger with this configuration. Startup continues without changing the threshold.",
+                )
+                self.assertIs(config.rdma_device_health_enabled, True)
+                self.assertEqual(config.rdma_device_health_probe_interval_ms, 1000)
+                self.assertEqual(config.rdma_device_health_fault_window_ms, window_ms)
+                self.assertEqual(config.rdma_device_health_unavailable_threshold_ms, 2000)
+                self.assertEqual(config.rdma_device_health_flap_warn_threshold, threshold)
+
+    def test_unreachable_env_flap_threshold_warns_unless_overridden_by_cli(self):
+        env = {
+            "RDMA_DEVICE_HEALTH_FAULT_WINDOW_MS": "10000",
+            "RDMA_DEVICE_HEALTH_UNAVAILABLE_THRESHOLD_MS": "2000",
+            "RDMA_DEVICE_HEALTH_FLAP_WARN_THRESHOLD": "7",
+        }
+        for argv, enabled, threshold, should_warn in (
+            (["prog"], True, 7, True),
+            (["prog", "--rdma_device_health_enabled", "0"], False, 7, True),
+            (["prog", "--rdma_device_health_flap_warn_threshold", "6"], True, 6, False),
+        ):
+            with self.subTest(argv=argv), patch.dict(
+                os.environ, env, clear=True
+            ), patch(
+                "rtp_llm.server.server_args.cache_store_group_args.logging.warning"
+            ) as warning:
+                sys.argv = argv
+                config = self._setup_args()
+                self.assertIs(config.rdma_device_health_enabled, enabled)
+                self.assertEqual(config.rdma_device_health_flap_warn_threshold, threshold)
+                if should_warn:
+                    warning.assert_called_once()
+                    self.assertEqual(warning.call_args[0][1:], (7, 6, 10000, 1000))
+                else:
+                    warning.assert_not_called()
+
+    def test_device_fault_confirmation_may_exceed_fault_window(self):
+        sys.argv = [
+            "prog",
+            "--rdma_device_health_device_fault_confirm_ms",
+            "20000",
+            "--rdma_device_health_fault_window_ms",
+            "10000",
+            "--rdma_device_health_unavailable_threshold_ms",
+            "2000",
+            "--rdma_device_health_flap_warn_threshold",
+            "6",
+        ]
+        with patch(
+            "rtp_llm.server.server_args.cache_store_group_args.logging.warning"
+        ) as warning:
+            config = self._setup_args()
+        warning.assert_not_called()
+        self.assertEqual(config.rdma_device_health_device_fault_confirm_ms, 20000)
+        self.assertEqual(config.rdma_device_health_fault_window_ms, 10000)
+
+    def test_cpp_exports_value_ranges(self):
+        from rtp_llm.ops import CacheStoreConfig
+
+        self.assertEqual(
+            CacheStoreConfig.rdma_device_health_probe_interval_ms_range, (100, 60000)
+        )
+        self.assertEqual(
+            CacheStoreConfig.rdma_device_health_device_fault_confirm_ms_range,
+            (1000, 600000),
+        )
+        self.assertEqual(
+            CacheStoreConfig.rdma_device_health_fault_window_ms_range, (10000, 3600000)
+        )
+        self.assertEqual(
+            CacheStoreConfig.rdma_device_health_unavailable_threshold_ms_range,
+            (1000, 3600000),
+        )
+        self.assertEqual(
+            CacheStoreConfig.rdma_device_health_flap_warn_threshold_range, (2, 1000)
+        )
+        self.assertEqual(
+            CacheStoreConfig.rdma_device_health_min_confirm_probe_intervals, 2
+        )
+
+    def test_pickle_round_trip(self):
+        from rtp_llm.ops import CacheStoreConfig
+
+        config = CacheStoreConfig()
+        config.cache_store_tcp_anet_rpc_queue_num = 7
+        for _, field_name, _, value in self.ENV_CASES:
+            setattr(config, field_name, value)
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.cache_store_tcp_anet_rpc_queue_num, 7)
+        for _, field_name, _, value in self.ENV_CASES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(getattr(restored, field_name), value)
+
+    def test_legacy_pickle_state_keeps_cpp_defaults(self):
+        from rtp_llm.ops import CacheStoreConfig
+
+        config = CacheStoreConfig()
+        config.cache_store_tcp_anet_rpc_queue_num = 7
+        for _, field_name, _, value in self.ENV_CASES:
+            setattr(config, field_name, value)
+        state = config.__getstate__()
+        self.assertEqual(len(state), 27)
+
+        legacy = CacheStoreConfig.__new__(CacheStoreConfig)
+        legacy.__setstate__(state[:20])
+        self.assertEqual(legacy.cache_store_tcp_anet_rpc_queue_num, 7)
+        self.assertIs(legacy.rdma_device_health_enabled, False)
+        self.assertEqual(legacy.rdma_device_health_fault_handler, "LOG")
+        self.assertEqual(legacy.rdma_device_health_probe_interval_ms, 1000)
+        self.assertEqual(legacy.rdma_device_health_device_fault_confirm_ms, 3000)
+        self.assertEqual(legacy.rdma_device_health_fault_window_ms, 600000)
+        self.assertEqual(legacy.rdma_device_health_unavailable_threshold_ms, 120000)
+        self.assertEqual(legacy.rdma_device_health_flap_warn_threshold, 10)
+
+        for size in (19, 21, 26, 28):
+            with self.subTest(size=size):
+                invalid = CacheStoreConfig.__new__(CacheStoreConfig)
+                with self.assertRaises(RuntimeError):
+                    invalid.__setstate__(tuple(range(size)))
+
+
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
