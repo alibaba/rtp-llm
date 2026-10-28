@@ -115,11 +115,13 @@ class EndpointRetirementLinearizationTest {
             try {
                 try {
                     if (detachedPrefill != null) {
-                        detachedPrefill.complete(cache, LoggerFactory.getLogger(getClass()));
+                        EndpointTestSupport.completeRetirement(
+                                detachedPrefill, cache, LoggerFactory.getLogger(getClass()));
                     }
                 } finally {
                     if (detachedDecode != null) {
-                        detachedDecode.complete(cache, LoggerFactory.getLogger(getClass()));
+                        EndpointTestSupport.completeRetirement(
+                                detachedDecode, cache, LoggerFactory.getLogger(getClass()));
                     }
                 }
                 assertTrue(registry.statusSnapshot(RoleType.PREFILL).isEmpty());

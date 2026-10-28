@@ -359,8 +359,9 @@ class PrefillQueueRunnerQueueTest {
                                 assertFalse(
                                         Thread.holdsLock(context),
                                         "request cleanup must run outside Context's monitor");
-                                assertFalse(
-                                        state.queueGuard().isHeldByCurrentThread(),
+                                org.junit.jupiter.api.Assertions.assertThrows(
+                                        IllegalStateException.class,
+                                        state.queueGuard()::requireHeld,
                                         "request cleanup must enter the resource ledger outside the queue lock");
                                 cleanupThread.set(Thread.currentThread());
                                 boolean released =
@@ -368,8 +369,9 @@ class PrefillQueueRunnerQueueTest {
                                                 .releaseRequest(state, queued);
                                 if (released) {
                                     releases.incrementAndGet();
-                                    assertFalse(
-                                            state.queueGuard().isHeldByCurrentThread(),
+                                    org.junit.jupiter.api.Assertions.assertThrows(
+                                            IllegalStateException.class,
+                                            state.queueGuard()::requireHeld,
                                             "capacity and queue notifications must run after resource release unlocks");
                                     runtime.signal(false);
                                     runtime.capacityAvailableSignal.run();

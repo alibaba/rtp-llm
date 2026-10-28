@@ -227,7 +227,7 @@ class RejectedDeliveryWithdrawalRaceTest {
             }
             SchedulerTestSupport.shutdown(owner.runtime);
             decode.close();
-            decode.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(decode);
         }
     }
 }

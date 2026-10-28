@@ -1757,7 +1757,7 @@ class PrefillEndpointTest {
             assertNull(
                     callbackFailure.get(),
                     "an admitted handoff must defer cleanup instead of self-awaiting");
-            retirementEndpoint.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(retirementEndpoint);
         } finally {
             retirementEndpoint.close();
         }

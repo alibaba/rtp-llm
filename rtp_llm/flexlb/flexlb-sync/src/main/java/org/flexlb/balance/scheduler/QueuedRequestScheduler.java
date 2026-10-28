@@ -142,11 +142,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         decisionThread.start();
     }
 
-    /** Latest queue wait cause and counters; this snapshot is not specific to the current request. */
-    Map<String, Object> getLatestQueueWaitSnapshot() {
-        return latestQueueWaitSnapshot;
-    }
-
     @Override
     protected boolean queueControl(RequestContext exact, RequestRoute withdrawn) {
         if (withdrawn != null) {
