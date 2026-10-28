@@ -43,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -362,7 +363,9 @@ class QueuedBatchDeliveryTest {
                 .thenAnswer(
                         call -> {
                             assertFalse(Thread.holdsLock(context));
-                            assertFalse(ledger.prefill.queueGuard().isHeldByCurrentThread());
+                            org.junit.jupiter.api.Assertions.assertThrows(
+                                    IllegalStateException.class,
+                                    ledger.prefill.queueGuard()::requireHeld);
                             rpcEntered.countDown();
                             await(releaseRpc);
                             return reply;
@@ -417,10 +420,9 @@ class QueuedBatchDeliveryTest {
                             when(capture.materialize())
                                     .thenAnswer(
                                             ignored -> {
-                                                assertFalse(
-                                                        ledger.prefill
-                                                                .queueGuard()
-                                                                .isHeldByCurrentThread());
+                                                assertThrows(
+                                                        IllegalStateException.class,
+                                                        ledger.prefill.queueGuard()::requireHeld);
                                                 throw failure;
                                             });
                             org.mockito.Mockito.doReturn(capture).when(committed).precedingWork();

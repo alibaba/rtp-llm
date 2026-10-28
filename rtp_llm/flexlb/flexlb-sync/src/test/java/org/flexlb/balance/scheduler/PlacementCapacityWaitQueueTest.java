@@ -107,7 +107,7 @@ class PlacementCapacityWaitQueueTest {
         queue.park(second, A, 0);
         queue.capacityChanged(A);
         assertEquals(List.of(first), drain(1));
-        availability.changed(A);
+        PlacementAvailabilityTestSupport.changed(availability, A);
         queue.capacityChanged(A);
         assertTrue(drain(10).isEmpty(), "another edge cannot create two active retries");
         assertFalse(queue.park(first, A, 0), "the owner must retry the raced placement");
@@ -172,7 +172,7 @@ class PlacementCapacityWaitQueueTest {
     @Test
     void edgeDuringPlanningRequiresRetryInsteadOfSleeping() {
         long snapshot = availability.sequence();
-        availability.changed(A);
+        PlacementAvailabilityTestSupport.changed(availability, A);
         assertFalse(queue.park(entry(50), A, snapshot));
         assertFalse(queue.park(entry(50), new PlacementKey(RoleType.PREFILL, "g", null), snapshot));
         assertFalse(queue.park(entry(50), PlacementKey.anyGroup(RoleType.PREFILL), snapshot));
@@ -188,7 +188,7 @@ class PlacementCapacityWaitQueueTest {
         queue.capacityChanged(replacement);
         assertEquals(List.of(first), drain(1));
         long snapshot = availability.sequence();
-        availability.changed(replacement);
+        PlacementAvailabilityTestSupport.changed(availability, replacement);
         assertFalse(queue.park(first, A, snapshot));
     }
 
@@ -244,7 +244,7 @@ class PlacementCapacityWaitQueueTest {
         var request = entry(50);
         long observed = availability.sequence();
         if (beforePark) {
-            availability.changed(event);
+            PlacementAvailabilityTestSupport.changed(availability, event);
             queue.capacityChanged(event);
             assertEquals(!matches, queue.park(request, blocker, observed));
             assertEquals(!matches, queue.isWaiting(request));
@@ -253,7 +253,7 @@ class PlacementCapacityWaitQueueTest {
                     "a pre-park edge is represented as immediate replan, not a duplicate wakeup");
         } else {
             assertTrue(queue.park(request, blocker, observed));
-            availability.changed(event);
+            PlacementAvailabilityTestSupport.changed(availability, event);
             queue.capacityChanged(event);
             assertEquals(matches ? List.of(request) : List.of(), drain(1));
             assertEquals(!matches, queue.isWaiting(request));

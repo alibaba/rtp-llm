@@ -461,7 +461,7 @@ class DeliverySettlementTest {
             assertNull(SchedulerTestSupport.failure(registry));
         } finally {
             decode.close();
-            decode.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(decode);
         }
     }
 

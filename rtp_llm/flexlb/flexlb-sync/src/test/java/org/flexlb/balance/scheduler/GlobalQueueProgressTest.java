@@ -112,7 +112,12 @@ class GlobalQueueProgressTest {
             f.submit(994L, "a");
             QueuedRequestScheduler queue = (QueuedRequestScheduler) f.scheduler;
             awaitCondition(
-                    () -> diagnostics.equals(queue.getLatestQueueWaitSnapshot().get("decision")));
+                    () ->
+                            diagnostics.equals(
+                                    ((Map<String, Object>)
+                                                    ReflectionTestUtils.getField(
+                                                            queue, "latestQueueWaitSnapshot"))
+                                            .get("decision")));
             verify(f.mutations.get(994L)).finish();
         }
     }
@@ -779,7 +784,8 @@ class GlobalQueueProgressTest {
             assertFalse(f.admitted.contains(1202L));
             f.decodeBlocked.remove(1202L);
             f.aSlots.set(1);
-            f.availability.changed(PlacementKey.exact(RoleType.DECODE, "a", "d:8000"));
+            PlacementAvailabilityTestSupport.changed(
+                    f.availability, PlacementKey.exact(RoleType.DECODE, "a", "d:8000"));
             awaitCondition(() -> f.admitted.contains(1202L));
             assertEquals(2, attempts.get());
         }
@@ -1003,7 +1009,8 @@ class GlobalQueueProgressTest {
         }
 
         private void release(String group) {
-            availability.changed(PlacementKey.exact(role, group, group + ":8000"));
+            PlacementAvailabilityTestSupport.changed(
+                    availability, PlacementKey.exact(role, group, group + ":8000"));
         }
 
         public void close() {

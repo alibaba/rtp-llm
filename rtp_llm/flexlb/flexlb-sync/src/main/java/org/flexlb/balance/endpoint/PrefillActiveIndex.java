@@ -59,10 +59,6 @@ public final class PrefillActiveIndex implements Iterable<RequestRoute> {
             this.entries = List.copyOf(entries);
         }
 
-        public boolean isEmpty() {
-            return entries.isEmpty();
-        }
-
         public List<GroupPlanner.Item> projectedItems() {
             List<GroupPlanner.Item> result = projectedItems;
             if (result != null) {

@@ -69,7 +69,7 @@ class RequestRouteTest {
             result.value().close();
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -106,7 +106,7 @@ class RequestRouteTest {
             assertFalse(pin.isOpen());
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -130,7 +130,7 @@ class RequestRouteTest {
             assertFalse(duplicate.isOpen());
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -151,7 +151,7 @@ class RequestRouteTest {
             assertFalse(pin.isOpen());
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -167,7 +167,7 @@ class RequestRouteTest {
             assertThrows(IllegalStateException.class, route::prepare);
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -185,7 +185,7 @@ class RequestRouteTest {
                     IllegalStateException.class, () -> RequestRoute.create(context, route, null));
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -206,7 +206,7 @@ class RequestRouteTest {
             assertThrows(IllegalStateException.class, route::prepare);
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -221,7 +221,7 @@ class RequestRouteTest {
             assertThrows(IllegalStateException.class, route::prepare);
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -274,9 +274,9 @@ class RequestRouteTest {
             prefill.close();
             decode.close();
             vit.close();
-            prefill.awaitRetirement();
-            decode.awaitRetirement();
-            vit.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(prefill);
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(decode);
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(vit);
         }
     }
 
@@ -302,7 +302,7 @@ class RequestRouteTest {
             assertFalse(pin.isOpen());
         } finally {
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 
@@ -341,8 +341,8 @@ class RequestRouteTest {
         } finally {
             worker.close();
             vit.close();
-            worker.awaitRetirement();
-            vit.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(vit);
         }
     }
 
@@ -367,13 +367,13 @@ class RequestRouteTest {
             var first = CompletableFuture.runAsync(() -> closeAfterBarrier(route, barrier));
             var second = CompletableFuture.runAsync(() -> closeAfterBarrier(acquired, barrier));
             CompletableFuture.allOf(first, second).get(3, TimeUnit.SECONDS);
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
             assertFalse(pin.isOpen());
         } finally {
             route.close();
             acquired.close();
             worker.close();
-            worker.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
         }
     }
 

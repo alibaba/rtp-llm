@@ -415,8 +415,9 @@ class RequestDeliveryLockContractTest {
                             assertFalse(
                                     Thread.holdsLock(registered.item().ctx()),
                                     "resource release must run outside the request monitor");
-                            assertFalse(
-                                    state.queueGuard().isHeldByCurrentThread(),
+                            assertThrows(
+                                    IllegalStateException.class,
+                                    state.queueGuard()::requireHeld,
                                     "resource release must enter outside the queue ownership lock");
                             boolean released =
                                     org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
@@ -424,7 +425,7 @@ class RequestDeliveryLockContractTest {
                             if (released) {
                                 releases.incrementAndGet();
                             }
-                            assertFalse(state.queueGuard().isHeldByCurrentThread());
+                            assertThrows(IllegalStateException.class, state.queueGuard()::requireHeld);
                             return released;
                         });
         CountDownLatch queuePublished = new CountDownLatch(1);

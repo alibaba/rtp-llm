@@ -436,7 +436,7 @@ class PrefillQueueRunnerRequestCapacityTest {
             implements AutoCloseable {
         public void close() {
             endpoint.close();
-            endpoint.awaitRetirement();
+            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(endpoint);
         }
     }
 }

@@ -83,7 +83,7 @@ class ReviewLifecycleRegressionTest {
             status.lock.unlock();
         }
         try {
-            retirement.complete(cache, LoggerFactory.getLogger(getClass()));
+            EndpointTestSupport.completeRetirement(retirement, cache, LoggerFactory.getLogger(getClass()));
             assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address));
             assertSame(
                     status,

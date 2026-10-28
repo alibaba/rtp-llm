@@ -83,11 +83,6 @@ public class EndpointRegistry {
             }
         }
 
-        /** Drain outside the generation lock, then clear cache and remove this exact status. */
-        public void complete(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
-            complete(cacheAwareService, logger, true);
-        }
-
         private void complete(
                 CacheAwareService cacheAwareService, org.slf4j.Logger logger, boolean awaitDrain) {
             Objects.requireNonNull(cacheAwareService, "cacheAwareService");
