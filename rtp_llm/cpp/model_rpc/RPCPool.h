@@ -1,12 +1,12 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include "grpc++/grpc++.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -19,6 +19,11 @@ struct Connection {
 template<typename T>
 class Pool {
 public:
+    // Default settings retain the existing backend behavior. Frontends may pass
+    // their configured message limits/keepalive settings when constructing a pool.
+    Pool(): arguments_(defaultArguments()) {}
+    explicit Pool(grpc::ChannelArguments arguments): arguments_(std::move(arguments)) {}
+
     absl::StatusOr<Connection<T>> getConnection(std::string peer) {
 
         std::lock_guard<std::mutex> guard(mutex_);
@@ -37,15 +42,7 @@ public:
         }
 
         if (need_new_connection) {
-            grpc::ChannelArguments args;
-            args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
-            args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
-            args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
-            args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
-            // 需配合 GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS 使用，例如 500
-            args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
-            args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
-            auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
+            auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), arguments_);
             if (!grpc_channel) {
                 std::string error_msg = "create grpc channel for " + peer + " failed";
                 return absl::InternalError(error_msg);
@@ -71,7 +68,19 @@ public:
 
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed
 
+    static grpc::ChannelArguments defaultArguments() {
+        grpc::ChannelArguments args;
+        args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
+        args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
+        args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
+        return args;
+    }
+
 private:
+    const grpc::ChannelArguments                   arguments_;
     std::mutex                                     mutex_;
     std::unordered_map<std::string, Connection<T>> connection_pool_;
 };

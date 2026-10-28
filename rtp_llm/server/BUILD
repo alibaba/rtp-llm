@@ -1,5 +1,10 @@
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
+exports_files(
+    ["server_args/server_args.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "request_headers",
     srcs = ["request_headers.py"],
