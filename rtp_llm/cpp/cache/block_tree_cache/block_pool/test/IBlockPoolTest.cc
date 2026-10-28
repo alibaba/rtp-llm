@@ -68,6 +68,7 @@ TEST(IBlockPoolTest, UnfreezePreservesCacheAndReleasesOrphans) {
             EXPECT_GT(pool->availableBlocksNum(), 2u);  // Also verifies callback runs outside the pool lock.
         });
         EXPECT_EQ(pool->availableBlocksNum(), 2u);
+        EXPECT_EQ(pool->unfrozenBlocksNum(), 0u);
         pool->unfreezeBlock(block);
         const bool preserved = remaining == BlockTreeRefType::CACHE;
         if (preserved) {
@@ -75,6 +76,7 @@ TEST(IBlockPoolTest, UnfreezePreservesCacheAndReleasesOrphans) {
             EXPECT_EQ(pool->treeRefCount(block), 1u);
         }
         EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        EXPECT_EQ(pool->unfrozenBlocksNum(), 1u);
         EXPECT_EQ(pool->isAllocated(block), preserved);
         EXPECT_EQ(pool->freeBlocksNum(), preserved ? 2u : 3u);
         EXPECT_EQ(pool->availableBlocksNum(), 3u);

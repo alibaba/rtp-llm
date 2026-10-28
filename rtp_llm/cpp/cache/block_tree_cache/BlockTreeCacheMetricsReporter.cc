@@ -63,6 +63,7 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     snapshot.eviction_target_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
     snapshot.store_ref_blocks           = pool.referencedBlocksNum(BlockTreeRefType::STORE);
     snapshot.frozen_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
+    snapshot.unfrozen_blocks            = pool.unfrozenBlocksNum();
     return snapshot;
 }
 

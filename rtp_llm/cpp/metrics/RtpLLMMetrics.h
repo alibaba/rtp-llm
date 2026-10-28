@@ -1043,6 +1043,7 @@ public:
     int64_t eviction_target_ref_blocks        = 0;
     int64_t store_ref_blocks                  = 0;
     int64_t frozen_ref_blocks                 = 0;
+    int64_t unfrozen_blocks                   = 0;
     float   used_ratio                        = 0;
     bool    report_eviction_target_ref_blocks = false;
     bool    report_frozen_ref_blocks          = false;
@@ -1074,6 +1075,8 @@ public:
     kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
     kmonitor::MutableMetric* store_ref_blocks_metric           = nullptr;
     kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
+    // Cumulative blocks whose final FROZEN reference has been released.
+    kmonitor::MutableMetric* unfrozen_blocks_metric            = nullptr;
     kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
 
     kmonitor::MutableMetric* read_bytes_metric                    = nullptr;

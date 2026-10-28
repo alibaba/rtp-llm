@@ -1412,6 +1412,7 @@ static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
     snapshot.eviction_target_ref_blocks = 15 + seed;
     snapshot.store_ref_blocks           = 16 + seed;
     snapshot.frozen_ref_blocks          = 17 + seed;
+    snapshot.unfrozen_blocks            = 18 + seed;
     snapshot.used_ratio                 = static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                              / static_cast<double>(snapshot.total_blocks));
     return snapshot;
@@ -1438,6 +1439,7 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
     snapshot.eviction_target_ref_blocks = 35 + seed;
     snapshot.store_ref_blocks           = 36 + seed;
     snapshot.frozen_ref_blocks          = 37 + seed;
+    snapshot.unfrozen_blocks            = 38 + seed;
     if (tier == Tier::DISK) {
         snapshot.read_bytes                    = (int64_t{1} << 40) + seed;
         snapshot.write_bytes                   = (int64_t{1} << 41) + seed;
@@ -1465,6 +1467,7 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
+    EXPECT_EQ(actual.unfrozen_blocks, source.unfrozen_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
     EXPECT_FALSE(actual.read_bytes.has_value()) << context;
@@ -1492,6 +1495,7 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_EQ(actual.frozen_ref_blocks, source.frozen_ref_blocks) << context;
+    EXPECT_EQ(actual.unfrozen_blocks, source.unfrozen_blocks) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
     EXPECT_EQ(actual.read_bytes, source.read_bytes) << context;
     EXPECT_EQ(actual.write_bytes, source.write_bytes) << context;

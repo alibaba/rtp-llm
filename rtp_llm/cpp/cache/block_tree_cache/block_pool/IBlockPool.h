@@ -71,6 +71,8 @@ public:
 
     // Number of distinct blocks carrying at least one tree reference of this type.
     size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
+    // Cumulative number of blocks whose FROZEN reference has been released.
+    size_t unfrozenBlocksNum() const;
 
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
@@ -177,6 +179,7 @@ private:
     size_t                                                    free_head_{0};
     size_t                                                    active_blocks_num_{0};
     size_t                                                    available_blocks_num_{0};
+    size_t                                                    unfrozen_blocks_num_{0};
 };
 
 }  // namespace rtp_llm

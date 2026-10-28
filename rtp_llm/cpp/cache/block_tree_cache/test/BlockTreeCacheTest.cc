@@ -902,7 +902,7 @@ TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnc
     }
 }
 
-TEST(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEveryTier) {
+TEST(BlockTreeCacheMetricsTest, FreezeMetricsAreOwnerOnlyAndIncludeZeroForEveryTier) {
     auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     RtpLLMCachePoolMetricsCollector collector;
     auto*                           metrics = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>();
@@ -912,24 +912,33 @@ TEST(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEveryTi
         tags.AddTag("tier", tierName(tier));
         collector.report_frozen_ref_blocks = false;
         collector.frozen_ref_blocks        = 9;
-        const auto series_before           = metricSeriesCount(metrics->frozen_ref_blocks_metric);
+        collector.unfrozen_blocks          = 7;
+        const auto frozen_series_before    = metricSeriesCount(metrics->frozen_ref_blocks_metric);
+        const auto unfrozen_series_before  = metricSeriesCount(metrics->unfrozen_blocks_metric);
         ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
-        EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), series_before);
+        EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), frozen_series_before);
+        EXPECT_EQ(metricSeriesCount(metrics->unfrozen_blocks_metric), unfrozen_series_before);
         collector.report_frozen_ref_blocks = true;
         collector.frozen_ref_blocks        = 0;
+        collector.unfrozen_blocks          = 0;
         ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
-        EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), series_before + 1);
+        EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), frozen_series_before + 1);
+        EXPECT_EQ(metricSeriesCount(metrics->unfrozen_blocks_metric), unfrozen_series_before + 1);
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->frozen_ref_blocks_metric, tags), 0);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->unfrozen_blocks_metric, tags), 0);
         collector.frozen_ref_blocks = 2;
+        collector.unfrozen_blocks   = 3;
         ASSERT_TRUE((reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
         EXPECT_DOUBLE_EQ(snapshotQps(metrics->frozen_ref_blocks_metric, tags), 2);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->unfrozen_blocks_metric, tags), 3);
     }
     EXPECT_EQ(metricSeriesCount(metrics->frozen_ref_blocks_metric), 3u);
+    EXPECT_EQ(metricSeriesCount(metrics->unfrozen_blocks_metric), 3u);
     EXPECT_EQ(metricSeriesCount(metrics->eviction_target_ref_blocks_metric), 0u);
     EXPECT_EQ(metricSeriesCount(metrics->store_ref_blocks_metric), 3u);
 }
 
-TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
+TEST(BlockTreeCacheMetricsTest, FreezeSnapshotsTrackReferencesAndUnfrozenCountsAcrossAllTiers) {
     auto device = makeDevicePool({{16, 0}}, 4, "shared_frozen_device");
     auto host   = makeHostPool(16, 4);
     auto disk   = makeDiskPool(16, 4, std::make_unique<MemoryDiskBlockIO>());
@@ -941,7 +950,9 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
     ASSERT_EQ(before.size(), 3u);
     for (const auto& snapshot : before) {
         EXPECT_EQ(snapshot.frozen_ref_blocks, 0u);
+        EXPECT_EQ(snapshot.unfrozen_blocks, 0u);
     }
+    std::vector<std::pair<IBlockPool*, BlockIdxType>> frozen_blocks;
     for (IBlockPool* pool : {static_cast<IBlockPool*>(device.get()),
                              static_cast<IBlockPool*>(host.get()),
                              static_cast<IBlockPool*>(disk.get())}) {
@@ -951,14 +962,25 @@ TEST(BlockTreeCacheMetricsTest, FrozenSnapshotsTrackReferencesAcrossAllTiers) {
         pool->freezeBlock(*block);
         pool->freezeBlock(*block);
         pool->decTreeRef(*block, BlockTreeRefType::STORE);
+        frozen_blocks.emplace_back(pool, *block);
     }
     const auto after = reporter.collectPoolMetricsSnapshots(groups);
     ASSERT_EQ(after.size(), 3u);
     for (const auto& snapshot : after) {
         EXPECT_EQ(snapshot.frozen_ref_blocks, 1u);
+        EXPECT_EQ(snapshot.unfrozen_blocks, 0u);
         EXPECT_EQ(snapshot.store_ref_blocks, 0u);
         EXPECT_EQ(snapshot.load_ref_blocks, 0u);
         EXPECT_EQ(snapshot.eviction_target_ref_blocks, 0u);
+    }
+    for (const auto& [pool, block] : frozen_blocks) {
+        pool->unfreezeBlock(block);
+    }
+    const auto after_unfreeze = reporter.collectPoolMetricsSnapshots(groups);
+    ASSERT_EQ(after_unfreeze.size(), 3u);
+    for (const auto& snapshot : after_unfreeze) {
+        EXPECT_EQ(snapshot.frozen_ref_blocks, 0u);
+        EXPECT_EQ(snapshot.unfrozen_blocks, 1u);
     }
 }
 
@@ -1613,6 +1635,7 @@ void expectSameJointLifecycleMetrics(const BlockTreePoolMetricsSnapshot& expecte
     EXPECT_EQ(actual.eviction_target_ref_blocks, expected.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
     EXPECT_EQ(actual.frozen_ref_blocks, expected.frozen_ref_blocks) << context;
+    EXPECT_EQ(actual.unfrozen_blocks, expected.unfrozen_blocks) << context;
 }
 
 TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction) {
@@ -1667,6 +1690,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
             EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << context;
             EXPECT_EQ(snapshot->store_ref_blocks, 0u) << context;
             EXPECT_EQ(snapshot->frozen_ref_blocks, 0u) << context;
+            EXPECT_EQ(snapshot->unfrozen_blocks, 0u) << context;
             if (first == nullptr) {
                 first = snapshot;
             } else {

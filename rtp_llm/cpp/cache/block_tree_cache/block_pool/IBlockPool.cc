@@ -44,7 +44,8 @@ std::string IBlockPool::debugString() const {
         << ", eviction_target_ref_blocks="
         << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
         << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)]
-        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)] << "}";
+        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)]
+        << ", unfrozen_blocks=" << unfrozen_blocks_num_ << "}";
     return oss.str();
 }
 
@@ -181,6 +182,7 @@ void IBlockPool::unfreezeBlock(BlockIdxType block) {
                     freeAllocatedBlockNoLock(block);
                 }
             }
+            ++unfrozen_blocks_num_;
             updateActiveBlocksNumNoLock(block, was_active);
             updateAvailableBlocksNumNoLock(block, was_available);
         });
@@ -240,6 +242,12 @@ size_t IBlockPool::referencedBlocksNum(BlockTreeRefType ref_type) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     return tree_referenced_block_counts_[treeRefTypeIndex(ref_type)];
+}
+
+size_t IBlockPool::unfrozenBlocksNum() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    return unfrozen_blocks_num_;
 }
 
 size_t IBlockPool::activeBlocksNum() const {
