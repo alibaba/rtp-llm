@@ -227,6 +227,7 @@ class MMAccessLogger(AccessLogger):
         exception: Optional[BaseException] = None,
         response: Optional[Any] = None,
         request_id: int = 0,
+        external_request_id: str = "",
     ) -> None:
         if logger is None:
             return
@@ -240,6 +241,9 @@ class MMAccessLogger(AccessLogger):
             dump_json(
                 {
                     "id": request_id,
+                    # Match GreenNet's correlation ID without changing the
+                    # numeric ID used by scheduling and cancellation.
+                    "external_request_id": external_request_id or str(request_id),
                     "query": [mm_input.to_string() for mm_input in request],
                     "log_time": log_time,
                     "exception": exception,
@@ -249,19 +253,44 @@ class MMAccessLogger(AccessLogger):
         )
 
     def log_query_access(
-        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        external_request_id: str = "",
     ) -> None:
-        self.log(self.query_logger, mm_inputs, request_id=request_id)
+        self.log(
+            self.query_logger,
+            mm_inputs,
+            request_id=request_id,
+            external_request_id=external_request_id,
+        )
 
     def log_exception_access(
         self,
         mm_inputs: List[MultimodalInput],
         exception: BaseException,
         request_id: int = 0,
+        external_request_id: str = "",
     ) -> None:
-        self.log(self.logger, mm_inputs, exception=exception, request_id=request_id)
+        self.log(
+            self.logger,
+            mm_inputs,
+            exception=exception,
+            request_id=request_id,
+            external_request_id=external_request_id,
+        )
 
     def log_success_access(
-        self, mm_inputs: List[MultimodalInput], response: Any, request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        response: Any,
+        request_id: int = 0,
+        external_request_id: str = "",
     ) -> None:
-        self.log(self.logger, mm_inputs, response=response, request_id=request_id)
+        self.log(
+            self.logger,
+            mm_inputs,
+            response=response,
+            request_id=request_id,
+            external_request_id=external_request_id,
+        )
