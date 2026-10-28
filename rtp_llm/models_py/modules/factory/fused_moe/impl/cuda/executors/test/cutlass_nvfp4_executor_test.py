@@ -20,6 +20,38 @@ from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
+    def test_selection_rejects_unquantized_bf16_models(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.config.server_config_setup import set_parallelism_config
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+            MoEConfigAdapter,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp4 import (
+            CudaNvfp4CutlassStrategy,
+        )
+        from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+        model = ModelConfig()
+        model.data_type = "bf16"
+        model.quant_config = None
+        moe = MoeConfig()
+        moe.fp4_moe_op = "cutlass"
+        moe.use_all_gather = True
+        moe.use_deepep_moe = False
+        for tp_size in (1, 2):
+            pc = ParallelismConfig()
+            pc.tp_size = tp_size
+            pc.ep_size = tp_size
+            pc.ffn_sp_size = tp_size
+            pc.world_size = tp_size
+            pc.local_world_size = tp_size
+            set_parallelism_config(pc)
+            for requested in ("auto", "nvfp4_cutlass"):
+                with self.subTest(tp_size=tp_size, requested=requested):
+                    moe.moe_strategy = requested
+                    config = MoEConfigAdapter(model, pc, moe)
+                    self.assertFalse(CudaNvfp4CutlassStrategy().can_handle(config))
+
     @unittest.skipUnless(
         torch.cuda.is_available()
         and torch.version.hip is None

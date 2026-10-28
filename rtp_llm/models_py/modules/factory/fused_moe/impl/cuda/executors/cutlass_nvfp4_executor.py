@@ -38,7 +38,8 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
             config.parallelism_config.get_ffn_tp_size() == 1 or tensor_parallel
         )
         checker.check(config.moe_config.fp4_moe_op == "cutlass")
-        checker.check(not config.model_config.quant_config.is_quanted())
+        quant_config = config.model_config.quant_config
+        checker.check(quant_config is not None and not quant_config.is_quanted())
         checker.check(not config.has_redundant_experts)
         checker.check(not config.model_config.eplb_config.enable_eplb())
         checker.check(config.tp_size == config.ep_size or tensor_parallel)
