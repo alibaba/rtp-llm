@@ -27,17 +27,6 @@ public final class SchedulerTestSupport {
         return runtime.shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
     }
 
-    public static void useRealCancelReply(AbstractRequestScheduler scheduler) {
-        org.mockito.Mockito.doCallRealMethod()
-                .when(scheduler)
-                .onCancelReply(
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any(),
-                        org.mockito.ArgumentMatchers.any());
-    }
-
     /** Empty Decode ownership uses typed domain results, including in tests without a real ledger. */
     public static org.flexlb.balance.endpoint.DecodeEndpoint mockDecodeEndpoint() {
         return RequestProtocolTestSupport.decodeEndpoint();
