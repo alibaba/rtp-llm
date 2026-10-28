@@ -712,9 +712,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_               = propose_params->gen_num_per_circle;
+    data_type_    = params.model_config_.data_type;
+    hidden_size_  = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_ = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                 = params.model_config_.vocab_size;
@@ -827,10 +827,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -910,7 +910,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -1377,11 +1377,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     // collect metrics
+    int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+    if (tps_execute_time_us <= 0) {
+        tps_execute_time_us = model_forward_us;
+    }
     if (metrics_reporter_) {
         collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
     }
 
     // dispatch
+    const int64_t context_execute_time_us = tps_execute_time_us;
+    stream_groups.addContextExecuteTimeUs(context_execute_time_us);
+    stream_groups.addFrontendContextExecuteMetrics(context_execute_time_us);
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dispatch_output)");
         auto result =
@@ -1460,6 +1467,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
                                      MtpMetricsCollector&                metrics_collector) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
+    const int64_t decode_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
@@ -1779,7 +1787,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             batch_stream_processor_->updateDecodePostDraftModelInput(
                 model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
         }
-        if (metrics_reporter_) {
+        if (metrics_reporter_ || stream_groups.needFrontendMetricStreaming()) {
             accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
         }
     } else {
@@ -1850,10 +1858,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         draft_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    if (metrics_reporter_) {
+    if (metrics_reporter_ || stream_groups.needFrontendMetricStreaming()) {
         collectDecodeMetrics(
             stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, model_forward_us);
     }
+
+    const int64_t decode_execute_time_us       = autil::TimeUtility::currentTimeInMicroSeconds() - decode_start_time_us;
+    metrics_collector.generate_execute_time_us = decode_execute_time_us;
+    stream_groups.addGenerateExecuteTimeUs(decode_execute_time_us);
+    stream_groups.addFrontendGenerateExecuteMetrics(decode_execute_time_us,
+                                                    metrics_collector.sp_engine_collector.total_accepted_token_num);
 
     auto dispatch_result = dispatchDecodeOutput(stream_groups,
                                                 streams,
@@ -2514,6 +2528,18 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     // prepare streams
     prepareStreams(streams, prefill_streams, decode_streams);
 
+    if (isTpRank0() && !warm_up_ && isKmonMetricReportingEnabled()) {
+        for (const auto& stream : decode_streams) {
+            if (stream->isFakeStream() || stream->isFinished() || stream->hasError()
+                || !stream->generateConfig()->frontend_metric_streaming)
+                continue;
+            if (auto owner = std::dynamic_pointer_cast<NormalGenerateStream>(stream)) {
+                metrics_collector.frontend_tpot_sample = owner->beginFrontendSpTpotSample();
+                break;
+            }
+        }
+    }
+
     // step forward
     int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -2528,12 +2554,22 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     metrics_collector.sp_engine_collector.step_latency_us =
         autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
+    if (metrics_collector.frontend_tpot_sample && metrics_collector.not_skip) {
+        const auto& sp = metrics_collector.sp_engine_collector;
+        if (sp.total_accepted_token_num > 0 && sp.total_stream_num > 0) {
+            const double tpot =
+                static_cast<double>(sp.step_latency_us) * sp.total_stream_num / sp.total_accepted_token_num;
+            metrics_collector.frontend_tpot_sample->complete(tpot);
+        }
+    }
+    metrics_collector.frontend_tpot_sample.reset();
+
     // report metrics
     if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
         // decode metrics
-        auto& tps_collector       = metrics_collector.tps_collector;
-        auto& sp_engine_collector = metrics_collector.sp_engine_collector;
-        auto  decode_time         = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        auto&      tps_collector       = metrics_collector.tps_collector;
+        auto&      sp_engine_collector = metrics_collector.sp_engine_collector;
+        const auto decode_time         = metrics_collector.generate_execute_time_us;
         if (sp_engine_collector.total_accepted_token_num) {
             tps_collector.addTokenSize(0,
                                        0,

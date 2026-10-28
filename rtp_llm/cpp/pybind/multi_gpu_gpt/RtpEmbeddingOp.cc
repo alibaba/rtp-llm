@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <optional>
 #include <pybind11/pytypes.h>
 
@@ -96,6 +97,7 @@ void RtpEmbeddingOp::init(py::object model,
             auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(parallelism_config.dp_rank));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+            startKmonServiceStatus(params.metrics_reporter);
         }
         embedding_engine_.reset(new EmbeddingEngine(params, py_handler));
         if (!mm_process_engine.is_none()) {
@@ -132,6 +134,7 @@ void RtpEmbeddingOp::init(py::object model,
         while (!is_server_ready_) {
             sleep(1);  // wait 1s for server ready
         }
+        setKmonServiceServing(true);
     } catch (const std::exception& e) {
         RTP_LLM_FAIL("init embedding engine failed, error msg: %s", e.what());
     }
@@ -172,6 +175,7 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
 }
 
 void RtpEmbeddingOp::stop() {
+    setKmonServiceServing(false);
     if (embedding_rpc_service_) {
         embedding_rpc_service_->stop();
         embedding_rpc_service_.reset();
@@ -191,6 +195,10 @@ void RtpEmbeddingOp::stop() {
     }
     embedding_grpc_service_.reset();
     stopKmonitorFactory();
+}
+
+void RtpEmbeddingOp::setServing(bool serving) {
+    setKmonServiceServing(serving);
 }
 
 void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
@@ -215,15 +223,15 @@ void RtpEmbeddingOp::startRpcServer(int64_t                              model_r
                                     py::object                           py_tokenizer,
                                     kmonitor::MetricsReporterPtr         reporter,
                                     std::shared_ptr<MultimodalProcessor> mm_processor) {
-    auto arpc_service = std::move(createEmbeddingArpcService(model_rpc_port,
-                                                             arpc_thread_num,
-                                                             arpc_queue_num,
-                                                             arpc_io_thread_num,
-                                                             py_render,
-                                                             py_tokenizer,
-                                                             mm_processor,
-                                                             embedding_engine_,
-                                                             reporter));
+    auto arpc_service = createEmbeddingArpcService(model_rpc_port,
+                                                   arpc_thread_num,
+                                                   arpc_queue_num,
+                                                   arpc_io_thread_num,
+                                                   py_render,
+                                                   py_tokenizer,
+                                                   mm_processor,
+                                                   embedding_engine_,
+                                                   reporter);
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
         embedding_rpc_service_.reset(new ArpcServerWrapper(
@@ -276,6 +284,7 @@ void registerRtpEmbeddingOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("mm_process_engine"))
         .def("stop", &RtpEmbeddingOp::stop)
+        .def("set_serving", &RtpEmbeddingOp::setServing)
         .def("decode",
              &RtpEmbeddingOp::decode,
              py::call_guard<py::gil_scoped_release>(),

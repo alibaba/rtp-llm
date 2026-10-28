@@ -18,6 +18,10 @@ from rtp_llm.config.generate_config import (
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.frontend.backend_metric_observer import (
+    make_backend_metric_observer,
+    metric_backend_generate_config,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -477,6 +481,8 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
         v41_inputs=None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
@@ -489,10 +495,16 @@ class CustomChatRenderer:
                     token_ids=input_id_tensor,
                     mm_inputs=mm_inputs,
                     v41_inputs=v41_inputs,
-                    generate_config=generate_config,
+                    generate_config=metric_backend_generate_config(
+                        generate_config, frontend_metric_observer is not None
+                    ),
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
+                    frontend_metric_tags=dict(frontend_metric_tags or {}),
+                    frontend_metric_observer=make_backend_metric_observer(
+                        frontend_metric_observer, unit_id=request_id
+                    ),
                 )
             )
         )

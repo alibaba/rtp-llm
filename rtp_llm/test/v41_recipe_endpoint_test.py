@@ -188,6 +188,32 @@ class EndpointConfigTest(unittest.TestCase):
 
 
 class EndpointAsyncPreparationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_entry_points_forward_metric_observer_to_renderer(self):
+        endpoint = make_endpoint(make_renderer())
+        endpoint.backend_rpc_server_visitor = object()
+        observer = MagicMock()
+        tags = {"request": "compact-logprobs"}
+        for asynchronous in (False, True):
+            with self.subTest(asynchronous=asynchronous), patch.object(
+                endpoint.chat_renderer, "generate_choice"
+            ) as generate_choice, patch.object(endpoint, "_complete_stream_response"):
+                args = (1, request(), SimpleNamespace(headers={}))
+                kwargs = {
+                    "frontend_metric_tags": tags,
+                    "frontend_metric_observer": observer,
+                }
+                if asynchronous:
+                    await endpoint.chat_completion_async(*args, **kwargs)
+                else:
+                    endpoint.chat_completion(*args, **kwargs)
+                self.assertEqual(
+                    generate_choice.call_args.kwargs["frontend_metric_tags"], tags
+                )
+                self.assertIs(
+                    generate_choice.call_args.kwargs["frontend_metric_observer"],
+                    observer,
+                )
+
     async def test_cancel_during_preparation_does_not_start_backend(self):
         endpoint = make_endpoint(make_renderer())
         loop = asyncio.get_running_loop()

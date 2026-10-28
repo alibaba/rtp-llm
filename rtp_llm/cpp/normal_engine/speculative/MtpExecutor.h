@@ -35,7 +35,9 @@ struct MtpMetricsCollector {
     // up exactly to sp_engine_collector.total_accepted_token_num.
     std::map<int32_t, int64_t> accepted_token_num_by_priority;
 
-    bool not_skip = false;
+    std::shared_ptr<PendingFrontendSpTpotSample> frontend_tpot_sample;
+    int64_t                                      generate_execute_time_us = 0;
+    bool                                         not_skip                 = false;
 };
 
 class MtpExecutor: public Executor {
@@ -93,7 +95,7 @@ public:
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
-    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
@@ -319,8 +321,8 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

@@ -16,6 +16,23 @@ enum class ThinkProcessState {
     AFTER_THINK,
 };
 
+inline int64_t thinkBodyTokenBudget(int max_thinking_tokens, size_t begin_tag_tokens, size_t end_tag_tokens) {
+    if (max_thinking_tokens <= 0) {
+        return 0;
+    }
+    return std::max<int64_t>(1,
+                             static_cast<int64_t>(max_thinking_tokens) - static_cast<int64_t>(begin_tag_tokens)
+                                 - static_cast<int64_t>(end_tag_tokens));
+}
+
+inline int64_t thinkGeneratedTokenBudget(int max_thinking_tokens, size_t begin_tag_tokens, size_t end_tag_tokens) {
+    if (max_thinking_tokens <= 0) {
+        return 0;
+    }
+    return thinkBodyTokenBudget(max_thinking_tokens, begin_tag_tokens, end_tag_tokens)
+           + static_cast<int64_t>(end_tag_tokens);
+}
+
 struct StreamThinkInfo {
     bool                                           in_think_mode;
     int                                            max_thinking_tokens;
@@ -23,6 +40,8 @@ struct StreamThinkInfo {
     std::vector<int>                               end_think_token_ids;
     int32_t                                        input_length;
     int32_t                                        current_output_length;
+    int32_t                                        think_output_length           = -1;
+    bool                                           budget_includes_boundary_tags = false;
     bool                                           is_beam_search;
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
     std::vector<int>                               pending_forced_think_end_token_ids;
@@ -51,6 +70,26 @@ struct StreamThinkInfo {
         }
     }
 
+    int64_t bodyTokenBudget() const {
+        return budget_includes_boundary_tags ?
+                   thinkBodyTokenBudget(max_thinking_tokens, begin_think_token_ids.size(), end_think_token_ids.size()) :
+                   max_thinking_tokens;
+    }
+
+    void markAfterThink() {
+        process_state = ThinkProcessState::AFTER_THINK;
+        if (think_output_length < 0) {
+            think_output_length = current_output_length;
+        }
+    }
+
+    int64_t finishedThinkOutputLen() const {
+        if (process_state != ThinkProcessState::AFTER_THINK) {
+            return -1;
+        }
+        return think_output_length >= 0 ? think_output_length : current_output_length;
+    }
+
     StreamThinkInfo copy() const {
         StreamThinkInfo think_info;
         think_info.in_think_mode                      = in_think_mode;
@@ -59,6 +98,8 @@ struct StreamThinkInfo {
         think_info.end_think_token_ids                = end_think_token_ids;
         think_info.input_length                       = input_length;
         think_info.current_output_length              = current_output_length;
+        think_info.think_output_length                = think_output_length;
+        think_info.budget_includes_boundary_tags      = budget_includes_boundary_tags;
         think_info.is_beam_search                     = is_beam_search;
         think_info.pending_forced_think_end_token_ids = pending_forced_think_end_token_ids;
         think_info.process_state                      = process_state;
@@ -87,12 +128,13 @@ public:
 
 public:
     std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    void                     updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
     MtpProcessorCapability   mtpCapability() const override;
     ErrorResult<int>         prepareSpeculative(const SpecLogitsProcessorRequest& request) override;
     bool                     isStateful() const override;
     int64_t                  acceptedTokenLen() const override;
+    int64_t                  finishedThinkOutputLen() const override;
     std::optional<int64_t>   committedOutputLen() const override;
 
     bool isSpecVerifyEligible() const;
@@ -101,7 +143,6 @@ private:
     int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request);
 
 public:
-
 private:
     bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, StreamThinkInfo& info, size_t vocab_size);
 

@@ -75,29 +75,30 @@ public:
 
     std::vector<int>              select_tokens_id;
     std::vector<std::string>      select_tokens_str;
-    int                           calculate_loss           = 0;
-    int                           hidden_states_cut_dim    = 0;
-    bool                          return_logits            = false;
-    bool                          return_prompt_logits     = false;
-    int                           prompt_logits_top_k      = 64;
-    int                           prompt_logits_start      = -1;
-    int                           prompt_logits_end        = -1;
-    bool                          return_target_logprob    = true;
-    bool                          return_cum_log_probs     = false;
-    bool                          return_incremental       = false;
-    bool                          return_hidden_states     = false;
-    bool                          return_all_hidden_states = false;
-    bool                          normalized_hidden_states = false;
-    bool                          return_output_ids        = false;
-    bool                          return_input_ids         = false;
-    bool                          is_streaming             = false;
-    int                           timeout_ms               = -1;
-    bool                          sp_edit                  = false;
-    bool                          force_disable_sp_run     = false;
-    bool                          force_sp_accept          = false;
-    ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
-    bool                          return_softmax_probs     = false;
-    bool                          aux_info                 = true;
+    int                           calculate_loss            = 0;
+    int                           hidden_states_cut_dim     = 0;
+    bool                          return_logits             = false;
+    bool                          return_prompt_logits      = false;
+    int                           prompt_logits_top_k       = 64;
+    int                           prompt_logits_start       = -1;
+    int                           prompt_logits_end         = -1;
+    bool                          return_target_logprob     = true;
+    bool                          return_cum_log_probs      = false;
+    bool                          return_incremental        = false;
+    bool                          return_hidden_states      = false;
+    bool                          return_all_hidden_states  = false;
+    bool                          normalized_hidden_states  = false;
+    bool                          return_output_ids         = false;
+    bool                          return_input_ids          = false;
+    bool                          is_streaming              = false;
+    int                           timeout_ms                = -1;
+    bool                          sp_edit                   = false;
+    bool                          force_disable_sp_run      = false;
+    bool                          force_sp_accept           = false;
+    ReturnAllProbsMode            return_all_probs          = ReturnAllProbsMode::NONE;
+    bool                          return_softmax_probs      = false;
+    bool                          aux_info                  = true;
+    bool                          frontend_metric_streaming = false;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;
@@ -376,6 +377,7 @@ public:
                 // field absent or other parse error — keep prior value
             }
         }
+        JSONIZE(frontend_metric_streaming);
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);

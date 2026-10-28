@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/engine_base/stream/FrontendSpTpotSamples.h"
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
 #include <optional>
@@ -156,7 +157,13 @@ struct AuxInfo {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
-    std::map<int, int>           multimodal_lengths = {};
+    std::map<int, int>           multimodal_lengths                 = {};
+    int64_t                      speculative_verify_rounds          = 0;
+    int64_t                      speculative_accepted_token_num     = 0;
+    int64_t                      speculative_proposed_draft_tokens  = 0;
+    int64_t                      context_execute_time_us            = 0;
+    int64_t                      generate_execute_time_us           = 0;
+    int64_t                      context_execute_time_with_cache_us = 0;
 };
 
 struct PromptLogitsOutput {
@@ -185,8 +192,16 @@ public:
 
 class GenerateOutputs {
 public:
-    std::vector<GenerateOutput> generate_outputs;
-    int64_t                     request_id;
+    std::vector<GenerateOutput>            generate_outputs;
+    int64_t                                request_id;
+    bool                                   frontend_metric_only = false;
+    std::shared_ptr<FrontendSpTpotSamples> frontend_sp_tpot_samples;
+    std::optional<int64_t>                 frontend_context_token_num;
+    std::optional<int64_t>                 frontend_context_token_num_with_cache;
+    std::optional<int64_t>                 frontend_context_execute_time_us;
+    std::optional<int64_t>                 frontend_context_execute_time_with_cache_us;
+    std::optional<int64_t>                 frontend_generate_token_num;
+    std::optional<int64_t>                 frontend_generate_execute_time_us;
 };
 
 enum class StreamState {

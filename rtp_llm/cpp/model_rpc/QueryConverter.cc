@@ -132,11 +132,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->calculate_loss           = config_proto->calculate_loss();
     generate_config->is_streaming             = config_proto->is_streaming();
     TRANS_OPTIONAL(aux_info);
-    generate_config->timeout_ms               = config_proto->timeout_ms();
-    generate_config->sp_edit                  = config_proto->sp_edit();
-    generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
-    generate_config->force_sp_accept          = config_proto->force_sp_accept();
-    generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    generate_config->timeout_ms           = config_proto->timeout_ms();
+    generate_config->sp_edit              = config_proto->sp_edit();
+    generate_config->force_disable_sp_run = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept      = config_proto->force_sp_accept();
+    generate_config->return_cum_log_probs = config_proto->return_cum_log_probs();
     if (config_proto->return_all_probs_mode() != 0) {
         // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
         // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
@@ -151,12 +151,13 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         generate_config->return_all_probs =
             config_proto->return_all_probs() ? ReturnAllProbsMode::DEFAULT : ReturnAllProbsMode::NONE;
     }
-    generate_config->return_softmax_probs  = config_proto->return_softmax_probs();
-    generate_config->can_use_pd_separation = config_proto->can_use_pd_separation();
-    generate_config->gen_timeline          = config_proto->gen_timeline();
-    generate_config->profile_step          = config_proto->profile_step();
-    generate_config->profile_trace_name    = config_proto->profile_trace_name();
-    generate_config->ignore_eos            = config_proto->ignore_eos();
+    generate_config->return_softmax_probs      = config_proto->return_softmax_probs();
+    generate_config->can_use_pd_separation     = config_proto->can_use_pd_separation();
+    generate_config->gen_timeline              = config_proto->gen_timeline();
+    generate_config->profile_step              = config_proto->profile_step();
+    generate_config->profile_trace_name        = config_proto->profile_trace_name();
+    generate_config->ignore_eos                = config_proto->ignore_eos();
+    generate_config->frontend_metric_streaming = config_proto->frontend_metric_streaming();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
            config_proto->select_tokens_id().data(),
@@ -446,6 +447,36 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                                    const int32_t          eos_token_id) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     outputs->set_request_id(responses->request_id);
+    outputs->set_frontend_metric_only(responses->frontend_metric_only);
+    if (responses->frontend_generate_token_num.has_value()) {
+        outputs->mutable_frontend_generate_token_num()->set_value(responses->frontend_generate_token_num.value());
+    }
+    if (responses->frontend_context_token_num.has_value()) {
+        outputs->mutable_frontend_context_token_num()->set_value(responses->frontend_context_token_num.value());
+    }
+    if (responses->frontend_context_token_num_with_cache.has_value()) {
+        outputs->mutable_frontend_context_token_num_with_cache()->set_value(
+            responses->frontend_context_token_num_with_cache.value());
+    }
+    if (responses->frontend_context_execute_time_us.has_value()) {
+        outputs->mutable_frontend_context_execute_time_us()->set_value(
+            responses->frontend_context_execute_time_us.value());
+    }
+    if (responses->frontend_context_execute_time_with_cache_us.has_value()) {
+        outputs->mutable_frontend_context_execute_time_with_cache_us()->set_value(
+            responses->frontend_context_execute_time_with_cache_us.value());
+    }
+    if (responses->frontend_generate_execute_time_us.has_value()) {
+        outputs->mutable_frontend_generate_execute_time_us()->set_value(
+            responses->frontend_generate_execute_time_us.value());
+    }
+    if (responses->frontend_sp_tpot_samples) {
+        for (const auto& sample : responses->frontend_sp_tpot_samples->take()) {
+            auto* value = outputs->add_frontend_sp_tpot_samples();
+            value->set_sequence_id(sample.first);
+            value->set_tpot_us(sample.second);
+        }
+    }
     const auto& source_outputs = responses->generate_outputs;
     if (source_outputs.empty()) {
         return;
@@ -479,6 +510,12 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
             aux_info->set_decode_disk_reuse_len(response.aux_info.decode_disk_reuse_len);
+            aux_info->set_speculative_verify_rounds(response.aux_info.speculative_verify_rounds);
+            aux_info->set_speculative_accepted_token_num(response.aux_info.speculative_accepted_token_num);
+            aux_info->set_speculative_proposed_draft_tokens(response.aux_info.speculative_proposed_draft_tokens);
+            aux_info->set_context_execute_time_us(response.aux_info.context_execute_time_us);
+            aux_info->set_context_execute_time_with_cache_us(response.aux_info.context_execute_time_with_cache_us);
+            aux_info->set_generate_execute_time_us(response.aux_info.generate_execute_time_us);
             aux_info->set_speculative_draft_rounds(response.aux_info.speculative_draft_rounds);
             for (const auto accepted_tokens : response.aux_info.speculative_accepted_tokens_per_pos) {
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
