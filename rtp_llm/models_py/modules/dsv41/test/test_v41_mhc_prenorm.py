@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.device.device_type import is_h20
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.models_py.modules.dsv41.hc.delayed import (
     DelayedHCUnit,
     _tile_ops,
@@ -70,7 +70,7 @@ class V41MHCPreNormCPUContractTest(unittest.TestCase):
             ), patch(
                 "torch.cuda.get_device_name", return_value=name
             ):
-                self.assertEqual(is_h20(torch.device("cuda", 0)), expected)
+                self.assertEqual(is_sm90(torch.device("cuda", 0)), expected)
 
     def test_tf32_tie_rule_and_weight_cache_invalidation(self):
         # RTP adds half a TF32 ULP before truncation, including negative ties;
@@ -177,7 +177,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
     @torch.no_grad()
     def test_token_boundaries_and_3d_4d_layouts(self):
         for tokens in (
-            (1, 6, 24, 31, 64, 65, 128, 256) if is_h20() else (1, 6, 24, 31, 64)
+            (1, 6, 24, 31, 64, 65, 128, 256) if is_sm90() else (1, 6, 24, 31, 64)
         ):
             residual, fn, base, scale = self._inputs(tokens)
             batch = 4 if tokens in (24, 64) else 1
@@ -239,7 +239,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
 
     @torch.no_grad()
     def test_graph_replay_changes_inputs(self):
-        for tokens in (1, 6, 24, 128, 256) if is_h20() else (1, 6, 24):
+        for tokens in (1, 6, 24, 128, 256) if is_sm90() else (1, 6, 24):
             with self.subTest(tokens=tokens):
                 residual, fn, base, scale = self._inputs(tokens)
                 with torch.inference_mode():
@@ -301,7 +301,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
             (residual.unsqueeze(0).unsqueeze(0), fn),
             (
                 torch.empty(
-                    257 if is_h20() else 65,
+                    257 if is_sm90() else 65,
                     4,
                     5120,
                     device="cuda",
@@ -367,7 +367,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                     ) as source:
                         weights.append(source.get_tensor(name).float().cuda())
                 fn, base, scale = weights
-                for tokens in (1, 6, 24, 128, 256) if is_h20() else (1, 6, 24):
+                for tokens in (1, 6, 24, 128, 256) if is_sm90() else (1, 6, 24):
                     residual = self._inputs(tokens)[0].reshape(1, tokens, 4, 5120)
                     old = _old_mixes(residual, fn)
                     actual = prenorm(residual, fn, _EPS)

@@ -26,6 +26,10 @@ from rtp_llm.models_py.modules.dsv41.attn_type import (
     CSA_STATE,
     HCA_KV,
     INDEXER_KV,
+    INDEXER_KV_2,
+    compact_ratio2_indexer_enabled,
+    indexer_kv_tag,
+    sm90_indexer_mode,
     SWA_KV,
 )
 from rtp_llm.models_py.modules.dsv41.bounded_replay import (
@@ -673,7 +677,11 @@ class AttentionV41FP8(AttentionFP8):
         global_bytes = 584 if self._use_v4_kv_cache else FP4_GLOBAL_ENTRY_BYTES
         self._pool_spec[CSA_KV] = (torch.uint8, global_bytes)
         self._pool_spec[HCA_KV] = (torch.uint8, global_bytes)
-        self._pool_spec[INDEXER_KV] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
+        self._indexer_mode = sm90_indexer_mode()
+        indexer_entry_bytes = 132 if self._indexer_mode == "fp8_dg" else FP4_INDEXER_ENTRY_BYTES
+        self._pool_spec[INDEXER_KV] = (torch.uint8, indexer_entry_bytes)
+        self._pool_spec[INDEXER_KV_2] = (torch.uint8, indexer_entry_bytes)
+        self._compact_ratio2_indexer = compact_ratio2_indexer_enabled()
         self._wo_a_groups_v41 = torch.nn.ModuleList()
         self._sm90_wo_a = None
         if (
@@ -1144,19 +1152,31 @@ class AttentionV41FP8(AttentionFP8):
     def _global_region(self):
         return CSA_KV if self.compress_ratio == 2 else HCA_KV
 
+    def _indexer_region(self):
+        if self.compress_ratio not in (1, 2):
+            return INDEXER_KV
+        return indexer_kv_tag(
+            self.compress_ratio, compact_ratio2=self._compact_ratio2_indexer
+        )
+
     def _source_pool(self, region):
         if self._kv_cache is None:
             return None
+        physical_region = self._indexer_region() if region == INDEXER_KV else region
         layer_id = self.layer_id if region == SWA_KV else self.kv_source_layer_id
         base = self._kv_cache.get_layer_cache(
             layer_id,
-            getattr(self, "_swa_cache_region", SWA_KV) if region == SWA_KV else region,
+            (
+                getattr(self, "_swa_cache_region", SWA_KV)
+                if region == SWA_KV
+                else physical_region
+            ),
         ).kv_cache_base
         if base is None or base.numel() == 0:
             return None
         dtype, width = self._pool_spec[region]
         views = self._shared_attention.setdefault("source_pool_views", {})
-        key = (layer_id, region, dtype, width)
+        key = (layer_id, physical_region, dtype, width)
         layout = (base.shape, base.stride(), base.data_ptr(), base.dtype, base.device)
         cached = views.get(key)
         if cached is not None and cached[0] is base and cached[1] == layout:
@@ -1164,7 +1184,11 @@ class AttentionV41FP8(AttentionFP8):
         stride_bytes = base.shape[1] * base.element_size()
         from ._kv_cache_utils import pool_entry_count
 
-        tag = getattr(self, "_swa_cache_region", SWA_KV) if region == SWA_KV else region
+        tag = (
+            getattr(self, "_swa_cache_region", SWA_KV)
+            if region == SWA_KV
+            else physical_region
+        )
         logical_entries = pool_entry_count(self._kv_cache, tag)
         capacity = stride_bytes // (width * dtype.itemsize)
         eb = min(logical_entries, capacity) if logical_entries else capacity
@@ -1196,7 +1220,10 @@ class AttentionV41FP8(AttentionFP8):
             return None
         bt = self._block_tables_by_type[region]
         eb = self._source_entries(region, pool)
-        tpb = require_pool_tokens_per_block(self._kv_cache, region=region)
+        tpb = require_pool_tokens_per_block(
+            self._kv_cache,
+            region=self._indexer_region() if region == INDEXER_KV else region,
+        )
         cp = self._cp_ctx
         sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
         slots = prefill_metadata.try_slot_mapping(
@@ -1309,6 +1336,9 @@ class AttentionV41FP8(AttentionFP8):
         """Publish global pools in sequence order, carrying pairs across tiles."""
         owner = self._owner()
         ratio = self.compress_ratio
+        # The existing batched index writer is FP4-specific. The FP8 primary
+        # path uses the same source slots with a 64-entry planar page view.
+        batched_groups = batched_groups and self._indexer_mode != "fp8_dg"
         from rtp_llm.models_py.modules.dsv41.fp8.compressor import (
             _linear_bf16_bf16_fp32,
         )
@@ -1699,6 +1729,7 @@ class AttentionV41FP8(AttentionFP8):
                 projected_index = F.linear(latent, owner.index_wk)
             index_stored = (
                 prefill
+                and self._indexer_mode != "fp8_dg"
                 and main_pool is not None
                 and index_pool is not None
                 and (
@@ -1740,9 +1771,17 @@ class AttentionV41FP8(AttentionFP8):
                     )
                     writer(global_keys.contiguous(), main_pool, main_slots)
                 if not index_stored:
-                    quantize_indexer_k_fp4(
-                        index_keys.contiguous(), index_slots, index_pool
-                    )
+                    if self._indexer_mode == "fp8_dg":
+                        from ._indexer_quant_triton import quantize_indexer_k
+                        from ._v41_sm90_fp8_indexer_cache import dg_pages
+
+                        quantize_indexer_k(
+                            index_keys.contiguous(), index_slots, dg_pages(index_pool)
+                        )
+                    else:
+                        quantize_indexer_k_fp4(
+                            index_keys.contiguous(), index_slots, index_pool
+                        )
             else:
                 warm_keys.append((boundary_pos, boundary_req, global_keys, index_keys))
             # Release all consumer views before the next group is allocated.
@@ -1764,7 +1803,7 @@ class AttentionV41FP8(AttentionFP8):
             global_keys = torch.cat([tile[2] for tile in warm_keys])
             index_keys = torch.cat([tile[3] for tile in warm_keys])
         result = []
-        fused_indexer = prefill and prefill_indexer.is_supported(
+        fused_indexer = self._indexer_mode != "fp8_dg" and prefill and prefill_indexer.is_supported(
             x_full.device, getattr(self, "index_n_heads", 0), owner.index_wk.shape[0]
         )
         if fused_indexer and main_pool is not None and index_pool is not None:
@@ -1833,15 +1872,33 @@ class AttentionV41FP8(AttentionFP8):
             if main_pool is None:
                 mask = boundary_req == b
                 g = global_keys[mask]
-                k = (
-                    prefill_indexer.PrefillIndexerKeys(
+                if self._indexer_mode == "fp8_dg":
+                    from ._v41_sm90_fp8_prefill import quantize_contiguous_fp8_indexer
+
+                    k = quantize_contiguous_fp8_indexer(index_keys[mask])
+                elif fused_indexer:
+                    k = prefill_indexer.PrefillIndexerKeys(
                         *prefill_indexer.quantize_indexer_k_reference(index_keys[mask])
                     )
-                    if fused_indexer
-                    else fp8_roundtrip(index_keys[mask])
-                )
+                else:
+                    k = fp8_roundtrip(index_keys[mask])
             else:
-                if fused_indexer:
+                if self._indexer_mode == "fp8_dg":
+                    from ._v41_sm90_fp8_indexer_cache import dg_pages
+                    from ._v41_sm90_fp8_prefill import (
+                        gather_fp8_indexer, gather_raw_fp8_indexer,
+                        unpack_raw_fp8_indexer,
+                    )
+
+                    pages = dg_pages(index_pool)
+                    index_slots = self._slots(INDEXER_KV, pos, req)
+                    if cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded:
+                        raw_index = gather_raw_fp8_indexer(pages, index_slots)
+                        self._gather_shards(raw_index)
+                        k = unpack_raw_fp8_indexer(raw_index)
+                    else:
+                        k = gather_fp8_indexer(pages, index_slots)
+                elif fused_indexer:
                     k = prefill_indexer.gather_indexer_keys(
                         index_pool,
                         lambda p, r: self._slots(INDEXER_KV, p, r),
@@ -1979,6 +2036,11 @@ class AttentionV41FP8(AttentionFP8):
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
+            from ._v41_sm90_fp8_prefill import (
+                PrefillFP8IndexerKeys, score_fp8_prefill_chunk,
+            )
+
+            fp8_indexer = isinstance(globals_by_req[0][1], PrefillFP8IndexerKeys)
             # Both dense and sparse DeepGEMM FP4 scorers consume BF16 weights.
             # Round once after the same FP32 scale inside fused Q preparation.
             prepared = (
@@ -1995,7 +2057,21 @@ class AttentionV41FP8(AttentionFP8):
                 if fused_indexer
                 else None
             )
-            if prepared is not None:
+            if fp8_indexer:
+                from ._indexer_q_quant_triton import (
+                    indexer_q_rope_fp8_quant_fold_indexed,
+                )
+
+                out.fill_(-1)
+                if candidates_out is not None:
+                    candidates_out.fill_(-1)
+                q_fp8, weights = indexer_q_rope_fp8_quant_fold_indexed(
+                    q.unsqueeze(1), raw_weights.unsqueeze(1), self.freqs_cis,
+                    positions, self.rope_head_dim,
+                )
+                q_fp8 = q_fp8.squeeze(1)
+                weights = weights.squeeze(1)
+            elif prepared is not None:
                 q_fp4, q_sf, weights = (value.squeeze(1) for value in prepared)
             else:
                 out.fill_(-1)
@@ -2011,10 +2087,10 @@ class AttentionV41FP8(AttentionFP8):
                     weights = weights.to(torch.bfloat16)
                 else:
                     q = fp8_roundtrip(q)
-            if fused_indexer:
-                # Both FP4 producers allocate independent payload/scale storage;
-                # all fused score paths below consume that pair, never BF16 q.
+            if fused_indexer or fp8_indexer:
+                # Fused scorers consume their independent quantized Q storage.
                 del q
+            del raw_weights
             dense_weights = weights
             pending = shared.pop("prefill_pool_ready", None)
             if pending is not None:
@@ -2101,7 +2177,7 @@ class AttentionV41FP8(AttentionFP8):
                     if sparse_request
                     else (
                         prefill_indexer.logits_chunk_rows(key_count)
-                        if fused_indexer
+                        if fused_indexer or fp8_indexer
                         else 64
                     )
                 )
@@ -2206,6 +2282,11 @@ class AttentionV41FP8(AttentionFP8):
                                 weights[output_rows],
                                 plan,
                             )
+                    elif fp8_indexer:
+                        with record_function_range("dsv41.prefill.indexer.fp8_dg_logits"):
+                            logits = score_fp8_prefill_chunk(
+                                q_fp8[chunk], dense_weights[chunk], keys, visible
+                            )
                     elif fused_indexer:
                         with record_function_range(
                             "dsv41.prefill.indexer.fused_logits"
@@ -2240,7 +2321,7 @@ class AttentionV41FP8(AttentionFP8):
                                 candidate_size,
                                 candidate_blocks,
                                 publish_candidates,
-                                mask_tail=logits.dtype == torch.bfloat16,
+                                mask_tail=logits.dtype == torch.bfloat16 or fp8_indexer,
                             )
                     k = min(self.index_topk, key_count)
                     target = out[output_rows, :k] if contiguous else None
@@ -2252,7 +2333,7 @@ class AttentionV41FP8(AttentionFP8):
                         out=target,
                     )
                     if selected is None:
-                        if logits.dtype == torch.bfloat16:
+                        if logits.dtype == torch.bfloat16 or fp8_indexer:
                             from ._v41_grouped_prefill_score import _mask_tail_kernel
 
                             _mask_tail_kernel[(logits.shape[0],)](
@@ -2871,11 +2952,21 @@ class AttentionV41FP8(AttentionFP8):
                 self._slots(self._global_region(), positions, req_ids),
             )
             index_pool = self._source_pool(INDEXER_KV)
-            quantize_indexer_k_fp4(
-                index_keys.contiguous(),
-                self._slots(INDEXER_KV, positions, req_ids),
-                index_pool,
-            )
+            if self._indexer_mode == "fp8_dg":
+                from ._indexer_quant_triton import quantize_indexer_k
+                from ._v41_sm90_fp8_indexer_cache import dg_pages
+
+                quantize_indexer_k(
+                    index_keys.contiguous(),
+                    self._slots(INDEXER_KV, positions, req_ids),
+                    dg_pages(index_pool),
+                )
+            else:
+                quantize_indexer_k_fp4(
+                    index_keys.contiguous(),
+                    self._slots(INDEXER_KV, positions, req_ids),
+                    index_pool,
+                )
         index_pool = self._source_pool(INDEXER_KV)
         capacity = self._rope_max_seq_len // self.compress_ratio
         from rtp_llm.models_py.modules.dsv41.fp8 import (
@@ -2885,8 +2976,41 @@ class AttentionV41FP8(AttentionFP8):
         cp = self._cp_ctx
         sharded = cp is not None and cp.cp_size > 1 and cp.kv_cache_sharded
         table = self._block_tables_by_type[INDEXER_KV][:B]
-        raw_tpb = require_pool_tokens_per_block(self._kv_cache, region=INDEXER_KV)
+        raw_tpb = require_pool_tokens_per_block(
+            self._kv_cache, region=self._indexer_region()
+        )
         logical_entries = raw_tpb // self.compress_ratio
+        if (
+            self._indexer_mode == "fp8_dg"
+            and not sharded
+            and index_pool.is_contiguous()
+            and logical_entries == index_pool.shape[1]
+            and torch.cuda.get_device_capability(x.device) == (9, 0)
+        ):
+            from ._indexer_score import has_fp8_fp4_paged_mqa_logits
+            from ._v41_sm90_fp8_indexer_cache import (
+                dg_block_table, dg_pages, initialize_zero_page,
+            )
+
+            if not has_fp8_fp4_paged_mqa_logits():
+                raise RuntimeError("FP8 primary indexer requires DeepGEMM paged MQA logits")
+
+            pages = dg_pages(index_pool)
+            zero_page_marker = (
+                id(self._kv_cache), pages.untyped_storage()._cdata,
+            )
+            if getattr(self, "_fp8_zero_page_marker", None) != zero_page_marker:
+                initialize_zero_page(pages)
+                self._fp8_zero_page_marker = zero_page_marker
+            dg_table = dg_block_table(table, index_pool)
+            if capacity > dg_table.shape[1] * 64:
+                raise ValueError("FP8 indexer capacity exceeds DeepGEMM page table")
+            self._shared_attention["global"] = {
+                self.layer_id: decode_indexer.DecodeIndexerKeys(
+                    pages, dg_table, capacity, 64
+                )
+            }
+            return
         if (
             not sharded
             and raw_tpb % self.compress_ratio == 0
@@ -2897,8 +3021,9 @@ class AttentionV41FP8(AttentionFP8):
                 x.device, index_pool.shape[1], self.index_n_heads, self.index_head_dim
             )
         ):
-            # Keep the owner's original FP8 bytes and paged layout. In V4.1's
-            # uniform INDEXER_KV pool, ratio 2 only fills half of each page.
+            # Keep the owner's original FP4 bytes and paged layout. The
+            # default uniform pool leaves half of each ratio-2 page unused;
+            # the optional compact tag stores exactly those 64 entries.
             self._shared_attention["global"] = {
                 self.layer_id: decode_indexer.DecodeIndexerKeys(
                     index_pool, table, capacity, logical_entries
@@ -2914,7 +3039,16 @@ class AttentionV41FP8(AttentionFP8):
         slots = torch.where(
             ids < ((starts + S) // self.compress_ratio)[:, None], slots, -1
         )
-        keys = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1)).view(
+        if self._indexer_mode == "fp8_dg":
+            from ._indexer_quant_triton import dequantize_indexer_k
+            from ._v41_sm90_fp8_indexer_cache import dg_pages
+
+            decoded = dequantize_indexer_k(
+                dg_pages(index_pool), slots.reshape(-1), out_dtype=torch.bfloat16
+            )
+        else:
+            decoded = dequantize_indexer_k_fp4(index_pool, slots.reshape(-1))
+        keys = decoded.view(
             B, capacity, self.index_head_dim
         )
         self._shared_attention["global"] = {self.layer_id: keys}
@@ -2933,6 +3067,7 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models_py.modules.dsv41.fp8.indexer import _run_topk_v3
 
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
+        fp8_score_bundle = None
         capacity = keys.capacity if paged else keys.shape[1]
         flat = x.reshape(T, -1)
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
@@ -3021,6 +3156,13 @@ class AttentionV41FP8(AttentionFP8):
                 pad_invisible=False,
                 candidate_blocks=score_candidates,
             )
+            if self._indexer_mode == "fp8_dg":
+                from ._v41_sm90_fp8_indexer_score import PagedFP8Scores
+
+                if not isinstance(all_logits, PagedFP8Scores):
+                    raise RuntimeError("FP8 DeepGEMM indexer did not return score metadata")
+                fp8_score_bundle = all_logits
+                all_logits = fp8_score_bundle.logits
         else:
             weights = (
                 weights.float() * (self.index_head_dim * self.index_n_heads) ** -0.5
@@ -3038,12 +3180,19 @@ class AttentionV41FP8(AttentionFP8):
         )
         if publish:
             shared.pop("candidate_mask", None)
+            candidate_rows = (
+                all_logits.shape[0] if fp8_score_bundle is not None else T
+            )
             shared["candidates"] = (
-                torch.empty(T, candidate_blocks, dtype=torch.int32, device=x.device)
+                torch.empty(candidate_rows, candidate_blocks, dtype=torch.int32, device=x.device)
                 if use_candidates
                 else None
             )
         visible_i32 = visible_per_token.to(torch.int32)
+        topk_visible = (
+            fp8_score_bundle.lengths if fp8_score_bundle is not None
+            else visible_i32.reshape(-1)
+        )
         if paged:
             from rtp_llm.models_py.modules.dsv41.fp8 import (
                 _v41_decode_topk as decode_topk,
@@ -3056,10 +3205,11 @@ class AttentionV41FP8(AttentionFP8):
                 and cached_mask is not None
                 and cached_mask[0] is candidates
                 and cached_mask[1].shape
-                == (T, (capacity + candidate_size - 1) // candidate_size)
+                == (all_logits.shape[0], (capacity + candidate_size - 1) // candidate_size)
                 and cached_mask[2] == candidate_size
+                and (fp8_score_bundle is None or len(cached_mask) >= 4)
             )
-            if decode_topk.is_supported(all_logits, visible_i32, self.index_topk) and (
+            if decode_topk.is_supported(all_logits, topk_visible, self.index_topk) and (
                 candidates is None or publish or compatible_mask
             ):
                 # DeepGEMM already returned rows for all B*S tokens. Keep the
@@ -3067,19 +3217,28 @@ class AttentionV41FP8(AttentionFP8):
                 if candidates is not None:
                     if publish:
                         candidates, flags = decode_topk.select_candidates(
-                            all_logits, visible_i32, candidate_size, candidate_blocks
+                            all_logits, topk_visible, candidate_size, candidate_blocks,
+                            bounded_flags=fp8_score_bundle is not None,
                         )
                         shared["candidates"] = candidates
-                        shared["candidate_mask"] = (candidates, flags, candidate_size)
+                        shared["candidate_mask"] = (
+                            candidates, flags, candidate_size, topk_visible,
+                        )
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
                         decode_topk.mask_candidates(
-                            all_logits, cached_mask[1], candidate_size
+                            all_logits, cached_mask[1], candidate_size,
+                            lengths=topk_visible if fp8_score_bundle is not None else None,
+                            flag_lengths=cached_mask[3] if fp8_score_bundle is not None else None,
                         )
                 output = decode_topk.select_tokens(
-                    all_logits, visible_i32, self.index_topk
+                    all_logits, topk_visible, self.index_topk
                 )
+                if fp8_score_bundle is not None:
+                    output = fp8_score_bundle.compact_selected(output)
                 shared["topk"] = {self.layer_id: output}
                 return output
+            if fp8_score_bundle is not None:
+                raise RuntimeError("FP8 DeepGEMM indexer requires bounded batched TopK")
             # The batched chain above reads only length-bounded columns, so
             # scoring elided the -inf padding. The per-request fallback below
             # can run torch.topk over full rows; restore the padding before

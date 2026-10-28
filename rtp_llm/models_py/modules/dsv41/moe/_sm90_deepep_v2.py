@@ -4,7 +4,7 @@ Local expert compute is supplied by the MoE strategy. Receive counts stay on
 device and routing is recomputed on every replay.
 """
 
-from rtp_llm.device.device_type import is_h20
+from rtp_llm.device.device_type import is_sm90
 
 
 def forward_elastic_static(strategy, x, weights, indices, *, local_forward):
@@ -41,7 +41,7 @@ def forward_elastic_static(strategy, x, weights, indices, *, local_forward):
     # Local FI already applied the route weights exactly once.
     combined, _, _ = strategy._comm_buffer.combine(local_output, handle)
     # The shared-expert epilogue already promotes its loads to FP32. Keeping
-    # H20's BF16 combine output avoids a separate, lossless conversion kernel.
-    if x.is_cuda and is_h20(x.device) and not _record_tensor.ENABLED:
+    # SM90's BF16 combine output avoids a separate, lossless conversion kernel.
+    if x.is_cuda and is_sm90(x.device) and not _record_tensor.ENABLED:
         return combined
     return combined.float()

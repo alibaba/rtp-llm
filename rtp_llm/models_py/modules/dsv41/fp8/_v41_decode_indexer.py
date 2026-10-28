@@ -295,6 +295,17 @@ def score_decode_indexer(
     preserve the original scaled-FP32-weights/gathered-frequencies contract.
     """
     b, s, h, d = q.shape
+    if pool.shape[-1] == 132:
+        if positions is None:
+            raise ValueError("FP8 DeepGEMM indexer Q requires token positions")
+        if torch.cuda.get_device_capability(q.device) != (9, 0):
+            raise ValueError("FP8 primary indexer is enabled only on SM90")
+        from ._v41_sm90_fp8_indexer_score import score_paged_fp8_indexer
+
+        return score_paged_fp8_indexer(
+            q, weights, freqs_cis, positions, pool, block_table, context_lens,
+            max_ctx_len=max_ctx_len, rope_head_dim=rope_head_dim,
+        )
     block_size = pool.shape[1]
     logical_entries = (
         block_size if logical_entries_per_block is None else logical_entries_per_block

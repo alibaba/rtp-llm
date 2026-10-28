@@ -31,12 +31,16 @@ def build_v41_kv_cache_spec_descs(
     draft=False,
     fixed_pool_use_host_memory=False,
     v4_kv_layout=False,
+    compact_ratio2_indexer=False,
+    fp8_indexer=False,
 ):
-    """Declare byte-exact FP4 global/indexer and FP8 sliding-window pools.
+    """Declare byte-exact global, indexer, and sliding-window pools.
 
-    Indexer blocks keep one entry per raw token for both ratios, matching the
-    kernel's payload/scale planes (ratio two fills the first half). CP sizing
-    and placement are delegated to the descriptor's generic policies.
+    By default, indexer blocks keep one entry per raw token for both ratios,
+    matching the FP4 payload/scale planes. The SM90 FP8 mode uses
+    ``compact_ratio2_indexer`` to halve ratio-2 source pages; the separate
+    tag keeps cache keys and physical strides distinct. CP sizing and
+    placement use the descriptor's generic policies.
     """
     global_bytes = 584 if v4_kv_layout else 288
     swa_bytes = 584 if v4_kv_layout else 528
@@ -52,7 +56,20 @@ def build_v41_kv_cache_spec_descs(
     }
     for desc in global_pools.values():
         desc.block_stride_bytes_alignment = 576 if v4_kv_layout else 4608
-    indexer = _make_dsv4_desc("indexer_kv", "compressed_kv", 68, DataType.TYPE_UINT8, 1)
+    indexer_bytes = 132 if fp8_indexer else 68
+    indexer = _make_dsv4_desc(
+        "indexer_kv", "compressed_kv", indexer_bytes, DataType.TYPE_UINT8, 1
+    )
+    # Separate tags are required: CacheConfigCreator rejects different
+    # physical specs under one tag. Ratio-2 pages have 64 indexer entries while
+    # the ratio-1 source retains its original 128-entry indexer_kv pages.
+    compact_indexer = (
+        _make_dsv4_desc(
+            "indexer_kv_2", "compressed_kv", indexer_bytes, DataType.TYPE_UINT8, 2
+        )
+        if compact_ratio2_indexer
+        else None
+    )
     state = _make_dsv4_desc(
         "csa_state", "fixed_state", 2 * head_dim, DataType.TYPE_FP32
     )
@@ -86,7 +103,16 @@ def build_v41_kv_cache_spec_descs(
             )
         ]
         if layer_id in sources:
-            layer.extend((global_pools[ratio], indexer))
+            layer.extend(
+                (
+                    global_pools[ratio],
+                    (
+                        compact_indexer
+                        if compact_indexer is not None and ratio == 2
+                        else indexer
+                    ),
+                )
+            )
             if ratio == 2:
                 layer.append(state)
         descs.append(layer)
@@ -94,6 +120,10 @@ def build_v41_kv_cache_spec_descs(
 
 
 def configure_v41_kv_cache(model_config, kv_cache_config=None):
+    from rtp_llm.models_py.modules.dsv41.attn_type import (
+        compact_ratio2_indexer_enabled,
+        sm90_indexer_mode,
+    )
     from rtp_llm.models_py.modules.dsv41.bounded_replay import enabled
     from rtp_llm.models_py.modules.dsv41.kv_cache_layout import use_v4_kv_cache
 
@@ -105,6 +135,8 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         attn.tokens_per_block = promoted
     bounded = enabled()
     v4_layout = use_v4_kv_cache()
+    compact_indexer = compact_ratio2_indexer_enabled()
+    indexer_mode = sm90_indexer_mode()
     draft = bool(model_config.is_mtp)
     model_config.hybrid_attention_config.hybrid_attention_types = [
         HybridAttentionType.NONE
@@ -120,6 +152,8 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
             kv_cache_config and kv_cache_config.dsv4_fixed_pool_use_memory
         ),
         v4_kv_layout=v4_layout,
+        compact_ratio2_indexer=compact_indexer,
+        fp8_indexer=indexer_mode == "fp8_dg",
     )
     fixed_blocks = (
         int(kv_cache_config.dsv4_fixed_pool_blocks or 0) if kv_cache_config else 0
@@ -135,4 +169,7 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         (0x4453563431504231 if bounded else 0x4453563431504631)
         if v4_layout
         else (0x4453563431494231 if bounded else 0x4453563431494631)
-    )
+    ) ^ {
+        "fp4": 0,
+        "fp8_dg": 0x4638444700000000,
+    }[indexer_mode]

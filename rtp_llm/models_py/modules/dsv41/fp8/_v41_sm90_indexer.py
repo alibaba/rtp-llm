@@ -19,7 +19,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.device.device_type import is_h20
+from rtp_llm.device.device_type import is_sm90
 
 from ._v41_fp4_triton import _e2m1_to_float, _ue8m0_to_float
 
@@ -208,12 +208,12 @@ def _score(
         capacity if candidate_plan is None else candidate_plan.sparse_columns
     )
     # BK128 preserves the reduction tree while amortizing query unpacking.
-    # H20-only tuning; other SM90 cards retain their original paged tile.
+    # SM90 paged tile tuning is shared by all Hopper SKUs.
     # Small paged grids lose occupancy; sparse single-row decode also loses
     # to BK64. Keep those shapes and the dense candidate scatter unchanged.
     wide_paged = (
         paged
-        and is_h20(q.device)
+        and is_sm90(q.device)
         and (
             (candidate_plan is None and capacity >= 16384)
             or (rows >= 8 and scoring_width >= 1024)

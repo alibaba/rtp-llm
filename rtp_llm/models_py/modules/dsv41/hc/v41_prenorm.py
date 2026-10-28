@@ -12,7 +12,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.device.device_type import is_cuda, is_h20
+from rtp_llm.device.device_type import is_cuda, is_sm90
 
 
 @lru_cache(maxsize=1)
@@ -44,7 +44,7 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     ):
         return False
     major = torch.cuda.get_device_capability(residual.device)[0]
-    max_tokens = 256 if is_h20(residual.device) else 64
+    max_tokens = 256 if is_sm90(residual.device) else 64
     return (
         major in (9, 10)
         and residual.numel() // 20480 <= max_tokens

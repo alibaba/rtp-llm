@@ -10,7 +10,7 @@ import importlib
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.device.device_type import is_h20
+from rtp_llm.device.device_type import is_sm90
 
 
 def _backend(q):
@@ -64,7 +64,7 @@ def flash_mla_with_kvcache(*, q, attn_sink=None, **kwargs):
         q.is_cuda
         and q.shape[1] > 1
         and kwargs.get("indices") is not None
-        and is_h20(q.device)
+        and is_sm90(q.device)
     ):
         output, lse = _single_query_decode(
             native, q, sink, kwargs, backend.get_mla_metadata
@@ -75,7 +75,7 @@ def flash_mla_with_kvcache(*, q, attn_sink=None, **kwargs):
 
 
 def _single_query_decode(native, q, sink, kwargs, get_mla_metadata=None):
-    """Keep H20 verification on the single-step sparse decode arithmetic.
+    """Keep SM90 verification on the single-step sparse decode arithmetic.
 
     Native multi-query planning changes split/merge boundaries with B*S.
     Small BF16 differences can then amplify through downstream quantization.

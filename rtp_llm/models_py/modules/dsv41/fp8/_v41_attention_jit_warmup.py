@@ -81,6 +81,7 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
         CSA_STATE,
         HCA_KV,
         INDEXER_KV,
+        INDEXER_KV_2,
         SWA_KV,
     )
     from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
@@ -93,7 +94,9 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
         regions = [SWA_KV]
         ratio = int(attn.compress_ratio)
         if getattr(attn, "is_kv_source", False):
-            regions.extend((CSA_KV if ratio == 2 else HCA_KV, INDEXER_KV))
+            regions.extend(
+                (CSA_KV if ratio == 2 else HCA_KV, attn._indexer_region())
+            )
             if ratio == 2:
                 regions.append(CSA_STATE)
         for region in regions:
@@ -413,6 +416,7 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
         CSA_STATE,
         HCA_KV,
         INDEXER_KV,
+        INDEXER_KV_2,
         SWA_KV,
     )
     from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as fp4
@@ -473,7 +477,26 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                 )
         _warm_swa_byte_slices(layout, cp_size, cp_rank, device)
         return
-    if layout.region == INDEXER_KV:
+    if layout.region in (INDEXER_KV, INDEXER_KV_2):
+        if getattr(attn, "_indexer_mode", "fp4") == "fp8_dg":
+            from ._indexer_quant_triton import quantize_indexer_k
+            from ._v41_sm90_fp8_indexer_cache import (
+                dg_block_table, dg_pages, initialize_zero_page,
+            )
+            from ._v41_sm90_fp8_prefill import (
+                gather_fp8_indexer, gather_raw_fp8_indexer,
+                unpack_raw_fp8_indexer,
+            )
+
+            pool = torch.zeros((2, layout.entries, 132), dtype=torch.uint8, device=device)
+            pages = dg_pages(pool)
+            initialize_zero_page(pages)
+            dg_block_table(torch.tensor([[1]], dtype=torch.int32, device=device), pool)
+            projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
+            quantize_indexer_k(projected, slots, pages)
+            gather_fp8_indexer(pages, slots)
+            unpack_raw_fp8_indexer(gather_raw_fp8_indexer(pages, slots))
+            return
         from . import _v41_grouped_gemm
 
         if _v41_grouped_gemm._enabled():
@@ -782,6 +805,83 @@ def _warm_indexer(attn, max_seq_len, device):
             vector_stride=stride,
             vector_offset=offset,
         )
+
+
+def _warm_fp8_indexer_layout(attn, device, max_seq_len):
+    """Compile SM90 FP8 prefill/decode and bounded TopK before graph capture."""
+    import torch
+
+    from ._indexer_quant_triton import quantize_indexer_k
+    from ._v41_decode_topk import (
+        mask_candidates, select_candidates, select_tokens,
+    )
+    from ._v41_sm90_fp8_indexer_cache import (
+        dg_block_table, dg_pages, initialize_zero_page,
+    )
+    from ._v41_sm90_fp8_indexer_score import score_paged_fp8_indexer
+    from ._v41_sm90_fp8_prefill import (
+        quantize_contiguous_fp8_indexer, score_fp8_prefill_chunk,
+    )
+    from ._indexer_q_quant_triton import indexer_q_rope_fp8_quant_fold_indexed
+
+    prefill_width = 1024
+    capacity = max_seq_len // int(attn.compress_ratio)
+    entries = 128 if int(attn.compress_ratio) == 1 else 64
+    resident_blocks = 1 + prefill_width // entries
+    keys = torch.zeros((prefill_width, 128), dtype=torch.bfloat16, device=device)
+    pool = torch.zeros((resident_blocks, entries, 132), dtype=torch.uint8, device=device)
+    pages = dg_pages(pool)
+    slots = torch.arange(
+        entries, prefill_width + entries, dtype=torch.int64, device=device
+    )
+    quantize_indexer_k(keys, slots, pages)
+    initialize_zero_page(pages)
+    table = dg_block_table(
+        (
+            torch.arange(
+                (capacity + entries - 1) // entries,
+                dtype=torch.int32, device=device,
+            ) % (prefill_width // entries) + 1
+        ).view(1, -1),
+        pool,
+    )
+    contiguous = quantize_contiguous_fp8_indexer(keys)
+    for query_len in (1, 2, 3, 5):
+        q = torch.zeros((1, query_len, 32, 128), dtype=torch.bfloat16, device=device)
+        weights = torch.ones((1, query_len, 32), dtype=torch.float32, device=device)
+        positions = torch.arange(query_len, dtype=torch.int64, device=device)
+        lengths = torch.full((1, query_len), prefill_width, dtype=torch.int32, device=device)
+        q_fp8, folded = indexer_q_rope_fp8_quant_fold_indexed(
+            q, weights, attn.freqs_cis, positions, attn.rope_head_dim
+        )
+        score_fp8_prefill_chunk(
+            q_fp8.view(query_len, 32, 128), folded.view(query_len, 32),
+            contiguous, lengths.view(-1),
+        )
+        paged = score_paged_fp8_indexer(
+            q, weights, attn.freqs_cis, positions, pages, table, lengths,
+            max_ctx_len=capacity, rope_head_dim=attn.rope_head_dim,
+        )
+        select_tokens(paged.logits, paged.lengths, 512)
+    candidate_config = getattr(attn, "v41_config", {})
+    candidate_size = int(candidate_config.get("candidate_block_size", 8)) or 8
+    candidate_count = int(candidate_config.get("candidate_topk_blocks", 512)) or 512
+    candidate_width = capacity
+    candidate_logits = torch.zeros(
+        (1, candidate_width), dtype=torch.float32, device=device
+    )
+    candidate_lengths = torch.full(
+        (1,), min(capacity, candidate_size * candidate_count),
+        dtype=torch.int32, device=device,
+    )
+    _, flags = select_candidates(
+        candidate_logits, candidate_lengths, candidate_size, candidate_count,
+        bounded_flags=True,
+    )
+    mask_candidates(
+        candidate_logits, flags, candidate_size,
+        lengths=candidate_lengths, flag_lengths=candidate_lengths,
+    )
 
 
 def _native_topk_warmup_shapes(max_seq_len):
@@ -1534,11 +1634,29 @@ def warmup_v41_attention_jit(
             )
             size = cp_size if kv_cache_sharded else 1
             rank = cp_rank if kv_cache_sharded else 0
-            for layout, attn_key in layouts:
+            for (layout, attn_key), attn in layouts.items():
                 if layout.entry_width == 584:
                     run(
                         ("sm90_v4_pool", layout, attn_key, size, rank),
                         partial(_warm_sm90_v4_pool, layout, size, rank, device),
+                    )
+                elif (
+                    layout.entry_width == 132
+                    and getattr(attn, "_indexer_mode", "fp4") == "fp8_dg"
+                ):
+                    run(
+                        ("sm90_fp8_indexer_pool", layout, attn_key, size, rank),
+                        partial(_warm_pool, attn, layout, size, rank, max_batch_size, device),
+                    )
+            for attn_key, attn in attentions.items():
+                if (
+                    getattr(attn, "is_index_source", False)
+                    and getattr(attn, "_indexer_mode", "fp4") == "fp8_dg"
+                ):
+                    run(
+                        ("sm90_fp8_indexer", attn_key, max_seq_len),
+                        partial(_warm_fp8_indexer_layout, attn, device, max_seq_len),
+                        True,
                     )
             return
         run(("swa_refresh",), partial(_warm_swa_refresh, device))
@@ -1586,14 +1704,17 @@ def warmup_v41_attention_jit(
                     CSA_STATE,
                     HCA_KV,
                     INDEXER_KV,
+                    INDEXER_KV_2,
                 )
 
                 paired = {}
                 for layout, attn_key in layouts:
                     paired.setdefault(attn_key, {})[layout.region] = layout
                 for regions in paired.values():
-                    index_layout = regions.get(INDEXER_KV)
                     main_layout = regions.get(CSA_KV, regions.get(HCA_KV))
+                    index_layout = regions.get(
+                        INDEXER_KV_2 if main_layout is not None and main_layout.ratio == 2 else INDEXER_KV
+                    )
                     if main_layout is None or index_layout is None:
                         continue
                     producer_layouts = (main_layout, index_layout)

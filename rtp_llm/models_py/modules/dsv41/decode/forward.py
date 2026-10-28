@@ -34,6 +34,7 @@ from rtp_llm.models_py.modules.dsv41.attn_type import (
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
+    INDEXER_KV_2,
     INDEXER_STATE,
     SWA_KV,
 )
@@ -131,6 +132,7 @@ def build_paged_pool_specs(
             DECODER_SWA_KV,
             HCA_KV,
             INDEXER_KV,
+            INDEXER_KV_2,
             CSA_KV,
             CSA_STATE,
             HCA_STATE,

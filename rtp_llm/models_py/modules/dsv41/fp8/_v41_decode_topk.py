@@ -172,6 +172,36 @@ def _candidate_store_flags_kernel(
 
 
 @triton.jit
+def _candidate_store_flags_bounded_kernel(
+    scores,
+    candidates,
+    flags,
+    block_lengths,
+    K: tl.constexpr,
+    NBLOCKS: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
+):
+    """Clear and publish only blocks that this row may actually consume."""
+    row = tl.program_id(0).to(tl.int64)
+    visible_blocks = tl.minimum(tl.load(block_lengths + row), NBLOCKS)
+    offsets = tl.arange(0, 1024)
+    for tile in tl.range(0, tl.cdiv(visible_blocks, 1024)):
+        blocks = tile * 1024 + offsets
+        tl.store(flags + row * NBLOCKS + blocks, 0, blocks < visible_blocks)
+    columns = tl.arange(0, triton.next_power_of_2(K))
+    if NBLOCKS <= K:
+        index = columns
+    else:
+        index = tl.load(candidates + row * K + columns, columns < K, other=-1)
+    domain = (columns < K) & (index >= 0) & (index < visible_blocks)
+    score = tl.load(scores + row * SCORE_STRIDE + index, domain, other=-float("inf"))
+    valid = domain & (score > -float("inf"))
+    tl.store(candidates + row * K + columns, tl.where(valid, index, -1), columns < K)
+    tl.debug_barrier()
+    tl.store(flags + row * NBLOCKS + index, 1, valid)
+
+
+@triton.jit
 def _candidate_mask_kernel(
     logits,
     flags,
@@ -191,6 +221,41 @@ def _candidate_mask_kernel(
     tl.store(
         logits + row * STRIDE + columns, -float("inf"), (columns < WIDTH) & (keep == 0)
     )
+
+
+@triton.jit
+def _candidate_mask_bounded_kernel(
+    logits,
+    flags,
+    lengths,
+    flag_lengths,
+    WIDTH: tl.constexpr,
+    STRIDE: tl.constexpr,
+    NBLOCKS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    TILE: tl.constexpr,
+    SPLIT: tl.constexpr,
+):
+    """Mask only visible logits; absent source flags are treated as false."""
+    row = tl.program_id(0).to(tl.int64)
+    visible = tl.minimum(tl.maximum(tl.load(lengths + row), 0), WIDTH)
+    flag_visible = tl.minimum(
+        tl.cdiv(tl.maximum(tl.load(flag_lengths + row), 0), BLOCK_SIZE), NBLOCKS
+    )
+    offsets = tl.arange(0, TILE)
+    for tile in tl.range(tl.program_id(1), tl.cdiv(visible, TILE), SPLIT):
+        columns = tile * TILE + offsets
+        blocks = columns // BLOCK_SIZE
+        keep = tl.load(
+            flags + row * NBLOCKS + blocks,
+            (columns < visible) & (blocks < flag_visible),
+            other=0,
+        )
+        tl.store(
+            logits + row * STRIDE + columns,
+            -float("inf"),
+            (columns < visible) & (keep == 0),
+        )
 
 
 @triton.jit
@@ -223,6 +288,8 @@ def select_candidates(
     lengths: torch.Tensor,
     block_size: int,
     topk_blocks: int,
+    *,
+    bounded_flags: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
@@ -280,14 +347,49 @@ def select_candidates(
         else:
             candidates.copy_(scores.topk(count, dim=-1, sorted=False).indices)
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
-    _candidate_store_flags_kernel[(rows,)](
-        scores, candidates, flags, count, nblocks, score_stride
-    )
+    if bounded_flags:
+        _candidate_store_flags_bounded_kernel[(rows,)](
+            scores, candidates, flags, block_lengths, count, nblocks, score_stride
+        )
+    else:
+        _candidate_store_flags_kernel[(rows,)](
+            scores, candidates, flags, count, nblocks, score_stride
+        )
     return candidates, flags
 
 
-def mask_candidates(logits: torch.Tensor, flags: torch.Tensor, block_size: int) -> None:
+def mask_candidates(
+    logits: torch.Tensor,
+    flags: torch.Tensor,
+    block_size: int,
+    *,
+    lengths: torch.Tensor | None = None,
+    flag_lengths: torch.Tensor | None = None,
+) -> None:
     rows, width = logits.shape
+    if lengths is not None:
+        if (
+            lengths.dtype != torch.int32
+            or lengths.shape != (rows,)
+            or not lengths.is_contiguous()
+            or lengths.device != logits.device
+        ):
+            raise ValueError("bounded candidate lengths must be contiguous int32 [rows]")
+        if flag_lengths is None:
+            flag_lengths = lengths
+        if (
+            flag_lengths.dtype != torch.int32
+            or flag_lengths.shape != (rows,)
+            or not flag_lengths.is_contiguous()
+            or flag_lengths.device != logits.device
+        ):
+            raise ValueError("source flag lengths must be contiguous int32 [rows]")
+        split = min(128, max(1, triton.next_power_of_2(triton.cdiv(256, rows))))
+        _candidate_mask_bounded_kernel[(rows, split)](
+            logits, flags, lengths, flag_lengths,
+            width, logits.stride(0), flags.shape[1], block_size, 1024, split,
+        )
+        return
     _candidate_mask_kernel[(rows, triton.cdiv(width, 1024))](
         logits, flags, width, logits.stride(0), flags.shape[1], block_size, 1024
     )

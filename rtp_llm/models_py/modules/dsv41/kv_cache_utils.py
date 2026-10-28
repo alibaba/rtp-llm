@@ -40,6 +40,7 @@ SWA_KV = "swa_kv"
 CSA_KV = "global_kv_2"
 HCA_KV = "global_kv_1"
 INDEXER_KV = "indexer_kv"
+INDEXER_KV_2 = "indexer_kv_2"
 INDEXER_STATE = "indexer_state"
 CSA_STATE = "csa_state"
 HCA_STATE = "hca_state"
@@ -49,7 +50,7 @@ DEFAULT_TAG = "default"
 
 # Paged (FULL) KV pools — a block-table row covers ``kernel_seq_size_per_block``
 # raw tokens.
-DSV4_KERNEL_ROW_TAGS: Tuple[str, ...] = (CSA_KV, HCA_KV, INDEXER_KV)
+DSV4_KERNEL_ROW_TAGS: Tuple[str, ...] = (CSA_KV, HCA_KV, INDEXER_KV, INDEXER_KV_2)
 # Fixed / ring pools — a block-table row covers ``seq_size_per_block`` raw
 # tokens.
 DSV4_PHYSICAL_ROW_TAGS: Tuple[str, ...] = (

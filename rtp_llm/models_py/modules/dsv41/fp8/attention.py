@@ -101,6 +101,7 @@ from rtp_llm.models_py.modules.dsv41.attn_type import (
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
+    INDEXER_KV_2,
     INDEXER_STATE,
     SWA_KV,
 )
@@ -113,6 +114,7 @@ _CACHE_TAG_BY_NAME = {
         CSA_KV,
         HCA_KV,
         INDEXER_KV,
+        INDEXER_KV_2,
         INDEXER_STATE,
         CSA_STATE,
         HCA_STATE,
@@ -309,6 +311,21 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
             attn._block_tables_by_type = bind_swa_table(
                 block_tables_by_type, attn._swa_cache_region
             )
+            # V4.1 source modules keep a logical INDEXER_KV reference.  The
+            # optional ratio-2 physical group has its own, smaller page stride.
+            # Alias only this layer's bound view; never mutate shared metadata.
+            index_region = getattr(attn, "_indexer_region", None)
+            if callable(index_region):
+                physical_index_region = index_region()
+                if physical_index_region != INDEXER_KV:
+                    if physical_index_region not in attn._block_tables_by_type:
+                        raise RuntimeError(
+                            f"Missing compact indexer block table: {physical_index_region}"
+                        )
+                    attn._block_tables_by_type = dict(attn._block_tables_by_type)
+                    attn._block_tables_by_type[INDEXER_KV] = (
+                        attn._block_tables_by_type[physical_index_region]
+                    )
         if cp_ctx is not BIND_KEEP:
             attn._cp_ctx = cp_ctx
         yield attn

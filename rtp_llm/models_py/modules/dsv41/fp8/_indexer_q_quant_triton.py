@@ -214,3 +214,68 @@ def indexer_q_rope_fp8_quant_fold(
         num_warps=4,
     )
     return q_fp8, w_fold
+
+
+@triton.jit
+def _indexer_q_rope_fp8_fold_indexed_kernel(
+    q_ptr, w_ptr, freqs_ri_ptr, positions_ptr, q_fp8_ptr, w_fold_ptr,
+    H: tl.constexpr, D: tl.constexpr, ROPE_START: tl.constexpr,
+    FREQ_STRIDE0: tl.constexpr, FREQ_STRIDE1: tl.constexpr,
+    WEIGHT_SCALE: tl.constexpr, FP8_MAX: tl.constexpr,
+):
+    row = tl.program_id(0)
+    token = row // H
+    d = tl.arange(0, D)
+    q = tl.load(q_ptr + row * D + d).to(tl.float32)
+    rope = d >= ROPE_START
+    local = d - ROPE_START
+    partner = tl.load(
+        q_ptr + row * D + ROPE_START + (local ^ 1), rope, other=0.0
+    ).to(tl.float32)
+    position = tl.load(positions_ptr + token)
+    freq = freqs_ri_ptr + position * FREQ_STRIDE0 + tl.maximum(local >> 1, 0) * FREQ_STRIDE1
+    cos = tl.load(freq, rope, other=1.0)
+    sin = tl.load(freq + 1, rope, other=0.0)
+    rotated = tl.where((local & 1) == 0, q * cos - partner * sin, q * cos + partner * sin)
+    q = tl.where(rope, rotated, q).to(tl.bfloat16).to(tl.float32)
+    scale = tl.maximum(tl.max(tl.abs(q), 0) / FP8_MAX, 1e-12)
+    packed = (q / scale).to(tl.float8e4nv)
+    tl.store((q_fp8_ptr + row * D + d).to(tl.pointer_type(tl.uint8)), packed.to(tl.uint8, bitcast=True))
+    weight = tl.load(w_ptr + row).to(tl.float32)
+    tl.store(w_fold_ptr + row, weight * (WEIGHT_SCALE * scale))
+
+
+def indexer_q_rope_fp8_quant_fold_indexed(
+    q_bf16: torch.Tensor,
+    weights: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    positions: torch.Tensor,
+    rope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused V4.1 RoPE, FP8 Q, and head-weight scale folding.
+
+    `positions` are the original token positions; frequency lookup uses the
+    same rows as the existing `freqs_cis[positions]` path. The score's
+    `(H*D)**-0.5` normalization is folded into FP32 weights here.
+    """
+    if q_bf16.dtype != torch.bfloat16 or q_bf16.ndim != 4:
+        raise ValueError("Q must be BF16 [B,S,H,D]")
+    b, s, h, d = q_bf16.shape
+    if d != 128 or rope_head_dim != 64:
+        raise ValueError("unsupported V4.1 FP8 indexer Q geometry")
+    if positions.numel() != b * s:
+        raise ValueError("positions must have one entry per query token")
+    q_bf16 = q_bf16.contiguous()
+    weights = weights.contiguous()
+    positions = positions.contiguous().view(-1)
+    freqs_ri = torch.view_as_real(freqs_cis.contiguous())
+    q_fp8 = torch.empty((b, s, h, d), dtype=torch.float8_e4m3fn, device=q_bf16.device)
+    w_fold = torch.empty((b, s, h), dtype=torch.float32, device=q_bf16.device)
+    _indexer_q_rope_fp8_fold_indexed_kernel[(b * s * h,)](
+        q_bf16, weights, freqs_ri, positions, q_fp8, w_fold,
+        H=h, D=d, ROPE_START=d - rope_head_dim,
+        FREQ_STRIDE0=freqs_ri.stride(0), FREQ_STRIDE1=freqs_ri.stride(1),
+        WEIGHT_SCALE=(h * d) ** -0.5, FP8_MAX=FP8_E4M3_MAX,
+        num_warps=4,
+    )
+    return q_fp8, w_fold
