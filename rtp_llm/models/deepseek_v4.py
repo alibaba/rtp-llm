@@ -6,9 +6,7 @@ raises so the engine fails fast if you try to actually run inference. Subsequent
 milestones (M1 mHC, M2 HCA, M3 CSA, M4 heterogeneous KV cache) flesh out the
 real model body in `rtp_llm/models_py/model_desc/deepseek_v4_model.py`.
 
-Key V4 architecture differences vs V3 — see
-`/home/wangyin.yx/workspace/work_memory/plans/develop_ds_v4.md` for the full
-breakdown:
+Key V4 architecture differences vs V3:
 
   - MQA single-KV-head with head_dim=512 (no kv_lora_rank, no v_head_dim split)
   - Per-layer attention type from `compress_ratios`: 0=SWA-only, 4=CSA, 128=HCA
