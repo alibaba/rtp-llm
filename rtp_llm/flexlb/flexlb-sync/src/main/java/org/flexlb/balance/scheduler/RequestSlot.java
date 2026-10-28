@@ -431,6 +431,11 @@ final class RequestSlot {
         return engineOwnership == EngineOwnership.DECODE_OWNED;
     }
 
+    /** Decode allocation cannot prove that a batch's Prefill fetch context is ready. */
+    private boolean decodeConfirmsDelivery() {
+        return decodeOwnsRequest() && deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE;
+    }
+
     boolean canClaimLocalTerminal() {
         requireSlotLock("local terminal eligibility");
         return ownsActiveGeneration()
@@ -940,8 +945,7 @@ final class RequestSlot {
                 || !exact.isReleasable()) {
             return PreemptionReduction.STALE;
         }
-        boolean discardable = cancellationReason == null
-                && engineOwnership == EngineOwnership.DECODE_OWNED;
+        boolean discardable = cancellationReason == null && decodeConfirmsDelivery();
         if (exact.postDeliveryFenceDetail() == null || discardable) {
             detachPreemptionOwner(exact);
             return materializePendingReplay(exact, false, exact);
@@ -1107,7 +1111,7 @@ final class RequestSlot {
         }
 
         PreemptionRegistration exact = preemptionOwner();
-        if (engineOwnership == EngineOwnership.DECODE_OWNED && terminal.deliveryFailure()) {
+        if (decodeConfirmsDelivery() && terminal.deliveryFailure()) {
             DeliveryClaimKind deliveryKind = deliveryClaimKind;
             long deliveryBatchId = batchId;
             if (exact == null) {
@@ -1145,12 +1149,18 @@ final class RequestSlot {
         return materializePendingReplay(exact, exact.isUnknown(), exact);
     }
 
-    PreemptionReduction reducePriorityCanceled(PrefillEndpoint source, ScheduledRequest expected) {
+    PreemptionReduction reducePriorityCanceled(
+            PrefillEndpoint source, ScheduledRequest expected, DeferredTerminal workerTerminal) {
         requireSlotLock("priority cancellation reduction");
-        PreemptionRegistration exact = ownsPrefillFact(source, expected) ? preemptionOwner() : null;
+        if (!ownsPrefillFact(source, expected)) {
+            return PreemptionReduction.STALE;
+        }
+        PreemptionRegistration exact = preemptionOwner();
+        if (exact == null) {
+            return reduceWorkerTerminal(expected, workerTerminal);
+        }
         DecodeEndpoint decode = expected.decodeEp();
-        if (exact == null
-                || exact.isSettled()
+        if (exact.isSettled()
                 || decode == null
                 || expected.decodeReservation() == null
                 || !decode.settlePriorityCanceled(
@@ -1478,6 +1488,7 @@ final class RequestSlot {
                         && expectedPreemption.isNotFound()))
                 && (allowDecodeOwned || cancellationReason == null)
                 && (allowDecodeOwned
+                    || deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE
                     || engineOwnership != EngineOwnership.DECODE_OWNED);
     }
 
@@ -1558,8 +1569,9 @@ final class RequestSlot {
 
     /**
      * Commit authoritative Decode ownership and atomically decide whether an
-     * unsent fence can be released. Fences which crossed the Cancel entry
-     * boundary remain the canonical owner until authoritative terminal proof.
+     * unsent route-delivery fence can be released. Batch delivery fences and
+     * fences which crossed the Cancel entry boundary retain ownership until
+     * authoritative terminal proof.
      */
     DecodeAcceptance markDecodeAccepted() {
         requireSlotLock("Decode acceptance");
@@ -1574,7 +1586,8 @@ final class RequestSlot {
             assertInvariant();
             return accepted;
         }
-        if (cancellationReason != null
+        if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE
+                || cancellationReason != null
                 || fence.transferredPreemption != null
                 || fence.cancelMayHaveBeenInstalled()) {
             assertInvariant();

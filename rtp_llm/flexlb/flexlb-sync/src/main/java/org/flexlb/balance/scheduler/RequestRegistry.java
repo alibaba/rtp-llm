@@ -1871,6 +1871,11 @@ public class RequestRegistry {
                     case NONE -> throw new IllegalStateException(
                             "delivery claim kind cannot be NONE");
                 };
+            } else if (exact.kind == DeliveryClaimKind.BATCH_ENQUEUE
+                    && exact.slot.decodeOwnsRequest()) {
+                fenceReduction = exact.slot.requestDeliveryFence(
+                        "Batch delivery " + completion.status()
+                                + ": " + detailOf(completion.cause()));
             } else if (completion.status()
                     == DeliveryResult.Status.FAILED) {
                 String detail = "Delivery failed: "
@@ -1894,11 +1899,16 @@ public class RequestRegistry {
                         case RELEASED -> work = reduceDeferredTerminalFactLocked(
                                 exact.slot,
                                 DeferredTerminal.deliveryRejected(detail));
-                        case ENGINE_ACCEPTED -> work = materializePostLockActionLocked(
-                                exact.slot,
-                                exact.slot.reduceDeliveryConfirmed(
-                                        exact.correlationId),
-                                null);
+                        case ENGINE_ACCEPTED -> {
+                            if (exact.kind == DeliveryClaimKind.BATCH_ENQUEUE) {
+                                fenceReduction = exact.slot.requestDeliveryFence(detail);
+                            } else {
+                                work = materializePostLockActionLocked(
+                                        exact.slot,
+                                        exact.slot.reduceDeliveryConfirmed(exact.correlationId),
+                                        null);
+                            }
+                        }
                         case CONFLICT -> fenceReduction =
                                 exact.slot.requestDeliveryFence(detail);
                         case STALE -> work = null;

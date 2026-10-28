@@ -158,7 +158,7 @@ public final class EndpointEventProjector {
                 work = scheduler.materializePostLockActionLocked(
                         slot,
                         slot.reducePriorityCanceled(
-                                source, item),
+                                source, item, terminal),
                         null);
             } else {
                 work = scheduler.materializePostLockActionLocked(

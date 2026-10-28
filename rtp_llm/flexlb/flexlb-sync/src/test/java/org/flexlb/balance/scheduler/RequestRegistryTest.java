@@ -1,6 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
@@ -8,6 +11,8 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -15,6 +20,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -34,6 +40,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -344,6 +354,215 @@ class RequestRegistryTest {
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
+    void acceptedCancelWithoutPriorityVictimConsumesPrefillTerminal() throws Exception {
+        Registered registered = registerBatchItem(701L);
+        DecodeEndpoint.EngineFenceLease lease = mock(DecodeEndpoint.EngineFenceLease.class);
+        when(registered.item().decodeEp().beginEngineFenceProtection(
+                registered.item().decodeReservation())).thenReturn(lease);
+        RequestRegistry.DeliveryClaim claim = claimBatch(registered);
+        assertEquals(1, lifecycle.decodeAcceptanceCount());
+        lifecycle.complete(claim, DeliveryResult.uncertain(new RuntimeException("RPC deadline")));
+
+        assertFalse(registered.future().isDone());
+        verify(engineCancelChannel).cancel(any(), eq(701L), anyLong());
+        publishPrefillCanceled(registered);
+
+        assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
+                registered.future().get(5, TimeUnit.SECONDS).getCode());
+        assertEquals(RequestState.Phase.FAILED, lifecycle.getRequestState(701L, 0L).state());
+        assertEquals(0, lifecycle.liveRequestCount());
+        assertEquals(0, lifecycle.decodeAcceptanceCount());
+        publishPrefillCanceled(registered);
+        verify(lease, times(1)).close();
+        verify(registered.item().decodeEp(), times(1)).releaseLocalShadowIfExact(
+                registered.item().decodeReservation());
+    }
+
+    @Test
+    void canceledWorkerPreservesClientCancellationCause() throws Exception {
+        Registered registered = registerBatchItem(702L);
+        claimBatch(registered);
+        lifecycle.cancelRequest(702L, 0L, CancelReason.CLIENT_CANCELLED);
+        publishPrefillCanceled(registered);
+
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                registered.future().get(5, TimeUnit.SECONDS).getCode());
+        assertEquals(RequestState.Phase.CANCELLED, lifecycle.getRequestState(702L, 0L).state());
+        assertEquals(0, lifecycle.liveRequestCount());
+    }
+
+    @Test
+    void decodeAcceptanceDoesNotConfirmAnUncertainBatch() throws Exception {
+        Registered registered = registerBatchItem(703L);
+        RequestRegistry.DeliveryClaim claim = claimBatch(registered);
+        publishDecodeAccepted(registered);
+        lifecycle.complete(claim, DeliveryResult.uncertain(new RuntimeException("RPC deadline")));
+
+        assertFalse(registered.future().isDone(), "D allocation does not publish the P fetch context");
+        assertEquals(RequestState.Phase.DISPATCHING, lifecycle.getRequestState(703L, 0L).state());
+        verify(engineCancelChannel).cancel(any(), eq(703L), anyLong());
+        publishPrefillCanceled(registered);
+        assertFalse(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
+    void decodeAcceptanceDoesNotConfirmATimedOutBatch() {
+        Registered registered = registerBatchItem(704L);
+        RequestRegistry.DeliveryClaim claim = claimBatch(registered);
+        publishDecodeAccepted(registered);
+        lifecycle.complete(claim, DeliveryResult.timedOut(new RuntimeException("RPC deadline")));
+
+        assertFalse(registered.future().isDone());
+        verify(engineCancelChannel).cancel(any(), eq(704L), anyLong());
+    }
+
+    @Test
+    void decodeAcceptanceDoesNotConfirmAFailedBatch() {
+        Registered registered = registerBatchItem(705L);
+        RequestRegistry.DeliveryClaim claim = claimBatch(registered);
+        publishDecodeAccepted(registered);
+        when(registered.item().decodeEp().settleDefiniteDispatchRejection(
+                registered.item().decodeReservation()))
+                .thenReturn(DecodeEndpoint.DispatchRejectionSettlement.ENGINE_ACCEPTED);
+        lifecycle.complete(claim, DeliveryResult.failed(new RuntimeException("rejected")));
+
+        assertFalse(registered.future().isDone());
+        verify(engineCancelChannel).cancel(any(), eq(705L), anyLong());
+    }
+
+    @Test
+    void endpointAcceptanceRacingBatchFailureCannotPublishFetch() {
+        Registered registered = registerBatchItem(706L);
+        RequestRegistry.DeliveryClaim claim = claimBatch(registered);
+        when(registered.item().decodeEp().settleDefiniteDispatchRejection(
+                registered.item().decodeReservation()))
+                .thenReturn(DecodeEndpoint.DispatchRejectionSettlement.ENGINE_ACCEPTED);
+        lifecycle.complete(claim, DeliveryResult.failed(new RuntimeException("rejected")));
+
+        assertFalse(registered.future().isDone());
+        verify(engineCancelChannel).cancel(any(), eq(706L), anyLong());
+    }
+
+    @Test
+    void decodeAcceptanceCannotReleaseAnUnsentBatchFence() throws Exception {
+        Registered registered = registerBatchItem(707L);
+        claimBatch(registered);
+        RequestSlot slot = lifecycle.requestSlot(707L);
+        RequestSlot.FenceReduction fence;
+        synchronized (slot) {
+            fence = slot.requestDeliveryFence("RPC deadline");
+        }
+        assertEquals(RequestSlot.FenceReduction.Status.START, fence.status());
+        publishDecodeAccepted(registered);
+
+        assertFalse(registered.future().isDone());
+        synchronized (slot) {
+            assertEquals(RequestSlot.FenceReduction.Status.NONE,
+                    slot.applyFenceUpdate(fence.fence(), RequestSlot.FenceUpdate.CANCEL_STARTED).status());
+        }
+        publishPrefillCanceled(registered);
+        assertFalse(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
+    void batchSuccessAckAfterDecodeAcceptancePublishesFetch() throws Exception {
+        Registered registered = registerBatchItem(708L);
+        RequestRegistry.DeliveryClaim claim = claimBatch(registered);
+        publishDecodeAccepted(registered);
+        assertFalse(registered.future().isDone());
+        lifecycle.complete(claim, DeliveryResult.delivered());
+
+        Response response = registered.future().get(5, TimeUnit.SECONDS);
+        assertTrue(response.isSuccess());
+        assertTrue(response.isEnqueuedByMaster());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState(708L, 0L).state());
+        verify(engineCancelChannel, never()).cancel(any(), anyLong(), anyLong());
+    }
+
+    @Test
+    void canceledFactFromAnotherPrefillCannotSettleTheRequest() {
+        Registered registered = registerBatchItem(709L);
+        claimBatch(registered);
+        new EndpointEventProjector(lifecycle).onPrefillStatus(
+                mock(PrefillEndpoint.class), RoleType.PREFILL,
+                List.of(PrefillState.WorkerStatusFact.terminal(registered.item(),
+                        PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED, 8429L)));
+        assertFalse(registered.future().isDone());
+        assertEquals(1, lifecycle.liveRequestCount());
+    }
+
+    @Test
+    void priorityVictimStillSettlesItsExactPreemptionOwner() throws Exception {
+        Registered registered = registerBatchItem(710L);
+        claimBatch(registered);
+        PreemptionRegistration preemption = lifecycle.tryClaim(710L, 1L, 77L, "priority victim")
+                .orElseThrow();
+        when(registered.item().decodeEp().settlePriorityCanceled(
+                77L, registered.item().decodeReservation())).thenReturn(true);
+
+        publishPrefillCanceled(registered);
+
+        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
+                registered.future().get(5, TimeUnit.SECONDS).getCode());
+        assertTrue(preemption.terminalObservation().toCompletableFuture().isDone());
+        assertEquals(0, lifecycle.liveRequestCount());
+        verify(registered.item().decodeEp()).settlePriorityCanceled(
+                77L, registered.item().decodeReservation());
+    }
+
+    @Test
+    void releasingPriorityOwnerKeepsUncertainBatchFencedAfterDecodeAcceptance() {
+        Registered registered = registerBatchItem(711L);
+        RequestRegistry.DeliveryClaim claim = claimBatch(registered);
+        PreemptionRegistration preemption = lifecycle.tryClaim(711L, 1L, 78L, "priority victim")
+                .orElseThrow();
+        publishDecodeAccepted(registered);
+        lifecycle.complete(claim, DeliveryResult.uncertain(new RuntimeException("RPC deadline")));
+
+        assertTrue(lifecycle.tryReleasePreemption(preemption));
+        assertEquals(RequestState.Phase.DISPATCHING, lifecycle.getRequestState(711L, 0L).state());
+        assertFalse(registered.future().isDone());
+        verify(engineCancelChannel).cancel(any(), eq(711L), anyLong());
+    }
+
+    private Registered registerBatchItem(long requestId) {
+        BalanceContext context = context(requestId);
+        CompletableFuture<Response> future = lifecycle.register(context, 4);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("127.0.0.1");
+        prefill.setGrpcPort(25351);
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+        when(engineCancelChannel.cancel(any(), eq(requestId), anyLong())).thenReturn(
+                CompletableFuture.completedFuture(EngineCancelChannel.CancelAck.ACCEPTED));
+        Registered registered = new Registered(new ScheduledRequest(
+                context, future, new Response(), prefill, null,
+                mock(PrefillEndpoint.class), decode, reservation, System.currentTimeMillis()), future);
+        RequestLifecycleTestSupport.bind(lifecycle, registered);
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, registered);
+        return registered;
+    }
+
+    private RequestRegistry.DeliveryClaim claimBatch(Registered registered) {
+        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+                registered.item(), 81L, () -> true);
+        assertNotNull(claim);
+        return claim;
+    }
+
+    private void publishDecodeAccepted(Registered registered) {
+        new EndpointEventProjector(lifecycle).onDecodeStatus(registered.item().decodeEp(),
+                List.of(DecodeEndpoint.WorkerStatusFact.accepted(registered.item().decodeReservation())));
+    }
+
+    private void publishPrefillCanceled(Registered registered) {
+        new EndpointEventProjector(lifecycle).onPrefillStatus(registered.item().prefillEp(), RoleType.PREFILL,
+                List.of(PrefillState.WorkerStatusFact.terminal(registered.item(),
+                        PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED, 8429L)));
     }
 
     private BalanceContext context(long requestId) {
