@@ -48,7 +48,10 @@ public class RequestWorkerSelector {
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
-    public int currentPrefillWorkerCount(String group) { return prefillSelector.currentPrefillWorkerCount(group); }
+    public int currentPrefillWorkerCount(String group) {
+        return requiredRoles.stream().filter(RoleType::supportsPrefill).findFirst()
+                .map(role -> prefillSelector.currentPrefillWorkerCount(role, group)).orElse(0);
+    }
 
     public List<RequestRoute> hotspotMigrationCandidates(int limit) {
         return prefillSelector.hotspotMigrationCandidates(limit);

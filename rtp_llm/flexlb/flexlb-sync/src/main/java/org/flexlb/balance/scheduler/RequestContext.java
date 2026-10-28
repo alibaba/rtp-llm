@@ -213,9 +213,18 @@ public final class RequestContext {
         }
         if (phase != Phase.OPEN || cancellation != null || delivery.abandonment() != null
                 || pendingEnd != null || placement != null && (placement.pendingTerminal() != null || placement.pendingRetirement() != null)
-                || preemption != null && preemption.pendingTerminal() != null
-                || absoluteDeadline > 0L && nowMs >= absoluteDeadline || nowMs - lastWorkerAtMs >= inactivityMs) {
+                || preemption != null && preemption.pendingTerminal() != null) {
             return new Rejected<>(before, before, Rejection.CANCELLED);
+        }
+        if (absoluteDeadline > 0L && nowMs >= absoluteDeadline || nowMs - lastWorkerAtMs >= inactivityMs) {
+            // The timer may not have run yet (or the request timer was consumed at
+            // handoff). Retain the real cause before the sender reports NOT_SENT.
+            // Sender exit, not this deadline, remains the resource-release proof.
+            cancellation = new CancellationFacts(CancelReason.DEADLINE_EXCEEDED,
+                    StrategyErrorType.BATCH_SLO_EXPIRED, "request expired before send", null);
+            retainEnd(new EndEvidence(route, EndKind.INACTIVITY, null, false, 0L,
+                    StrategyErrorType.BATCH_SLO_EXPIRED, cancellation.detail(), false, false), nowMs);
+            return new Rejected<>(before, refresh(nowMs), Rejection.CANCELLED);
         }
         delivery = new DeliveryFacts(exact, SendState.SENDING, delivery.acknowledged(), null,
                 delivery.executionFinished(), delivery.prefillProof(), delivery.decodeProof(), true,

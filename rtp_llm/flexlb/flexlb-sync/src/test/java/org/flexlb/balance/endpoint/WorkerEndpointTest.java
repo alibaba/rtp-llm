@@ -40,7 +40,7 @@ class WorkerEndpointTest {
                 8080,
                 8081,
                 "site-x");
-        FlexlbConfig config = SchedulingTestConfig.newConfig();
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator()
                 .setExpression("sum(computeTokens)");
         EndpointTestSupport.TestRequestRuntime requestRuntime =
@@ -374,7 +374,7 @@ class WorkerEndpointTest {
         Request req = Request.builder()
                 .requestId(requestId)
                 .seqLen(seqLen).build();
-        RequestContext ctx = new RequestContext(SchedulingTestConfig.newConfig());
+        RequestContext ctx = new RequestContext(SchedulingTestConfig.batchConfig());
         ctx.data().setRequest(req);
         return ctx;
     }

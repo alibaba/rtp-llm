@@ -68,7 +68,7 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.1", 8080, 8090);
 
-        config = SchedulingTestConfig.newConfig();
+        config = SchedulingTestConfig.batchConfig();
         configureBatch(config, config.decisionPolicy().getMaxRequests(), 300, null);
         setFormula(config, "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
@@ -1751,7 +1751,7 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.9", 8089, 8099);
 
-        FlexlbConfig endpointConfig = SchedulingTestConfig.newConfig();
+        FlexlbConfig endpointConfig = SchedulingTestConfig.batchConfig();
         configureBatch(
                 endpointConfig,
                 endpointConfig.decisionPolicy().getMaxRequests(),
@@ -1853,7 +1853,7 @@ class PrefillEndpointTest {
                                              long seqLen,
                                              long hitCacheLen) {
         return createRequestRoute(
-                owner, SchedulingTestConfig.newConfig(), requestId, seqLen, hitCacheLen);
+                owner, SchedulingTestConfig.batchConfig(), requestId, seqLen, hitCacheLen);
     }
 
     private static RequestRoute createRequestRoute(

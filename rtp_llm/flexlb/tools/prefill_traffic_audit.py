@@ -15,9 +15,11 @@ DEADLINE_ERROR = (
 )
 DEADLINE_ERRORS = {
     DEADLINE_ERROR,
+    "admission capacity is temporarily exhausted; trigger=DECODE placement unavailable",
     "admission capacity is temporarily exhausted; trigger=Prefill collection window",
     "admission capacity is temporarily exhausted; trigger=Prefill batch capacity exhausted",
     "admission capacity is temporarily exhausted; trigger=waiting for Prefill decision",
+    "admission capacity is temporarily exhausted; trigger=Route commit in progress",
 }
 AUXILIARY_STAGES = {"warmup", "affinity", "probe", "calibration"}
 
@@ -52,6 +54,8 @@ def _percentile(values, quantile):
 
 def expected_rejection(row, hard_wait_s):
     """Classification only: audit_run also requires absence of all Engine evidence."""
+    if row.get("code") == 8511 and row.get("error") == "request expired before send":
+        return row["ended_s"] - row["started_s"] >= hard_wait_s - 0.05
     return row.get("code") == 8431 and (
         row.get("error") == OVERLOAD_ERROR
         or (

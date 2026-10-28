@@ -60,7 +60,7 @@ class WorkerBatcherSchedulingTest {
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void sloProjectionDoesNotAcquireRequestMonitorWhileHoldingWorkerLock() throws Exception {
-        FlexlbConfig config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":3000}");
+        FlexlbConfig config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":3000,\"dispatcher\":{\"type\":\"BATCH\"}}");
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "ttftSloMs", 3000L);
         AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
@@ -97,7 +97,7 @@ class WorkerBatcherSchedulingTest {
     @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     void invalidSloCollectionPredictionDoesNotStopWorker() {
-        FlexlbConfig config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":3000}");
+        FlexlbConfig config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":3000,\"dispatcher\":{\"type\":\"BATCH\"}}");
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "ttftSloMs", 3000L);
         var evaluator = endpoint.predictor.evaluator();

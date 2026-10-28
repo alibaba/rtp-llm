@@ -132,6 +132,7 @@ class BaselineParityE2ETest {
             var decision = config.decisionPolicy();
             decision.setMaxCollectionWaitMs(5);
             decision.setMaxRequests(2);
+            config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.BATCH);
             config.getDispatcher().setMaxInflightPerPrefillWorker(1);
             return new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false, decision, false, config);
         } finally {

@@ -92,7 +92,11 @@ class PrefillTrafficTrendTest {
                 new PrefillQueueShedding.Candidate<>("low", 10, 1,
                         new PrefillQueueShedding.Estimate(100, 90, 25000, 1)),
                 new PrefillQueueShedding.Candidate<>("high", 90, 2,
-                        new PrefillQueueShedding.Estimate(100, 0, 25000, 1)));
+                        new PrefillQueueShedding.Estimate(100, 0, 25000, 1)),
+                new PrefillQueueShedding.Candidate<>("feed-1", 90, 3,
+                        new PrefillQueueShedding.Estimate(100, 90, 1, 1)),
+                new PrefillQueueShedding.Candidate<>("feed-2", 90, 4,
+                        new PrefillQueueShedding.Estimate(100, 90, 1, 1)));
         var probe = trend.observe(0, 50000, 30000, 60000);
         assertTrue(PrefillQueueShedding.adaptiveVictims(queue, config, probe).isEmpty());
         var hard = trend.observe(100, 65000, 30000, 60000);

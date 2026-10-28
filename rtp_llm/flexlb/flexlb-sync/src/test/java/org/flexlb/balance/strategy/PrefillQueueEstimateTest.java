@@ -19,6 +19,30 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class PrefillQueueEstimateTest {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = RoleType.class, names = {"PREFILL", "PDFUSION"})
+    void capacityRefreshUsesTheModelsPrefillRoleAndRoutingGroup(RoleType role) {
+        var config = StrategyTestSupport.config();
+        var service = SchedulingTestConfig.configService(config);
+        var registry = StrategyTestSupport.endpointRegistry(service);
+        try {
+            var strategy = new CostBasedPrefillStrategy(registry, mock(CacheAwareService.class),
+                    mock(EngineHealthReporter.class), mock(CacheMetricsReporter.class), service);
+            var meta = mock(org.flexlb.config.ModelMetaConfig.class);
+            when(meta.requiredRoles()).thenReturn(List.of(role));
+            var router = new org.flexlb.balance.scheduler.RequestWorkerSelector(strategy,
+                    mock(DecodeSelector.class), mock(VitWorkerSelector.class), meta);
+            for (int i = 1; i <= 4; i++) {
+                String ip = "10.0.1." + i;
+                StrategyTestSupport.publishEndpoint(registry, role, ip + ":8080",
+                        StrategyTestSupport.workerStatus(role, "a", ip, 8080, 8081,
+                                true, 1_000_000L, 1_000_000L));
+                assertEquals(i, router.currentPrefillWorkerCount("a"));
+                assertEquals(0, router.currentPrefillWorkerCount("b"));
+            }
+        } finally { registry.close(); }
+    }
+
     @Test void estimateUsesPoolCacheTokensAndConfiguredUncachedWorkFormula() {
         var config = StrategyTestSupport.config();
         config.setDispatcher(ConfigTestSupport.nonBatch());

@@ -1,11 +1,49 @@
 """Open-loop Schedule RPCs with one completion monitor, independent of queue wait."""
 
 import concurrent.futures
+import contextlib
+import gc
 import math
 import queue
 import threading
 import time
 from dataclasses import dataclass
+
+
+@contextlib.contextmanager
+def suspend_cyclic_gc():
+    """Keep whole-heap cycle scans off the bounded open-loop driver's clock.
+
+    Reference counting remains active. Restore the process's prior GC state even
+    after failure; the finite trace and client cleanup bound this interval.
+    Registered clocked controls stop before collection is restored.
+    """
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with contextlib.ExitStack() as controls:
+            yield controls
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+def start_engine_stream(ops, response, request_id, generated, timeout_s):
+    """Use the runner's protocol and stream reader with the test's RPC deadline."""
+    from adapters.stream import StreamHandle, StreamSnapshot
+
+    target = ops.prefill_addr(response)
+    if not target:
+        raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
+    stub = ops.pb2_grpc.RpcServiceStub(ops._channel(target))
+    if response.enqueued_by_master:
+        call = stub.FetchResponse(
+            ops.pb2.FetchRequestPB(request_id=request_id), timeout=timeout_s
+        )
+    else:
+        ops._copy_role_addrs(generated, response)
+        call = stub.GenerateStreamCall(generated, timeout=timeout_s)
+    return StreamHandle(call, StreamSnapshot())
 
 
 @dataclass
@@ -34,6 +72,8 @@ class AsyncQueryClient:
         stream_timeout_s=20.0,
         poll_interval_s=0.005,
         close_timeout_s=5.0,
+        request_timeout_ms=None,
+        stream_starter=None,
     ):
         if any(
             not math.isfinite(value) or value <= 0
@@ -45,7 +85,13 @@ class AsyncQueryClient:
             )
         ):
             raise ValueError("client timeouts and polling interval must be positive")
+        if request_timeout_ms is not None and (
+            type(request_timeout_ms) is not int or request_timeout_ms <= 0
+        ):
+            raise ValueError("request timeout must be a positive integer")
         self.ops = ops
+        self.request_timeout_ms = request_timeout_ms
+        self._start_stream = stream_starter or ops.start_stream
         self.schedule_timeout_s = schedule_timeout_s
         self.stream_timeout_s = stream_timeout_s
         self.poll_interval_s = poll_interval_s
@@ -58,6 +104,7 @@ class AsyncQueryClient:
         self._wake = threading.Event()
         self._closing = threading.Event()
         self._entries = {}
+        self._streaming = {}
         self._request_ids = set()
         self._thread = None
         self._close_deadline = None
@@ -104,6 +151,10 @@ class AsyncQueryClient:
                     block_keys=item["keys"],
                 )
                 request.session_id = item["session"]
+                if self.request_timeout_ms is not None:
+                    generated = self._generate_input(request_id, item)
+                    request.generate_input = generated.SerializeToString()
+                    request.generate_timeout = self.request_timeout_ms
                 entry.rpc = self._stub.Schedule.future(
                     request, timeout=self.schedule_timeout_s
                 )
@@ -124,6 +175,17 @@ class AsyncQueryClient:
         self._wake.set()
         return entry.result
 
+    def _generate_input(self, request_id, item):
+        generated = self.ops.build_generate_input(
+            request_id,
+            input_len=item["input_tokens"],
+            output_len=2,
+            block_keys=item["keys"],
+        )
+        if self.request_timeout_ms is not None:
+            generated.generate_config.timeout_ms = self.request_timeout_ms
+        return generated
+
     def _finish(self, request_id, entry, ended_s=None):
         if entry.failure:
             entry.row.update(success=False, error=entry.failure)
@@ -132,6 +194,7 @@ class AsyncQueryClient:
             if self._entries.get(request_id) is not entry:
                 return
             self._entries.pop(request_id)
+            self._streaming.pop(request_id, None)
         if entry.result.set_running_or_notify_cancel():
             entry.result.set_result(entry.row)
 
@@ -157,14 +220,11 @@ class AsyncQueryClient:
                 entry.row["error"] = response.error_message
                 self._finish(request_id, entry, completed_s)
                 return
-            generated = self.ops.build_generate_input(
-                request_id,
-                input_len=entry.row["input_tokens"],
-                output_len=2,
-                block_keys=entry.row["keys"],
-            )
+            generated = self._generate_input(request_id, entry.row)
             entry.stream_started_s = time.monotonic()
-            entry.stream = self.ops.start_stream(response, request_id, generated)
+            entry.stream = self._start_stream(response, request_id, generated)
+            with self._lock:
+                self._streaming[request_id] = entry
             launched = time.monotonic()
             entry.row.update(
                 stream_started_s=entry.stream_started_s,
@@ -230,6 +290,7 @@ class AsyncQueryClient:
 
     def _monitor(self):
         try:
+            next_rpc_sweep = 0.0
             while True:
                 self._wake.wait(self.poll_interval_s)
                 self._wake.clear()
@@ -241,9 +302,16 @@ class AsyncQueryClient:
                     self._schedule_done(request_id, rpc, completed)
                 if not self._ready.empty():
                     self._wake.set()
-                with self._lock:
-                    entries = list(self._entries.items())
                 now = time.monotonic()
+                sweep_rpcs = self._closing.is_set() or now >= next_rpc_sweep
+                with self._lock:
+                    entries = list(
+                        (self._entries if sweep_rpcs else self._streaming).items()
+                    )
+                if sweep_rpcs:
+                    # RPC completions arrive through callbacks. Only their deadline
+                    # and cancellation fallback needs a periodic full-queue scan.
+                    next_rpc_sweep = now + 0.1
                 for request_id, entry in entries:
                     self._poll(request_id, entry, now)
                 if self._closing.is_set():

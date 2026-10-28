@@ -51,6 +51,16 @@ def load_cases(path):
                 raise ValueError(f"invalid {field}: {name}")
         if case.get("arrival", "poisson") not in ("poisson", "uniform"):
             raise ValueError("unknown arrival distribution")
+        prediction_scale = case.get("prediction_scale", 1.0)
+        if (
+            type(prediction_scale) not in (int, float)
+            or not math.isfinite(prediction_scale)
+            or prediction_scale <= 0
+        ):
+            raise ValueError(f"invalid prediction_scale: {name}")
+        cache_blocks = case.get("prefill_cache_blocks", 100000)
+        if type(cache_blocks) is not int or cache_blocks <= 0:
+            raise ValueError(f"invalid prefill_cache_blocks: {name}")
         stage_names = set()
         if not case.get("phases"):
             raise ValueError("case has no phases")
@@ -183,13 +193,32 @@ def annotate_slo(audit, rows, slo_ms):
             and phase["ttft_p99_s"] * 1000 > slo_ms
         ):
             raise ValueError(f"low-load phase {phase['stage']} misses TTFT target")
+        if phase.get("require_tail_zero_rejections", False):
+            tail = [
+                row
+                for row in samples
+                if row["planned_s"] - phase["start_s"] >= phase["settle_seconds"]
+            ]
+            timely = sum(
+                row["success"] and row["ttft_s"] * 1000 <= slo_ms for row in tail
+            )
+            phase["recovery_tail_slo_goodput_fraction"] = (
+                timely / len(tail) if tail else 0
+            )
+            if not tail or timely / len(tail) < 0.99:
+                raise ValueError(f"recovery tail {phase['stage']} misses TTFT target")
 
 
-def master_config(dispatch, learning, slo_ms=None):
+def master_config(dispatch, learning, slo_ms=None, prediction_scale=1.0):
+    if prediction_scale != 1.0 and (learning or slo_ms is not None):
+        raise ValueError("prediction_scale requires explicit FORMULA configuration")
     if slo_ms is not None:
         if slo_ms <= 0:
             raise ValueError("slo_ms must be positive")
-        return {"ttftSloMs": slo_ms, "dispatcher": {"type": dispatch}}
+        config = {"ttftSloMs": slo_ms}
+        if dispatch != "NON_BATCH":
+            config["dispatcher"] = {"type": dispatch}
+        return config
     decision = {"type": "SINGLE"}
     if dispatch == "BATCH":
         decision = {
@@ -201,7 +230,8 @@ def master_config(dispatch, learning, slo_ms=None):
     if not learning:
         prefill["executionTimeEstimator"] = {
             "type": "FORMULA",
-            "expression": "sum(computeTokens) / 70",
+            "expression": "sum(computeTokens) / 70"
+            + (f" * {prediction_scale}" if prediction_scale != 1.0 else ""),
         }
     return {
         "schemaVersion": 3,
@@ -237,7 +267,11 @@ def master_config(dispatch, learning, slo_ms=None):
 
 def run_case(args, case):
     from prefill_traffic_audit import audit_run, validate_environment, validate_trace
-    from prefill_traffic_client import AsyncQueryClient
+    from prefill_traffic_client import (
+        AsyncQueryClient,
+        start_engine_stream,
+        suspend_cyclic_gc,
+    )
     from prefill_worker_jitter import JitterController, audit_execution
 
     out = args.out_dir.resolve()
@@ -254,7 +288,12 @@ def run_case(args, case):
     from runtime.network import http_post_json
 
     proto_utils.PROTO_DIR = HERE.parents[1] / "cpp/model_rpc/proto"
-    config = master_config(args.dispatch, case.get("learning", False), args.slo_ms)
+    config = master_config(
+        args.dispatch,
+        case.get("learning", False),
+        args.slo_ms,
+        case.get("prediction_scale", 1.0),
+    )
     mock_config = master_config(args.dispatch, False)
     del mock_config["router"]["roles"]["prefill"]["tokenBalance"]
     del mock_config["scheduler"]["prefillQueueShedding"]
@@ -273,7 +312,7 @@ def run_case(args, case):
         raw_config=json.dumps(mock_config),
         master_jvm_heap="2g",
         mock_heap="2g",
-        prefill_cache_blocks=100000,
+        prefill_cache_blocks=case.get("prefill_cache_blocks", 100000),
     )
     spec.perf["prefill_expression"] = "sum(computeTokens) / 70"
     write_json(out / "config.json", config)
@@ -359,7 +398,9 @@ def run_case(args, case):
             temporary.replace(env.discovery_file)
             wait_topology(len(current) - 1)
             code, body = ops.remove_engine(
-                worker["name"], mode="graceful", drain_timeout_ms=15000
+                worker["name"],
+                mode="graceful",
+                drain_timeout_ms=max(15000, 2 * (args.slo_ms or 3000) + 5000),
             )
             assert code == 200 and body.get("drained") is True, body
             topology.append({"epoch_ms": time.time() * 1000, "remove": body})
@@ -374,7 +415,16 @@ def run_case(args, case):
             env.mock_http_port,
             env.master_management_port,
         )
-        with AsyncQueryClient(ops) as client:
+        transport_timeout_s = max(20.0, 2 * (args.slo_ms or 3000) / 1000 + 5.0)
+        with suspend_cyclic_gc() as controls, AsyncQueryClient(
+            ops,
+            schedule_timeout_s=transport_timeout_s,
+            stream_timeout_s=transport_timeout_s,
+            request_timeout_ms=max(30000, 4 * args.slo_ms) if args.slo_ms else None,
+            stream_starter=lambda response, rid, generated: start_engine_stream(
+                ops, response, rid, generated, transport_timeout_s
+            ),
+        ) as client:
             wait_topology(3)
             for item in warmup + probes:
                 row = client.submit(item, time.monotonic(), time.time() * 1000).result()
@@ -395,6 +445,7 @@ def run_case(args, case):
                 jitter = JitterController(
                     ops, mode=args.jitter, seed=args.seed, period_s=1.0
                 )
+                controls.callback(jitter.stop)
                 jitter.start()
                 start = time.monotonic() + 0.1
                 epoch = time.time() * 1000 + (start - time.monotonic()) * 1000
@@ -417,7 +468,9 @@ def run_case(args, case):
                 workers = 3
                 for offset, kind, item in timeline:
                     planned = start + offset
-                    time.sleep(max(0, planned - time.monotonic()))
+                    remaining = planned - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(remaining)
                     if kind == 0:
                         if item.get("workers", workers) != workers:
                             workers = item["workers"]
@@ -520,7 +573,7 @@ def main():
         type=int,
         help="Use only this TTFT SLO and transport mode; learn all worker service times",
     )
-    parser.add_argument("--jobs", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--jobs", type=int, choices=(1, 2, 4, 8, 16), default=1)
     parser.add_argument("--run-case", help=argparse.SUPPRESS)
     parser.add_argument(
         "--dispatch", choices=("NON_BATCH", "BATCH"), help=argparse.SUPPRESS
@@ -615,7 +668,9 @@ def main():
                 os.environ,
                 FLEXLB_FT_MASTER_HTTP_PORT=str(17480 + slot * 20),
                 FLEXLB_FT_MASTER_MANAGEMENT_PORT=str(17481 + slot * 20),
-                FLEXLB_FT_MOCK_BASE_GRPC_PORT=str(12000 + slot * 1000),
+                FLEXLB_FT_MOCK_BASE_GRPC_PORT=str(
+                    12000 + slot * 1000 if slot < 4 else 24000 + (slot - 4) * 1000
+                ),
             )
             with (args.out_dir / f"{label}.log").open("w") as log:
                 process = subprocess.run(

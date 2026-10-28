@@ -208,6 +208,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 config.queueScheduler().setOrdering(ConfigTestSupport.priority());
             }
             config.setDispatcher(new DispatcherConfig());
+            config.getDispatcher().setType(DispatcherConfig.Type.BATCH);
             config.queueScheduler().setDecision(decisionPolicy);
         }
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):

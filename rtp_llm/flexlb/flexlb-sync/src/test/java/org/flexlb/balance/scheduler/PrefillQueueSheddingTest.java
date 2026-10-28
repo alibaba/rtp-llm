@@ -52,22 +52,54 @@ class PrefillQueueSheddingTest {
         config.setExpectedWaitThresholdMs(3_000);
         config.setMaxWaitMs(6_000);
         var queue = List.of(candidate("young-cold", 50, 2, 100, 0, 2_000, 1),
-                candidate("older-warm", 50, 1, 100, 90, 2_000, 1));
+                candidate("older-warm", 50, 1, 100, 90, 1_000, 1),
+                candidate("warm-2", 50, 3, 100, 90, 500, 1),
+                candidate("warm-3", 50, 4, 100, 90, 500, 1));
         assertTrue(PrefillQueueShedding.adaptiveVictims(queue, config, null,
                 id -> id.equals("young-cold") ? 100 : 4_000).isEmpty());
         assertEquals(List.of("young-cold"), PrefillQueueShedding.adaptiveVictims(queue, config, null,
                 id -> 3_000));
     }
 
-    @Test void hardOverloadDoesNotWaitForYoungRequestsOrTrafficGrace() {
+    @Test void hardEstimateCannotImmediatelyRejectAnEntireFreshBurst() {
         var config = new org.flexlb.config.PrefillQueueSheddingConfig();
         config.setExpectedWaitThresholdMs(3_000);
         config.setMaxWaitMs(6_000);
-        var queue = List.of(candidate("cold", 50, 1, 100, 0, 7_000, 1));
-        var probing = new PrefillTrafficTrend.Snapshot(PrefillTrafficTrend.State.BURST_PROBE,
-                0, 0, 0, 0, 7_000, true, 3_000);
-        assertEquals(List.of("cold"), PrefillQueueShedding.adaptiveVictims(queue, config, probing, id -> 0));
-        assertEquals(List.of("cold"), PrefillQueueShedding.adaptiveVictims(queue, config, null, id -> 0));
+        var queue = java.util.stream.IntStream.range(0, 100)
+                .mapToObj(i -> candidate("request-" + i, 50, i, 100, 0, 700_000, 2)).toList();
+        var victims = PrefillQueueShedding.adaptiveVictims(queue, config, null, id -> 0);
+        assertEquals(75, victims.size(), "prediction error must not clear an entire service feed");
+        assertEquals("request-99", victims.getFirst());
+    }
+
+    @Test void repeatedHardOverloadRetainsAWorkerFeedReserveDespitePredictionBias() {
+        var config = new org.flexlb.config.PrefillQueueSheddingConfig();
+        config.setExpectedWaitThresholdMs(3_000);
+        config.setMaxWaitMs(6_000);
+        var queue = new java.util.ArrayList<>(java.util.stream.IntStream.range(0, 100)
+                .mapToObj(i -> candidate("request-" + i, 50, i, 100, i < 4 ? 90 : 0, 700_000, 2)).toList());
+        for (int round = 0; round < 100; round++) {
+            var victims = PrefillQueueShedding.adaptiveVictims(queue, config, null, id -> 3_000);
+            queue.removeIf(c -> victims.contains(c.value()));
+        }
+        assertEquals(List.of("request-0", "request-1"),
+                queue.stream().map(PrefillQueueShedding.Candidate::value).toList());
+    }
+
+    @Test void softAgeProtectionCannotRedirectColdEvictionsOntoOlderHotSessions() {
+        var config = new org.flexlb.config.PrefillQueueSheddingConfig();
+        config.setExpectedWaitThresholdMs(3_000);
+        config.setMaxWaitMs(6_000);
+        var queue = new java.util.ArrayList<PrefillQueueShedding.Candidate<String>>();
+        for (int i = 0; i < 10; i++) { queue.add(candidate("cold-" + i, 50, i + 3, 100, 0, 400, 4)); }
+        queue.add(candidate("hot-1", 50, 1, 100, 90, 8_000, 4));
+        queue.add(candidate("hot-2", 50, 2, 100, 90, 8_000, 4));
+        assertTrue(PrefillQueueShedding.adaptiveVictims(queue, config, null,
+                id -> id.startsWith("cold") ? 0 : 4_000).isEmpty(),
+                "young cold requests cannot transfer their rejection onto hot sessions");
+        var victims = PrefillQueueShedding.adaptiveVictims(queue, config, null, id -> 4_000);
+        assertFalse(victims.isEmpty());
+        assertTrue(victims.stream().allMatch(id -> id.startsWith("cold")));
     }
 
     @Test void explicitLegacyRecoveryRetainsItsSheddingPolicy() {

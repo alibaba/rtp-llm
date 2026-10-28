@@ -170,6 +170,33 @@ class TrafficAuditTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected scheduling"):
             audit_run(requests, stages, events, dispatch="NON_BATCH")
 
+    def test_unsent_deadline_is_distinct_from_transport_failure(self):
+        requests, stages, events = evidence()
+        reject(requests[1], "request expired before send")
+        requests[1]["code"] = 8511
+        requests[1]["ended_s"] = requests[1]["started_s"] + 6
+        stages[0]["allow_rejections"] = True
+        events = events[:2]
+        events[0]["batch_size"] = 1
+        audit_run(requests, stages, events, dispatch="NON_BATCH")
+        requests[1]["code"] = 8510
+        with self.assertRaisesRegex(ValueError, "unexpected scheduling"):
+            audit_run(requests, stages, events, dispatch="NON_BATCH")
+        requests[1]["code"] = 8511
+        requests[1]["ended_s"] -= 1
+        with self.assertRaisesRegex(ValueError, "unexpected scheduling"):
+            audit_run(requests, stages, events, dispatch="NON_BATCH")
+        requests[1]["ended_s"] += 1
+        with self.assertRaisesRegex(
+            ValueError, "rejected request 2 has Engine evidence"
+        ):
+            audit_run(
+                requests,
+                stages,
+                events + [{"rid": 2, "event": "admission"}],
+                dispatch="NON_BATCH",
+            )
+
     def test_each_deadline_trigger_needs_elapsed_time_code_and_no_engine_events(self):
         for message in DEADLINE_ERRORS:
             with self.subTest(message=message):

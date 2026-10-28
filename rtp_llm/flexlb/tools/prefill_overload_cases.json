@@ -1,0 +1,409 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "severe-mixed-ramp",
+      "suites": [
+        "acceptance"
+      ],
+      "jitters": [
+        "stable",
+        "independent",
+        "correlated"
+      ],
+      "seeds": [
+        1,
+        2,
+        3
+      ],
+      "cold_fraction": 0.25,
+      "long_fraction": 0.8,
+      "session_fraction": 1.0,
+      "hot_fraction": 0,
+      "learning": false,
+      "arrival": "poisson",
+      "phases": [
+        {
+          "name": "steady",
+          "seconds": 15,
+          "load": 0.5,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.8
+        },
+        {
+          "name": "dip",
+          "seconds": 2,
+          "load": 0.02,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "burst_requests": 1
+        },
+        {
+          "name": "ramp",
+          "seconds": 15,
+          "load": 2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.15
+        },
+        {
+          "name": "severe",
+          "seconds": 30,
+          "load": 10,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.01
+        },
+        {
+          "name": "recovery",
+          "seconds": 20,
+          "load": 0.2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "settle_seconds": 10,
+          "require_tail_zero_rejections": true
+        }
+      ]
+    },
+    {
+      "name": "severe-cold-ramp",
+      "suites": [
+        "acceptance"
+      ],
+      "jitters": [
+        "stable",
+        "independent",
+        "correlated"
+      ],
+      "seeds": [
+        1,
+        2,
+        3
+      ],
+      "cold_fraction": 1,
+      "long_fraction": 0.8,
+      "session_fraction": 1.0,
+      "hot_fraction": 0,
+      "learning": false,
+      "arrival": "poisson",
+      "phases": [
+        {
+          "name": "steady",
+          "seconds": 15,
+          "load": 0.5,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.8
+        },
+        {
+          "name": "dip",
+          "seconds": 2,
+          "load": 0.02,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "burst_requests": 1
+        },
+        {
+          "name": "ramp",
+          "seconds": 15,
+          "load": 2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.15
+        },
+        {
+          "name": "severe",
+          "seconds": 30,
+          "load": 10,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.01
+        },
+        {
+          "name": "recovery",
+          "seconds": 20,
+          "load": 0.2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "settle_seconds": 10,
+          "require_tail_zero_rejections": true
+        }
+      ]
+    },
+    {
+      "name": "severe-hotspot-ramp",
+      "suites": [
+        "acceptance"
+      ],
+      "jitters": [
+        "stable",
+        "independent",
+        "correlated"
+      ],
+      "seeds": [
+        1,
+        2,
+        3
+      ],
+      "cold_fraction": 0.25,
+      "long_fraction": 0.8,
+      "session_fraction": 1.0,
+      "hot_fraction": 0.5,
+      "learning": false,
+      "arrival": "poisson",
+      "phases": [
+        {
+          "name": "steady",
+          "seconds": 15,
+          "load": 0.5,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.8
+        },
+        {
+          "name": "dip",
+          "seconds": 2,
+          "load": 0.02,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "burst_requests": 1
+        },
+        {
+          "name": "ramp",
+          "seconds": 15,
+          "load": 2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.15
+        },
+        {
+          "name": "severe",
+          "seconds": 30,
+          "load": 10,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.01
+        },
+        {
+          "name": "recovery",
+          "seconds": 20,
+          "load": 0.2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "settle_seconds": 10,
+          "require_tail_zero_rejections": true
+        }
+      ]
+    },
+    {
+      "name": "severe-learning-ramp",
+      "suites": [
+        "acceptance"
+      ],
+      "jitters": [
+        "stable",
+        "independent",
+        "correlated"
+      ],
+      "seeds": [
+        1,
+        2,
+        3
+      ],
+      "cold_fraction": 0.25,
+      "long_fraction": 0.8,
+      "session_fraction": 1.0,
+      "hot_fraction": 0,
+      "learning": true,
+      "arrival": "poisson",
+      "phases": [
+        {
+          "name": "steady",
+          "seconds": 15,
+          "load": 0.5,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.8
+        },
+        {
+          "name": "dip",
+          "seconds": 2,
+          "load": 0.02,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "burst_requests": 1
+        },
+        {
+          "name": "ramp",
+          "seconds": 15,
+          "load": 2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.15
+        },
+        {
+          "name": "severe",
+          "seconds": 30,
+          "load": 10,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.01
+        },
+        {
+          "name": "recovery",
+          "seconds": 20,
+          "load": 0.2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "settle_seconds": 10,
+          "require_tail_zero_rejections": true
+        }
+      ]
+    },
+    {
+      "name": "severe-cache-churn",
+      "suites": [
+        "acceptance"
+      ],
+      "jitters": [
+        "stable",
+        "independent",
+        "correlated"
+      ],
+      "seeds": [
+        1,
+        2,
+        3
+      ],
+      "cold_fraction": 0.25,
+      "long_fraction": 0.8,
+      "session_fraction": 1.0,
+      "hot_fraction": 0,
+      "learning": false,
+      "arrival": "poisson",
+      "phases": [
+        {
+          "name": "steady",
+          "seconds": 15,
+          "load": 0.5,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.8
+        },
+        {
+          "name": "dip",
+          "seconds": 2,
+          "load": 0.02,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "burst_requests": 1
+        },
+        {
+          "name": "ramp",
+          "seconds": 15,
+          "load": 2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.15
+        },
+        {
+          "name": "severe",
+          "seconds": 60,
+          "load": 10,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.01
+        },
+        {
+          "name": "recovery",
+          "seconds": 20,
+          "load": 0.2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "settle_seconds": 10,
+          "require_tail_zero_rejections": true
+        }
+      ],
+      "prefill_cache_blocks": 4096
+    },
+    {
+      "name": "severe-overestimated-ramp",
+      "suites": [
+        "acceptance"
+      ],
+      "jitters": [
+        "stable",
+        "independent",
+        "correlated"
+      ],
+      "seeds": [
+        1,
+        2,
+        3
+      ],
+      "cold_fraction": 0.25,
+      "long_fraction": 0.8,
+      "session_fraction": 1.0,
+      "hot_fraction": 0,
+      "learning": false,
+      "arrival": "poisson",
+      "phases": [
+        {
+          "name": "steady",
+          "seconds": 15,
+          "load": 0.5,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.8
+        },
+        {
+          "name": "dip",
+          "seconds": 2,
+          "load": 0.02,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "burst_requests": 1
+        },
+        {
+          "name": "ramp",
+          "seconds": 15,
+          "load": 2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.15
+        },
+        {
+          "name": "severe",
+          "seconds": 30,
+          "load": 10,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.01
+        },
+        {
+          "name": "recovery",
+          "seconds": 20,
+          "load": 0.2,
+          "workers": 3,
+          "allow_rejections": true,
+          "min_success_fraction": 0.5,
+          "settle_seconds": 10,
+          "require_tail_zero_rejections": true
+        }
+      ],
+      "prediction_scale": 5.0
+    }
+  ]
+}

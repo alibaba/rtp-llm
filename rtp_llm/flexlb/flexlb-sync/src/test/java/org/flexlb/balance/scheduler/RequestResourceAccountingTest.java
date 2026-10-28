@@ -56,6 +56,31 @@ class RequestResourceAccountingTest {
     private static final long TOTAL_KV = 10_000L;
     private static final long TTL = TimeUnit.HOURS.toMillis(1);
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void sendDeadlineKeepsItsCauseAndReleasesExactLedgersAfterSenderExit(boolean absolute) throws Exception {
+        try (Fixture f = new Fixture()) {
+            var acquisition = f.decode.acquireDispatchPermit(f.reservation, f.capacity);
+            var member = new DeliveryDispatcher.Member(f.item, acquisition.handle());
+            var claim = f.requests.claimDelivery(f.item, DeliveryClaimKind.BATCH_ENQUEUE, 1L, member.decode());
+            assertNotNull(claim);
+            String field = absolute ? "absoluteDeadline" : "lastWorkerAtMs";
+            org.springframework.test.util.ReflectionTestUtils.setField(f.item.ctx(), field,
+                    System.currentTimeMillis() - (absolute ? 1 : TTL + 1));
+            assertFalse(f.requests.tryStartSend(claim));
+            assertFalse(f.item.ctx().snapshot().deliveryReleasable());
+            DeliveryDispatcher.closeCommitted(List.of(member), f.prefillHandoff);
+            var result = DeliveryResult.notSent(new java.util.concurrent.CancellationException("delivery abandoned before send"));
+            RequestProtocolTestSupport.transport(f.requests, claim, result);
+            var response = f.item.future().get(5, TimeUnit.SECONDS);
+            assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+            f.assertEmpty();
+            RequestProtocolTestSupport.transport(f.requests, claim, result);
+            f.assertEmpty();
+            f.assertCapacityReusable();
+        }
+    }
+
     @Test
     void schedulerCannotConsumeAnotherEndpointsRealDispatchPermit() throws Exception {
         try (Fixture owner = new Fixture(); Fixture other = new Fixture()) {

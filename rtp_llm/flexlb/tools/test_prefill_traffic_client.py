@@ -1,12 +1,19 @@
 """Asynchronous traffic-client tests with controllable RPC and stream lifecycles."""
 
 import concurrent.futures
+import gc
 import threading
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from prefill_traffic_client import AsyncQueryClient, _Query
+from prefill_traffic_client import (
+    AsyncQueryClient,
+    _Query,
+    start_engine_stream,
+    suspend_cyclic_gc,
+)
 
 
 def item(request_id):
@@ -122,6 +129,135 @@ class AsyncQueryClientTest(unittest.TestCase):
     def submit(self, client, request_id=1):
         return client.submit(item(request_id), time.monotonic(), time.time() * 1000)
 
+    def test_long_slo_request_deadline_reaches_schedule_payload_and_stream(self):
+        class DeadlineOps(FakeOps):
+            def build_generate_input(self, request_id, **kwargs):
+                generated = super().build_generate_input(request_id, **kwargs)
+                generated.generate_config = SimpleNamespace(timeout_ms=30000)
+                generated.SerializeToString = lambda: str(
+                    generated.generate_config.timeout_ms
+                ).encode()
+                self.generated_payload = generated
+                return generated
+
+        for batch in (False, True):
+            ops = DeadlineOps()
+            with AsyncQueryClient(ops, request_timeout_ms=120000) as client:
+                future = self.submit(client)
+                self.assertEqual(120000, ops.requests[1].generate_timeout)
+                self.assertEqual(b"120000", ops.requests[1].generate_input)
+                ops.calls[1].set_result(response(batch=batch))
+                self.assertTrue(future.result(timeout=2)["success"])
+                self.assertEqual(
+                    120000, ops.generated_payload.generate_config.timeout_ms
+                )
+
+    def test_custom_stream_starter_receives_both_dispatch_paths(self):
+        for batch in (False, True):
+            ops = FakeOps()
+            starter = Mock(side_effect=ops.start_stream)
+            with AsyncQueryClient(ops, stream_starter=starter) as client:
+                future = self.submit(client)
+                reply = response(batch=batch)
+                ops.calls[1].set_result(reply)
+                self.assertTrue(future.result(timeout=2)["success"])
+                self.assertEqual(1, starter.call_count)
+                self.assertIs(reply, starter.call_args.args[0])
+                self.assertEqual(1, starter.call_args.args[1])
+
+    def test_engine_stream_applies_rpc_deadline_and_preserves_role_routing(self):
+        reader = SimpleNamespace(StreamHandle=Mock(), StreamSnapshot=Mock())
+        for batch in (False, True):
+            ops = FakeOps()
+            rpc = SimpleNamespace(FetchResponse=Mock(), GenerateStreamCall=Mock())
+            ops.pb2_grpc = SimpleNamespace(RpcServiceStub=Mock(return_value=rpc))
+            ops.pb2 = SimpleNamespace(FetchRequestPB=Mock())
+            ops._copy_role_addrs = Mock()
+            reply, generated = response(batch=batch), object()
+            with patch.dict("sys.modules", {"adapters.stream": reader}):
+                start_engine_stream(ops, reply, 7, generated, 65.0)
+            if batch:
+                ops.pb2.FetchRequestPB.assert_called_once_with(request_id=7)
+                rpc.FetchResponse.assert_called_once_with(
+                    ops.pb2.FetchRequestPB.return_value, timeout=65.0
+                )
+                rpc.GenerateStreamCall.assert_not_called()
+                ops._copy_role_addrs.assert_not_called()
+            else:
+                ops._copy_role_addrs.assert_called_once_with(generated, reply)
+                rpc.GenerateStreamCall.assert_called_once_with(generated, timeout=65.0)
+                rpc.FetchResponse.assert_not_called()
+
+    def test_engine_stream_rejects_missing_prefill_route(self):
+        reader = SimpleNamespace(StreamHandle=Mock(), StreamSnapshot=Mock())
+        with patch.dict("sys.modules", {"adapters.stream": reader}):
+            with self.assertRaisesRegex(RuntimeError, "no PREFILL/PDFUSION"):
+                start_engine_stream(FakeOps(), response(success=False), 7, object(), 65)
+        reader.StreamHandle.assert_not_called()
+
+    def test_driver_gc_pause_restores_enabled_state_after_failure(self):
+        was_enabled = gc.isenabled()
+        try:
+            gc.enable()
+            with self.assertRaisesRegex(RuntimeError, "load failed"):
+                with suspend_cyclic_gc():
+                    self.assertFalse(gc.isenabled())
+                    raise RuntimeError("load failed")
+            self.assertTrue(gc.isenabled())
+        finally:
+            if not was_enabled:
+                gc.disable()
+
+    def test_clocked_controls_stop_before_gc_is_restored_after_body_failure(self):
+        was_enabled = gc.isenabled()
+        observed = []
+        try:
+            gc.enable()
+            with self.assertRaisesRegex(RuntimeError, "load failed"):
+                with suspend_cyclic_gc() as controls:
+                    controls.callback(lambda: observed.append(gc.isenabled()))
+                    raise RuntimeError("load failed")
+            self.assertEqual([False], observed)
+            self.assertTrue(gc.isenabled())
+        finally:
+            if not was_enabled:
+                gc.disable()
+
+    def test_control_stop_failure_still_restores_gc(self):
+        was_enabled = gc.isenabled()
+        observed = []
+
+        def stop():
+            observed.append(gc.isenabled())
+            raise RuntimeError("controller failed")
+
+        try:
+            gc.enable()
+            with self.assertRaisesRegex(RuntimeError, "controller failed"):
+                with suspend_cyclic_gc() as controls:
+                    controls.callback(stop)
+            self.assertEqual([False], observed)
+            self.assertTrue(gc.isenabled())
+        finally:
+            if not was_enabled:
+                gc.disable()
+
+    def test_driver_gc_pause_preserves_already_disabled_state(self):
+        was_enabled = gc.isenabled()
+        try:
+            gc.disable()
+            with suspend_cyclic_gc():
+                self.assertFalse(gc.isenabled())
+            self.assertFalse(gc.isenabled())
+        finally:
+            if was_enabled:
+                gc.enable()
+
+    def test_request_deadline_must_be_a_positive_integer(self):
+        for value in (0, -1, True, 1.5, float("inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                AsyncQueryClient(FakeOps(), request_timeout_ms=value)
+
     def test_1500_waiting_schedule_rpcs_use_one_monitor_not_worker_threads(self):
         ops = FakeOps()
         before = {thread.ident for thread in threading.enumerate()}
@@ -206,6 +342,16 @@ class AsyncQueryClientTest(unittest.TestCase):
             self.assertEqual(200, row["code"])
             self.assertFalse(row["success"])
             self.assertIn("stream setup failed", row["error"])
+
+    def test_pending_rpc_without_completion_still_expires_and_releases_entry(self):
+        ops = FakeOps()
+        with AsyncQueryClient(ops, schedule_timeout_s=0.02) as client:
+            row = self.submit(client).result(timeout=2)
+            self.assertFalse(row["success"])
+            self.assertIn("deadline", row["error"])
+            self.assertTrue(ops.calls[1].cancelled())
+            self.assertFalse(client._entries)
+            self.assertFalse(client._streaming)
 
     def test_inband_error_transport_error_and_unfinished_stream_never_succeed(self):
         for kwargs in (

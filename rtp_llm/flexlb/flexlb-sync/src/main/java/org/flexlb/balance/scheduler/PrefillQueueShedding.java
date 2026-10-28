@@ -23,10 +23,14 @@ public final class PrefillQueueShedding {
 
     public record Candidate<T>(T value, int priority, long sequence, Estimate estimate) { }
 
-    public static <T> Comparator<Candidate<T>> evictionOrder() {
+    private static <T> Comparator<Candidate<T>> benefitOrder() {
         return Comparator.<Candidate<T>>comparingInt(Candidate::priority)
                 .thenComparingInt(c -> c.estimate().hitTokens() == 0 ? 0 : 1)
-                .thenComparingDouble(c -> c.estimate().hitRate())
+                .thenComparingDouble(c -> c.estimate().hitRate());
+    }
+
+    public static <T> Comparator<Candidate<T>> evictionOrder() {
+        return PrefillQueueShedding.<T>benefitOrder()
                 .thenComparing(Comparator.comparingLong((Candidate<T> c) -> c.sequence()).reversed());
     }
 
@@ -50,19 +54,49 @@ public final class PrefillQueueShedding {
         return adaptiveVictims(candidates, config, trend, ignored -> Long.MAX_VALUE);
     }
 
-    /** Automatic soft shedding gives a young request its soft wait budget. Hard overload is immediate.
-     * Filter the original victims rather than evicting higher-priority/cache-beneficial work instead.
-     * Age is the original request age, so retries, migration and repeated bursts cannot renew it.
+    /**
+     * Estimates select excess work, but cannot empty the service feed in one step.
+     * Automatic recovery already observes each overload episode. Hard overload must
+     * not give every new cold arrival a fresh grace period ahead of older hot work.
+     * Original request deadlines remain authoritative, including for the feed reserve.
      */
     public static <T> List<T> adaptiveVictims(List<Candidate<T>> candidates,
             org.flexlb.config.PrefillQueueSheddingConfig config, PrefillTrafficTrend.Snapshot trend,
             java.util.function.ToLongFunction<T> ageMs) {
         var selected = selectAdaptiveVictims(candidates, config, trend);
-        if (config.getRecovery() == null || config.getRecovery().getWindowMs() != 0
-                || candidates.stream().mapToDouble(c -> c.estimate().fleetWorkMs()).sum() >= config.getMaxWaitMs()) {
+        if (config.getRecovery() == null || config.getRecovery().getWindowMs() != 0 || selected.isEmpty()) {
             return selected;
         }
-        return selected.stream().filter(value -> ageMs.applyAsLong(value) >= config.getExpectedWaitThresholdMs()).toList();
+        double work = candidates.stream().mapToDouble(c -> c.estimate().fleetWorkMs()).sum();
+        long observationMs = work >= config.getMaxWaitMs() ? 0L : config.getExpectedWaitThresholdMs();
+        int workers = candidates.stream().mapToInt(c -> c.estimate().workers()).max().orElse(0);
+        int reserve = Math.min(candidates.size(), workers);
+        // Retain a quarter for transient prediction error while promptly removing excess cold work.
+        int limit = Math.min(candidates.size() - reserve, (int) ((3L * candidates.size() + 3L) / 4));
+        if (observationMs == 0L) {
+            return List.copyOf(selected.subList(0, Math.min(limit, selected.size())));
+        }
+        var byValue = new java.util.HashMap<T, Candidate<T>>();
+        candidates.forEach(candidate -> byValue.put(candidate.value(), candidate));
+        Comparator<Candidate<T>> benefit = benefitOrder();
+        Candidate<T> protectedTier = null;
+        for (T value : selected) {
+            if (ageMs.applyAsLong(value) < observationMs) {
+                var candidate = byValue.get(value);
+                if (protectedTier == null || benefit.compare(candidate, protectedTier) < 0) {
+                    protectedTier = candidate;
+                }
+            }
+        }
+        var result = new ArrayList<T>();
+        for (T value : selected) {
+            if (result.size() >= limit) { break; }
+            // Same-tier older work can still be shed. A young cold request must never
+            // redirect its rejection onto a higher-priority or better-cache request.
+            if (protectedTier != null && benefit.compare(byValue.get(value), protectedTier) > 0) { break; }
+            if (ageMs.applyAsLong(value) >= observationMs) { result.add(value); }
+        }
+        return result;
     }
 
     private static <T> List<T> selectAdaptiveVictims(List<Candidate<T>> candidates,

@@ -50,6 +50,75 @@ class CatalogValidationTest(unittest.TestCase):
             self.assertEqual(len(case["phases"]), len(phases))
             self.assertTrue(all(math.isfinite(row["offset_s"]) for row in trace))
 
+    def test_overload_catalog_covers_finite_cache_and_nonempty_phases(self):
+        cases = load_cases(HERE / "prefill_overload_cases.json")
+        self.assertTrue(
+            any(case.get("prefill_cache_blocks", 100000) < 100000 for case in cases)
+        )
+        for case in cases:
+            for seed in case["seeds"]:
+                _, _, _, trace, phases = make_trace(case, seed)
+                self.assertEqual(
+                    {phase["name"] for phase in phases},
+                    {row["stage"] for row in trace},
+                )
+
+    def test_prediction_scale_requires_positive_finite_number(self):
+        for value in (0, -1, True, "5", float("inf"), float("nan")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.load([traffic_case(prediction_scale=value)])
+        self.assertEqual(
+            self.load([traffic_case(prediction_scale=5.0)])[0]["prediction_scale"], 5.0
+        )
+
+    def test_slo30_catalog_observes_sustained_overload_and_recovery(self):
+        cases = load_cases(HERE / "prefill_slo30_overload_cases.json")
+        self.assertTrue(
+            any(c.get("prefill_cache_blocks", 100000) < 100000 for c in cases)
+        )
+        for case in cases:
+            self.assertEqual(1.0, case.get("prediction_scale", 1.0))
+            phases = {p["name"]: p for p in case["phases"]}
+            if case["name"] != "slo30-short-burst":
+                self.assertGreaterEqual(phases["severe"]["seconds"], 120)
+            self.assertEqual(30, phases["recovery"]["settle_seconds"])
+            self.assertGreaterEqual(phases["recovery"]["seconds"], 60)
+            self.assertTrue(phases["recovery"]["require_tail_zero_rejections"])
+            _, _, _, trace, _ = make_trace(case, 1)
+            self.assertEqual(set(phases), {row["stage"] for row in trace})
+
+    def test_prediction_bias_changes_only_the_master_formula(self):
+        for dispatch in ("BATCH", "NON_BATCH"):
+            biased = master_config(dispatch, False, prediction_scale=5.0)
+            actual = master_config(dispatch, False)
+            self.assertEqual(
+                biased["router"]["roles"]["prefill"]["executionTimeEstimator"][
+                    "expression"
+                ],
+                "sum(computeTokens) / 70 * 5.0",
+            )
+            self.assertEqual(
+                actual["router"]["roles"]["prefill"]["executionTimeEstimator"][
+                    "expression"
+                ],
+                "sum(computeTokens) / 70",
+            )
+            with self.assertRaises(ValueError):
+                master_config(dispatch, True, prediction_scale=5.0)
+            with self.assertRaises(ValueError):
+                master_config(dispatch, False, slo_ms=3000, prediction_scale=5.0)
+
+    def test_cache_capacity_requires_positive_integer(self):
+        for value in (0, -1, 1.5, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.load([traffic_case(prefill_cache_blocks=value)])
+        self.assertEqual(
+            self.load([traffic_case(prefill_cache_blocks=4096)])[0][
+                "prefill_cache_blocks"
+            ],
+            4096,
+        )
+
     def test_rejects_invalid_names_and_duplicate_names(self):
         for name in ("", "../escape", "A Case", "with/slash"):
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -308,17 +377,40 @@ class TraceContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "misses TTFT target"):
             annotate_slo(report, rows, 3000)
 
+    def test_recovery_tail_requires_timely_success_even_when_rejections_are_allowed(
+        self,
+    ):
+        stage = dict(
+            stage="recovery",
+            allow_rejections=True,
+            completed=2,
+            ttft_p99_s=4.0,
+            require_tail_zero_rejections=True,
+            start_s=10,
+            settle_seconds=6,
+        )
+        rows = [
+            dict(stage="recovery", success=True, ttft_s=4.0, planned_s=11),
+            dict(stage="recovery", success=True, ttft_s=4.0, planned_s=17),
+        ]
+        with self.assertRaisesRegex(ValueError, "recovery tail"):
+            annotate_slo({"stages": [stage]}, rows, 3000)
+        rows[1]["ttft_s"] = 2.0
+        annotate_slo({"stages": [stage]}, rows, 3000)
+        self.assertEqual(stage["recovery_tail_slo_goodput_fraction"], 1.0)
+
     def test_single_slo_mode_does_not_smuggle_in_manual_queue_or_capacity_settings(
         self,
     ):
         for mode in ("NON_BATCH", "BATCH"):
-            self.assertEqual(
-                {"ttftSloMs": 3000, "dispatcher": {"type": mode}},
-                master_config(mode, False, 3000),
-            )
-            self.assertEqual(
-                master_config(mode, True, 3000), master_config(mode, False, 3000)
-            )
+            for slo in (3000, 30000):
+                expected = {"ttftSloMs": slo}
+                if mode == "BATCH":
+                    expected["dispatcher"] = {"type": mode}
+                self.assertEqual(expected, master_config(mode, False, slo))
+                self.assertEqual(
+                    master_config(mode, True, slo), master_config(mode, False, slo)
+                )
         with self.assertRaises(ValueError):
             master_config("BATCH", True, 0)
 

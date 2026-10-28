@@ -189,7 +189,7 @@ class TwinOverloadAdmissionTest {
     }
 
     private static FlexlbConfig config(Integer batchLimit) {
-        FlexlbConfig config = SchedulingTestConfig.newConfig();
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
         config.decisionPolicy().setMaxRequests(8);
         config.queueScheduler().setQueueTimeoutMs(3_600_000L);
         config.decisionPolicy().setMaxCollectionWaitMs(400L);

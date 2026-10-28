@@ -66,6 +66,30 @@ class RequestDeliveryClaimStateTest {
         assertNotNull(terminal);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deadlineAtSendBoundaryIsNotReportedAsTransportFailure(boolean absolute) {
+        var fixture = fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
+        var context = fixture.context();
+        long now = absolute ? 100_001L : context.snapshot().inactivityExpiresAtMs();
+        if (absolute) {
+            context.recordEngineEvidence(new EngineEvidence(fixture.route(), fixture.reservation(), RoleType.DECODE,
+                    EngineKind.ACTIVE, 0L, null, now - 1));
+        }
+        assertInstanceOf(Rejected.class, context.beginSend(fixture.delivery(), now));
+        assertNotNull(context.snapshot().cancellation(), "sender must retain the deadline before reporting NOT_SENT");
+        assertEquals(CancelReason.DEADLINE_EXCEEDED, context.snapshot().cancellation().reason());
+        assertFalse(context.snapshot().deliveryReleasable(), "deadline alone does not prove sender exit");
+        context.recordDeliveryResult(new TransportResult(fixture.delivery(),
+                DeliveryResult.notSent(new java.util.concurrent.CancellationException("delivery abandoned before send")), now));
+        assertTrue(context.snapshot().deliveryReleasable());
+        RequestCleanupPassTest.granted(context.beginClose(context.snapshot().pendingEnd(), now));
+        assertEquals(org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED,
+                context.snapshot().outcome().errorType());
+        assertEquals(DecodeResources.ReleaseReason.NOT_SENT,
+                RequestCleanupPassTest.granted(context.beginSettlement()).releaseReason());
+    }
+
     @Test
     void abandoningUnpublishedRouteClosesItsSenderWithoutInventingNotSentProof() {
         var fixture = fixture(DeliveryClaimKind.ROUTE_DECISION, false);

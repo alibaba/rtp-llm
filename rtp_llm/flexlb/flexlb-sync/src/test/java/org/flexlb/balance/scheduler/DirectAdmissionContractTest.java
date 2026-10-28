@@ -351,6 +351,9 @@ class DirectAdmissionContractTest {
                     }
                     assertEquals(separateDecode ? 1 : 0, fixture.decode.resourceSnapshot().queuedCount());
                 }
+            } finally {
+                // The spy owns a batcher that is not registered in the fixture's endpoint registry.
+                prefill.close();
             }
         }
     }

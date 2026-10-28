@@ -449,7 +449,11 @@ public class CostBasedPrefillStrategy {
     }
 
     public int currentPrefillWorkerCount(String group) {
-        return (int) endpointRegistry.prefillRoutingSnapshot(RoleType.PREFILL).stream()
+        return currentPrefillWorkerCount(RoleType.PREFILL, group);
+    }
+
+    public int currentPrefillWorkerCount(RoleType role, String group) {
+        return (int) endpointRegistry.prefillRoutingSnapshot(role).stream()
                 .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
                 .count();
     }
