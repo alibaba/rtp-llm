@@ -1,3 +1,5 @@
+import json
+
 from rtp_llm.ops import CPRotateMethod
 from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
 
@@ -35,6 +37,24 @@ def init_parallel_group_args(
         type=int,
         default=1,
         help="设置数据并行（Data Parallelism）的副本数量或组大小。",
+    )
+    parallel_group.add_argument(
+        "--pp_size",
+        env_name="PP_SIZE",
+        bind_to=(parallelism_config, "pp_size"),
+        type=int,
+        default=1,
+        help="流水线并行（Pipeline Parallelism）段数。布局为 PP 最外层："
+        "world_rank = pp_rank * (dp_size * tp_size) + dp_rank * tp_size + tp_rank，"
+        "通常 WORLD_SIZE = PP_SIZE * TP_SIZE * DP_SIZE。",
+    )
+    parallel_group.add_argument(
+        "--pp_stage_layer_counts",
+        env_name="PP_STAGE_LAYER_COUNTS",
+        bind_to=(parallelism_config, "pp_stage_layer_counts"),
+        type=json.loads,
+        default=[],
+        help="主模型各 PP stage 的层数，使用 JSON 数组，例如 [16, 20]；未设置时自动划分。",
     )
     parallel_group.add_argument(
         "--world_size",

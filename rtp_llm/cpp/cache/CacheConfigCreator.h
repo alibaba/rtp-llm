@@ -51,7 +51,7 @@ public:
                                          const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
                                          const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
     static uint32_t synchronizeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config);
-    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
+    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.
@@ -59,11 +59,16 @@ public:
                                                       const SpecBuildContext&      ctx,
                                                       int64_t                      expected_layer_num);
 
+    static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
+                                              const ParallelismConfig& parallelism_config,
+                                              bool                     is_draft_model = false);
+
 private:
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          const KVCacheConfig&     kv_cache_config,
-                                         int                      gen_num_per_cycle);
+                                         int                      gen_num_per_cycle,
+                                         uint32_t                 global_layer_begin);
 };
 
 }  // namespace rtp_llm

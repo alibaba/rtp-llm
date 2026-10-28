@@ -500,14 +500,40 @@ TEST_F(KVCacheManagerTest, LayoutWithoutCapacityCannotAllocatePool) {
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/false));
 }
 
-TEST_F(KVCacheManagerTest, RankAgreementUsesMinimumAndFfnBaseline) {
+TEST_F(KVCacheManagerTest, RankAgreementUsesMinimum) {
     const int candidates[] = {11, 7, 9};
-    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false), 7u);
-    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, true), 1u);
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3), 7u);
 
     const int invalid_candidates[] = {11, 0, 9};
-    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(invalid_candidates, 3, false));
-    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0, false));
+    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(invalid_candidates, 3));
+    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0));
+}
+
+TEST_F(KVCacheManagerTest, FfnDisaggregateUsesRoleLocalCapacityThroughPoolInit) {
+    const uint32_t candidates[] = {11, 7, 9, 3};
+    for (int64_t rank = 0; rank < 4; ++rank) {
+        SCOPED_TRACE(rank);
+        ParallelismConfig parallelism;
+        parallelism.world_size = 4;
+        parallelism.world_rank = rank;
+        parallelism.pp_size = parallelism.tp_size = 1;
+        parallelism.dp_size                       = 4;
+        parallelism.dp_rank                       = rank;
+        auto& ffn                                 = parallelism.ffn_disaggregate_config;
+        ffn.enable_ffn_disaggregate               = true;
+        ffn.attention_dp_size                     = 3;
+        ffn.is_ffn_rank                           = rank == 3;
+
+        const auto confirmed = CacheConfigCreator::synchronizeBlockNum(candidates[rank], parallelism);
+        const auto expected  = ffn.is_ffn_service() ? 2u : candidates[rank];
+        ASSERT_EQ(confirmed, expected);
+        auto config = makeSimpleMhaCacheConfig(1, 1, 4, DataType::TYPE_FP16);
+        config.finalizeBlockNums(confirmed, RuntimeConfig{});
+        KVCacheManager manager(config, /*warmup=*/false, nullptr, {}, parallelism);
+        ASSERT_TRUE(manager.init());
+        EXPECT_EQ(manager.cacheConfig().group("default").block_num, expected);
+        EXPECT_EQ(manager.totalBlocksNum(), expected - 1);
+    }
 }
 
 TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {
@@ -1805,11 +1831,63 @@ public:
         return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
     }
 
-    size_t submitted_batch_count{0};
-    size_t submitted_descriptor_count{0};
+    size_t                      submitted_batch_count{0};
+    size_t                      submitted_descriptor_count{0};
     std::vector<CacheCopyError> copy_errors;
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
+    for (const int pp_size : {1, 2}) {
+        SCOPED_TRACE(::testing::Message() << "pp_size=" << pp_size);
+        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig     kv_cache_config;
+        ParallelismConfig parallelism_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        parallelism_config.pp_size           = pp_size;
+        parallelism_config.pp_rank           = pp_size > 1 ? 1 : 0;
+        parallelism_config.world_size        = pp_size;
+        parallelism_config.world_rank        = parallelism_config.pp_rank;
+        auto manager =
+            std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config, parallelism_config);
+        ASSERT_TRUE(manager->init());
+        auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
+        manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+
+        FunctionRequestPB request;
+        auto*             mem_request = request.mutable_mem_request();
+        mem_request->set_copy_direction(MemoryOperationRequestPB::H2D);
+        mem_request->set_timeout_ms(1000);
+        for (const int block_id : {1, 2}) {
+            auto* item = mem_request->add_copy_items();
+            item->add_group_tags("absent_group");
+            item->set_mem_block(block_id);
+            auto* block = item->add_group_blocks();
+            block->set_tag("absent_group");
+            block->set_block_id(block_id);
+        }
+        FunctionResponsePB response;
+
+        EXPECT_TRUE(manager->executeFunction(request, response));
+        ASSERT_TRUE(response.has_mem_response());
+        EXPECT_EQ(response.mem_response().code(),
+                  pp_size > 1 ? MemoryOperationResponsePB::OK : MemoryOperationResponsePB::INVALID_REQUEST);
+        ASSERT_EQ(response.mem_response().block_errors_size(), mem_request->copy_items_size());
+        const auto result = BlockTransferRequestConverter::decodeTransferResult(response.mem_response(),
+                                                                                mem_request->copy_items_size());
+        EXPECT_EQ(result.ok(), pp_size > 1);
+        EXPECT_EQ(result.status.code(), pp_size > 1 ? ErrorCode::NONE_ERROR : ErrorCode::INVALID_PARAMS);
+        const auto expected_error = pp_size > 1 ? CacheCopyError::NONE : CacheCopyError::INVALID_REQUEST;
+        EXPECT_EQ(result.copy_error, expected_error);
+        EXPECT_EQ(result.block_errors, std::vector<CacheCopyError>(mem_request->copy_items_size(), expected_error));
+        if (pp_size > 1) {
+            EXPECT_TRUE(result.status.ToString().empty());
+        }
+        EXPECT_EQ(engine->submitted_batch_count, 0u);
+        EXPECT_EQ(engine->submitted_descriptor_count, 0u);
+    }
+}
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
@@ -1968,62 +2046,85 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForMixedPartialAn
     }
 }
 
-TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
-    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    KVCacheConfig     kv_cache_config;
-    ParallelismConfig parallelism_config;
-    RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    parallelism_config.tp_size           = 2;
-    parallelism_config.tp_rank           = 0;
-    parallelism_config.world_size        = 2;
-    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
+TEST_F(KVCacheManagerTest, FirstStageRootBroadcastsAcrossAllPPAndTPWorkers) {
+    for (const auto& [pp_size, tp_size] : std::vector<std::pair<int, int>>{{1, 2}, {2, 1}, {2, 2}}) {
+        SCOPED_TRACE(::testing::Message() << "pp_size=" << pp_size << ", tp_size=" << tp_size);
+        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig     kv_cache_config;
+        ParallelismConfig parallelism_config;
+        RuntimeConfig     runtime_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        parallelism_config.tp_size           = tp_size;
+        parallelism_config.tp_rank           = 0;
+        parallelism_config.pp_size           = pp_size;
+        parallelism_config.pp_rank           = 0;
+        parallelism_config.dp_size           = 2;
+        parallelism_config.world_size        = pp_size * parallelism_config.dp_size * parallelism_config.tp_size;
+        parallelism_config.world_rank        = 0;
+        const size_t worker_count            = static_cast<size_t>(pp_size * tp_size);
+        for (size_t worker = 0; worker < worker_count; ++worker) {
+            runtime_config.worker_grpc_addrs.push_back("127.0.0.1:" + std::to_string(12345 + worker));
+        }
 
-    auto manager = std::make_shared<KVCacheManager>(
-        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
-    ASSERT_TRUE(manager->init());
-    ASSERT_NE(manager->blockTreeCache(), nullptr);
-    ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
-    EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
+        auto manager = std::make_shared<KVCacheManager>(
+            cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+        ASSERT_TRUE(manager->init());
+        ASSERT_NE(manager->blockTreeCache(), nullptr);
+        ASSERT_NE(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, nullptr);
+        EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(),
+                  worker_count);
 
-    FunctionRequestPB request;
-    appendValidGroupedTransfer(manager, request);
-    FunctionResponsePB response;
-    EXPECT_TRUE(manager->executeFunction(request, response));
-    ASSERT_TRUE(response.has_mem_response());
-    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+        const auto& broadcast = manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_;
+        EXPECT_EQ(broadcast->worker_addrs_, runtime_config.worker_grpc_addrs);
+    }
 }
 
-TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {
-    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    KVCacheConfig     kv_cache_config;
-    ParallelismConfig parallelism_config;
-    RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
-    parallelism_config.tp_size           = 2;
-    parallelism_config.tp_rank           = 1;
-    parallelism_config.world_size        = 2;
-    parallelism_config.world_rank        = 1;
-    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
+TEST_F(KVCacheManagerTest, NonRootRanksHaveNoBroadcastManager) {
+    struct RankCase {
+        int pp_size;
+        int pp_rank;
+        int tp_size;
+        int tp_rank;
+    };
+    for (const RankCase rank : std::vector<RankCase>{{1, 0, 2, 1}, {2, 1, 1, 0}}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "pp=" << rank.pp_rank << "/" << rank.pp_size << ", tp=" << rank.tp_rank << "/" << rank.tp_size);
+        auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+        KVCacheConfig     kv_cache_config;
+        ParallelismConfig parallelism_config;
+        RuntimeConfig     runtime_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        parallelism_config.pp_size           = rank.pp_size;
+        parallelism_config.pp_rank           = rank.pp_rank;
+        parallelism_config.tp_size           = rank.tp_size;
+        parallelism_config.tp_rank           = rank.tp_rank;
+        parallelism_config.world_size        = rank.pp_size * rank.tp_size;
+        parallelism_config.world_rank        = rank.pp_rank * rank.tp_size + rank.tp_rank;
+        for (int worker = 0; worker < rank.pp_size * rank.tp_size; ++worker) {
+            runtime_config.worker_grpc_addrs.push_back("127.0.0.1:" + std::to_string(12345 + worker));
+        }
 
-    auto manager = std::make_shared<KVCacheManager>(
-        cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
-    ASSERT_TRUE(manager->init());
-    ASSERT_NE(manager->blockTreeCache(), nullptr);
-    EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_, nullptr);
+        auto manager = std::make_shared<KVCacheManager>(
+            cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+        ASSERT_TRUE(manager->init());
+        ASSERT_NE(manager->blockTreeCache(), nullptr);
+        EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_, nullptr);
+    }
 }
 
-TEST_F(KVCacheManagerTest, MultiRankZeroRejectsMismatchedBroadcastAddressCount) {
+TEST_F(KVCacheManagerTest, FirstStageRootRejectsMismatchedBroadcastAddressCount) {
     auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
+    parallelism_config.pp_size       = 2;
+    parallelism_config.pp_rank       = 0;
     parallelism_config.tp_size       = 2;
     parallelism_config.tp_rank       = 0;
-    parallelism_config.world_size    = 2;
-    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345"};
+    parallelism_config.world_size    = 4;
+    runtime_config.worker_grpc_addrs = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     auto manager = std::make_shared<KVCacheManager>(
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);

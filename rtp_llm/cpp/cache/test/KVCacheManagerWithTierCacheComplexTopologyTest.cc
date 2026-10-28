@@ -285,7 +285,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     for (const bool fail_load : {false, true}) {
         SCOPED_TRACE(fail_load ? "mixed protected/legacy failure" : "mixed successful load-back");
         ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
-        auto cache  = manager_->blockTreeCache();
+        auto cache = manager_->blockTreeCache();
         auto engine =
             std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
@@ -501,7 +501,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             ASSERT_TRUE(scheduler->enqueue(prefill_stream).ok());
             auto first_schedule = scheduler->schedule();
             ASSERT_TRUE(first_schedule.ok());
-            EXPECT_TRUE(first_schedule.value().empty());
+            EXPECT_TRUE(first_schedule.value().streams.empty());
             EXPECT_EQ(prefill_stream->getStatus(), StreamState::LOADING_CACHE);
             EXPECT_EQ(prefill_stream->reuseLength(), block_size);
             EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
@@ -520,8 +520,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
             const auto second_schedule = scheduler->schedule();
             ASSERT_TRUE(second_schedule.ok());
-            ASSERT_EQ(second_schedule.value().size(), 1u);
-            EXPECT_EQ(second_schedule.value().front(), prefill_stream);
+            ASSERT_EQ(second_schedule.value().streams.size(), 1u);
+            EXPECT_EQ(second_schedule.value().streams.front(), prefill_stream);
             EXPECT_EQ(prefill_stream->getStatus(), StreamState::RUNNING);
             EXPECT_FALSE(prefill_stream->hasError());
             EXPECT_EQ(prefill_stream->reuseLength(), block_size);
@@ -534,7 +534,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             const auto after_failure = snapshotPathResources(*cache, seed.cache_keys);
             ASSERT_TRUE(after_failure.has_value());
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-                const auto&  group_set   = cache->groupSets()[group_set_id];
+                const auto& group_set = cache->groupSets()[group_set_id];
                 // Injected transport failure does not identify a corrupt record.
                 for (size_t path = 0; path < 3; ++path) {
                     const auto& source = (*after_failure)[path][group_set_id];
@@ -619,8 +619,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                         const BlockIndicesType& blocks = load_resource->blocks(0, tag);
                         ASSERT_GE(blocks.size(), 3u);
                         ASSERT_FALSE(isNullBlockIdx(blocks[path]));
-                        ASSERT_TRUE(fillGroupBlockPayload(
-                            manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
+                        ASSERT_TRUE(
+                            fillGroupBlockPayload(manager_, cache_config_, tag, blocks[path], path, /*poison=*/true));
                     }
                 }
             }

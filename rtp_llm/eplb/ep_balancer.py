@@ -87,7 +87,11 @@ class ExpertBalancer:
         self.num_groups = self._load_config.moe_n_group
         self.num_nodes = self._load_config.num_nodes
         self.num_gpu = self._load_config.ep_size
-        self.moe_layer_index = self._load_config.moe_layer_index
+        self.moe_layer_index = [
+            layer_id
+            for layer_id in self._load_config.moe_layer_index
+            if layer_id in self._load_config.layer_range
+        ]
         self.num_experts = self._load_config.expert_num
 
         self.time_prefix = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

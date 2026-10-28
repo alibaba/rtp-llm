@@ -74,6 +74,7 @@ def _load_config(exported_device):
     return LoadConfig(
         database=BaseDatabase(),
         num_layers=1,
+        layer_range=range(1),
         hidden_size=2,
         head_num=1,
         head_num_kv=1,
@@ -284,15 +285,15 @@ class CompressedW8A8ConfigTest(unittest.TestCase):
 
     def test_accepts_regex_ignore_patterns(self):
         pattern = r"re:.*\.mlp\..*"
-        config = CompressedW8A8Int8PerChannelQuantConfig(
-            ignore_patterns=[pattern]
-        )
+        config = CompressedW8A8Int8PerChannelQuantConfig(ignore_patterns=[pattern])
         self.assertIn(pattern, config.exclude_modules)
 
     def test_missing_w8a8_activation_strategy_reports_unsupported_scheme(self):
         group = _compressed_group()
         group["input_activations"].pop("strategy")
-        with self.assertRaisesRegex(ValueError, "unsupported compressed-tensors scheme"):
+        with self.assertRaisesRegex(
+            ValueError, "unsupported compressed-tensors scheme"
+        ):
             self._load(
                 {
                     "quant_method": "compressed-tensors",
@@ -307,9 +308,7 @@ class CompressedW8A8ConfigTest(unittest.TestCase):
             "model.language_model.layers.8.linear_attn.conv1d",
             "mtp.layers.0.mlp.shared_expert_gate",
         ]
-        config = CompressedW8A8Int8PerChannelQuantConfig(
-            ignore_patterns=patterns
-        )
+        config = CompressedW8A8Int8PerChannelQuantConfig(ignore_patterns=patterns)
         self.assertEqual(config.exclude_modules, set(patterns))
 
     def test_precision_validation_rejects_fp8_kv_cache(self):
@@ -321,9 +320,7 @@ class CompressedW8A8ConfigTest(unittest.TestCase):
 
     def test_precision_validation_accepts_bf16_kv_cache(self):
         config = CompressedW8A8Int8PerChannelQuantConfig()
-        config.verify_compute_dtype_and_kv_cache_dtype(
-            torch.bfloat16, torch.bfloat16
-        )
+        config.verify_compute_dtype_and_kv_cache_dtype(torch.bfloat16, torch.bfloat16)
 
     def test_low_latency_bucket_uses_per_token_quantization_sizes(self):
         config = CompressedW8A8Int8PerChannelQuantConfig()
@@ -440,9 +437,7 @@ class CompressedW8A8WeightTest(unittest.TestCase):
         )
 
     def test_non_matching_literal_ignore_keeps_the_quantized_loader(self):
-        config = CompressedW8A8Int8PerChannelQuantConfig(
-            ignore_patterns=["lm_head"]
-        )
+        config = CompressedW8A8Int8PerChannelQuantConfig(ignore_patterns=["lm_head"])
         self.assertTrue(
             CompressedW8A8Int8PerChannelWeight.support(config, self._source())
         )

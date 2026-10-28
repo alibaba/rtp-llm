@@ -78,6 +78,7 @@ struct ParallelismConfig {
     int64_t tp_rank          = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
+    int64_t pp_rank          = 0;
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
@@ -88,6 +89,9 @@ struct ParallelismConfig {
     // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
     // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
+
+    /** Main-model layer counts per stage; ignored by drafts and single-stage models. */
+    std::vector<int64_t> pp_stage_layer_counts;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
@@ -407,18 +411,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode         = false;
-    int     wrr_available_ratio           = 80;
-    int     rank_factor                   = 0;
-    int     thread_count                  = 32;
-    int     rdma_connect_timeout_ms       = 250;
-    int     rdma_qp_count_per_connection  = 2;
-    int     rdma_io_thread_count          = 4;
-    int     rdma_worker_thread_count      = 2;
-    int     messager_io_thread_count      = 2;
-    int     messager_worker_thread_count  = 32;
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 32;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 32;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -601,9 +605,6 @@ public:
     int getEpSize() const {
         return ep_size_;
     }
-    int getTpRank() const {
-        return world_rank_ % tp_size_;
-    }
     void setWorldRank(int world_rank) {
         world_rank_ = world_rank;
     }
@@ -683,7 +684,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -692,7 +693,7 @@ struct GrpcConfig: GrpcMapsConfig {
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
     int max_server_workers = 4;
-    DashScGrpcConfig(){};
+    DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);

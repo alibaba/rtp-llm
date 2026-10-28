@@ -47,6 +47,27 @@ cc_library(
 )
 
 cc_library(
+    name = "stage_layer_range",
+    hdrs = ["StageLayerRange.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":config_modules",
+    ],
+)
+
+# Rank topology mirrors rtp_llm/models_py/distributed/rank_layout.py.
+cc_library(
+    name = "rank_layout",
+    hdrs = ["RankLayout.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":config_modules",
+    ],
+)
+
+cc_library(
     name = "eplb_config",
     hdrs = ["EplbConfig.h"],
     srcs = ["EplbConfig.cc"],

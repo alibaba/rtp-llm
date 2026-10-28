@@ -13,7 +13,7 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import DataType, HybridAttentionType, KVCacheSpecType
+from rtp_llm.ops import DataType, HybridAttentionType, KVCacheSpecType, TaskType
 
 
 class Qwen3NextBase(BaseModel):
@@ -41,6 +41,9 @@ class Qwen3NextBase(BaseModel):
 
     def support_cuda_graph(self) -> bool:
         return True
+
+    def support_pp(self) -> bool:
+        return self.model_config.task_type == TaskType.LANGUAGE_MODEL
 
     @classmethod
     def _apply_kv_cache_config(

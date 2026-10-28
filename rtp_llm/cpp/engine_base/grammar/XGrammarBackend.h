@@ -51,6 +51,15 @@ struct GrammarCompileResult {
     absl::Status                               status = absl::OkStatus();
 };
 
+class GrammarCompileHandle {
+private:
+    friend class XGrammarBackend;
+
+    GrammarKeyCpp                            key_;
+    std::shared_future<GrammarCompileResult> future_;
+    std::optional<GrammarCompileResult>      result_;
+};
+
 struct GrammarBackendStats {
     int64_t compile_total               = 0;
     int64_t compile_invalid             = 0;
@@ -92,6 +101,14 @@ public:
     // is never shared across streams.
     absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> createMatcherFromKey(const GrammarKeyCpp& key);
 
+    // Starts compilation without waiting. A saturated queue is returned as
+    // DEFERRED so prefetch never rejects a user request.
+    GrammarCompileHandle prefetch(const GrammarKeyCpp& key);
+
+    // Installs a fresh matcher from a prefetched result. Every consumer retains
+    // the normal compile timeout and retry behavior.
+    absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> createMatcherFromHandle(GrammarCompileHandle& handle);
+
     GrammarBackendStats stats() const;
     void                clear();
 
@@ -104,16 +121,16 @@ public:
 
 private:
     struct Options {
-        bool    any_whitespace                    = true;
-        bool    strict_mode                       = true;
-        bool    terminate_without_stop_token      = false;
-        int     max_compiler_threads              = 8;
-        int64_t total_cache_budget_bytes          = 2LL << 30;
-        int64_t compiler_cache_budget_bytes       = 1LL << 30;
-        int64_t verdict_cache_budget_bytes        = 1LL << 30;
-        int     compile_timeout_ms                = 2000;
-        int     compile_concurrency               = 1;
-        int     compile_queue_size                = 2;
+        bool    any_whitespace               = true;
+        bool    strict_mode                  = true;
+        bool    terminate_without_stop_token = false;
+        int     max_compiler_threads         = 8;
+        int64_t total_cache_budget_bytes     = 2LL << 30;
+        int64_t compiler_cache_budget_bytes  = 1LL << 30;
+        int64_t verdict_cache_budget_bytes   = 1LL << 30;
+        int     compile_timeout_ms           = 2000;
+        int     compile_concurrency          = 1;
+        int     compile_queue_size           = 2;
     };
 
     struct CacheEntry {
@@ -150,6 +167,8 @@ private:
     GrammarCompileResult                                       invokeCompiler(const GrammarKeyCpp& key);
     GrammarCompileResult                                       compileSync(const GrammarKeyCpp& key);
     GrammarCompileResult runCompileTask(const GrammarKeyCpp& key, const std::string& id);
+    GrammarCompileHandle acquireCompile(const GrammarKeyCpp& key, bool is_prefetch);
+    GrammarCompileResult waitForCompile(GrammarCompileHandle& handle);
 
     absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
     createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled);
@@ -164,7 +183,7 @@ private:
     void reportCompile(const GrammarCompileResult& result, int64_t latency_us) const;
     void reportOverload() const;
     void fillResidentGauges(RtpLLMGrammarMetricsCollector& collector,
-                            std::optional<int64_t>          inflight = std::nullopt) const;
+                            std::optional<int64_t>         inflight = std::nullopt) const;
 
     static constexpr int64_t kEntryOverheadBytes = 128;
 
@@ -176,8 +195,8 @@ private:
     CompileFn                    compile_fn_;
     MetricsReportFn              metrics_report_fn_for_test_;
 
-    mutable std::mutex cache_mutex_;
-    mutable CacheMap   cache_;
+    mutable std::mutex             cache_mutex_;
+    mutable CacheMap               cache_;
     mutable std::list<std::string> lru_;
     mutable int64_t                cache_bytes_   = 0;
     mutable int64_t                invalid_count_ = 0;
