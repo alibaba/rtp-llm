@@ -1222,7 +1222,8 @@ TEST_F(QueryConverterTest, PrefillRpcServerConvertsMalformedInputEmbeddingsToInv
     embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
     input_embeddings_pb->add_embedding_locs(0);
 
-    PrefillRpcServer             server;
+    TestPrefillRpcServer server;
+    server.initRequestParsingEngine();
     RPCContext                   rpc_context{&input, nullptr};
     grpc::ServerContext          server_context;
     kmonitor::MetricsReporterPtr metrics_reporter;
@@ -1234,6 +1235,9 @@ TEST_F(QueryConverterTest, PrefillRpcServerConvertsMalformedInputEmbeddingsToInv
 
     EXPECT_EQ(prefill_context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_NE(prefill_context.error_status.error_message().find("Request parsing error"), std::string::npos);
+    EXPECT_NE(
+        prefill_context.error_status.error_message().find("TensorPB payload byte size does not match shape and dtype"),
+        std::string::npos);
 
     ErrorDetailsPB error_details;
     ASSERT_TRUE(error_details.ParseFromString(prefill_context.error_status.error_details()));
@@ -1255,6 +1259,9 @@ TEST_F(QueryConverterTest, PrefillRpcServerRejectsInputEmbeddingsWithTpGreaterTh
     auto                         meta            = std::make_shared<RpcServerRuntimeMeta>();
     auto                         prefill_context = PrefillGenerateContext(
         &server.resource(), rpc_context, input.generate_config().timeout_ms(), &server_context, metrics_reporter, meta);
+
+    // Test runtime support independently of engine-dependent request preparation.
+    prefill_context.generate_input = QueryConverter::transQuery(&input);
 
     server.getRpcConnection(prefill_context);
 

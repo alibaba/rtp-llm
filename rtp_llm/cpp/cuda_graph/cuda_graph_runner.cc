@@ -440,6 +440,23 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // for now we only support 2.2.1 and 2.2.3 in deocode cuda graph, and 2.2.2 will be support in prefill cuda graph.
 
     if (isGenerationPrefillCudaGraph()) {
+        auto& overrides = py_model_inputs.cuda_graph_input_embedding_overrides;
+        auto& mask      = py_model_inputs.cuda_graph_input_embedding_mask;
+        RTP_LLM_CHECK_WITH_INFO(overrides.defined() && mask.defined(),
+                                "full prefill CUDA graph input embedding buffers are not initialized");
+        mask.zero_();
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            const auto* locs = inputs.input_embeddings_locs.data_ptr<int32_t>();
+            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
+                const auto& embedding = inputs.input_embeddings->at(i);
+                const int   loc       = locs[i];
+                const int   length    = static_cast<int>(embedding.size(0));
+                overrides.narrow(0, loc, length).copy_(embedding, /*non_blocking=*/true);
+                mask.narrow(0, loc, length).fill_(true);
+            }
+        }
+    }
+    if (isGenerationPrefillCudaGraph()) {
         // Generation-prefill owns its host metadata lifetime: wait for both
         // staging copies and the preceding replay before CPU mutation. This
         // role does not use the legacy asynchronous replay-preparation opt-out.
@@ -1338,6 +1355,9 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
                                              const CudaGraphState& state,
                                              CudaGraphCheckMode    mode) const {
     const bool observe_fallback = mode == CudaGraphCheckMode::FORWARD;
+    if (!isGenerationPrefillCudaGraph() && inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        return false;
+    }
     const int  graph_key = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     const auto graph_it  = graph_instances_.find(graph_key);
     if (graph_it == graph_instances_.end()) {
@@ -1423,6 +1443,9 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs&  inputs,
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state, CudaGraphCheckMode mode) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
     const bool observe_fallback = mode == CudaGraphCheckMode::FORWARD;
+    if (!isGenerationPrefillCudaGraph() && inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        return false;
+    }
     if (!enable_cuda_graph_) {
         return false;
     }
@@ -1507,6 +1530,28 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
         }
         if (inputs.attention_inputs.cache_store_inputs.has_value()) {
             return fallback("pd_cache_store_input", GenerationPrefillCudaGraphStatus::PD_CACHE_STORE_NOT_SUPPORTED);
+        }
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            if (!inputs.input_embeddings_locs.defined() || inputs.input_embeddings_locs.is_cuda()
+                || inputs.input_embeddings_locs.scalar_type() != torch::kInt32
+                || !inputs.input_embeddings_locs.is_contiguous() || inputs.input_embeddings_locs.dim() != 1
+                || inputs.input_embeddings_locs.numel() != static_cast<int64_t>(inputs.input_embeddings->size())) {
+                return fallback("input_embeddings_metadata", GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
+            }
+            const auto* locs         = inputs.input_embeddings_locs.data_ptr<int32_t>();
+            int64_t     previous_end = 0;
+            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
+                const auto& embedding = inputs.input_embeddings->at(i);
+                if (!embedding.defined() || !embedding.is_cuda() || !embedding.is_floating_point()
+                    || embedding.dim() != 2 || embedding.size(0) <= 0 || embedding.size(1) != hidden_size_) {
+                    return fallback("input_embeddings_metadata", GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
+                }
+                const int64_t loc = locs[i];
+                if (loc < previous_end || loc + embedding.size(0) > inferred_tokens) {
+                    return fallback("input_embeddings_metadata", GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
+                }
+                previous_end = loc + embedding.size(0);
+            }
         }
         const auto tensor_has_elements = [](const torch::Tensor& tensor) {
             return tensor.defined() && tensor.numel() > 0;
@@ -1843,6 +1888,12 @@ void CudaGraphRunner::initCapture() {
         // owns only attention metadata and must not replace this tensor because
         // the captured graph retains its address.
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+        if (isGenerationPrefillCudaGraph()) {
+            inputs.cuda_graph_input_embedding_overrides =
+                torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+            inputs.cuda_graph_input_embedding_mask = torch::zeros(
+                {max_num_token_}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA).requires_grad(false));
+        }
         if (engram_window_size_ > 0) {
             inputs.engram_token_windows = torch::full({max_num_token_, engram_window_size_}, -1, options_cuda_int32_);
         }
@@ -2095,6 +2146,12 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const bool fixed_capacity_draft_prefill = usesFixedCapacityMtpDraftPrefillCudaGraph();
     const int  token_slice_len = fixed_capacity_draft_prefill ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    if (isGenerationPrefillCudaGraph()) {
+        inputs.cuda_graph_input_embedding_overrides =
+            capture_mem_hold_.py_model_inputs_.cuda_graph_input_embedding_overrides.slice(0, 0, token_slice_len);
+        inputs.cuda_graph_input_embedding_mask =
+            capture_mem_hold_.py_model_inputs_.cuda_graph_input_embedding_mask.slice(0, 0, token_slice_len);
+    }
     if (engram_window_size_ > 0) {
         inputs.engram_token_windows =
             capture_mem_hold_.py_model_inputs_.engram_token_windows.slice(0, 0, token_slice_len);
