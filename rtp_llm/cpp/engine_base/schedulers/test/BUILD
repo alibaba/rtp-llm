@@ -3,6 +3,19 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "scheduler_synchronization_state_test",
+    srcs = ["SchedulerSynchronizationStateTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base/schedulers:scheduler_synchronization_state",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {"GPU_COUNT": "0"},
+    exec_properties = {"gpu_count": "0"},
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",

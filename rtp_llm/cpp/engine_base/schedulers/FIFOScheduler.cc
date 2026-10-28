@@ -133,7 +133,7 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         }
         schedule_trigger_ = true;
     }
-    cond_.notify_all();
+    scheduler_sync_state_->notify();
     return {std::move(enqueue_successes), streams};
 }
 
@@ -331,29 +331,8 @@ void FIFOScheduler::onLoadingStream(const GenerateStreamPtr& stream) {
             return;
         }
 
-        // onDone() may run inline while schedule()/stop() already owns this
-        // mutex. In that case the active scheduler round will observe the
-        // predicate directly; recursively acquiring a non-recursive mutex
-        // would deadlock. Async callbacks acquire the mutex before publishing
-        // the predicate, closing the condition-variable check-to-park window.
-        if (sync_state->lockOwnedByCurrentThread()) {
-            if (sync_state->pending_cache_load_count.load(std::memory_order_acquire) == 0) {
-                sync_state->cache_load_completion_trigger = true;
-            }
-            return;
-        }
-
-        bool notify = false;
-        {
-            std::lock_guard<std::mutex> lock(sync_state->mutex);
-            if (sync_state->pending_cache_load_count.load(std::memory_order_acquire) == 0) {
-                sync_state->cache_load_completion_trigger = true;
-                notify                                    = true;
-            }
-        }
-        if (notify) {
-            sync_state->cond.notify_all();
-        }
+        // May run inline under scheduler or allocator locks; only acquire the wake mutex.
+        sync_state->notifyCacheLoadCompletion();
     });
     if (!registered) {
         const size_t previous = sync_state->pending_cache_load_count.fetch_sub(1, std::memory_order_acq_rel);
@@ -687,21 +666,23 @@ bool FIFOScheduler::partitionChunkContinuations() {
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
-    unique_lock<mutex>                            lock(lock_);
-    SchedulerSynchronizationState::LockOwnerScope lock_owner(*scheduler_sync_state_);
+    unique_lock<mutex> lock(lock_);
+    auto timeout = std::chrono::milliseconds::max();
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
-        cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+        timeout = std::chrono::milliseconds(10);
     } else if (!waiting_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
         // large retryable queue into a tight malloc/eviction loop.
-        cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
-    } else {
-        cond_.wait(lock, [this] { return waitPredicate(); });
+        timeout = std::chrono::milliseconds(100);
     }
+    scheduler_sync_state_->wait(lock, [this] { return waitPredicate(); }, timeout);
 
-    schedule_trigger_                                    = false;
-    scheduler_sync_state_->cache_load_completion_trigger = false;
+    schedule_trigger_ = false;
+    {
+        std::lock_guard<std::mutex> wake_lock(scheduler_sync_state_->wake_mutex);
+        scheduler_sync_state_->cache_load_completion_trigger = false;
+    }
     last_admitted_context_batch_size_                    = 0;
     last_admitted_context_token_size_                    = 0;
     last_waiting_oldest_age_us_                          = 0;

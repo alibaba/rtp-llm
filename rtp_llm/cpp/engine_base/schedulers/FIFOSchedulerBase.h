@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -14,47 +13,13 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerSynchronizationState.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
 int64_t computeChunkGrant(int64_t budget, int64_t rows, int64_t remaining, int64_t block_size);
-
-struct SchedulerSynchronizationState {
-    class LockOwnerScope {
-    public:
-        explicit LockOwnerScope(const SchedulerSynchronizationState& state): previous_(lock_owner_) {
-            lock_owner_ = &state;
-        }
-
-        ~LockOwnerScope() {
-            lock_owner_ = previous_;
-        }
-
-        LockOwnerScope(const LockOwnerScope&)            = delete;
-        LockOwnerScope& operator=(const LockOwnerScope&) = delete;
-
-    private:
-        const SchedulerSynchronizationState* previous_;
-    };
-
-    bool lockOwnedByCurrentThread() const {
-        return lock_owner_ == this;
-    }
-
-    std::mutex              mutex;
-    std::condition_variable cond;
-    std::atomic<size_t>     pending_cache_load_count{0};
-    // Protected by mutex. The count remains atomic because allocator callbacks
-    // decrement it before taking mutex only on the transition to zero.
-    bool cache_load_completion_trigger{false};
-
-private:
-    static thread_local const SchedulerSynchronizationState* lock_owner_;
-};
-
-using SchedulerSynchronizationStatePtr = std::shared_ptr<SchedulerSynchronizationState>;
 
 class FIFOSchedulerBase: public SchedulerBase {
 public:
@@ -92,6 +57,7 @@ protected:
     virtual const char* schedulerName() const                                            = 0;
     virtual bool        evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
                                               const GenerateStreamPtr&            new_stream) = 0;
+    // Called with both lock_ and scheduler_sync_state_->wake_mutex held.
     virtual bool        waitPredicate()                                                  = 0;
     virtual void        onRunningStream(const GenerateStreamPtr& stream) {}
     virtual void        onLoadingStream(const GenerateStreamPtr& stream) {}
@@ -135,7 +101,6 @@ protected:
     bool                            schedule_trigger_        = false;
     SchedulerSynchronizationStatePtr scheduler_sync_state_ = std::make_shared<SchedulerSynchronizationState>();
     std::mutex&                     lock_                        = scheduler_sync_state_->mutex;
-    std::condition_variable&        cond_                        = scheduler_sync_state_->cond;
     kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
     int64_t                         last_admitted_context_batch_size_ = 0;
     int64_t                         last_admitted_context_token_size_ = 0;
