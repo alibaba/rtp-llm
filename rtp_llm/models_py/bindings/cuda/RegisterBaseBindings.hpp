@@ -28,11 +28,21 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 
+#if defined(RTP_ENGRAM_TRANSITION_ENABLED)
+#include "rtp_llm/models_py/bindings/cuda/kernels/engram_transition.h"
+#endif
+
 using namespace rtp_llm;
 
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+#if defined(RTP_ENGRAM_TRANSITION_ENABLED)
+    rtp_ops_m.def("engram_wkv_post", &rtp_llm::engramWkvPost);
+    rtp_ops_m.def("engram_gate_update", &rtp_llm::engramGateUpdate);
+    rtp_ops_m.def("engram_pre", &rtp_llm::engramPre);
+#endif
+
     rtp_ops_m.def("per_token_group_quant_fp8_v3",
                   &rtp_llm::per_token_group_quant_fp8_v3,
                   "V4.1 BF16 group32 E4M3 quantization with packed UE8M0 scales",

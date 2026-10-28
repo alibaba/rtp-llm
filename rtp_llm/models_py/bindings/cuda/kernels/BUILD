@@ -446,3 +446,28 @@ cc_library(
     # Match legacy BF16 quantization, preserving finite subnormal inputs.
     copts = cuda_copts() + ["-nvcc_options=ftz=false"],
 )
+
+# Engram's device code uses DeepGEMM/CUTLASS SM103 instructions. Keep its
+# compiler arithmetic and CUTLASS headers private to these three translation units.
+cc_library(
+    name = "engram_transition",
+    data = ["engram/NOTICE", "engram/LICENSE.DeepGEMM"],
+    srcs = ["engram_wkv_post.cu", "engram_gate_update.cu", "engram_pre.cu"],
+    hdrs = ["engram_transition.h"],
+    textual_hdrs = glob(["engram/**/*.cuh", "engram/**/*.h"]),
+    copts = cuda_default_copts_without_arch() + [
+        "-O3", "-std=c++20",
+        "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-nvcc_options=expt-relaxed-constexpr", "-nvcc_options=expt-extended-lambda",
+        "-nvcc_options=ftz=false", "-nvcc_options=fmad=true",
+        "-nvcc_options=ptxas-options=--register-usage-level=10",
+        "--cuda-gpu-arch=sm_103a",
+    ],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_driver",
+    ],
+    implementation_deps = ["@cutlass_engram//:cutlass"],
+)

@@ -76,6 +76,7 @@ _TESTS = [
     "test_engram_cuda",
     "test_flash_mla_heads",
     "test_v41_cross_layer_mhc",
+    "test_engram_transition_cuda",
     "test_v41_aux_capture_mhc",
     "test_v41_decode_rope_metadata",
     "test_v41_delayed_hc",
