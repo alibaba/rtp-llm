@@ -17,8 +17,8 @@ namespace {
 constexpr auto kNoProgressScheduleGap = std::chrono::milliseconds(1);
 
 int remainingKVAllocationSteps(const GenerateStreamPtr& stream) {
-    // The final generated token is never used as input to another forward, so it does not get a KV entry.
-    return std::max(0, static_cast<int>(stream->maxTokenNum()) - stream->seqLength() - 1);
+    /** Estimate until scheduling stops; the final generated token needs no subsequent KV allocation. */
+    return std::max(0, static_cast<int>(stream->nextStepSeqLengthLimit()) - stream->seqLength() - 1);
 }
 
 int64_t estimateNeedBlocks(const GenerateStreamPtr& stream, int decode_step) {
@@ -201,7 +201,7 @@ bool PDFusionRatioScheduler::waitPredicate() {
            || !running_streams_.empty() || !pending_decode_streams_.empty() || !new_streams_.empty();
 }
 
-absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
+absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
@@ -242,11 +242,11 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
             made_progress |= new_streams_.size() < active_size_before;
             if (!prefill_batch.empty()) {
                 has_unclassified_prefill_batch_ = true;
-                decode_since_prefill_          = 0;
+                decode_since_prefill_           = 0;
                 prefill_since_decode_ += 1;
                 reportMetrics();
                 last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-                return prefill_batch;
+                return ScheduleOutput{std::move(prefill_batch)};
             }
         }
     }
@@ -257,8 +257,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
         decode_since_prefill_ += 1;
         prefill_since_decode_ = 0;
     }
-    if (!pending_decode_streams_.empty() || !new_streams_.empty()
-        || (made_progress && !waiting_streams_.empty())) {
+    if (!pending_decode_streams_.empty() || !new_streams_.empty() || (made_progress && !waiting_streams_.empty())) {
         schedule_trigger_ = true;
     }
     if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
@@ -270,7 +269,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return running_streams_;
+    return ScheduleOutput{running_streams_};
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
@@ -323,10 +322,10 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
     auto&     state              = *admission_peak_state_;
     const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
-    const bool    enforce_capacity = !state.streams.empty();
+    const bool enforce_capacity = !state.streams.empty();
     // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
     // unknown, so use the conservative no-hit estimate here.
-    const int64_t initial_delta    = estimateInitialNeedBlocks(new_stream);
+    const int64_t initial_delta = estimateInitialNeedBlocks(new_stream);
 
     if (enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
@@ -334,7 +333,7 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
         return false;
     }
 
-    const auto insert_it = std::lower_bound(state.streams.begin(),
+    const auto insert_it      = std::lower_bound(state.streams.begin(),
                                             state.streams.end(),
                                             AdmissionStreamInfo{new_stream, remaining_kv_steps},
                                             longerLifetimeFirst);
@@ -404,7 +403,7 @@ bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
     const bool processed = !pending_decode_streams_.empty();
     for (auto it = pending_decode_streams_.begin(); it != pending_decode_streams_.end();) {
         const auto& stream = *it;
-        const auto state = stream->getStatus();
+        const auto  state  = stream->getStatus();
         if ((state != StreamState::RUNNING || stream->isContextStream()) && state != StreamState::FINISHED
             && !stream->hasError()) {
             stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "invalid pending-decode stream state");

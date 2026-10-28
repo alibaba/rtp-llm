@@ -384,10 +384,10 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.cache_store_publish_start_tokens =
         pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
-    inputs.kv_cache_block_id   = pinnedTensor(block_ids,
-                                            {static_cast<int64_t>(group_tags.size()),
-                                             static_cast<int64_t>(batch_size),
-                                             static_cast<int64_t>(block_table_width)});
+    inputs.kv_cache_block_id        = pinnedTensor(block_ids,
+                                                   {static_cast<int64_t>(group_tags.size()),
+                                                    static_cast<int64_t>(batch_size),
+                                                    static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -654,17 +654,17 @@ Scenario makeMtpScenario() {
 
 Scenario makeScenario(const std::string& name) {
     if (name == "cyclic_chunk_views") {
-        auto config      = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
-        auto groups      = config.topology().groups();
-        groups[0].policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        auto full_spec                      = groups[1].spec->clone();
+        auto config                          = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
+        auto groups                          = config.topology().groups();
+        groups[0].policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        auto full_spec                       = groups[1].spec->clone();
         full_spec->kernel_seq_size_per_block = 1;
-        groups[1].spec                      = std::move(full_spec);
+        groups[1].spec                       = std::move(full_spec);
         config.setTopology(std::move(groups), {LayerBase{kLayerId, {"swa", "full"}}});
         auto layout = makeLayout(config);
         // Both chunk rows use cyclic execution banks, but only the final
         // SWA row exposes its owned tail blocks to cache-store publication.
-        auto inputs = makeInputs(/*input_lengths=*/{4, 4},
+        auto inputs                             = makeInputs(/*input_lengths=*/{4, 4},
                                  /*request_ids=*/{301, 302},
                                  /*cache_keys=*/{3101, 3102, 3103, 3104, 3201, 3202, 0, 0},
                                  /*cache_keys_width=*/4,
@@ -675,9 +675,8 @@ Scenario makeScenario(const std::string& name) {
                                  /*global_stride_bytes=*/24);
         inputs.prefix_lengths                   = pinnedTensor({4, 0}, {2});
         inputs.cache_store_publish_start_tokens = pinnedTensor({4, 0}, {2});
-        inputs.kv_cache_kernel_block_id = pinnedTensor(
-            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0,
-             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
+        inputs.kv_cache_kernel_block_id         = pinnedTensor(
+            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
@@ -786,6 +785,22 @@ Scenario makeScenario(const std::string& name) {
     if (name == "prefill_only_pd") {
         auto scenario                = makeMultiTagScenario();
         scenario.inputs.skip_lm_head = true;
+        return scenario;
+    }
+    if (name == "pp_boundary") {
+        auto scenario                = makeMultiTagScenario();
+        scenario.parallelism.pp_size = 3;
+        scenario.parallelism.pp_rank = 1;
+        const auto rows              = scenario.inputs.combo_tokens.numel();
+        const auto hidden =
+            torch::arange(rows, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA)).reshape({rows, 1});
+        scenario.inputs.pp_intermediates = {{"hidden_states", hidden},
+                                            {"residual", hidden + 10},
+                                            {"mtp_aux_hidden_states", torch::cat({hidden + 20, hidden + 30}, 1)}};
+        scenario.inputs.engram_token_windows =
+            torch::arange(rows * 2, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true)).reshape({rows, 2});
+        scenario.inputs.need_all_logits        = false;
+        scenario.inputs.need_all_hidden_states = false;
         return scenario;
     }
     if (name == "capture_bf16") {
@@ -947,10 +962,13 @@ py::dict serializeResult(const RecordingCacheStore&              store,
         bases[py::str(tag)] = py::int_(address);
     }
     py::dict result;
-    result["records"]        = std::move(records);
-    result["base_addresses"] = std::move(bases);
-    result["logits_defined"] = output.logits.defined();
-    result["hidden_width"]   = output.all_hidden_states.defined() ? output.all_hidden_states.size(1) : 0;
+    result["records"]          = std::move(records);
+    result["base_addresses"]   = std::move(bases);
+    result["logits_defined"]   = output.logits.defined();
+    result["hidden_width"]     = output.all_hidden_states.defined() ? output.all_hidden_states.size(1) : 0;
+    result["pp_intermediates"] = output.pp_intermediates;
+    result["mtp_target_hidden_states"] =
+        output.mtp_target_hidden_states.defined() ? py::cast(output.mtp_target_hidden_states) : py::none();
     return result;
 }
 

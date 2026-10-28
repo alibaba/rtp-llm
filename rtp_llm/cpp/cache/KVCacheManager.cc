@@ -234,7 +234,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const SpeculativeExecutionConfig&  sp_config,
                                const PDSepConfig&                 pd_sep_config,
                                const CacheStoreConfig& /*cache_store_config*/,
-                               bool use_device_malloc_block_pool):
+                               bool                         use_device_malloc_block_pool,
+                               BlockTreeCacheLayoutConstPtr block_tree_layout):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -244,6 +245,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     use_device_malloc_block_pool_(use_device_malloc_block_pool),
     warmup_(warmup),
+    block_tree_layout_(std::move(block_tree_layout)),
     allocation_wait_state_(std::make_shared<KVCacheAllocationWaitState>()) {
     for (const auto& group : config_.topology().groups()) {
         RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete cache groups");
@@ -335,7 +337,9 @@ bool KVCacheManager::init() {
     for (const auto& pool : coordinator_manager_->groupBlockPools()) {
         pool->setCapacityChangeCallback(capacity_changed);
     }
-    const bool requires_broadcast_manager = parallelism_config_.tp_size > 1 && parallelism_config_.tp_rank == 0
+    const bool is_first_stage_root        = parallelism_config_.pp_rank == 0 && parallelism_config_.tp_rank == 0;
+    const bool requires_broadcast_manager = is_first_stage_root
+                                            && (parallelism_config_.pp_size > 1 || parallelism_config_.tp_size > 1)
                                             && !runtime_config_.worker_grpc_addrs.empty();
     std::shared_ptr<BroadcastManager> broadcast_manager;
     if (requires_broadcast_manager) {
@@ -362,7 +366,8 @@ bool KVCacheManager::init() {
                                              parallelism_config_,
                                              std::move(storage_backend),
                                              broadcast_manager,
-                                             metrics_reporter_);
+                                             metrics_reporter_,
+                                             block_tree_layout_);
     if (!block_tree_cache_) {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
@@ -379,7 +384,8 @@ bool KVCacheManager::init() {
 }
 
 std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {
-    const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.tp_size);
+    const size_t tp_size               = static_cast<size_t>(parallelism_config_.tp_size);
+    const size_t expected_worker_count = static_cast<size_t>(parallelism_config_.pp_size) * tp_size;
     if (runtime_config_.worker_grpc_addrs.size() != expected_worker_count) {
         RTP_LLM_LOG_ERROR("KVCacheManager: worker grpc address count mismatch, expected=%zu, actual=%zu",
                           expected_worker_count,
@@ -387,6 +393,7 @@ std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferMa
         return nullptr;
     }
 
+    /** Worker addresses already select this DP lane and are ordered by PP stage, then TP rank. */
     auto broadcast_manager = std::make_shared<BroadcastManager>(runtime_config_.worker_grpc_addrs);
     if (!broadcast_manager->init()) {
         RTP_LLM_LOG_ERROR("KVCacheManager: failed to initialize BlockTreeCache BroadcastManager");
@@ -768,9 +775,16 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
     }
     std::vector<TransferDescriptor> descriptors;
+    const bool                      allow_absent_group_sets = parallelism_config_.pp_size > 1;
     if (!BlockTransferRequestConverter::decodeTransfer(
-            request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
+            request.mem_request(), descriptors, block_tree_cache_->groupSets(), allow_absent_group_sets)) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
+        return true;
+    }
+    if (descriptors.empty()) {
+        TransferResult result;
+        result.expandBlockErrors(request.mem_request().copy_items_size());
+        BlockTransferRequestConverter::encodeTransferResult(*memory_response, result);
         return true;
     }
 

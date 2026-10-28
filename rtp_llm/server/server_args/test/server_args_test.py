@@ -38,6 +38,24 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class PipelinePartitionArgumentsTest(TestCase):
+    def test_partition_binds_to_parallel_config(self):
+        from rtp_llm.server.server_args import server_args
+
+        for args, env, expected in (
+            ([], {}, []),
+            (["--pp_stage_layer_counts", "[2, 3, 2]"], {}, [2, 3, 2]),
+            ([], {"PP_STAGE_LAYER_COUNTS": "[3, 4]"}, [3, 4]),
+        ):
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, env, clear=True
+            ):
+                configs = server_args.setup_args(args)
+                self.assertEqual(
+                    configs.parallelism_config.pp_stage_layer_counts, expected
+                )
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
@@ -636,9 +654,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
         self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
         seven_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
-        seven_slot_fifo_config.__setstate__(
-            (32, 8192, "ratio", "2", False, 16, 2048)
-        )
+        seven_slot_fifo_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048))
         self.assertEqual(seven_slot_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(seven_slot_fifo_config.prefill_chunk_size, 0)
 
@@ -1818,10 +1834,14 @@ class GenerateArgsFromEnvTest(TestCase):
         with patch.dict(os.environ, {"ENABLE_CRC": "0"}, clear=True):
             value = read_env_value("ENABLE_CRC", True, str2bool)
         self.assertIs(value, False)
-        self.assertEqual(format_argument_pair("--enable_crc", value), ["--enable_crc", "0"])
+        self.assertEqual(
+            format_argument_pair("--enable_crc", value), ["--enable_crc", "0"]
+        )
 
     def test_invalid_str2bool_environment_value_is_rejected(self):
-        from rtp_llm.server.server_args.generate_args_from_env_clean import read_env_value
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            read_env_value,
+        )
         from rtp_llm.server.server_args.util import str2bool
 
         with patch.dict(os.environ, {"ENABLE_CRC": "not-a-bool"}, clear=True):

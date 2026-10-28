@@ -254,7 +254,7 @@ bool groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_vi
 bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<std::string>>& group_members) {
     group_members.clear();
     for (const GroupBase& group : cache_config.topology().groups()) {
-        if (!group.policy.enable_prefix_reuse) {
+        if (!cacheGroupParticipatesInBlockTree(group.policy)) {
             continue;
         }
 
@@ -354,6 +354,30 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
 
 }  // namespace
 
+BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_config,
+                                                 const KVCacheConfig& kv_cache_config) {
+    auto layout = std::make_shared<BlockTreeCacheLayout>();
+    if (!buildGroupMembers(cache_config, layout->group_members)) {
+        return nullptr;
+    }
+    const bool enable_crc = kv_cache_config.enable_crc && CrcBlockCopyBatch::available()
+                            && (kv_cache_config.enable_memory_cache || kv_cache_config.enable_disk_cache);
+    const size_t pool_alignment = kv_cache_config.enable_disk_cache && !kv_cache_config.disk_cache_buffered_io ?
+                                      kDirectIOAlignment :
+                                      kCopyAlignment;
+    layout->backing_layouts.reserve(layout->group_members.size());
+    for (const auto& members : layout->group_members) {
+        auto backing_layout = computeBackingLayout(cache_config, members, enable_crc, pool_alignment);
+        RTP_LLM_CHECK_WITH_INFO(backing_layout.pool_stride
+                                    <= std::numeric_limits<size_t>::max() - layout->local_combined_stride_bytes,
+                                "BlockTreeCache combined lower-tier stride overflow");
+        layout->local_combined_stride_bytes += backing_layout.pool_stride;
+        layout->backing_layouts.push_back(std::move(backing_layout));
+    }
+    layout->capacity_stride_bytes = layout->local_combined_stride_bytes;
+    return layout;
+}
+
 size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t combined_stride_bytes) {
     if (combined_stride_bytes == 0) {
         return 0;
@@ -375,13 +399,14 @@ std::string resolveDiskMountPath(const std::string& paths_csv, int64_t local_wor
     return paths[static_cast<size_t>(local_rank)];
 }
 
-BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                         cache_config,
-                                       const KVCacheConfig&                       kv_cache_config,
-                                       const CoordinatorCacheManagerPtr&          coordinator_manager,
-                                       const ParallelismConfig&                   parallelism_config,
-                                       std::shared_ptr<StorageBackend>            storage_backend,
-                                       std::shared_ptr<BroadcastManager>          broadcast_manager,
-                                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                          cache_config,
+                                       const KVCacheConfig&                        kv_cache_config,
+                                       const CoordinatorCacheManagerPtr&           coordinator_manager,
+                                       const ParallelismConfig&                    parallelism_config,
+                                       std::shared_ptr<StorageBackend>             storage_backend,
+                                       std::shared_ptr<BroadcastManager>           broadcast_manager,
+                                       std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter,
+                                       std::shared_ptr<const BlockTreeCacheLayout> layout) {
     const auto device_eviction_policy = parseEvictionPolicy(kv_cache_config.device_eviction_policy);
     const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.memory_eviction_policy);
     const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
@@ -432,12 +457,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
     }
     if (kv_cache_config.enable_crc && (host_enabled || disk_enabled) && !CrcBlockCopyBatch::available()) {
-        RTP_LLM_LOG_WARNING(
-            "CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
-            "host/disk transfers use plain copies");
+        RTP_LLM_LOG_WARNING("CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
+                            "host/disk transfers use plain copies");
     }
-    const bool crc_backend_available =
-        kv_cache_config.enable_crc && CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
     // HOST buffers are also used directly for disk I/O, so both pools share the disk alignment when needed.
     const size_t pool_alignment =
         disk_enabled && !kv_cache_config.disk_cache_buffered_io ? kDirectIOAlignment : kCopyAlignment;
@@ -454,11 +476,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         return nullptr;
     }
 
-    std::vector<GroupSetPtr>              group_sets;
-    std::vector<std::vector<std::string>> group_members;
-    if (!buildGroupMembers(cache_config, group_members)) {
+    if (layout == nullptr) {
+        layout = planBlockTreeCacheLayout(cache_config, kv_cache_config);
+    }
+    if (layout == nullptr || layout->group_members.size() != layout->backing_layouts.size()
+        || layout->capacity_stride_bytes < layout->local_combined_stride_bytes) {
+        RTP_LLM_LOG_ERROR("failed to build a consistent BlockTreeCache layout");
         return nullptr;
     }
+    const auto&              group_members   = layout->group_members;
+    const auto&              backing_layouts = layout->backing_layouts;
+    const size_t             combined_stride = layout->capacity_stride_bytes;
+    std::vector<GroupSetPtr> group_sets;
     if (disk_enabled) {
         for (const std::vector<std::string>& members : group_members) {
             RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
@@ -468,17 +497,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                 return nullptr;
             }
         }
-    }
-
-    std::vector<BackingLayout> backing_layouts;
-    backing_layouts.reserve(group_members.size());
-    size_t combined_stride = 0;
-    for (const std::vector<std::string>& members : group_members) {
-        const auto layout = computeBackingLayout(cache_config, members, crc_backend_available, pool_alignment);
-        RTP_LLM_CHECK_WITH_INFO(layout.pool_stride <= std::numeric_limits<size_t>::max() - combined_stride,
-                                "BlockTreeCache combined lower-tier stride overflow");
-        combined_stride += layout.pool_stride;
-        backing_layouts.push_back(layout);
     }
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());

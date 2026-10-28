@@ -10,6 +10,8 @@
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/config/RankLayout.h"
+#include "rtp_llm/cpp/config/StageLayerRange.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -17,6 +19,19 @@
 namespace rtp_llm {
 
 namespace {
+
+bool modelHasMultipleCacheGroups(const ModelConfig& model_config) {
+    std::set<std::string> tags;
+    for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
+        for (const auto& desc : layer_descs) {
+            tags.insert(desc.tag);
+            if (tags.size() > 1) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 // Kernel blocks feeding a compressed (OpaqueKV) pool must be a whole number of
 // 128-token units: 128 is the HCA compression unit and also FlashMLA's block
@@ -287,7 +302,8 @@ void populateGroups(CacheConfig&                 config,
 CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
                                   const ParallelismConfig& parallelism_config,
                                   const KVCacheConfig&     kv_cache_config,
-                                  int                      gen_num_per_cycle) {
+                                  int                      gen_num_per_cycle,
+                                  uint32_t                 global_layer_begin) {
     const auto [seq_size, kernel_seq_size] = resolveSeqSizes(model_config, kv_cache_config);
     validateDescs(model_config, kernel_seq_size);
     validateAttentionMetadata(model_config);
@@ -299,6 +315,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     CacheConfig config;
     config.dtype                   = ctx.dtype;
     config.layer_num               = static_cast<uint32_t>(model_config.num_layers);
+    config.global_layer_begin      = global_layer_begin;
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
@@ -356,11 +373,43 @@ LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCach
     return layer_specs;
 }
 
+ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
+                                                       const ParallelismConfig& parallelism_config,
+                                                       bool                     is_draft_model) {
+    if (parallelism_config.pp_size <= 1 || is_draft_model) {
+        return model_config;
+    }
+
+    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
+    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
+                            "kv_cache_spec_descs size %zu != num_layers %ld",
+                            model_config.kv_cache_spec_descs.size(),
+                            model_config.num_layers);
+
+    ModelConfig stage_config = model_config;
+    stage_config.num_layers  = range.size;
+    stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + range.begin,
+                                            model_config.kv_cache_spec_descs.begin() + range.end());
+
+    auto& attention_types = stage_config.hybrid_attention_config.hybrid_attention_types;
+    if (!attention_types.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(attention_types.size() == static_cast<size_t>(model_config.num_layers),
+                                "hybrid_attention_types size %zu != num_layers %ld",
+                                attention_types.size(),
+                                model_config.num_layers);
+        attention_types.assign(model_config.hybrid_attention_config.hybrid_attention_types.begin() + range.begin,
+                               model_config.hybrid_attention_config.hybrid_attention_types.begin() + range.end());
+    }
+    return stage_config;
+}
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
-                                                  int                      gen_num_per_cycle) {
-    auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+                                                  int                      gen_num_per_cycle,
+                                                  uint32_t                 global_layer_begin) {
+    auto config =
+        createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, global_layer_begin);
     config.linear_step = std::max(1, kv_cache_config.linear_step);
     return config;
 }
@@ -378,7 +427,11 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
                                                    const ParallelismConfig& parallelism_config,
                                                    const KVCacheConfig&     kv_cache_config,
                                                    int                      gen_num_per_cycle) {
-    auto config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
+    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
+    auto       config =
+        createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
+    config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
     // Upstream warmup pools reserve the sentinel block plus one allocatable
     // block per group, and never inherit linear_step: the SWA
     // ceil(baseline/step) shrink would collapse those groups to sentinel-only.
@@ -400,11 +453,19 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         draft_model_config == nullptr
             || (sp_config->gen_num_per_cycle >= 0 && sp_config->gen_num_per_cycle <= std::numeric_limits<int>::max()),
         "draft proposal token count must fit a non-negative int");
-    const int gen_num_per_cycle = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
-    auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    const int  gen_num_per_cycle  = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
+    const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
+    const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
+    auto       config =
+        createBasicConfig(stage_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, range.begin);
+    config.model_has_multiple_cache_groups = modelHasMultipleCacheGroups(model_config);
     if (draft_model_config != nullptr) {
-        auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
+        RTP_LLM_CHECK_WITH_INFO(layout.isLastStage(), "draft cache configuration is only valid on the last PP stage");
+        auto draft_model = stageScopedModelConfig(*draft_model_config, parallelism_config, true);
+        auto draft       = createBasicConfig(
+            draft_model, parallelism_config, kv_cache_config, gen_num_per_cycle, /*global_layer_begin=*/0);
+        int num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
@@ -460,29 +521,32 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
 
 uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candidate_block_num,
                                                  const ParallelismConfig& parallelism_config) {
-    size_t world_size = parallelism_config.tp_size * parallelism_config.dp_size;
-    if (world_size > 1) {
+    const auto& ffn_config = parallelism_config.ffn_disaggregate_config;
+    /** Attention ranks own independent KV caches; the FFN service only needs a minimal valid placeholder pool. */
+    if (ffn_config.enable_ffn_disaggregate) {
+        return ffn_config.is_ffn_service() ? 2u : candidate_block_num;
+    }
+
+    const auto layout     = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto group_size = static_cast<size_t>(layout.laneStride());
+    if (group_size > 1) {
         RTP_LLM_CHECK_WITH_INFO(candidate_block_num <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()),
                                 "candidate cache block count exceeds collective int32 range");
-        size_t local_rank    = parallelism_config.tp_size * parallelism_config.dp_rank + parallelism_config.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
-        auto   block_num_ptr = block_num_t.data_ptr<int>();
+        const auto local_rank     = static_cast<size_t>(layout.stageRank());
+        auto       block_num_t    = torch::empty({static_cast<int64_t>(group_size)}, torch::kInt32).pin_memory();
+        auto       block_num_ptr  = block_num_t.data_ptr<int>();
         block_num_ptr[local_rank] = static_cast<int>(candidate_block_num);
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+        execAllGather({{block_num_t}, ParallelMode::STAGE});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
-        return selectConfirmedBlockNum(
-            block_num_ptr, world_size, parallelism_config.ffn_disaggregate_config.is_ffn_service());
+        return selectConfirmedBlockNum(block_num_ptr, group_size);
     }
     return candidate_block_num;
 }
 
-uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service) {
+uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size_t count) {
     RTP_LLM_CHECK_WITH_INFO(candidates != nullptr && count > 0, "cross-rank cache candidates must not be empty");
-    if (is_ffn_service) {
-        return 1;
-    }
     const auto confirmed = *std::min_element(candidates, candidates + count);
     RTP_LLM_CHECK_WITH_INFO(confirmed > 0, "cross-rank cache block count must be positive");
     return static_cast<uint32_t>(confirmed);

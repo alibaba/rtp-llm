@@ -8,6 +8,16 @@ To use single-node multi-GPU parallelism, you need to add environment variables 
 TP_SIZE=2 WORLD_SIZE=2 MODEL_TYPE=xxx CHECKPOINT_PATH=/path/to/ckpt TOKENIZER_PATH=/path/to/tokenizer python3 -m rtp_llm.start_server
 ```
 
+## Pipeline Parallelism
+
+Pipeline parallelism (PP) divides the model layers across multiple GPUs. A two-stage deployment can be started with:
+
+```bash
+PP_SIZE=2 WORLD_SIZE=2 MODEL_TYPE=xxx CHECKPOINT_PATH=/path/to/ckpt TOKENIZER_PATH=/path/to/tokenizer python3 -m rtp_llm.start_server
+```
+
+Normally, `WORLD_SIZE = PP_SIZE * TP_SIZE * DP_SIZE`. Layers are split evenly by default. To customize the split, set `PP_STAGE_LAYER_COUNTS`, for example `'[16,20]'`; it must contain one positive value per stage and sum to the model's layer count.
+
 ## Multi-Node Single/Multi-GPU
 When starting the service, you need to configure the environment variable `DISTRIBUTE_CONFIG_FILE=/path/to/file`. The configuration content is JSON with the following format. The port is optional; if not filled, it is considered the same as the master port:
 ``` json
