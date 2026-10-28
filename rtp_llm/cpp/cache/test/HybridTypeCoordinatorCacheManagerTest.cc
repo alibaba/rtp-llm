@@ -2726,8 +2726,7 @@ protected:
     void SetUp() override {
         rtp_llm::initLogger();
         createDevice();
-        auto config        = makeFullSwaLinearCacheConfig();
-        config.linear_step = 4;
+        auto config = makeFullSwaLinearCacheConfig();
         allocator_         = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
         KVCacheConfig tiered_config;
         tiered_config.enable_memory_cache  = true;
