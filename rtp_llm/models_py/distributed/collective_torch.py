@@ -100,16 +100,22 @@ def _make_cpu_tp_broadcaster_base_path(
         base_dir = os.path.join(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
         )
-    os.makedirs(base_dir, mode=0o700, exist_ok=True)
-    base_path = os.path.join(
-        base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
-    )
+    socket_name = f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
+    base_path = os.path.join(base_dir, socket_name)
+    if (
+        not os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_DIR")
+        and len(os.fsencode(f"{base_path}_0.sock")) >= _UDS_SUN_PATH_LIMIT
+    ):
+        # Remote executors can supply TMPDIR paths longer than sun_path.
+        base_dir = os.path.join("/tmp", f"rtp_llm_{os.getuid()}")
+        base_path = os.path.join(base_dir, socket_name)
     rank0_path = f"{base_path}_0.sock"
     if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
         raise ValueError(
             f"CpuTpBroadcaster UDS path too long ({len(os.fsencode(rank0_path))} "
             f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {rank0_path}"
         )
+    os.makedirs(base_dir, mode=0o700, exist_ok=True)
     return base_path
 
 
