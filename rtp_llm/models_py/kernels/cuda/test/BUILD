@@ -3,6 +3,14 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "fp4_b12x_test",
+    srcs = ["fp4_b12x_test.py"],
+    deps = ["//rtp_llm/models_py:fp4_b12x"],
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
 py_library(
     name = "fast_bf16_int8_test_utils",
     srcs = ["fast_bf16_int8_test_utils.py"],

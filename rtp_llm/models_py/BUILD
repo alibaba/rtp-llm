@@ -1,6 +1,13 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
 py_library(
+    name = "fp4_b12x",
+    srcs = ["kernels/cuda/fp4_b12x.py"],
+    deps = ["//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/*.py",

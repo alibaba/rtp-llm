@@ -25,6 +25,8 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        if name == "nvidia-cutlass-dsl":
+            cuda13_x86_deps.append(requirement_gpu_cuda13("nvidia-cutlass-dsl-libs-cu13"))
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
@@ -82,6 +84,7 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@rtp_llm//:using_cuda13_x86": [
+            "nvidia-cutlass-dsl[cu13]==4.4.2",
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             # DeepGEMM ee6161b: nv_dev 2642b32 plus wheel CI, with native SM120 kernels.
