@@ -876,6 +876,14 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
         }
         // Only final rows may register persistent target/draft state for PD.
         plan.model_input.request_pd_separation.masked_fill_(plan.intermediate_chunk_mask, false);
+        if (!is_dspark_ && intermediateCount(plan.intermediate_chunk_mask) > 0) {
+            RTP_LLM_CHECK_WITH_INFO(!plan.model_input.need_all_logits,
+                                    "MTP chunked prefill does not support full prompt logits/loss");
+            auto rows = finalPrefillRows(plan.intermediate_chunk_mask);
+            auto indexes = plan.model_input.lm_output_indexes.index_select(
+                0, rows.to(plan.model_input.lm_output_indexes.device()));
+            plan.model_input.lm_output_indexes = indexes.is_cuda() ? indexes : indexes.pin_memory();
+        }
     }
 
     static const bool kLogWindow = std::getenv("RTP_LLM_LOG_TPSYNC") != nullptr;
@@ -1149,10 +1157,15 @@ void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
             }
         }
         GptModelOutputs final_output = model_output;
-        final_output.logits = model_output.logits.index_select(0, rows.to(model_output.logits.device()));
-        if (model_output.hidden_states.defined()) {
-            final_output.hidden_states = model_output.hidden_states.index_select(
-                0, rows.to(model_output.hidden_states.device()));
+        if (model_output.logits.size(0) == stream_count) {
+            final_output.logits = model_output.logits.index_select(0, rows.to(model_output.logits.device()));
+            if (model_output.hidden_states.defined()) {
+                final_output.hidden_states = model_output.hidden_states.index_select(
+                    0, rows.to(model_output.hidden_states.device()));
+            }
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(model_output.logits.size(0) == rows.numel(),
+                                    "MTP target logits must contain all rows or only final rows");
         }
         PPExecutionResult final_result;
         sampleTokens(final_plan, final_output, final_result);
@@ -1382,7 +1395,12 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
             torch::Tensor final_rows;
             if (intermediate_count > 0) {
                 final_rows = finalPrefillRows(intermediate_chunk_mask).to(proposal_logits.device());
-                proposal_logits = proposal_logits.index_select(0, final_rows);
+                if (proposal_logits.size(0) == intermediate_chunk_mask.numel()) {
+                    proposal_logits = proposal_logits.index_select(0, final_rows);
+                } else {
+                    RTP_LLM_CHECK_WITH_INFO(proposal_logits.size(0) == final_rows.numel(),
+                                            "MTP draft logits must contain all rows or only final rows");
+                }
             }
             auto draft_tokens = fast_topk_sampler_->forward(proposal_logits, 1).token_ids.to(torch::kInt32);
 

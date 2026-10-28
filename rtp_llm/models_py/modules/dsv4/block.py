@@ -309,6 +309,23 @@ class Block(nn.Module):
         _, _, _, ffn_hc_post = self._prefill_fast_hc_impls()
         return ffn_hc_post(ffn_out, residual, post, comb)
 
+    def forward_prefill_kv_only(
+        self, x, input_ids, positions, cu_seqlens, *, kv_cache=None,
+        block_tables_by_type=None, use_fast_path=False
+    ):
+        """MTP intermediate chunks need this layer's KV, not its output."""
+        if not isinstance(self.attn, AttentionFP8) or self.attn.compress_ratio != 0:
+            raise RuntimeError("MTP KV-only prefill requires native FP8 SWA attention")
+        if use_fast_path:
+            _, x_pre, _, _ = self.prefill_fast_attn_pre(x)
+        else:
+            x_pre, _, _ = self.attn_hc.pre(x)
+            x_pre = self.attn_norm(x_pre)
+        self.attn.forward_prefill_kv_only(
+            x_pre, positions, kv_cache=kv_cache, block_tables_by_type=block_tables_by_type
+        )
+        return x
+
     def forward_decode(
         self,
         x: torch.Tensor,  # [B, 1, hc, dim]

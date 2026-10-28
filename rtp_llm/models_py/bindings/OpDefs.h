@@ -367,6 +367,8 @@ struct PyModelInputs {
     rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
     // PP: boundary tensors from the upstream stage; empty under pp_size=1.
     PPIntermediates pp_intermediates;
+    // Derived from an empty LM selection. Only MTP prefill consumes this flag.
+    bool prefill_kv_only = false;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

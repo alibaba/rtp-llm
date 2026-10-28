@@ -17,6 +17,7 @@ final norm, ``_mtp_hidden_buffer`` accessor — falls through to
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 import torch
@@ -37,6 +38,10 @@ from rtp_llm.utils.model_weight import W
 
 
 class DeepSeekV4MtpModel(DeepSeekV4Model):
+    # Fusion changes the input to the native Block stack, not its execution
+    # contract. It is safe to use the validated FP8 prefill callables afterward.
+    _prefill_fast_hidden_compatible = True
+
     # PP view: the draft never shards across stages. ModelFactory only
     # constructs it on the stage owning ModuleKind.MTP (the last stage,
     # see ModulePlacement) and loads its single layer whole
@@ -309,9 +314,16 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
 
     def forward(self, inputs, fmha_impl: Any = None):
         self._cur_inputs = inputs
+        previous_kv_only = getattr(self.v4, "_mtp_prefill_kv_only", False)
+        self.v4._mtp_prefill_kv_only = (
+            not self._is_decode_role
+            and bool(getattr(inputs, "prefill_kv_only", False))
+            and os.environ.get("DSV4_MTP_PREFILL_KV_ONLY", "1") == "1"
+        )
         try:
             return super().forward(inputs, fmha_impl)
         finally:
+            self.v4._mtp_prefill_kv_only = previous_kv_only
             self._cur_inputs = None
 
 
