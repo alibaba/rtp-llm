@@ -94,7 +94,7 @@ class ConfigServiceTest {
                 prefill.getExecutionTimeEstimator().getExpression());
         assertNull(prefill.getCacheAffinity());
         assertNull(config.getRouter().getGroupSelector());
-        assertEquals("kvcache_used_ratio",
+        assertEquals("running_size",
                 config.getRouter().getRoles().getDecode().getCostEstimator().getExpression());
         var decode = config.getRouter().getRoles().getDecode().getAvailability();
         assertEquals(90, decode.getMaxKvUsagePercent());
@@ -277,7 +277,7 @@ class ConfigServiceTest {
         assertSame(original, estimator.compiledFormula());
         FlexlbConfigValidator.validate(config);
         assertSame(original, estimator.compiledFormula());
-        estimator.setExpression("running_size");
+        estimator.setExpression("kvcache_used_ratio");
         var changed = estimator.compiledFormula();
         assertNotSame(original, changed);
         assertSame(changed, estimator.compiledFormula());
