@@ -39,6 +39,7 @@ interface_includes = [
     "RemoteStoreTask.h",
     "MessagerRequest.h",
     "ErrorCodeUtil.h",
+    "PdTransferSwitches.h",
 ]
 
 interface_sources = [

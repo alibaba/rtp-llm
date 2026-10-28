@@ -48,6 +48,19 @@ _EAGER_COUNT_GATHER_FLAG = "DSV4_MOE_EAGER_COUNT_GATHER"
 _EAGER_GATHER_LOGGED = False
 _LOCAL_REPLAY_OWNER_ROWS = (512, 1024)
 _LOCAL_REPLAY_MAX_GRAPHS_PER_LAYER = 2
+# Copy-engine ring transport (``_ring_ep_transport``), default off.
+#   DSV4_MOE_RING_DISPATCH=1          ring all-gather of the unmasked MXFP8 packet
+#   DSV4_MOE_RING_COMBINE=nccl|mxfp8|bf16
+#                                     nccl: all_to_all return (DSV4_MOE_RETURN_DTYPE)
+#                                     mxfp8: ring reduce-scatter, MXFP8 requant per hop
+#                                     bf16: ring reduce-scatter with BF16 running sums
+#   DSV4_MOE_RING_MAX_ROWS=2048       per-rank row cap of the ring slabs
+# The ring needs rank-uniform stage counts; any other call uses NCCL.  Counts
+# are the stage-authoritative vector, so every rank takes the same route.
+_RING_DISPATCH_FLAG = "DSV4_MOE_RING_DISPATCH"
+_RING_COMBINE_FLAG = "DSV4_MOE_RING_COMBINE"
+_RING_MAX_ROWS_FLAG = "DSV4_MOE_RING_MAX_ROWS"
+_RING_LOGGED = False
 # A pool is shared only by graphs with the exact same device/current-stream/
 # shape key.  PyTorch permits graph-pool sharing only when graphs replay in the
 # same order they were captured.  Separating the 512/1024 and stream buckets
@@ -81,6 +94,29 @@ def _eager_count_gather_enabled() -> bool:
     if value not in ("0", "1"):
         raise ValueError(f"{_EAGER_COUNT_GATHER_FLAG} must be 0 or 1, got {value!r}")
     return value == "1"
+
+
+def _ring_dispatch_enabled() -> bool:
+    value = os.environ.get(_RING_DISPATCH_FLAG, "0")
+    if value not in ("0", "1"):
+        raise ValueError(f"{_RING_DISPATCH_FLAG} must be 0 or 1, got {value!r}")
+    return value == "1"
+
+
+def _ring_combine_mode() -> str:
+    value = os.environ.get(_RING_COMBINE_FLAG, "nccl")
+    if value not in ("nccl", "mxfp8", "bf16"):
+        raise ValueError(
+            f"{_RING_COMBINE_FLAG} must be nccl, mxfp8 or bf16, got {value!r}"
+        )
+    return value
+
+
+def _ring_max_rows() -> int:
+    value = int(os.environ.get(_RING_MAX_ROWS_FLAG, "2048"))
+    if value <= 0:
+        raise ValueError(f"{_RING_MAX_ROWS_FLAG} must be positive, got {value}")
+    return value
 
 
 def _is_sm120_runtime() -> bool:
@@ -137,6 +173,11 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         # buffers, pinned readback, event).  Never shared with the synchronous
         # ``_gather_counts`` buffers so the two paths cannot race.
         self._eager_counts_state: Optional[dict] = None
+        self._ring_dispatch = _ring_dispatch_enabled()
+        self._ring_combine = _ring_combine_mode()
+        self._ring_max_rows = _ring_max_rows()
+        self._ring_calls = 0
+        self._ring_fallbacks = 0
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
@@ -253,14 +294,24 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         counts = self._counts_for_forward(n_local, group, world, device, pending)
         n_total = sum(counts)
 
+        ring = self._ring_for_call(
+            counts, n_local, hidden, payload_cols, group, world, device
+        )
         with record_function_range("dsv4.moe.a2a.dispatch"):
-            send_payload = self._pack_dispatch(
-                x, weights, indices, hidden, scale_cols, topk, payload_cols, world
-            )
-            recv = self._all_to_all(
-                send_payload, [n_local] * world, counts, payload_cols, group
-            )
-            del send_payload
+            if ring is not None and self._ring_dispatch:
+                recv = ring.allgather(
+                    self._pack_dispatch_unmasked(
+                        x, weights, indices, hidden, scale_cols, topk, payload_cols
+                    )
+                )
+            else:
+                send_payload = self._pack_dispatch(
+                    x, weights, indices, hidden, scale_cols, topk, payload_cols, world
+                )
+                recv = self._all_to_all(
+                    send_payload, [n_local] * world, counts, payload_cols, group
+                )
+                del send_payload
 
         with record_function_range("dsv4.moe.a2a.compute"):
             local_out = self._compute_local(
@@ -269,6 +320,12 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
 
         del recv
         with record_function_range("dsv4.moe.a2a.return"):
+            if ring is not None and self._ring_combine != "nccl":
+                summed = ring.reduce_scatter(
+                    local_out.contiguous(), n_local, mode=self._ring_combine
+                )
+                del local_out
+                return summed.to(x.dtype)
             ret_payload = self._pack_return(local_out, hidden, scale_cols, n_total)
             del local_out
             ret_recv = self._all_to_all(
@@ -277,6 +334,85 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
             del ret_payload
             summed = self._combine_return(ret_recv, n_local, hidden, world)
         return summed.to(x.dtype)
+
+    # ---- ring transport ---------------------------------------------------
+
+    def _ring_for_call(
+        self, counts, n_local, hidden, payload_cols, group, world, device
+    ):
+        """Ring transport for this call, or None for NCCL.
+
+        The decision depends only on stage-authoritative counts and env, so
+        every rank of the stage takes the same route for the same call."""
+        global _RING_LOGGED
+        if not self._ring_dispatch and self._ring_combine == "nccl":
+            return None
+        if torch.cuda.is_current_stream_capturing():
+            # Host-launched driver copies and stream memory ops are not
+            # captured into a framework graph; keep NCCL there.
+            self._ring_fallbacks += 1
+            return None
+        if (
+            n_local <= 0
+            or len(set(counts)) != 1
+            or int(counts[0]) != n_local
+            or n_local > self._ring_max_rows
+            or hidden % 256
+        ):
+            self._ring_fallbacks += 1
+            if self._ring_fallbacks == 1:
+                logging.info(
+                    "[DSV4 MoE] %s ring transport fallback to NCCL: layer=%d "
+                    "counts=%s local_rows=%d max_rows=%d",
+                    BACKEND_NAME,
+                    self.cfg.layer_id,
+                    list(counts),
+                    n_local,
+                    self._ring_max_rows,
+                )
+            return None
+        from .._ring_ep_transport import get_ring_transport
+
+        ring = get_ring_transport(
+            group, self._ring_max_rows, hidden, payload_cols, device
+        )
+        self._ring_calls += 1
+        if not _RING_LOGGED:
+            _RING_LOGGED = True
+            logging.info(
+                "[DSV4 MoE] %s ring transport engaged: dispatch=%s combine=%s "
+                "rows=%d max_rows=%d world=%d",
+                BACKEND_NAME,
+                "ring_allgather" if self._ring_dispatch else "nccl_all_to_all",
+                self._ring_combine,
+                n_local,
+                self._ring_max_rows,
+                world,
+            )
+        return ring
+
+    def _pack_dispatch_unmasked(
+        self, x, weights, indices, hidden, scale_cols, topk, payload_cols
+    ) -> torch.Tensor:
+        """One [N, payload] packet with the full top-k; receivers keep their own experts.
+
+        Same quantization and byte layout as ``_pack_dispatch``; only the
+        per-peer weight/id masking moves to the receiver, which already
+        re-checks ``ids`` against its local expert range."""
+        from flashinfer import mxfp8_quantize
+
+        n_local = int(x.size(0))
+        scale_end = hidden + scale_cols
+        weight_end = scale_end + topk * _WEIGHT_BYTES
+        x_fp8, x_scale = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=False)
+        buf = torch.empty((n_local, payload_cols), dtype=torch.uint8, device=x.device)
+        buf[:, :hidden].copy_(x_fp8.view(torch.uint8).reshape(n_local, hidden))
+        buf[:, hidden:scale_end].copy_(
+            x_scale.view(torch.uint8).reshape(n_local, scale_cols)
+        )
+        buf[:, scale_end:weight_end].view(torch.float32).copy_(weights)
+        buf[:, weight_end:].view(torch.int32).copy_(indices.to(torch.int32))
+        return buf
 
     # ---- steps ------------------------------------------------------------
 

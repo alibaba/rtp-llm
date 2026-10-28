@@ -37,6 +37,13 @@ bool PPScheduler::supportsChunkedPrefill(const RuntimeConfig&              runti
     if (sp_config.type == SP_TYPE_NONE) {
         return true;
     }
+    // MTP fastgen (step 1a): intermediate chunks run target only; the final chunk
+    // samples and runs the draft once for the PD handoff proposal. Singleton batch only.
+    if (sp_config.type == SP_TYPE_MTP && pd_sep_config.role_type == RoleType::PREFILL
+        && runtime_config.fifo_scheduler_config.cp_force_single_prefill
+        && autil::EnvUtil::getEnv<int64_t>("RTP_LLM_MTP_CHUNKED_PREFILL", 0) == 1) {
+        return true;
+    }
     // DSpARK commits unshifted target features. Limit the experiment to the
     // singleton CP prefill schedule so a round has one unambiguous chunk phase.
     return sp_config.type == SP_TYPE_DSPARK && pd_sep_config.role_type == RoleType::PREFILL
@@ -66,9 +73,14 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
     prefill_cp_size_(parallelism_config.local_cp_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1),
+    max_context_batch_size_(pd_sep_config.role_type == RoleType::PREFILL ?
+                                static_cast<size_t>(std::max<int64_t>(
+                                    runtime_config.fifo_scheduler_config.max_context_batch_size, 0)) :
+                                0),
     sp_config_(sp_config),
     chunked_prefill_enabled_(supportsChunkedPrefill(runtime_config, pd_sep_config, parallelism_config, sp_config)),
     pp_overlap_cap_(resolvePPChunkOverlapCap(parallelism_config.pp_size)) {
+    RTP_LLM_LOG_INFO("PPScheduler max context streams per pass=%zu (0=unlimited)", max_context_batch_size_);
     RTP_LLM_LOG_INFO("PPScheduler fastgen chunk overlap cap=%ld (pp_size=%ld)",
                      static_cast<long>(pp_overlap_cap_),
                      static_cast<long>(parallelism_config.pp_size));
@@ -145,8 +157,11 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
         if (new_state == StreamState::RUNNING) {
             // Overlapped chunks can leave several admitted streams ready again.
             // Keep the same singleton CP batch contract used for new admission.
-            if (!cp_force_single_prefill_ || pd_sep_config_.role_type == RoleType::DECODE
-                || scheduled_streams.empty()) {
+            const bool context_batch_full =
+                max_context_batch_size_ > 0 && scheduled_streams.size() >= max_context_batch_size_;
+            if ((!cp_force_single_prefill_ || pd_sep_config_.role_type == RoleType::DECODE
+                 || scheduled_streams.empty())
+                && !context_batch_full) {
                 scheduled_streams.push_back(stream);
             }
             ++it;
@@ -282,6 +297,10 @@ bool PPScheduler::fitsCurrentBatch(const ScheduleRuntime& schedule_runtime, cons
     }
 
     if (cp_force_single_prefill_ && schedule_runtime.scheduled_stream_count > 0) {
+        return false;
+    }
+
+    if (max_context_batch_size_ > 0 && schedule_runtime.scheduled_stream_count >= max_context_batch_size_) {
         return false;
     }
 

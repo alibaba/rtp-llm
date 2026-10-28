@@ -78,6 +78,9 @@ private:
     const size_t                     max_batch_tokens_without_cache_ = 0;
     const bool                       cp_force_single_prefill_;
     const size_t                     prefill_cp_size_;
+    // PREFILL only: max context streams per forward pass (0 = unlimited). The DSV4 prefill
+    // workspace is sized by max_context_batch_size, so rescheduled fastgen chunks must obey it too.
+    const size_t                     max_context_batch_size_;
     const SpeculativeExecutionConfig sp_config_;
     const bool                       chunked_prefill_enabled_;
     // Maximum outstanding fastgen prefill chunks per stream.

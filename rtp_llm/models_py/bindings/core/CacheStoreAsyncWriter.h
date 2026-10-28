@@ -74,6 +74,7 @@ private:
     size_t                             cache_model_id_{0};
     int                                cp_rank_{0};
     int                                cp_size_{1};
+    int                                stage_cp_rank_{0};
 
     // CacheStore can be injected after model construction, so resolve it once per forward.
     std::shared_ptr<CacheStore> active_cache_store_;
