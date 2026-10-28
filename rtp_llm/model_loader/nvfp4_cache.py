@@ -3,13 +3,14 @@
 import hashlib
 import inspect
 import json
+import logging
 import math
 import os
 import tempfile
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
+from safetensors import SafetensorError, safe_open
 from safetensors.torch import save_file
 
 from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
@@ -69,22 +70,28 @@ class Nvfp4ExpertCache:
         key = hashlib.sha256(raw.encode()).hexdigest()
         path = self.directory / (key + ".safetensors")
         if path.exists():
-            with safe_open(str(path), framework="pt", device="cpu") as f:
-                metadata = f.metadata()
-                if metadata.get("contract") != raw:
-                    raise ValueError("NVFP4 cache contract mismatch")
-                tensors = {name: f.get_tensor(name) for name in f.keys()}
-            self._validate(tensors, weight.shape, block_size)
-            checksums = json.loads(metadata["tensor_sha256"])
-            if checksums != {
-                name: tensor_sha(value) for name, value in tensors.items()
-            }:
-                raise ValueError("NVFP4 cache payload checksum mismatch")
-            return (
-                tensors["packed"].to(weight.device),
-                tensors["block_scale"].to(weight.device),
-                tensors["global_scale"].to(weight.device).reshape(()),
-            )
+            try:
+                with safe_open(str(path), framework="pt", device="cpu") as f:
+                    metadata = f.metadata() or {}
+                    if metadata.get("contract") != raw:
+                        raise ValueError("NVFP4 cache contract mismatch")
+                    tensors = {name: f.get_tensor(name) for name in f.keys()}
+                self._validate(tensors, weight.shape, block_size)
+                checksums = json.loads(metadata["tensor_sha256"])
+                if checksums != {
+                    name: tensor_sha(value) for name, value in tensors.items()
+                }:
+                    raise ValueError("NVFP4 cache payload checksum mismatch")
+            except (SafetensorError, ValueError, KeyError, TypeError) as error:
+                logging.warning("Rebuilding invalid NVFP4 cache %s: %s", path, error)
+                # Replace atomically below; unlinking here could remove a valid
+                # entry another loader has just published.
+            else:
+                return (
+                    tensors["packed"].to(weight.device),
+                    tensors["block_scale"].to(weight.device),
+                    tensors["global_scale"].to(weight.device).reshape(()),
+                )
         packed, scale, global_scale = quantize_expert_to_nvfp4(weight, block_size)
         tensors = {
             "packed": packed,
