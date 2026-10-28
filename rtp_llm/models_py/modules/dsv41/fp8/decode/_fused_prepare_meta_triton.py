@@ -31,6 +31,10 @@ def _fused_prepare_meta_kernel(
     start_pos_in_ptr,  # [bs] i32
     # persistent outputs (max-sized; we write [:bs] prefix only)
     start_pos_out_ptr,  # [B_max] i32
+    position_ids_ptr,
+    position_ids_long_ptr,
+    decode_seq_start_ptr,
+    topk_buffer_ptr,
     cmp_len_4_ptr,  # [B_max] i32 — None when HAS_CMP_4=False
     cmp_len_128_ptr,  # [B_max] i32 — None when HAS_CMP_128=False
     cmp_len_pt_4_ptr,  # [B_max, q_len] i32
@@ -47,6 +51,7 @@ def _fused_prepare_meta_kernel(
     valid_requests_ptr,
     valid_request_count,
     # constants
+    VALID_COUNT_ON_DEVICE: tl.constexpr,
     Q_LEN: tl.constexpr,
     WINDOW: tl.constexpr,
     INDEX_TOPK: tl.constexpr,
@@ -56,11 +61,20 @@ def _fused_prepare_meta_kernel(
     BLOCK_W: tl.constexpr,  # >= WINDOW, power of 2
     BLOCK_K: tl.constexpr,  # >= INDEX_TOPK, power of 2
     BLOCK_HCA: tl.constexpr,  # >= HCA_DENSE_WIDTH, power of 2
+    POSITION_STRIDE: tl.constexpr,
+    POSITION_LONG_STRIDE: tl.constexpr,
+    DECODE_START_STRIDE: tl.constexpr,
+    TOPK_STRIDES: tl.constexpr,
+    HAS_POSITION_LONG: tl.constexpr,
+    HAS_DECODE_START: tl.constexpr,
+    TOPK_BUFFER_WIDTH: tl.constexpr,
     HAS_CMP_4: tl.constexpr,  # False for SWA-only (MTP draft)
     HAS_CMP_128: tl.constexpr,  # False when no HCA layers
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
+    if VALID_COUNT_ON_DEVICE:
+        valid_request_count = tl.load(valid_request_count)
     if valid_requests_ptr is not None:
         if q == 0:
             # Clear the entire capture-capacity tail, including rows that were
@@ -75,9 +89,27 @@ def _fused_prepare_meta_kernel(
     in_ring = abs_pos % WINDOW  # i32 scalar
     out_rq = r * Q_LEN + q
 
+    tl.store(position_ids_ptr + out_rq * POSITION_STRIDE, abs_pos)
+    if HAS_POSITION_LONG:
+        tl.store(
+            position_ids_long_ptr + out_rq * POSITION_LONG_STRIDE, abs_pos.to(tl.int64)
+        )
+    if TOPK_BUFFER_WIDTH > 0:
+        reset = tl.arange(0, BLOCK_K)
+        tl.store(
+            topk_buffer_ptr
+            + r * TOPK_STRIDES[0]
+            + q * TOPK_STRIDES[1]
+            + reset * TOPK_STRIDES[2],
+            -1,
+            reset < TOPK_BUFFER_WIDTH,
+        )
+
     # ---- Scalar outputs (write once per request; gate on q==0) ----
     if q == 0:
         tl.store(start_pos_out_ptr + r, sp)
+        if HAS_DECODE_START:
+            tl.store(decode_seq_start_ptr + r * DECODE_START_STRIDE, sp.to(tl.int64))
         if HAS_CMP_4:
             tl.store(cmp_len_4_ptr + r, (sp + Q_LEN) // 4)
         if HAS_CMP_128:
@@ -173,7 +205,8 @@ def fused_update_decode_meta_pure(
     meta: Any,
     start_pos: torch.Tensor,
     max_seq_len: int,
-    *, valid_request_count: int | None = None,
+    *,
+    valid_request_count: int | torch.Tensor | None = None,
 ) -> None:
     """Fuse the pure-start_pos metadata preparation into a single Triton kernel.
 
@@ -183,22 +216,36 @@ def fused_update_decode_meta_pure(
 
     Writes start_pos, slot_mapping_swa, slot_mapping_compressed,
     compressed_lens, compressed_lens_per_token, topk_window_idxs,
-    topk_total_by_ratio, swa_abs_idx.
+    topk_total_by_ratio, swa_abs_idx, position buffers and topk reset.
     Callers handle pool_write_slot_mappings, swa_global_slots,
-    hca_cmp_global_slots, and topk_buffer_compressed reset separately.
+    and hca_cmp_global_slots separately.
     """
     bs = int(start_pos.shape[0])
     valid_requests = getattr(meta, "valid_requests", None)
     live_requests = bs if valid_request_count is None else valid_request_count
-    if not 0 <= live_requests <= bs:
+    count_on_device = isinstance(live_requests, torch.Tensor)
+    if count_on_device:
+        if not (
+            live_requests.numel() == 1
+            and live_requests.dtype == torch.int32
+            and live_requests.device == start_pos.device
+            and live_requests.is_contiguous()
+        ):
+            raise ValueError(
+                "Decode live request count must be one contiguous device int32"
+            )
+    elif not 0 <= live_requests <= bs:
         raise ValueError("Invalid decode live request count")
     if valid_requests is not None and not (
-        valid_requests.ndim == 1 and valid_requests.numel() >= bs
+        valid_requests.ndim == 1
+        and valid_requests.numel() >= bs
         and valid_requests.dtype == torch.bool
         and valid_requests.device == start_pos.device
         and valid_requests.is_contiguous()
     ):
-        raise ValueError("Decode validity must be contiguous bool storage covering the prepared batch")
+        raise ValueError(
+            "Decode validity must be contiguous bool storage covering the prepared batch"
+        )
     q_len = meta.q_len_per_req
     window_size = meta.window_size
     index_topk = meta.topk_buffer_compressed.shape[-1]
@@ -236,6 +283,10 @@ def fused_update_decode_meta_pure(
     _fused_prepare_meta_kernel[grid](
         start_pos,
         meta.start_pos,
+        meta.position_ids,
+        meta.position_ids_long,
+        meta.decode_seq_start_per_req,
+        meta.topk_buffer_compressed,
         cmp_len_4,
         cmp_len_128,
         cmp_len_pt_4,
@@ -250,6 +301,7 @@ def fused_update_decode_meta_pure(
         bs,
         valid_requests,
         live_requests,
+        VALID_COUNT_ON_DEVICE=count_on_device,
         Q_LEN=q_len,
         WINDOW=window_size,
         INDEX_TOPK=max(index_topk, 1),
@@ -259,6 +311,21 @@ def fused_update_decode_meta_pure(
         BLOCK_W=BLOCK_W,
         BLOCK_K=BLOCK_K,
         BLOCK_HCA=BLOCK_HCA,
+        POSITION_STRIDE=meta.position_ids.stride(0),
+        POSITION_LONG_STRIDE=(
+            meta.position_ids_long.stride(0)
+            if meta.position_ids_long is not None
+            else 1
+        ),
+        DECODE_START_STRIDE=(
+            meta.decode_seq_start_per_req.stride(0)
+            if meta.decode_seq_start_per_req is not None
+            else 1
+        ),
+        TOPK_STRIDES=meta.topk_buffer_compressed.stride(),
+        HAS_POSITION_LONG=meta.position_ids_long is not None,
+        HAS_DECODE_START=meta.decode_seq_start_per_req is not None,
+        TOPK_BUFFER_WIDTH=index_topk,
         HAS_CMP_4=has_4,
         HAS_CMP_128=has_128,
     )
@@ -487,3 +554,171 @@ def fused_phase2b_pool_slot_mapping(
         HAS_IDX=has_idx,
         HAS_HCA=has_hca,
     )
+
+
+@triton.jit
+def _state_pool_slots_kernel(
+    table,
+    positions,
+    requests,
+    output,
+    N: tl.constexpr,
+    ROWS: tl.constexpr,
+    COLS: tl.constexpr,
+    POSITION_STRIDE: tl.constexpr,
+    REQUEST_STRIDE: tl.constexpr,
+    OUTPUT_STRIDE: tl.constexpr,
+    ROW_STRIDE: tl.constexpr,
+    COL_STRIDE: tl.constexpr,
+    ENTRIES: tl.constexpr,
+    TOKENS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = index < N
+    position = tl.load(positions + index * POSITION_STRIDE, mask, 0).to(tl.int64)
+    request = tl.load(requests + index * REQUEST_STRIDE, mask, 0).to(tl.int64)
+    request = tl.where(request < 0, request + ROWS, request)
+    # Explicit floor division/modulo also preserves the eager signed case.
+    page = position // TOKENS - (position % TOKENS < 0)
+    page = (page % COLS + COLS) % COLS
+    offset = (position % ENTRIES + ENTRIES) % ENTRIES
+    block = tl.load(table + request * ROW_STRIDE + page * COL_STRIDE, mask, 0).to(
+        tl.int64
+    )
+    tl.store(
+        output + index * OUTPUT_STRIDE,
+        tl.where(block > 0, block * ENTRIES + offset, -1),
+        mask,
+    )
+
+
+def fill_state_pool_slots(table, positions, requests, output, entries, tokens):
+    """Write cyclic state slots directly into the graph's persistent buffer."""
+    count = positions.numel()
+    if (
+        table.ndim != 2
+        or any(t.ndim != 1 for t in (positions, requests, output))
+        or not table.is_cuda
+        or any(t.device != table.device for t in (positions, requests, output))
+        or any(
+            t.dtype not in (torch.int32, torch.int64)
+            for t in (table, positions, requests, output)
+        )
+        or requests.numel() < count
+        or output.numel() < count
+        or table.shape[1] == 0
+        or entries <= 0
+        or tokens <= 0
+        or any(
+            t.untyped_storage().data_ptr() == output.untyped_storage().data_ptr()
+            for t in (table, positions, requests)
+        )
+    ):
+        return False
+    if count:
+        with torch.cuda.device(table.device):
+            _state_pool_slots_kernel[(triton.cdiv(count, 256),)](
+                table,
+                positions,
+                requests,
+                output,
+                N=count,
+                ROWS=table.shape[0],
+                COLS=table.shape[1],
+                POSITION_STRIDE=positions.stride(0),
+                REQUEST_STRIDE=requests.stride(0),
+                OUTPUT_STRIDE=output.stride(0),
+                ROW_STRIDE=table.stride(0),
+                COL_STRIDE=table.stride(1),
+                ENTRIES=entries,
+                TOKENS=tokens,
+                BLOCK=256,
+            )
+    return True
+
+
+@triton.jit
+def _snapshot_block_tables_kernel(
+    sources,
+    destinations,
+    ROWS: tl.constexpr,
+    COLS: tl.constexpr,
+    SOURCE_STRIDES: tl.constexpr,
+    DEST_STRIDES: tl.constexpr,
+    DEST_COLS: tl.constexpr,
+    SIZES: tl.constexpr,
+    OFFSETS: tl.constexpr,
+    BATCH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    program = tl.program_id(0)
+    for table in tl.static_range(len(SIZES)):
+        if program >= OFFSETS[table] and program < OFFSETS[table + 1]:
+            index = (program - OFFSETS[table]) * BLOCK + tl.arange(0, BLOCK)
+            valid = index < SIZES[table]
+            row, col = index // DEST_COLS[table], index % DEST_COLS[table]
+            copy = valid & (row < ROWS[table]) & (col < COLS[table])
+            value = tl.load(
+                sources[table]
+                + row * SOURCE_STRIDES[table][0]
+                + col * SOURCE_STRIDES[table][1],
+                copy,
+                0,
+            )
+            # Match zero tail -> copy rectangle -> zero right padding order.
+            write = valid & ((row >= BATCH) | (row < ROWS[table]))
+            tl.store(
+                destinations[table]
+                + row * DEST_STRIDES[table][0]
+                + col * DEST_STRIDES[table][1],
+                value,
+                write,
+            )
+
+
+def try_snapshot_block_tables(destinations, sources, batch):
+    """Batch independent graph-table copies, preserving padding and storage."""
+    pairs = [
+        (src, destinations[key])
+        for key, src in sources.items()
+        if key in destinations and destinations[key].numel()
+    ]
+    if not pairs:
+        return True
+    if any(
+        src.ndim != 2
+        or dst.ndim != 2
+        or not src.is_cuda
+        or src.device != dst.device
+        or dst.device != pairs[0][1].device
+        or src.dtype != torch.int32
+        or dst.dtype != torch.int32
+        for src, dst in pairs
+    ):
+        return False
+    # Parallel copies must have independent outputs and no read-after-write
+    # dependency between tables. Preserve the original loop for aliased views.
+    output_storage = [dst.untyped_storage().data_ptr() for _, dst in pairs]
+    if len(set(output_storage)) != len(output_storage) or any(
+        src.untyped_storage().data_ptr() in output_storage for src, _ in pairs
+    ):
+        return False
+    offsets = [0]
+    for _, dst in pairs:
+        offsets.append(offsets[-1] + triton.cdiv(dst.numel(), 256))
+    with torch.cuda.device(pairs[0][1].device):
+        _snapshot_block_tables_kernel[(offsets[-1],)](
+            tuple(src for src, _ in pairs),
+            tuple(dst for _, dst in pairs),
+            ROWS=tuple(min(src.shape[0], dst.shape[0]) for src, dst in pairs),
+            COLS=tuple(min(src.shape[1], dst.shape[1]) for src, dst in pairs),
+            SOURCE_STRIDES=tuple(src.stride() for src, _ in pairs),
+            DEST_STRIDES=tuple(dst.stride() for _, dst in pairs),
+            DEST_COLS=tuple(dst.shape[1] for _, dst in pairs),
+            SIZES=tuple(dst.numel() for _, dst in pairs),
+            OFFSETS=tuple(offsets),
+            BATCH=batch,
+            BLOCK=256,
+        )
+    return True

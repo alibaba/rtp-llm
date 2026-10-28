@@ -1,16 +1,24 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
+#include <vector>
+#include <unordered_map>
+#include <map>
 #include <cerrno>
 #include <cstdlib>
 #include <limits>
-#include <vector>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
-#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGraph.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAException.h>
+#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #endif
 
 namespace rtp_llm {
@@ -29,6 +37,325 @@ int dsparkForceTopK() {
                             "RTP_LLM_DSPARK_FORCE_TOPK must be an integer in [0, INT_MAX], got '%s'",
                             value);
     return static_cast<int>(topk);
+}
+
+#if USING_CUDA
+struct DSparkSamplingGraphs {
+    struct Entry {
+        at::cuda::CUDAGraph graph;
+        torch::Tensor       anchors;
+        torch::Tensor       temperatures;
+        SamplerOutput       output;
+    };
+    torch::Tensor          logits, w1, w2, map;
+    const void *           logits_ptr = nullptr, *w1_ptr = nullptr, *w2_ptr = nullptr, *map_ptr = nullptr;
+    size_t                 vocab;
+    c10::cuda::CUDAStream  capture_stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStream  replay_stream  = at::cuda::getCurrentCUDAStream();
+    c10::cuda::MempoolId_t pool           = at::cuda::graph_pool_handle();
+    std::unordered_map<int64_t, std::unique_ptr<Entry>> entries;
+
+    ~DSparkSamplingGraphs() {
+        try {
+            const c10::cuda::CUDAGuard guard(logits.device());
+            replay_stream.synchronize();
+            capture_stream.synchronize();
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("DSpARK sampling graph drain failed: %s", error.what());
+        }
+    }
+};
+
+struct RejectionSamplingGraphs {
+    struct Entry {
+        cudaGraph_t                   graph      = nullptr;
+        cudaGraphExec_t               executable = nullptr;
+        cudaGraphNode_t               kernel     = nullptr;
+        cudaKernelNodeParams          kernel_params{};
+        torch::Tensor                 masks_h, masks_d, draft, target, uniform, result_d, result_h;
+        std::shared_ptr<torch::Event> ready    = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        torch::Event                  uploaded = cuda_graph::makeGraphEvent(), computed = cuda_graph::makeGraphEvent();
+        bool                          submitted = false;
+
+        ~Entry() {
+            if (!executable && !graph)
+                return;
+            const c10::cuda::CUDAGuard guard(masks_d.device());
+            if (executable)
+                cudaGraphExecDestroy(executable);
+            if (graph)
+                cudaGraphDestroy(graph);
+        }
+    };
+    torch::Device                                          device;
+    int                                                    vocab;
+    c10::cuda::CUDAStream                                  copy_stream = at::cuda::getStreamFromPool();
+    std::map<int64_t, std::vector<std::shared_ptr<Entry>>> entries;
+
+    explicit RejectionSamplingGraphs(torch::Device d, int v): device(d), vocab(v) {}
+    ~RejectionSamplingGraphs() {
+        try {
+            const c10::cuda::CUDAGuard guard(device);
+            for (const auto& [batch, slots] : entries)
+                for (const auto& slot : slots)
+                    if (slot->submitted)
+                        slot->ready->synchronize();
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("rejection graph drain failed: %s", error.what());
+        }
+    }
+};
+
+static bool sameGraphTensor(const torch::Tensor& a, const torch::Tensor& b, const void* captured_ptr) {
+    if (!a.defined() || !b.defined())
+        return a.defined() == b.defined();
+    return a.device() == b.device() && a.scalar_type() == b.scalar_type() && a.sizes() == b.sizes()
+           && a.strides() == b.strides() && a.data_ptr() == captured_ptr;
+}
+#endif
+
+void SpeculativeSampler::prepareRejectionGraphs(const torch::Device&    device,
+                                                int                     vocab,
+                                                const std::vector<int>& batch_sizes) {
+#if USING_CUDA
+    if (!device.is_cuda() || vocab <= 0 || propose_step_ == 0 || batch_sizes.empty())
+        return;
+    const c10::cuda::CUDAGuard guard(device);
+    auto                       graphs = std::make_shared<RejectionSamplingGraphs>(device, vocab);
+    const auto                 stream = graphs->copy_stream;
+    cuda_graph::graphDeviceSynchronize();
+    const c10::cuda::CUDAStreamGuard stream_guard(stream);
+    const auto                       ints = torch::TensorOptions().device(device).dtype(torch::kInt32);
+    const auto                       host = torch::TensorOptions().device(torch::kCPU).pinned_memory(true);
+    for (int batch : batch_sizes) {
+        if (batch <= 0 || graphs->entries.count(batch))
+            continue;
+        auto& slots = graphs->entries[batch];
+        for (int i = 0; i < 3; ++i) {
+            auto e      = std::make_shared<RejectionSamplingGraphs::Entry>();
+            e->masks_h  = torch::zeros({2, batch}, host.dtype(torch::kBool));
+            e->masks_d  = torch::empty({2, batch}, ints.dtype(torch::kBool));
+            e->draft    = torch::zeros({batch, static_cast<int64_t>(propose_step_)}, ints);
+            e->target   = torch::zeros({batch * static_cast<int64_t>(propose_step_ + 1), 1}, ints);
+            e->uniform  = torch::zeros({batch, static_cast<int64_t>(propose_step_ + 1)}, ints.dtype(torch::kFloat32));
+            e->result_d = torch::empty({batch * static_cast<int64_t>(propose_step_ + 2)}, ints);
+            e->result_h = torch::empty(e->result_d.sizes(), host.dtype(torch::kInt32));
+            auto run    = [&]() {
+                // Both probability distributions are point masses. Keep the
+                // original rejection kernel, with its exact acceptance and
+                // force-override rules; dense/mixed sampling stays eager.
+                const auto status = invokeRejectionSampling<float, int32_t>(nullptr,
+                                                                            e->draft.data_ptr<int32_t>(),
+                                                                            e->uniform.data_ptr<float>(),
+                                                                            nullptr,
+                                                                            e->target.data_ptr<int32_t>(),
+                                                                            1,
+                                                                            e->result_d.data_ptr<int32_t>(),
+                                                                            e->result_d.data_ptr<int32_t>()
+                                                                                + batch * (propose_step_ + 1),
+                                                                            e->masks_d.data_ptr<bool>(),
+                                                                            batch,
+                                                                            propose_step_,
+                                                                            vocab,
+                                                                            stream.stream(),
+                                                                            true,
+                                                                            true,
+                                                                            e->masks_d.data_ptr<bool>() + batch,
+                                                                            true);
+                C10_CUDA_CHECK(status);
+            };
+            C10_CUDA_CHECK(cudaMemcpyAsync(e->masks_d.data_ptr(),
+                                           e->masks_h.data_ptr(),
+                                           e->masks_d.nbytes(),
+                                           cudaMemcpyHostToDevice,
+                                           stream.stream()));
+            run();
+            stream.synchronize();
+            // No allocation or RNG inside this capture. Transfers use an
+            // independent stream at runtime, so DMA cannot stall model compute.
+            C10_CUDA_CHECK(cudaStreamBeginCapture(stream.stream(), cudaStreamCaptureModeGlobal));
+            try {
+                run();
+            } catch (...) {
+                cudaStreamEndCapture(stream.stream(), &e->graph);
+                throw;
+            }
+            C10_CUDA_CHECK(cudaStreamEndCapture(stream.stream(), &e->graph));
+            size_t count = 0;
+            C10_CUDA_CHECK(cudaGraphGetNodes(e->graph, nullptr, &count));
+            std::vector<cudaGraphNode_t> nodes(count);
+            C10_CUDA_CHECK(cudaGraphGetNodes(e->graph, nodes.data(), &count));
+            for (auto node : nodes) {
+                cudaGraphNodeType type;
+                C10_CUDA_CHECK(cudaGraphNodeGetType(node, &type));
+                if (type == cudaGraphNodeTypeKernel) {
+                    e->kernel = node;
+                    C10_CUDA_CHECK(cudaGraphKernelNodeGetParams(node, &e->kernel_params));
+                }
+            }
+            RTP_LLM_CHECK_WITH_INFO(e->kernel, "incomplete rejection sampling graph");
+            C10_CUDA_CHECK(cudaGraphInstantiateWithFlags(&e->executable, e->graph, 0));
+            C10_CUDA_CHECK(cudaGraphLaunch(e->executable, stream.stream()));
+            stream.synchronize();
+            slots.push_back(std::move(e));
+        }
+    }
+    rejection_graphs_ = std::move(graphs);
+#endif
+}
+
+bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
+                                              const torch::Tensor&      masks,
+                                              const torch::Tensor&      draft,
+                                              const torch::Tensor&      target,
+                                              const torch::Tensor&      uniform,
+                                              const torch::Tensor&      probs,
+                                              bool                      point_mass) const {
+#if USING_CUDA
+    const auto& graphs = rejection_graphs_;
+    if (!graphs || !point_mass || draft.device() != graphs->device || target.device() != graphs->device
+        || uniform.device() != graphs->device || draft.scalar_type() != torch::kInt32
+        || target.scalar_type() != torch::kInt32 || !draft.is_contiguous() || !target.is_contiguous()
+        || draft.dim() != 2 || draft.size(0) == 0 || draft.size(1) != static_cast<int64_t>(propose_step_)
+        || target.dim() != 2 || target.size(1) < 1 || target.size(0) != draft.size(0) * (propose_step_ + 1)
+        || probs.dim() != 3 || probs.size(2) != graphs->vocab)
+        return false;
+    const int64_t batch = draft.size(0), token_count = batch * (propose_step_ + 1);
+    const auto    found = graphs->entries.lower_bound(batch);
+    if (found == graphs->entries.end())
+        return false;
+    const c10::cuda::CUDAGuard guard(graphs->device);
+    for (const auto& entry : found->second) {
+        // Host result ownership and upload completion are separate: a done
+        // event alone does not mean asynchronous CPU bookkeeping has finished.
+        if (entry.use_count() != 1 || entry->result_h.storage().use_count() != 1
+            || (entry->submitted && !entry->ready->query()))
+            continue;
+        entry->masks_h.zero_();
+        entry->masks_h.narrow(1, 0, batch).copy_(masks);
+        const auto main_stream = at::cuda::getCurrentCUDAStream();
+        auto       copy_stream = graphs->copy_stream;
+        while (copy_stream == main_stream)
+            copy_stream = at::cuda::getStreamFromPool();
+        auto result = torch::empty({batch * static_cast<int64_t>(propose_step_ + 2)}, entry->result_d.options());
+        C10_CUDA_CHECK(cudaMemcpyAsync(entry->masks_d.data_ptr(),
+                                       entry->masks_h.data_ptr(),
+                                       entry->masks_d.nbytes(),
+                                       cudaMemcpyHostToDevice,
+                                       copy_stream.stream()));
+        entry->uploaded.record(copy_stream);
+        entry->uploaded.block(main_stream);
+        // Patch node arguments to this call's tensors. The original kernel
+        // reads the last history column directly; no staging or output clone
+        // is needed, and every GPU result owns independent storage.
+        float* draft_probs    = nullptr;
+        float* target_probs   = nullptr;
+        auto*  draft_ids      = draft.data_ptr<int32_t>();
+        auto*  target_ids     = target.data_ptr<int32_t>();
+        auto*  samples        = uniform.data_ptr<float>();
+        auto*  output_ids     = result.data_ptr<int32_t>();
+        auto*  output_lengths = output_ids + token_count;
+        auto*  do_sample      = entry->masks_d.data_ptr<bool>();
+        auto*  force          = do_sample + found->first;
+        int    rows = batch, steps = propose_step_, vocab = graphs->vocab, stride = target.size(1);
+        bool   draft_point_mass = true, target_point_mass = true, finalize = true;
+        void*  args[]       = {&draft_probs,
+                               &draft_ids,
+                               &samples,
+                               &target_probs,
+                               &target_ids,
+                               &stride,
+                               &output_ids,
+                               &output_lengths,
+                               &do_sample,
+                               &rows,
+                               &steps,
+                               &vocab,
+                               &draft_point_mass,
+                               &target_point_mass,
+                               &force,
+                               &finalize};
+        auto   params       = entry->kernel_params;
+        params.gridDim.x    = rows;
+        params.kernelParams = args;
+        C10_CUDA_CHECK(cudaGraphExecKernelNodeSetParams(entry->executable, entry->kernel, &params));
+        C10_CUDA_CHECK(cudaGraphLaunch(entry->executable, main_stream.stream()));
+        entry->computed.record(main_stream);
+        entry->computed.block(copy_stream);
+        C10_CUDA_CHECK(cudaMemcpyAsync(entry->result_h.data_ptr(),
+                                       result.data_ptr(),
+                                       result.nbytes(),
+                                       cudaMemcpyDeviceToHost,
+                                       copy_stream.stream()));
+        c10::cuda::CUDACachingAllocator::recordStream(result.storage().data_ptr(), copy_stream);
+        output.accept_tokens = result.narrow(0, 0, token_count).view({batch, static_cast<int64_t>(propose_step_ + 1)});
+        output.accept_len    = result.narrow(0, token_count, batch);
+        output.accept_tokens_cpu = entry->result_h.narrow(0, 0, token_count).view(output.accept_tokens.sizes());
+        output.accept_len_cpu    = entry->result_h.narrow(0, token_count, batch);
+        entry->ready->record(copy_stream);
+        entry->submitted = true;
+        // A later logits cap may re-record the public completion event.
+        // Slot reuse must continue to track this original transfer separately.
+        output.transfer_done_event->record(copy_stream);
+        output.graph_buffers = entry;
+        return true;
+    }
+#endif
+    return false;
+}
+
+void SpeculativeSampler::prepareDSparkDraftGraphs(const torch::Tensor&    logits_buffer,
+                                                  const torch::Tensor&    markov_w1,
+                                                  const torch::Tensor&    markov_w2,
+                                                  size_t                  draft_vocab_size,
+                                                  const std::vector<int>& batch_sizes) {
+#if USING_CUDA
+    if (!logits_buffer.defined() || !logits_buffer.is_cuda() || logits_buffer.dim() != 2
+        || logits_buffer.scalar_type() != torch::kFloat32 || !logits_buffer.is_contiguous() || propose_step_ == 0
+        || draft_vocab_size >= (1u << 24))
+        return;
+    const c10::cuda::CUDAGuard device_guard(logits_buffer.device());
+    auto                       graphs = std::make_shared<DSparkSamplingGraphs>();
+    graphs->logits                    = logits_buffer.detach();
+    graphs->w1                        = markov_w1.detach();
+    graphs->w2                        = markov_w2.detach();
+    graphs->map                       = d2t_map_.defined() ? d2t_map_.detach() : torch::Tensor();
+    graphs->logits_ptr                = logits_buffer.data_ptr();
+    graphs->w1_ptr                    = markov_w1.data_ptr();
+    graphs->w2_ptr                    = markov_w2.data_ptr();
+    graphs->map_ptr                   = d2t_map_.defined() ? d2t_map_.data_ptr() : nullptr;
+    graphs->vocab                     = draft_vocab_size;
+    auto sizes                        = batch_sizes;
+    if (sizes.empty())
+        sizes.push_back(logits_buffer.size(0) / propose_step_);
+    std::sort(sizes.begin(), sizes.end(), std::greater<int>());
+    sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
+    cuda_graph::graphDeviceSynchronize();
+    const c10::cuda::CUDAStreamGuard stream_guard(graphs->capture_stream);
+    // Keep every owning graph alive while its private pool is shared.
+    dspark_graphs_ = graphs;
+    for (int batch : sizes) {
+        if (batch <= 0 || static_cast<int64_t>(batch) * propose_step_ > logits_buffer.size(0))
+            continue;
+        auto entry          = std::make_unique<DSparkSamplingGraphs::Entry>();
+        entry->anchors      = torch::zeros({batch}, logits_buffer.options().dtype(torch::kInt32));
+        entry->temperatures = torch::full({batch}, 1.0e-6f, logits_buffer.options());
+        auto input          = logits_buffer.narrow(0, 0, batch * propose_step_);
+        auto run            = [&]() {
+            return sampleDSparkDraftEager(
+                input, entry->anchors, entry->temperatures, {}, {}, markov_w1, markov_w2, draft_vocab_size, true, 0, 0);
+        };
+        run();
+        run();
+        graphs->capture_stream.synchronize();
+        entry->graph.capture_begin(graphs->pool);
+        entry->output = run();
+        entry->graph.capture_end();
+        entry->graph.replay();
+        graphs->capture_stream.synchronize();
+        graphs->entries.emplace(batch, std::move(entry));
+    }
+#endif
 }
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
@@ -59,7 +386,68 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                                     size_t               draft_vocab_size,
                                                     bool                 batch_all_greedy,
                                                     int                  force_topk,
-                                                    int                  joint_max_top_k) const {
+                                                    int                  joint_max_top_k,
+                                                    bool                 copy_token_ids) const {
+    RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
+#if USING_CUDA
+    const auto& graphs = dspark_graphs_;
+    if (graphs && batch_all_greedy && draft_vocab_size == graphs->vocab && base_logits.defined()
+        && base_logits.device() == graphs->logits.device() && base_logits.scalar_type() == torch::kFloat32
+        && base_logits.dim() == 2 && base_logits.is_contiguous() && base_logits.data_ptr() == graphs->logits_ptr
+        && base_logits.size(1) == graphs->logits.size(1) && temperature.is_cuda()
+        && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1 && temperature.is_contiguous()
+        && anchors.is_cuda() && anchors.scalar_type() == torch::kInt32 && anchors.is_contiguous()
+        && anchors.numel() == temperature.numel() && anchors.device() == base_logits.device()
+        && temperature.device() == base_logits.device()
+        && base_logits.size(0) == temperature.numel() * static_cast<int64_t>(propose_step_)
+        && sameGraphTensor(markov_w1, graphs->w1, graphs->w1_ptr)
+        && sameGraphTensor(markov_w2, graphs->w2, graphs->w2_ptr)
+        && sameGraphTensor(d2t_map_, graphs->map, graphs->map_ptr)) {
+        const auto found = graphs->entries.find(temperature.numel());
+        if (found != graphs->entries.end()) {
+            const c10::cuda::CUDAGuard guard(base_logits.device());
+            const auto                 stream = at::cuda::getCurrentCUDAStream();
+            if (stream != graphs->replay_stream)
+                graphs->replay_stream.synchronize();
+            graphs->replay_stream    = stream;
+            auto&              entry = *found->second;
+            FusedD2DCopyParams copies;
+            copies.add(anchors.data_ptr(), entry.anchors.data_ptr(), anchors.nbytes());
+            copies.add(temperature.data_ptr(), entry.temperatures.data_ptr(), temperature.nbytes());
+            fusedCopy(copies);
+            entry.graph.replay();
+            auto output = entry.output;
+            if (copy_token_ids) {
+                output.token_ids = output.token_ids.clone();
+            }
+            return output;
+        }
+    }
+#endif
+    return sampleDSparkDraftEager(base_logits,
+                                  anchors,
+                                  temperature,
+                                  top_k,
+                                  top_p,
+                                  markov_w1,
+                                  markov_w2,
+                                  draft_vocab_size,
+                                  batch_all_greedy,
+                                  force_topk,
+                                  joint_max_top_k);
+}
+
+SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& base_logits,
+                                                         const torch::Tensor& anchors,
+                                                         const torch::Tensor& temperature,
+                                                         const torch::Tensor& top_k,
+                                                         const torch::Tensor& top_p,
+                                                         const torch::Tensor& markov_w1,
+                                                         const torch::Tensor& markov_w2,
+                                                         size_t               draft_vocab_size,
+                                                         bool                 batch_all_greedy,
+                                                         int                  force_topk,
+                                                         int                  joint_max_top_k) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
     RTP_LLM_CHECK_WITH_INFO(temperature.defined() && temperature.is_cuda() && temperature.is_contiguous()
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
@@ -97,7 +485,22 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     const bool    sample_from_strided_q = false;
 #endif
 
-    auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
+    bool fused_greedy_output = false;
+#if USING_CUDA
+    fused_greedy_output = point_mass_path && propose_step_ > 0 && markov_w1.is_cuda()
+                          && markov_w1.device() == base_logits.device() && markov_w1.dim() == 2
+                          && markov_w1.scalar_type() == markov_w2.scalar_type()
+                          && (!d2t_map_.defined()
+                              || (d2t_map_.device() == base_logits.device() && d2t_map_.scalar_type() == torch::kInt64
+                                  && d2t_map_.dim() == 1 && d2t_map_.numel() >= draft_vocab_size));
+#endif
+    auto token_matrix    = fused_greedy_output ? torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
+                                                           base_logits.options().dtype(torch::kInt32)) :
+                                                 torch::Tensor();
+    auto previous_tokens = anchors.reshape({batch_size});
+    if (previous_tokens.scalar_type() != torch::kInt32 && previous_tokens.scalar_type() != torch::kInt64) {
+        previous_tokens = previous_tokens.to(torch::kLong);
+    }
     auto all_probabilities =
         point_mass_path ?
             torch::Tensor() :
@@ -131,9 +534,27 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         base_logits.narrow(1, 0, draft_vocab_size)
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
 
+    torch::Tensor markov_embedding;
     for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
-        auto markov_embedding = markov_w1.index_select(0, previous_tokens);
-        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
+        if (!markov_embedding.defined()) {
+            markov_embedding = markov_w1.index_select(0, previous_tokens);
+        }
+        auto markov_bias = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
+
+#if USING_CUDA
+        if (fused_greedy_output) {
+            auto next_embedding = step + 1 < static_cast<int64_t>(propose_step_) ?
+                                      torch::empty({batch_size, markov_w1.size(1)}, markov_w1.options()) :
+                                      torch::Tensor();
+            cudaMarkovArgmaxStep({proposal_logits.select(1, step), markov_bias, temperature},
+                                 token_matrix.select(1, step),
+                                 d2t_map_,
+                                 markov_w1,
+                                 next_embedding);
+            markov_embedding = std::move(next_embedding);
+            continue;
+        }
+#endif
 
         torch::Tensor sampled_draft_tokens;
         if (point_mass_path) {
@@ -215,10 +636,11 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         }
         token_columns.push_back(sampled_target_tokens);
         previous_tokens = sampled_target_tokens.to(torch::kLong);
+        markov_embedding = torch::Tensor();
     }
 
     SamplerOutput output;
-    output.token_ids = torch::stack(token_columns, 1).contiguous();
+    output.token_ids = fused_greedy_output ? token_matrix : torch::stack(token_columns, 1).contiguous();
     if (!point_mass_path) {
         output.all_probs = std::move(all_probabilities);
     }
@@ -248,7 +670,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     int batch_size = streams.size();
 
     auto draft_token_ids  = draft_sampler_output.token_ids;
-    auto target_token_ids = target_sampler_output.token_ids;
 
     auto       draft_token_probs      = draft_sampler_output.all_probs;
     auto       target_token_probs     = target_sampler_output.all_probs;
@@ -281,8 +702,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         stream_idx++;
     }
     buffer_holder_.hold_host(masks);
-    auto masks_d     = masks.to(target_device, true);
-    auto do_sample_d = masks_d.select(0, 0);
 
     // Folded finalization capability (CUDA kernel): the rejection kernel
     // applies the force-accept override and the -1 -> 0 padding reset itself
@@ -293,15 +712,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     const bool finalize_in_kernel = execRejectionSamplingSupportsFinalize();
 
     // An undefined force mask retains the ordinary rejection path.
-    auto build_force_mask_device = [&]() -> torch::Tensor {
-        return has_force ? masks_d.select(0, 1) : torch::Tensor();
-    };
-
-    torch::Tensor force_mask_d;
-    if (finalize_in_kernel) {
-        force_mask_d = build_force_mask_device();
-    }
-
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
     torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
 
@@ -317,6 +727,20 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             idx++;
         }
     }
+
+    if (replayRejectionGraph(sample_output,
+                             masks,
+                             draft_token_ids_d_t,
+                             target_token_ids_d_t,
+                             uniform_samples_d,
+                             target_token_probs,
+                             draft_probs_point_mass && target_probs_point_mass))
+        return;
+
+    auto       masks_d      = masks.to(target_device, true);
+    auto       do_sample_d  = masks_d.select(0, 0);
+    const auto force_mask   = has_force ? masks_d.select(0, 1) : torch::Tensor();
+    auto       force_mask_d = finalize_in_kernel ? force_mask : torch::Tensor();
 
     auto draft_token_probs_d_t  = draft_token_probs;
     auto target_token_probs_d_t = target_token_probs;
@@ -391,7 +815,6 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         // requested forced acceptance — accept all draft tokens plus the
         // target bonus token.
         {
-            auto force_mask = build_force_mask_device();
             if (force_mask.defined()) {
                 RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.post_rejection_sampling.forceSpAccept");
                 // target_token_ids_d_t layout: [batch_size * (propose_step+1), token_stride]

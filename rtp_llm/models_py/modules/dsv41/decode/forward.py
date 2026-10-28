@@ -408,11 +408,10 @@ def forward_decode(
     Two metadata paths:
 
     * **CUDA-graph path** (``fmha_impl`` is a ``DSv4DecodeFmhaImpl``): read
-      ``fmha_impl.metadata`` as-is. It was populated either in
-      ``DSv4DecodeFmhaImpl.__init__`` (initial dtype-check forward) or by
-      C++ ``prepare_cuda_graph`` before each replay. Reading
-      ``attn.sequence_lengths`` here during stream capture would trigger a
-      CPU→CUDA copy that's illegal inside a graph.
+      ``fmha_impl.metadata`` from persistent buffers. FP8 capture includes
+      metadata preparation from the runner's device mirrors at graph entry;
+      other implementations prepare it before replay. Host sequence lengths
+      must never be copied during capture.
     * **Eager path**: build :class:`DSv4DecodeAttnMetadata` inline via
       :func:`build_metadata_eager`.
 
@@ -453,6 +452,8 @@ def forward_decode(
     input_ids = input_ids.reshape(-1)
 
     if isinstance(fmha_impl, _graph_impl_types):
+        if hasattr(fmha_impl, "prepare_in_graph"):
+            fmha_impl.prepare_in_graph(attn)
         meta = fmha_impl.metadata
     else:
         paged_specs = build_paged_pool_specs(

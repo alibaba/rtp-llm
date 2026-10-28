@@ -247,7 +247,8 @@ public:
     void prepareDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
                                              GptModelInputs&         model_input,
                                              const torch::Tensor&    proposals,
-                                             TensorHolder&           host_holder);
+                                             TensorHolder&           host_holder,
+                                             torch::Tensor*          owned_proposals = nullptr);
 
     // Async target preparation runs before proposal sampling completes. Build
     // its verify-width positions locally from the TP-synchronized proposal

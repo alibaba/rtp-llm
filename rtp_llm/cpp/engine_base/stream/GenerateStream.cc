@@ -2,11 +2,19 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstring>
 #include <memory>
+#include <map>
 #include <typeinfo>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#endif
+#if USING_CUDA
+#include <ATen/cuda/CUDAEvent.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #endif
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -1016,7 +1024,8 @@ bool GenerateStream::canReserveMtpCacheWithoutBookkeepingJoin(const MtpAsyncDevi
 bool GenerateStream::replaceMtpCacheSnapshot(uint64_t                   expected_epoch,
                                              torch::Tensor              physical,
                                              torch::Tensor              kernel,
-                                             std::vector<torch::Tensor> host_buffers) {
+                                             std::vector<torch::Tensor> host_buffers,
+                                             bool                       upload_pending) {
     std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
     if (mtp_async_state_.epoch != expected_epoch) {
         return false;
@@ -1024,6 +1033,7 @@ bool GenerateStream::replaceMtpCacheSnapshot(uint64_t                   expected
     mtp_async_state_.next_kv_cache_block_id_gpu        = std::move(physical);
     mtp_async_state_.next_kv_cache_kernel_block_id_gpu = std::move(kernel);
     mtp_async_state_.cache_snapshot_host_buffers       = std::move(host_buffers);
+    mtp_async_state_.cache_snapshot_upload_pending     = upload_pending;
     return true;
 }
 
@@ -1041,24 +1051,134 @@ absl::Status GenerateStream::reserveMtpCacheFromUpperBound(const MtpAsyncDeviceS
         physical_width = std::max(physical_width, static_cast<int64_t>(resource.blocks(0, tag).size()));
         kernel_width   = std::max(kernel_width, static_cast<int64_t>(resource.kernelBlocks(0, tag).size()));
     }
-    const auto pinned_i32    = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
-    auto       physical_host = torch::zeros({static_cast<int64_t>(tags.size()), 1, physical_width}, pinned_i32);
-    auto       kernel_host   = torch::zeros({static_cast<int64_t>(tags.size()), 1, kernel_width}, pinned_i32);
+    const auto pinned_i32     = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    const auto group_count    = static_cast<int64_t>(tags.size());
+    const auto physical_count = group_count * physical_width;
+    // One immutable allocation and upload; the two views retain independent
+    // widths and values (physical and kernel IDs need not be identical).
+    auto host          = torch::zeros({physical_count + group_count * kernel_width}, pinned_i32);
+    auto physical_host = host.narrow(0, 0, physical_count).view({group_count, 1, physical_width});
+    auto kernel_host = host.narrow(0, physical_count, group_count * kernel_width).view({group_count, 1, kernel_width});
     for (size_t row = 0; row < tags.size(); ++row) {
         const auto& physical = resource.blocks(0, tags[row]);
         const auto& kernel   = resource.kernelBlocks(0, tags[row]);
         std::copy(physical.begin(), physical.end(), physical_host.data_ptr<int32_t>() + row * physical_width);
         std::copy(kernel.begin(), kernel.end(), kernel_host.data_ptr<int32_t>() + row * kernel_width);
     }
-    // Sources are new immutable pinned tensors, never the mutable allocator
-    // vectors. Keep them with the state while H2D runs on the engine stream.
-    auto physical = physical_host.to(state.next_kv_cache_block_id_gpu.options(), /*non_blocking=*/true);
-    auto kernel   = kernel_host.to(state.next_kv_cache_kernel_block_id_gpu.options(), /*non_blocking=*/true);
+    // Both views own the shared storage through the published snapshot.
+    torch::Tensor physical;
+    torch::Tensor kernel;
+    const bool    same_device =
+        state.next_kv_cache_block_id_gpu.device() == state.next_kv_cache_kernel_block_id_gpu.device();
+    if (state.batch_cache_snapshot_upload && same_device) {
+        RTP_LLM_CHECK_WITH_INFO(replaceMtpCacheSnapshot(state.epoch,
+                                                        state.next_kv_cache_block_id_gpu,
+                                                        state.next_kv_cache_kernel_block_id_gpu,
+                                                        {std::move(physical_host), std::move(kernel_host)},
+                                                        /*upload_pending=*/true),
+                                "MTP cache reservation raced another state publication");
+        return absl::OkStatus();
+    }
+    if (same_device) {
+        auto device = host.to(state.next_kv_cache_block_id_gpu.options(), /*non_blocking=*/true);
+        physical    = device.narrow(0, 0, physical_count).view_as(physical_host);
+        kernel      = device.narrow(0, physical_count, group_count * kernel_width).view_as(kernel_host);
+    } else {
+        physical = physical_host.to(state.next_kv_cache_block_id_gpu.options(), /*non_blocking=*/true);
+        kernel   = kernel_host.to(state.next_kv_cache_kernel_block_id_gpu.options(), /*non_blocking=*/true);
+    }
     RTP_LLM_CHECK_WITH_INFO(
         replaceMtpCacheSnapshot(
             state.epoch, std::move(physical), std::move(kernel), {std::move(physical_host), std::move(kernel_host)}),
         "MTP cache reservation raced another state publication");
     return absl::OkStatus();
+}
+
+void GenerateStream::flushMtpCacheSnapshotUploads(const std::list<std::shared_ptr<GenerateStream>>& streams,
+                                                  std::optional<torch::Stream>                      upload_stream) {
+    RTP_LLM_PROFILE_SCOPE("mtp.flush_cache_snapshot_uploads");
+    (void)upload_stream;  // Non-CUDA builds keep the caller-stream copy.
+    struct Upload {
+        std::shared_ptr<GenerateStream> stream;
+        MtpAsyncDeviceState             state;
+    };
+    std::map<int, std::vector<Upload>> batches;
+    for (const auto& stream : streams) {
+        auto state = stream->getMtpAsyncDeviceState();
+        if (state.cache_snapshot_upload_pending) {
+            RTP_LLM_CHECK_WITH_INFO(hasMtpCacheSnapshot(state) && state.cache_snapshot_host_buffers.size() == 2,
+                                    "pending MTP snapshot requires a valid device pair and two host views");
+            batches[state.next_kv_cache_block_id_gpu.get_device()].push_back({stream, std::move(state)});
+        }
+    }
+    for (const auto& [device, batch] : batches) {
+        (void)device;
+        int64_t total = 0;
+        for (const auto& upload : batch) {
+            for (const auto& tensor : upload.state.cache_snapshot_host_buffers) {
+                RTP_LLM_CHECK_WITH_INFO(tensor.device().is_cpu() && tensor.scalar_type() == torch::kInt32
+                                            && tensor.dim() == 3 && tensor.is_contiguous(),
+                                        "pending MTP snapshot must be contiguous host int32 [group,1,blocks]");
+                total += tensor.numel();
+            }
+        }
+        auto    host   = torch::empty({total}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        int64_t offset = 0;
+        for (const auto& upload : batch) {
+            for (const auto& tensor : upload.state.cache_snapshot_host_buffers) {
+                if (tensor.numel()) {
+                    std::memcpy(host.data_ptr<int32_t>() + offset,
+                                tensor.data_ptr<int32_t>(),
+                                tensor.numel() * sizeof(int32_t));
+                }
+                offset += tensor.numel();
+            }
+        }
+        const auto    options = batch.front().state.next_kv_cache_block_id_gpu.options();
+        torch::Tensor gpu;
+#if USING_CUDA
+        if (options.device().is_cuda() && upload_stream && upload_stream->device_type() == c10::DeviceType::CUDA
+            && upload_stream->device_index() == device) {
+            const c10::cuda::CUDAGuard device_guard(options.device());
+            const auto                 current = c10::cuda::getCurrentCUDAStream(device);
+            cudaStreamCaptureStatus    capture_status;
+            C10_CUDA_CHECK(cudaStreamIsCapturing(current.stream(), &capture_status));
+            const auto copy = c10::cuda::CUDAStream(*upload_stream);
+            if (capture_status == cudaStreamCaptureStatusNone && copy != current) {
+                at::cuda::CUDAEvent uploaded;
+                {
+                    const c10::cuda::CUDAStreamGuard stream_guard(copy);
+                    gpu = host.to(options, /*non_blocking=*/true);
+                    uploaded.record(copy);
+                }
+                // The immutable host snapshot has no dependency on the preceding
+                // model round. Preserve caller-stream readiness before publishing.
+                uploaded.block(current);
+                c10::cuda::CUDACachingAllocator::recordStream(gpu.storage().data_ptr(), current);
+            } else {
+                gpu = host.to(options, /*non_blocking=*/true);
+            }
+        } else
+#endif
+        {
+            gpu = host.to(options, /*non_blocking=*/true);
+        }
+        offset = 0;
+        for (const auto& upload : batch) {
+            const auto& physical = upload.state.cache_snapshot_host_buffers[0];
+            const auto& kernel   = upload.state.cache_snapshot_host_buffers[1];
+            const auto  count    = physical.numel() + kernel.numel();
+            RTP_LLM_CHECK_WITH_INFO(
+                upload.stream->replaceMtpCacheSnapshot(
+                    upload.state.epoch,
+                    gpu.narrow(0, offset, physical.numel()).view(physical.sizes()),
+                    gpu.narrow(0, offset + physical.numel(), kernel.numel()).view(kernel.sizes()),
+                    {host.narrow(0, offset, physical.numel()).view(physical.sizes()),
+                     host.narrow(0, offset + physical.numel(), kernel.numel()).view(kernel.sizes())}),
+                "batched MTP upload raced another state publication");
+            offset += count;
+        }
+    }
 }
 
 bool GenerateStream::hasError() const {

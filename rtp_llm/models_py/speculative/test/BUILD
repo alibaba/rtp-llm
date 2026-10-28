@@ -38,3 +38,27 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "test_boundary_prepare",
+    srcs = ["test_boundary_prepare.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    }),
+)
+
+py_test(
+    name = "test_boundary_compatibility",
+    srcs = ["test_boundary_compatibility.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "2"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+    }),
+)

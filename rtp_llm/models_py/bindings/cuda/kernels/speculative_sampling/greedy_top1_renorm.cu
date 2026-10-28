@@ -152,27 +152,8 @@ __global__ void greedyTop1PartialsKernel(const float* __restrict__ logits,
     }
 }
 
-// Kernel 2: combine the per-row partials, zero-fill the row's one-hot chunk,
-// and scatter the 1.0 at the row argmax; split 0 also writes the token.
-// kWriteOnehot=false is the token-only point-mass mode: the chunk zero-fill
-// and the scatter are skipped (the caller consumes the distribution as a
-// point mass at samples_out), leaving the partials combine + token write.
-template<bool kVectorized, bool kWriteOnehot>
-__global__ void greedyTop1WriteKernel(float* __restrict__ onehot_out,
-                                      int32_t* __restrict__ samples_out,
-                                      const float* __restrict__ partials_max,
-                                      const float* __restrict__ partials_idx,
-                                      const int vocab_size,
-                                      const int chunk) {
-    const int split  = blockIdx.x;
-    const int row    = blockIdx.y;
-    const int splits = gridDim.x;
-
-    // Every CTA redundantly combines the <= kGreedyTop1MaxSplits partials of
-    // its row (a few cached 4-byte loads) instead of paying a second sync.
-    // `vocab_size` is the empty-chunk sentinel written by kernel 1; split 0 is
-    // always non-empty for vocab > 0, so the sentinel never survives a full
-    // combine of a real row.
+__device__ __forceinline__ int
+combineGreedyTop1(const float* partials_max, const float* partials_idx, int row, int splits, int vocab_size) {
     float row_max = -INFINITY;
     int   row_arg = vocab_size;
     for (int i = 0; i < splits; ++i) {
@@ -185,6 +166,47 @@ __global__ void greedyTop1WriteKernel(float* __restrict__ onehot_out,
             row_arg = idx;
         }
     }
+
+    return row_arg;
+}
+
+// Token-only output has no vocabulary-sized stores: one thread per row is sufficient.
+__global__ void greedyTop1TokensKernel(int32_t*     samples_out,
+                                       const float* partials_max,
+                                       const float* partials_idx,
+                                       int          batch_size,
+                                       int          splits,
+                                       int          vocab_size,
+                                       int64_t      sample_stride) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < batch_size) {
+        samples_out[row * sample_stride] = combineGreedyTop1(partials_max, partials_idx, row, splits, vocab_size);
+    }
+}
+
+// Kernel 2: combine the per-row partials, zero-fill the row's one-hot chunk,
+// and scatter the 1.0 at the row argmax; split 0 also writes the token.
+// kWriteOnehot=false is the token-only point-mass mode: the chunk zero-fill
+// and the scatter are skipped (the caller consumes the distribution as a
+// point mass at samples_out), leaving the partials combine + token write.
+template<bool kVectorized, bool kWriteOnehot>
+__global__ void greedyTop1WriteKernel(float* __restrict__ onehot_out,
+                                      int32_t* __restrict__ samples_out,
+                                      const float* __restrict__ partials_max,
+                                      const float* __restrict__ partials_idx,
+                                      const int     vocab_size,
+                                      const int     chunk,
+                                      const int64_t sample_stride) {
+    const int split  = blockIdx.x;
+    const int row    = blockIdx.y;
+    const int splits = gridDim.x;
+
+    // Every CTA redundantly combines the <= kGreedyTop1MaxSplits partials of
+    // its row (a few cached 4-byte loads) instead of paying a second sync.
+    // `vocab_size` is the empty-chunk sentinel written by kernel 1; split 0 is
+    // always non-empty for vocab > 0, so the sentinel never survives a full
+    // combine of a real row.
+    const int row_arg = combineGreedyTop1(partials_max, partials_idx, row, splits, vocab_size);
 
     if constexpr (kWriteOnehot) {
         float* orow = onehot_out + static_cast<int64_t>(row) * vocab_size;
@@ -213,11 +235,11 @@ __global__ void greedyTop1WriteKernel(float* __restrict__ onehot_out,
                 orow[row_arg] = 1.0f;
             }
             if (split == 0) {
-                samples_out[row] = static_cast<int32_t>(row_arg);
+                samples_out[row * sample_stride] = static_cast<int32_t>(row_arg);
             }
         }
     } else if (threadIdx.x == 0 && split == 0) {
-        samples_out[row] = static_cast<int32_t>(row_arg);
+        samples_out[row * sample_stride] = static_cast<int32_t>(row_arg);
     }
 }
 
@@ -228,7 +250,8 @@ cudaError_t launchGreedyTop1Renorm(const float* logits,
                                    int          batch_size,
                                    int          vocab_size,
                                    float*       partials,
-                                   cudaStream_t stream) {
+                                   cudaStream_t stream,
+                                   int64_t      sample_stride) {
     const int  splits = greedyTop1RenormSplits(batch_size, vocab_size);
     const int  units  = kVectorized ? vocab_size / 4 : vocab_size;
     const int  chunk  = (units + splits - 1) / splits;
@@ -243,8 +266,14 @@ cudaError_t launchGreedyTop1Renorm(const float* logits,
     if (status != cudaSuccess) {
         return status;
     }
-    greedyTop1WriteKernel<kVectorized, kWriteOnehot>
-        <<<grid, block, 0, stream>>>(onehot_out, samples_out, partials_max, partials_idx, vocab_size, chunk);
+    if constexpr (kWriteOnehot) {
+        greedyTop1WriteKernel<kVectorized, kWriteOnehot><<<grid, block, 0, stream>>>(
+            onehot_out, samples_out, partials_max, partials_idx, vocab_size, chunk, sample_stride);
+    } else {
+        constexpr int threads = 128;
+        greedyTop1TokensKernel<<<(batch_size + threads - 1) / threads, threads, 0, stream>>>(
+            samples_out, partials_max, partials_idx, batch_size, splits, vocab_size, sample_stride);
+    }
     return cudaGetLastError();
 }
 
@@ -274,7 +303,8 @@ cudaError_t invokeGreedyTop1Renorm(const float* logits,
                                    int          vocab_size,
                                    float*       partials,
                                    cudaStream_t stream,
-                                   bool         write_onehot) {
+                                   bool         write_onehot,
+                                   int64_t      sample_stride) {
     if (batch_size == 0) {
         return cudaSuccess;
     }
@@ -282,21 +312,23 @@ cudaError_t invokeGreedyTop1Renorm(const float* logits,
     // slot; the caller gate must fall back to the legacy chain beyond that.
     // onehot_out is only dereferenced when write_onehot is set.
     if (logits == nullptr || (write_onehot && onehot_out == nullptr) || samples_out == nullptr || partials == nullptr
-        || vocab_size <= 0 || vocab_size >= (1 << 24) || batch_size < 0) {
+        || vocab_size <= 0 || vocab_size >= (1 << 24) || batch_size < 0 || sample_stride <= 0) {
         return cudaErrorInvalidValue;
     }
     // Contiguous views may start at an unaligned storage offset.
     if (vocab_size % 4 == 0 && reinterpret_cast<uintptr_t>(logits) % alignof(float4) == 0
         && (!write_onehot || reinterpret_cast<uintptr_t>(onehot_out) % alignof(float4) == 0)) {
-        return write_onehot ? launchGreedyTop1Renorm<true, true>(
-                                  logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream) :
-                              launchGreedyTop1Renorm<true, false>(
-                                  logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream);
+        return write_onehot ?
+                   launchGreedyTop1Renorm<true, true>(
+                       logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream, sample_stride) :
+                   launchGreedyTop1Renorm<true, false>(
+                       logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream, sample_stride);
     }
-    return write_onehot ? launchGreedyTop1Renorm<false, true>(
-                              logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream) :
-                          launchGreedyTop1Renorm<false, false>(
-                              logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream);
+    return write_onehot ?
+               launchGreedyTop1Renorm<false, true>(
+                   logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream, sample_stride) :
+               launchGreedyTop1Renorm<false, false>(
+                   logits, onehot_out, samples_out, batch_size, vocab_size, partials, stream, sample_stride);
 }
 
 }  // namespace rtp_llm
