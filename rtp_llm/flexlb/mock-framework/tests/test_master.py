@@ -52,8 +52,16 @@ def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
     assert master_environment({'a': {'b': 2}}, [], tmp_path) == {}
 
 
+@pytest.mark.parametrize('replicas', [1, 2], ids=['one-master', 'two-masters'])
 @pytest.mark.parametrize('batched', [False, True], ids=['single-nonbatch', 'fixed-window-batch'])
-def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched):
+def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas):
+    from mock_framework.execution.processes import master_port
+    try:
+        master_port(replicas)
+    except ExecutionError as error:
+        if 'enable loopback aliases' in str(error):
+            pytest.skip(str(error))
+        raise
     import asyncio
     import os
     import subprocess
@@ -78,7 +86,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched):
     engine_config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
                      'max_seq_len': 4096, 'compute.expression': '1 + batchSize'}
     document = {'id': 'production_master_probe', 'describe': '真实Master与新P/D及Client接线验证',
-        'environment': {'master': {'config': master_config},
+        'environment': {'master': {'deployment': {'replicas': replicas}, 'config': master_config},
                         'prefill': {'engine': 'rtp', 'config': engine_config},
                         'decode': {'engine': 'rtp', 'config': engine_config}},
         'phases': [{'id': 'probe', 'describe': '逐Master读取并由外部Client发请求', 'timeout': '30s', 'steps': [
@@ -86,20 +94,22 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched):
                        'args': {'role': 'prefill'}, 'expect': {'eq': {'instances': [{'id': 'prefill-0'}]}}}},
             {'check': {'id': 'decodes', 'describe': '实际登记D集合', 'interface': 'master/engine/get',
                        'args': {'role': 'decode'}, 'expect': {'eq': {'instances': [{'id': 'decode-0'}]}}}},
-            {'check': {'id': 'leader', 'describe': 'standalone没有选举声明', 'interface': 'master/leadership/get', 'expect': {'count': 0}}},
-            {'call': {'id': 'wait', 'describe': '供外部Client取流', 'interface': 'runtime/wait', 'args': {'duration': '12s'}}}]}]}
+            {'check': {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/leadership/get', 'expect': {'count': 1}}},
+            {'call': {'id': 'wait', 'describe': '供外部Client取流', 'interface': 'runtime/wait', 'args': {'duration': '20s' if replicas == 2 else '12s'}}}]}]}
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
     registry = Registry.load(root / 'build/interfaces.json'); case = compile_case(case_file, registry)
     components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
     for role in ('prefill', 'decode'):
         components[role] = {'command': [str(java), '-jar', str(root / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')]}
-    launch = prepare_launch({'components': components, 'bindings': {'master/': 'master-0'}}, case, tmp_path)
+    launch = prepare_launch({'components': components, 'bindings': {'master/': 'master-0'},
+        'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath,
+                                  'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
     output = tmp_path / 'result'
 
     async def exercise():
         task = asyncio.create_task(run_case(case, registry, launch, output))
         try:
-            ready = output / 'components/master-0/ready.json'
+            ready = output / f'components/master-{replicas - 1}/ready.json'
             while not ready.exists():
                 if task.done():
                     raise AssertionError(await task)
@@ -113,7 +123,32 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched):
             result = json.loads(actual.read_text())
             assert result['enqueued_by_master'] is batched and result['outcome'] == 'success'
             assert result['tokens'] == 3 and 0 < result['ttft_ns'] <= result['elapsed_ns']
-            with urllib.request.urlopen(endpoints['metrics'], timeout=3) as response:
+            if replicas == 2:
+                from mock_framework.execution.transport import post
+                from mock_framework.execution.records import timestamp
+                nodes = {f'master-{i}': json.loads((output / f'components/master-{i}/endpoints.json').read_text())
+                         for i in range(replicas)}
+                async def claims():
+                    result = []
+                    for node in nodes.values():
+                        value = await post(node['control'], {'interface': 'master/leadership/get', 'args': {},
+                            'context': {'run': 'foreground', 'query_time': timestamp(), 'observation': None, 'timeout_ms': 3000}})
+                        result.extend(item['id'] for item in value['instances'])
+                    return result
+                before = await claims()
+                assert len(before) == 1
+                # Exercise the production lifecycle hook, without changing the production election code.
+                def offline():
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    with opener.open(nodes[before[0]]['http'] + '/hook/pre_stop', timeout=10) as response:
+                        assert response.status == 200
+                await asyncio.to_thread(offline)
+                async with asyncio.timeout(10):
+                    while (after := await claims()) != [node for node in nodes if node != before[0]]:
+                        await asyncio.sleep(.05)
+                (tmp_path / 'handoff.json').write_text(json.dumps({'before': before, 'after': after}))
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(endpoints['metrics'], timeout=3) as response:
                 metrics = response.read().decode('utf-8')
                 assert response.status == 200 and 'jvm_memory_used_bytes' in metrics and 'flexlb_' in metrics
             (ready.parent / 'metrics.prom').write_text(metrics)
@@ -126,7 +161,19 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched):
     assert effective['FLEXLB_CONFIG'] == master_config['FLEXLB_CONFIG']
     events = [json.loads(row) for row in (output / 'events.jsonl').read_text().splitlines()]
     started = [event for event in events if event['event'] == 'process_started']
-    assert [event['node'] for event in started] == ['prefill-0', 'decode-0', 'master-0']
+    assert [event['node'] for event in started] == ['zookeeper', 'prefill-0', 'decode-0'] + [f'master-{i}' for i in range(replicas)]
+    election = effective['FLEXLB_SYNC_CONSISTENCY_CONFIG']
+    assert election['needConsistency'] is True
+    gates = [json.loads(row) for row in (output / 'gates.jsonl').read_text().splitlines()]
+    assert set(gates[0]['actual']['instances']) == {f'master-{i}' for i in range(replicas)}
+    if replicas == 2:
+        other = json.loads((output / 'components/master-1/effective-config.json').read_text())
+        assert other['advertised_ip'] == '127.0.0.2' and effective['advertised_ip'] == '127.0.0.1'
+        assert other['server_port'] == effective['server_port']
+        assert other['HIPPO_ROLE'] == effective['HIPPO_ROLE']
+        assert other['FLEXLB_SYNC_CONSISTENCY_CONFIG'] == election
+    stopped = [event['node'] for event in events if event['event'] == 'process_stopped']
+    assert stopped[-1] == 'zookeeper'
     for event in started:
         with pytest.raises(ProcessLookupError):
             os.kill(event['pid'], 0)

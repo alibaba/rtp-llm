@@ -91,11 +91,17 @@ Java Client实现时应基于seed和稳定逻辑请求身份生成每个请求�
 
 `java/master`的入口为`org.flexlb.MasterNode`，与生产Application、同步器和调度器运行于同一JVM，不启动第二个Master子进程，也不引入Mock调度器。启动classpath为本模块`target/classes`加构建生成的`target/dependencies.txt`；启动配方可使用`java -cp <classpath> org.flexlb.MasterNode`，建议为生产Spring初始化预留60s的startup_timeout。
 
-Case的`environment.master.config`保存原生环境变量字符串：`FLEXLB_CONFIG`是原样JSON文本，`MODEL_SERVICE_CONFIG`是原生模型路由JSON。Runner先启动P/D/V，再启动Master，最后启动Client，与YAML中组件的书写顺序无关。它根据已启动Engine的endpoints.json维护topology.json，将MODEL_SERVICE_CONFIG中的hosts/discovery_file替换为本次运行的discovery.json；service_id、组和各角色发现域名仍来自原配置。FLEXLB_CONFIG不改写。单个本地组内各角色的实例集合由对应启动结果生成，不读取线上VIP。
+Case的`environment.master.config`保存原生环境变量字符串：`FLEXLB_CONFIG`是原样JSON文本，`MODEL_SERVICE_CONFIG`是原生模型路由JSON。Runner先启动本次运行独占的ZooKeeper，再启动P/D/V、Master和Client，与YAML中组件的书写顺序无关。它根据已启动Engine的endpoints.json维护topology.json，将MODEL_SERVICE_CONFIG中的hosts/discovery_file替换为本次运行的discovery.json；service_id、组和各角色发现域名仍来自原配置。FLEXLB_CONFIG不改写。单个本地组内各角色的实例集合由对应启动结果生成，不读取线上VIP。
 
-当前明确限制一个Master、一个模型endpoint组、独立角色和grpc协议。本批验证P/D；ViT Engine尚未实现，发现格式预留同样的角色映射但不宣称ViT链路已通过。发现文件使用实际Engine gRPC端口，由生产WorkerAddressService按grpc协议转换内部HTTP身份；不假设Engine控制HTTP端口与gRPC端口相邻。复制来的原始配置保留在config.json，实际环境和发现地址另存native-environment.json、effective-config.json和discovery.json；Master日志写入自己的运行目录。HTTP/gRPC使用本机空闲端口，/prometheus沿用生产Master指标，endpoints.json同时登记业务、控制与指标地址。
+当前支持单/多Master，仍限制一个模型endpoint组、独立角色和grpc协议。本批验证P/D；ViT Engine尚未实现，发现格式预留同样的角色映射但不宣称ViT链路已通过。发现文件使用实际Engine gRPC端口，由生产WorkerAddressService按grpc协议转换内部HTTP身份；不假设Engine控制HTTP端口与gRPC端口相邻。复制来的原始配置保留在config.json，实际环境和发现地址另存native-environment.json、effective-config.json和discovery.json；Master日志写入自己的运行目录。/prometheus沿用生产Master指标，endpoints.json同时登记业务、控制与指标地址。
 
-只绑定MasterStateApi的两个读取接口：master/engine/get读取生产WorkerDirectory的当前角色集合并映射为Engine句柄，未知地址明确报错，不按部署数量伪造或悄悄忽略；结果以Master ID分别返回。master/leadership/get读取生产isMaster声明，关闭一致性选举的standalone模式返回空集合，不将唯一进程冒充当选leader。master/process/stop/start、多Master聚合和滚动重启尚未接入。
+只绑定MasterStateApi的两个读取接口：master/engine/get读取生产WorkerDirectory的当前角色集合并映射为Engine句柄，未知地址明确报错，不按部署数量伪造或悄悄忽略；结果以Master ID分别返回。master/leadership/get读取各Master的生产isMaster声明，Runner汇总真实声明集合；master/engine/get逐个读取并保留每个Master的结果，不将Engine集合取并集。单/多Master使用相同读取流程。master/process/stop/start和滚动重启尚未接入。
+
+单/多Master统一开启生产ZooKeeper选举，不提供standalone分支。启动配方必须配置顶层`zookeeper`，与组件配方相同，入口是`java -cp <Master的classpath> org.flexlb.mock.master.ZookeeperNode`。这是实际ZooKeeper服务，独立JVM、独立数据目录，使用已有ZooKeeper依赖；不复用旧框架启动器，也不修改生产代码。Runner分配连接地址和本次实验的HIPPO_ROLE，覆盖运行时FLEXLB_SYNC_CONSISTENCY_CONFIG为needConsistency=true，使用6s会话超时，实际值保存到native-environment.json、effective-config.json和zookeeper/master-environment.json。原始Case配置仍单独保存。
+
+Master依次使用127.0.0.1、127.0.0.2等回环IPv4地址，HTTP端口相同、gRPC端口统一为HTTP+2；端口在Engine启动后探测，实际启动若发生抢占则明确失败。这样符合生产选举用IP作为身份、转发共用端口的约束。Linux默认支持127/8回环；macOS没有配置相应别名时，多Master启动明确报错，应在Linux开发机运行，不会自动修改操作系统网络配置。每次实验有独立ZK和选举路径，互不共享选举状态。
+
+Master发布ready前必须从实际ZK选举取得Leader地址，不能将进程启动视为选举成功。任一组件或ZK意外退出都使实验失败；收尾先停止组件，再停止ZK，最后停止Prometheus，保留ZK数据及日志供排查。ZooKeeper启动配方属于Runner运行配置，不放进Case的业务组件配置。
 
 真实接线测试另外启动生产Master JVM、新P/D JVM和Client探针JVM，覆盖DIRECT/NON_BATCH的Generate与QUEUE/FIXED_WINDOW/BATCH的Enqueue→Fetch；与前一节保留的调度协议夹具测试区分记录。这些是小流量本地接线验证，不作为远程开发机/CI大规模稳定性或压力能力验收。现阶段保留每个Engine一个JVM及跨实例gRPC，是否长期保留以这些后续测量为准。
 

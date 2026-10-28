@@ -7,7 +7,7 @@ import org.flexlb.mock.api.model.Types.*;
 import org.junit.jupiter.api.Test;
 
 class MasterReadsTest {
-    @Test void leadershipUsesTheActualClaimIncludingNoElectionInStandaloneMode() {
+    @Test void leadershipUsesTheActualClaimIncludingBeforeElectionCompletes() {
         var leader = new AtomicBoolean();
         var reads = new MasterReads("master-0", leader::get, role -> Set.of(), Map.of());
         assertTrue(reads.leadership(new None()).instances().isEmpty());
