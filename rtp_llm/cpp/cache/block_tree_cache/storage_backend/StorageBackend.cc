@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/KVCMOperationId.h"
 
 #include <algorithm>
 #include <mutex>
@@ -47,8 +48,25 @@ struct StorageTaskState {
     uint64_t                          trace_id{0};
     std::vector<Pin> pins;
     std::once_flag   finish_once;
-    void             finish() {
-        std::call_once(finish_once, [this] {
+    std::function<void(FrozenTask)> retain_frozen;
+    std::function<void(const std::string&)> finish_operation;
+    void                              finish(bool completion_unknown = false) {
+        std::call_once(finish_once, [this, completion_unknown] {
+            if (completion_unknown) {
+                TransferResult result{ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "backend completion unknown")};
+                if (!request.operation_id.empty()) {
+                    result.recovery_task_ids.push_back(request.operation_id);
+                }
+                FrozenTask frozen(result,
+                                  request.operation_id.empty() ? FrozenTask::QueryKind::TRANSFER :
+                                                                 FrozenTask::QueryKind::KVCM);
+                for (const Pin& pin : pins) {
+                    frozen.freeze(pin.pool, pin.block);
+                }
+                retain_frozen(std::move(frozen));
+            } else if (!request.operation_id.empty() && finish_operation) {
+                finish_operation(request.operation_id);
+            }
             for (const Pin& pin : pins) {
                 pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
             }
@@ -341,9 +359,86 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
     auto state     = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request = std::move(request);
     state->trace_id = trace_id;
+    if (supportsCompletionQueries()) state->request.operation_id = nextKVCMOperationId();
+    state->retain_frozen = [this](FrozenTask task) {
+        std::function<void(FrozenTask)> retainer;
+        {
+            std::lock_guard<std::mutex> lock(frozen_mutex_);
+            retainer = frozen_task_retainer_;
+            if (!retainer) {
+                frozen_tasks_.push_back(std::move(task));
+                return;
+            }
+        }
+        retainer(std::move(task));
+    };
+    state->finish_operation = [this](const std::string& operation_id) {
+        FinishedOperationHandler handler;
+        {
+            std::lock_guard<std::mutex> lock(finished_operation_mutex_);
+            handler = finished_operation_handler_;
+        }
+        if (handler) handler(operation_id);
+    };
     RTP_LLM_CHECK(initialized_);
 
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
+    if (for_write) {
+        const auto original_keys = state->request.keys;
+        auto       filtered_keys = std::make_shared<CacheKeysType>();
+        std::vector<std::vector<StorageBlockHandle>> filtered_handles;
+        filtered_keys->reserve(original_keys->size());
+        filtered_handles.reserve(state->request.handles.size());
+        size_t handle_count = 0;
+        for (const auto& row : state->request.handles) {
+            handle_count += row.size();
+        }
+        pinned.reserve(handle_count);
+        state->pins.reserve(handle_count);
+        for (size_t key_index = 0; key_index < state->request.handles.size(); ++key_index) {
+            const auto& key_handles = state->request.handles[key_index];
+            if (key_handles.empty()) {
+                continue;
+            }
+            const size_t         row_pin_begin = state->pins.size();
+            std::vector<BlockKey> row_pins;
+            row_pins.reserve(key_handles.size());
+            bool rejected = false;
+            for (const StorageBlockHandle& handle : key_handles) {
+                const auto&    pool = devicePool(handle.tag);
+                const BlockKey key{pool.get(), handle.block};
+                if (!pinned.insert(key).second) {
+                    continue;
+                }
+                if (!pool->tryPinForRemoteConnector(handle.block)) {
+                    pinned.erase(key);
+                    rejected = true;
+                    break;
+                }
+                state->pins.push_back({pool, handle.block});
+                row_pins.push_back(key);
+            }
+            if (rejected) {
+                for (auto it = row_pins.rbegin(); it != row_pins.rend(); ++it) {
+                    auto pin = std::move(state->pins.back());
+                    state->pins.pop_back();
+                    pinned.erase(*it);
+                    pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
+                }
+                RTP_LLM_CHECK(state->pins.size() == row_pin_begin);
+                continue;
+            }
+            filtered_keys->push_back((*original_keys)[key_index]);
+            filtered_handles.push_back(key_handles);
+        }
+        if (filtered_handles.empty()) {
+            state->request.operation_id.clear();
+            return nullptr;
+        }
+        state->request.keys    = std::move(filtered_keys);
+        state->request.handles = std::move(filtered_handles);
+        return state;
+    }
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
             const auto&    pool = devicePool(handle.tag);

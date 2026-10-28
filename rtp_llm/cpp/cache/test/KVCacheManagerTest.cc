@@ -889,6 +889,26 @@ TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayer
     }
 }
 
+TEST_F(KVCacheManagerTest, QueryTransferTasksReturnsMixedStates) {
+    KVCacheManager manager(makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8), false);
+    ASSERT_TRUE(manager.init());
+    ASSERT_NE(manager.blockTreeCache(), nullptr);
+    auto& registry = manager.blockTreeCache()->transfer_task_registry_;
+    ASSERT_TRUE(registry.start("running"));
+    ASSERT_TRUE(registry.start("finished"));
+    ASSERT_TRUE(registry.finish("finished"));
+    QueryTransferTasksRequestPB request;
+    for (const auto* id : {"running", "finished", "missing"}) request.add_task_ids(id);
+    QueryTransferTasksResponsePB response;
+    ASSERT_TRUE(manager.queryTransferTasks(request, response));
+    ASSERT_EQ(response.tasks_size(), 3);
+    using PB = QueryTransferTasksResponsePB::TaskState;
+    EXPECT_EQ(response.tasks(0).state(), PB::RUNNING);
+    EXPECT_EQ(response.tasks(1).state(), PB::FINISHED);
+    EXPECT_EQ(response.tasks(2).state(), PB::NOT_FOUND);
+    for (int i = 0; i < 3; ++i) EXPECT_EQ(response.tasks(i).task_id(), request.task_ids(i));
+}
+
 TEST_F(KVCacheManagerTest, AvailableBlocksUsesCanonicalPoolCount) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
@@ -2336,6 +2356,24 @@ protected:
             ASSERT_EQ(req->resource->blocksNum(0, "default"), 3);
             ASSERT_NO_FATAL_FAILURE(devicePayload(*req, /*write=*/false, 2));
         }
+        auto demoteTreeCopies = [&](const std::vector<const Request*>& requests) {
+            // FULL eviction advances from leaves to parents, so maintain until
+            // the selected paths are HOST-only instead of assuming one pass.
+            bool device_present = true;
+            for (size_t attempt = 0; attempt < 8 && device_present; ++attempt) {
+                demote();
+                BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+                device_present = false;
+                std::lock_guard<std::mutex> lock(cache->mutex_);
+                for (const auto* req : requests) {
+                    const auto path = cache->tree()->findNode(req->keys);
+                    for (const auto* node : path) {
+                        device_present = device_present || node->group_set_resources[0].hasTier(Tier::DEVICE);
+                    }
+                }
+            }
+            ASSERT_FALSE(device_present);
+        };
         if (concurrent) {
             // A/B keep their device copies while load_a/load_b hold request
             // references. The same watermark still demotes the idle C/D blocks.
@@ -2351,8 +2389,14 @@ protected:
                     }
                 }
             }
+            // Watermark eviction skips DEVICE blocks with live request refs.
+            // C/D are idle and can demote while A/B keep serving from DEVICE.
+            demoteTreeCopies({&c, &d});
             ASSERT_NO_FATAL_FAILURE(hostPayload(c));
             ASSERT_NO_FATAL_FAILURE(hostPayload(d));
+            for (const auto* req : {&load_a, &load_b}) {
+                ASSERT_NO_FATAL_FAILURE(devicePayload(*req, /*write=*/false, 2));
+            }
         }
         EXPECT_EQ(manager_->freeBlocksNum(), 10u);  // Two live three-block requests.
         size_t d2h = 0;
@@ -2372,9 +2416,7 @@ protected:
         manager_->free(FreeInfo{load_b.resource, load_b.tokens});
         if (concurrent) {
             // Releasing the request references makes A/B eligible again.
-            demote();
-            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+            demoteTreeCopies({&a, &b});
             ASSERT_NO_FATAL_FAILURE(hostPayload(a));
             ASSERT_NO_FATAL_FAILURE(hostPayload(b));
         }

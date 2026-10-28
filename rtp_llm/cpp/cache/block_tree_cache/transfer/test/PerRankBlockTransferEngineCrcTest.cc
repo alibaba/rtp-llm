@@ -656,7 +656,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, InvalidDeviceIndicesAndMemberCountsNev
         {targets_[0][0], targets_[0][1], targets_[0][0]},
     };
     for (const auto& blocks : invalid) {
-        for (const auto direction :
+        for (const auto& direction :
              {std::make_pair(Tier::DEVICE, Tier::HOST), std::make_pair(Tier::HOST, Tier::DEVICE)}) {
             std::memset(hostData(0), 0x6b, host_->strideBytes());
             if (direction.first == Tier::HOST) {

@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/LinearReplayPool.h"
 #include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/KVCMOperationRegistry.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -152,6 +153,10 @@ public:
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+    bool queryTransferTasks(const QueryTransferTasksRequestPB& request, QueryTransferTasksResponsePB& response) const;
+    bool queryKVCMOperations(const QueryKVCMOperationsRequestPB& request,
+                             QueryKVCMOperationsResponsePB& response) const;
+    bool forgetKVCMOperation(const std::string& operation_id);
 
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
@@ -201,6 +206,7 @@ private:
     std::thread       metrics_reporter_thread_;
 
     BlockTreeCachePtr                           block_tree_cache_;
+    KVCMOperationRegistry                       kvcm_operation_registry_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
 
     mutable std::mutex          cache_store_mutex_;
