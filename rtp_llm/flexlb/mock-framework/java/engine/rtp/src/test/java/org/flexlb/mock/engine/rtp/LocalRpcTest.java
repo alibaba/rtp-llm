@@ -114,7 +114,7 @@ class LocalRpcTest {
         }
     }
 
-    @Test void unsupportedPdAndInsufficientMemoryAreErrorsNotSuccessfulFrames() throws Exception {
+    @Test void missingDecodeRouteAndInsufficientMemoryAreErrorsNotSuccessfulFrames() throws Exception {
         try (var node = RtpNode.start(config("1"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
@@ -122,7 +122,7 @@ class LocalRpcTest {
                 var input = LocalPrefillTest.input(1, 0, true);
                 var pd = input.toBuilder().setGenerateConfig(input.getGenerateConfig().toBuilder().setMaxNewTokens(8).setCanUsePdSeparation(true)).build();
                 var unsupported = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(pd).hasNext());
-                assertEquals(Status.Code.UNIMPLEMENTED, unsupported.getStatus().getCode());
+                assertEquals(Status.Code.INVALID_ARGUMENT, unsupported.getStatus().getCode());
                 var probabilities = input.toBuilder().setGenerateConfig(input.getGenerateConfig().toBuilder().setReturnSoftmaxProbs(true)).build();
                 assertEquals(Status.Code.UNIMPLEMENTED, assertThrows(StatusRuntimeException.class,
                     () -> rpc.generateStreamCall(probabilities).hasNext()).getStatus().getCode());

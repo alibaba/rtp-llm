@@ -79,8 +79,13 @@ class PrefillTransferTest {
             assertEquals("completed", source.next()); await(() -> p.status().getAvailableKvCache() == 16);
             assertEquals(10, d.status().getAvailableKvCache()); assertEquals(0, d.status().getRunningTaskInfo(0).getPrefixLength());
             assertEquals(0, d.status().getRunningQueryLen()); assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
-            request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.GENERATE).build()); replies.error(Status.Code.UNIMPLEMENTED);
-            assertEquals(16, d.status().getAvailableKvCache());
+            request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.GENERATE).setFirstGenerateTokenId(5).build());
+            for (int count = 2; count <= 4; count++) {
+                var output = (GenerateOutputsPB) replies.next();
+                assertEquals(count, output.getFlattenOutput().getAuxInfo(0).getOutputLen());
+                assertEquals(count == 4, output.getFlattenOutput().getFinished(0));
+            }
+            assertEquals("completed", replies.next()); assertEquals(16, d.status().getAvailableKvCache());
         }
     }
 

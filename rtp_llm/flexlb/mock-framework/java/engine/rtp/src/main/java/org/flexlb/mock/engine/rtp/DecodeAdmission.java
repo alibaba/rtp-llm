@@ -8,6 +8,8 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 import org.flexlb.mock.metrics.EngineMetrics;
 import org.flexlb.mock.engine.rtp.transfer.*;
+import org.flexlb.mock.compute.*;
+import org.flexlb.mock.api.model.Types.Role;
 
 /** D-side ALLOCATE/LOAD owner. A LOAD ACK requires data from a live, computed P source. */
 final class DecodeAdmission implements AutoCloseable {
@@ -21,6 +23,10 @@ final class DecodeAdmission implements AutoCloseable {
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-decode-deadline").factory());
     private final EngineMetrics metrics;
+    private final RpcChannels channels = new RpcChannels();
+    private final SimulatedCompute compute = new SimulatedCompute();
+    private final ArrayDeque<Call> ready = new ArrayDeque<>();
+    private Call running;
     private boolean closed;
 
     DecodeAdmission(RtpConfig config, DeviceCache cache) {
@@ -46,12 +52,17 @@ final class DecodeAdmission implements AutoCloseable {
         ScheduledFuture<?> timeout;
         boolean terminal, acknowledged, loading, loaded;
         List<String> peers;
-        ManagedChannel source;
+        Context.CancellableContext source;
+        boolean generating, backpressured;
+        int generated, token;
+        long executionNanos, stepStarted;
+        SimulatedCompute.Execution execution;
         int reused;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response; this.context = context;
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE : after(System.nanoTime(), context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
+            response.setOnReadyHandler(() -> resume(this));
             response.setOnCancelHandler(() -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
                 stop(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
@@ -60,7 +71,11 @@ final class DecodeAdmission implements AutoCloseable {
         }
         @Override public void onNext(GenerateRequestPB request) { accept(this, request); }
         @Override public void onError(Throwable error) { stop(this, Status.CANCELLED.withDescription("Decode stream closed"), 8100); }
-        @Override public void onCompleted() { stop(this, Status.CANCELLED.withDescription("P closed before LOAD/generation"), 8100); }
+        @Override public void onCompleted() {
+            synchronized (DecodeAdmission.this) {
+                if (!generating) stop(this, Status.CANCELLED.withDescription("P closed before generation"), 8100);
+            }
+        }
     }
 
     private synchronized void accept(Call call, GenerateRequestPB request) {
@@ -75,8 +90,16 @@ final class DecodeAdmission implements AutoCloseable {
                 if (request.getStage() == RemoteStage.LOAD && call.acknowledged && !call.loading && !call.loaded) {
                     load(call); return;
                 }
-                if (call.loaded && request.getStage() == RemoteStage.GENERATE)
-                    throw Status.UNIMPLEMENTED.withDescription("Decode token generation is not implemented").asRuntimeException();
+                if (call.loaded && !call.generating && request.getStage() == RemoteStage.GENERATE) {
+                    if (request.getProposeTokenIdsCount() > 0 || request.getPositionIdsCount() > 0 || request.hasProposeProbs() || request.hasProposeHidden())
+                        throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
+                    call.generating = true; call.generated = 1; call.token = request.getFirstGenerateTokenId();
+                    if (call.input.getGenerateConfig().getMaxNewTokens() == 1) {
+                        call.response.onNext(LocalResponse.token(call.input, call.token, 1, call.reused, System.nanoTime() - call.started, true, true));
+                        stop(call, Status.OK, 0);
+                    } else { ready.addLast(call); advance(); }
+                    return;
+                }
                 throw Status.FAILED_PRECONDITION.withDescription("Expected LOAD after ALLOCATE acknowledgement").asRuntimeException();
             }
             validate(request);
@@ -110,6 +133,9 @@ final class DecodeAdmission implements AutoCloseable {
                 || generation.hasAdapterName() || !generation.getUniqueKey().isEmpty() || generation.getPrefillOnly()
                 || generation.getNumBeams() > 1 || generation.getNumReturnSequences() > 1 || generation.getVariableNumBeamsCount() > 0)
             throw Status.UNIMPLEMENTED.withDescription("Decode reservation currently supports single-sequence text only").asRuntimeException();
+        validateOutput(input);
+        if ((long) input.getTokenIdsCount() + generation.getMaxNewTokens() >= config.maxSeqLen())
+            throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Mock requires input + output below max_seq_len"), 605);
         if (input.getTokenIdsCount() < 1 || input.getTokenIdsCount() >= config.maxSeqLen()
                 || generation.getTimeoutMs() < 0 || generation.getMaxNewTokens() < 1 || generation.getMinNewTokens() < 0
                 || generation.getMinNewTokens() > generation.getMaxNewTokens() || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
@@ -166,10 +192,10 @@ final class DecodeAdmission implements AutoCloseable {
         if (call.peers.size() != 1 || call.peers.getFirst().isBlank())
             throw Status.FAILED_PRECONDITION.withDescription("Mock LOAD requires one P transfer address in ALLOCATE.peer_addrs").asRuntimeException();
         call.loading = true;
-        call.source = ManagedChannelBuilder.forTarget(call.peers.getFirst()).usePlaintext().build();
+        call.source = Context.current().withCancellation();
         long budget = Math.min(TimeUnit.MILLISECONDS.toNanos(config.loadTimeoutMs()), call.deadline == Long.MAX_VALUE
             ? Long.MAX_VALUE : Math.max(1, call.deadline - System.nanoTime()));
-        PrefillTransferGrpc.newStub(call.source).withDeadlineAfter(budget, TimeUnit.NANOSECONDS).read(
+        call.source.run(() -> PrefillTransferGrpc.newStub(channels.get(call.peers.getFirst())).withDeadlineAfter(budget, TimeUnit.NANOSECONDS).read(
             TransferRequest.newBuilder().setClientId(call.key.client()).setInput(call.input).setBlockSize(config.blockSize()).build(), new StreamObserver<>() {
                 private TransferMetadata metadata;
                 @Override public void onNext(TransferMetadata value) { metadata = value; }
@@ -178,7 +204,7 @@ final class DecodeAdmission implements AutoCloseable {
                     stop(call, status.augmentDescription("P-to-D LOAD failed"), status.getCode() == Status.Code.DEADLINE_EXCEEDED ? 603 : 8212);
                 }
                 @Override public void onCompleted() { loaded(call, metadata); }
-            });
+            }));
     }
 
     private synchronized void loaded(Call call, TransferMetadata metadata) {
@@ -191,7 +217,7 @@ final class DecodeAdmission implements AutoCloseable {
             stop(call, Status.FAILED_PRECONDITION.withDescription("P-to-D KV layout differs"), 8212); return;
         }
         call.loading = false; call.loaded = true;
-        call.source.shutdownNow(); call.source = null;
+        call.source.cancel(null); call.source = null;
         try {
             // The transferred prefix is not a historical D cache hit. Keep the lease private until terminal cleanup.
             call.response.onNext(GenerateOutputsPB.newBuilder().setRequestId(call.key.request())
@@ -199,51 +225,148 @@ final class DecodeAdmission implements AutoCloseable {
         } catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
     }
 
+    static void validateOutput(GenerateInputPB input) {
+        var g = input.getGenerateConfig();
+        if (g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
+                || g.getReturnAllProbs() || g.getReturnSoftmaxProbs() || g.getReturnCumLogProbs() || g.getCalculateLoss() != 0
+                || g.getStopWordsList().getRowsCount() > 0 || g.getSpEdit() || g.getSpInputLookup())
+            throw Status.UNIMPLEMENTED.withDescription("Extra outputs, stop words and speculative generation are not supported").asRuntimeException();
+    }
+
+    private synchronized void resume(Call call) {
+        if (!call.terminal && call.backpressured) { call.backpressured = false; ready.addLast(call); advance(); }
+    }
+
+    private boolean advancing;
+    /** One simulated execution slot, fair round-robin by token; capacity waits do not block other calls. */
+    private void advance() {
+        if (advancing) return;
+        advancing = true;
+        try {
+            while (!closed && running == null && !ready.isEmpty()) {
+                var call = ready.removeFirst();
+                if (call.terminal) continue;
+                if (!call.response.isReady()) { call.backpressured = true; continue; }
+                if (System.nanoTime() >= call.deadline) { stop(call, Status.DEADLINE_EXCEEDED.withDescription("Decode expired in queue"), 603); continue; }
+                try {
+                    int contextTokens = Math.addExact(call.input.getTokenIdsCount(), call.generated);
+                    int blocks = (int) (((long) contextTokens + config.blockSize() - 1) / config.blockSize());
+                    var failure = call.lease.growTo(blocks);
+                    if (failure == DeviceCache.Failure.PERMANENT) { stop(call, Status.RESOURCE_EXHAUSTED.withDescription("Decode growth exceeds capacity"), 602); continue; }
+                    if (failure != null) {
+                        call.allocation = workers.submit(() -> grow(call, blocks)); continue;
+                    }
+                    running = call; call.stepStarted = System.nanoTime();
+                    var request = new ForwardBatch.Request(call.key.client() + "/" + call.key.request(), call.input.getTokenIdsCount(),
+                        call.reused, call.input.getGenerateConfig().getMaxNewTokens(), call.generated, 1, call.input.getPriority(), List.of());
+                    var batch = new ForwardBatch(call.key.client() + "/" + call.key.request() + "/" + call.generated,
+                        List.of(new ForwardBatch.Partition(0, List.of(request))));
+                    call.execution = compute.submit(config.compute().plan(Role.decode, config.id(), batch));
+                    call.execution.completion().thenAccept(outcome -> stepped(call, outcome));
+                } catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode step failed: " + error.getMessage()), 0); }
+            }
+        } finally { advancing = false; }
+    }
+
+    private void grow(Call call, int blocks) {
+        try {
+            long observed = Long.MIN_VALUE;
+            while (true) {
+                synchronized (this) {
+                    if (call.terminal) return;
+                    long generation = cache.allocationGeneration();
+                    if (observed != generation) {
+                        var failure = call.lease.growTo(blocks); observed = cache.allocationGeneration();
+                        if (failure == null) { ready.addLast(call); advance(); return; }
+                        if (failure == DeviceCache.Failure.PERMANENT) { stop(call, Status.RESOURCE_EXHAUSTED.withDescription("Decode growth exceeds capacity"), 602); return; }
+                    }
+                }
+                cache.awaitCapacityChange(observed, 50);
+            }
+        } catch (InterruptedException error) { Thread.currentThread().interrupt(); stop(call, Status.CANCELLED.withDescription("Decode growth interrupted"), 8100); }
+        catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode growth failed: " + error.getMessage()), 0); }
+    }
+
+    private synchronized void stepped(Call call, SimulatedCompute.Outcome outcome) {
+        if (call.terminal) return;
+        if (outcome.state() != SimulatedCompute.State.COMPLETED) { stop(call, Status.CANCELLED.withDescription("Decode compute cancelled"), 8100); return; }
+        if (System.nanoTime() >= call.deadline) { stop(call, Status.DEADLINE_EXCEEDED.withDescription("Decode expired during Forward"), 603); return; }
+        if (call.response.isCancelled()) { stop(call, Status.CANCELLED.withDescription("Decode cancelled"), 8100); return; }
+        call.executionNanos += outcome.elapsedNanos(); call.generated++; running = null;
+        metrics.forwardCompleted(outcome.elapsedNanos(), 1, 1, 1);
+        boolean finished = call.generated >= call.input.getGenerateConfig().getMaxNewTokens();
+        try { call.response.onNext(LocalResponse.token(call.input, call.token, call.generated, call.reused, System.nanoTime() - call.started, finished, true)); }
+        catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("Decode output consumer closed"), 8100); return; }
+        if (finished) stop(call, Status.OK, 0);
+        else { ready.addLast(call); advance(); }
+    }
+
     private synchronized void stop(Call call, Status status, long code) {
         if (call.terminal) return;
         call.terminal = true;
         if (call.timeout != null) call.timeout.cancel(false);
         if (call.allocation != null) call.allocation.cancel(true);
-        if (call.source != null) { call.source.shutdownNow(); call.source = null; }
-        if (call.lease != null) call.lease.close(); // Partial P transfer is not committed as a reusable D prefix on cancellation.
+        if (call.source != null) { call.source.cancel(null); call.source = null; }
+        if (call.execution != null) call.execution.cancel();
+        ready.remove(call);
+        if (running == call) running = null;
+        if (call.lease != null) {
+            if (status.isOk() && config.reuseCache() && config.deviceCache() && call.input.getGenerateConfig().getReuseCache())
+                call.lease.complete(PrefixKeys.completeBlocks(call.input, config.blockSize()));
+            else call.lease.close();
+        }
         if (call.input != null) {
             active.remove(call.key, call);
-            history.add(task(call).setEndTimeMs(System.currentTimeMillis()).setErrorInfo(ErrorDetailsPB.newBuilder()
-                .setErrorCode(code == 0 ? status.getCode().value() : code).setErrorMessage(status.getDescription())).build());
+            var finished = task(call).setEndTimeMs(System.currentTimeMillis()).setIterateCount(Math.max(0, call.generated - 1));
+            if (!status.isOk()) finished.setErrorInfo(ErrorDetailsPB.newBuilder()
+                .setErrorCode(code == 0 ? status.getCode().value() : code).setErrorMessage(status.getDescription()));
+            history.add(finished.build());
             metrics.finished(switch (status.getCode()) {
+                case OK -> EngineMetrics.Outcome.success;
                 case CANCELLED -> EngineMetrics.Outcome.cancelled;
                 case DEADLINE_EXCEEDED -> EngineMetrics.Outcome.timeout;
                 default -> EngineMetrics.Outcome.error;
             });
         }
-        Runnable reply = () -> { if (!call.response.isCancelled()) call.response.onError(RtpErrors.failure(status, code)); };
+        Runnable reply = () -> {
+            if (!call.response.isCancelled()) {
+                if (status.isOk()) call.response.onCompleted();
+                else call.response.onError(RtpErrors.failure(status, code));
+            }
+        };
         try { callbacks.execute(reply); }
-        catch (RejectedExecutionException closing) { reply.run(); } // A frame can arrive on an unaccepted stream during server shutdown.
+        catch (RejectedExecutionException closing) { reply.run(); }
+        advance();
     }
 
     synchronized TaskHistory.Snapshot snapshot(long latest) {
-        return history.snapshot(latest, active.values().stream().map(c -> task(c).build()).toList(), active.size(), 0);
+        return history.snapshot(latest, active.values().stream().map(c -> task(c).build()).toList(), active.size() - (running == null ? 0 : 1), running == null ? 0 : 1);
     }
     private TaskInfoPB.Builder task(Call call) {
+        long now = System.nanoTime();
+        long executing = call.executionNanos + (running == call ? Math.max(0, now - call.stepStarted) : 0);
         return TaskInfoPB.newBuilder().setRequestId(call.input.getRequestId()).setInputLength(call.input.getTokenIdsCount())
-            .setPrefixLength(call.reused).setPriority(call.input.getPriority()).setDpRank(0).setIsWaiting(true)
-            .setPhase(call.lease == null ? TaskPhase.TASK_PHASE_RECEIVED : TaskPhase.TASK_PHASE_KV_ALLOCATED)
-            .setWaitingTimeMs(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - call.started));
+            .setPrefixLength(call.reused).setPriority(call.input.getPriority()).setDpRank(0).setIsWaiting(running != call)
+            .setPhase(running == call ? TaskPhase.TASK_PHASE_RUNNING : call.lease == null ? TaskPhase.TASK_PHASE_RECEIVED : TaskPhase.TASK_PHASE_KV_ALLOCATED)
+            .setWaitingTimeMs(TimeUnit.NANOSECONDS.toMillis(Math.max(0, now - call.started - executing)))
+            .setExecutionTimeMs(TimeUnit.NANOSECONDS.toMillis(executing));
     }
     String scrapeMetrics() { return metrics.scrape(); }
     private synchronized EngineMetrics.State metricState() {
         var kv = cache.snapshot(0, false); long size = config.blockSize();
-        return new EngineMetrics.State(active.size(), 0, kv.totalBlocks() * size, kv.availableBlocks() * size,
+        return new EngineMetrics.State(active.size() - (running == null ? 0 : 1), running == null ? 0 : 1, kv.totalBlocks() * size, kv.availableBlocks() * size,
             kv.freeBlocks() * size, kv.heldBlocks() * size);
     }
     private static long after(long now, long nanos) {
         try { return Math.addExact(now, nanos); }
         catch (ArithmeticException overflow) { return nanos < 0 ? Long.MIN_VALUE : Long.MAX_VALUE; }
     }
-    @Override public synchronized void close() {
-        if (closed) return;
-        closed = true;
-        for (var call : List.copyOf(active.values())) stop(call, Status.UNAVAILABLE.withDescription("Decode node closed"), 0);
-        workers.shutdownNow(); deadlines.shutdownNow(); callbacks.shutdown();
+    @Override public void close() {
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+            for (var call : List.copyOf(active.values())) stop(call, Status.UNAVAILABLE.withDescription("Decode node closed"), 0);
+        }
+        workers.shutdownNow(); deadlines.shutdownNow(); compute.close(); channels.close(); callbacks.shutdown();
     }
 }

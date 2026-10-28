@@ -15,6 +15,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final DeviceCache cache;
     private final LocalPrefill requests;
     private final DecodeAdmission decode;
+    private final PrefillTransfer transfer;
+    private final PrefillGeneration generation;
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
@@ -22,9 +24,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         this.config = config; this.cache = cache;
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache) : null;
         decode = requests == null ? new DecodeAdmission(config, cache) : null;
+        transfer = requests == null ? null : new PrefillTransfer(config, requests);
+        generation = transfer == null ? null : new PrefillGeneration(config, transfer);
     }
-    io.grpc.BindableService transfer() { return requests == null ? null : new PrefillTransfer(config, requests); }
-    public void close() { closed = true; if (requests != null) requests.close(); if (decode != null) decode.close(); }
+    io.grpc.BindableService transfer() { return transfer; }
+    void rpcAddress(String address) { if (generation != null) generation.address(address); }
+    public void close() { closed = true; if (generation != null) generation.close(); if (requests != null) requests.close(); if (decode != null) decode.close(); }
     String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
 
     @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
@@ -33,6 +38,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     @Override public void generateStreamCall(GenerateInputPB request, StreamObserver<GenerateOutputsPB> observer) {
         if (requests == null) { super.generateStreamCall(request, observer); return; }
+        if (request.getGenerateConfig().getMaxNewTokens() > 1) { generation.generate(request, observer); return; }
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
         // Cancellation can happen before submit returns; capture the exact session, never just its reusable id.
         var session = new java.util.concurrent.atomic.AtomicReference<LocalPrefill.Session>();

@@ -99,7 +99,18 @@ public final class NativeProbe {
                 if (System.nanoTime() >= end) throw new IllegalStateException("D leaked loaded KV");
                 Thread.sleep(5);
             }
-            return Map.of("transfer_loaded", true, "prefill_available_while_pinned", held,
+            var nativeInput = input.toBuilder().setRequestId(45);
+            nativeInput.getGenerateConfigBuilder().setCanUsePdSeparation(true).addRoleAddrs(RoleAddrPB.newBuilder()
+                .setRole(RoleAddrPB.RoleType.DECODE).setIp("127.0.0.1").setGrpcPort(Integer.parseInt(decode.authority().split(":")[1])));
+            int count = 0;
+            var generated = pRpc.generateStreamCall(nativeInput.build());
+            while (generated.hasNext()) {
+                var output = generated.next(); count++;
+                if (output.getFlattenOutput().getAuxInfo(0).getOutputLen() != count || output.getFlattenOutput().getFinished(0) != (count == 4))
+                    throw new IllegalStateException("Invalid automatic P/D output");
+            }
+            if (count != 4) throw new IllegalStateException("Automatic P/D did not produce four outputs");
+            return Map.of("pd_output_tokens", count, "transfer_loaded", true, "prefill_available_while_pinned", held,
                 "prefill_available_after_load", pAvailable, "decode_available_after_load_cancel", 128);
         } finally { context.cancel(null); p.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }

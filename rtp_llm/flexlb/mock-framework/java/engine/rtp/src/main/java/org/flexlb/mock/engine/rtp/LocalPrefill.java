@@ -81,7 +81,7 @@ final class LocalPrefill implements AutoCloseable {
         return session;
     }
 
-    private void validate(GenerateInputPB input, boolean retained) {
+    void validate(GenerateInputPB input, boolean retained) {
         if (config.role() != Role.prefill || (retained ? input.getGenerateConfig().getMaxNewTokens() < 1 : input.getGenerateConfig().getMaxNewTokens() != 1))
             throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
         var generation = input.getGenerateConfig();

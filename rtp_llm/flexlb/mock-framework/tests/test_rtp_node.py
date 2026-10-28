@@ -62,13 +62,14 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 if role == 'prefill':
                     assert actual['local_output_tokens'] == 1
                 else:
+                    assert actual['pd_output_tokens'] == 4
                     assert actual['transfer_loaded'] is True
                     assert actual['prefill_available_while_pinned'] == 112
                     assert actual['prefill_available_after_load'] == 128
                     assert actual['decode_available_after_load_cancel'] == 128
                     assert actual['decode_reserved_tokens'] == 16
                     assert actual['decode_available_after_cancel'] == 128
-                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE', 'LOAD']
+                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE', 'LOAD', 'GENERATE']
                     assert endpoints['remote_generation']['load'] is True
                 with urllib.request.urlopen(endpoints['metrics'], timeout=2) as response:
                     assert response.status == 200
@@ -77,7 +78,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 (directory / 'metrics.prom').write_text(metrics)
                 samples = [line for line in metrics.splitlines() if line.startswith('mock_engine_forward_seconds_count{')]
                 assert len(samples) == 1
-                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 0)
+                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 3)
                 assert f'role="{role}"' in samples[0]
                 effective = json.loads((directory / 'effective-config.json').read_text())
                 assert effective['compute'][role]['noise']['scale'] == 1
