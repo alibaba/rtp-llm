@@ -168,6 +168,21 @@ public:
         }
     }
 
+    ::grpc::Status ForgetTransferTasks(::grpc::ServerContext* context,
+                                       const ForgetTransferTasksRequestPB* request, EmptyPB* response) override {
+        return local_server_->ForgetTransferTasks(context, request, response);
+    }
+
+    ::grpc::Status QueryTransferTasks(::grpc::ServerContext* context, const QueryTransferTasksRequestPB* request,
+                                      QueryTransferTasksResponsePB* response) override {
+        return local_server_->QueryTransferTasks(context, request, response);
+    }
+    ::grpc::Status QueryKVCMOperations(::grpc::ServerContext* context,
+                                       const QueryKVCMOperationsRequestPB* request,
+                                       QueryKVCMOperationsResponsePB* response) override {
+        return local_server_->QueryKVCMOperations(context, request, response);
+    }
+
     ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
                                    const ::FunctionRequestPB* request,
                                    ::FunctionResponsePB*      response) override {

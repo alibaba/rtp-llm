@@ -712,6 +712,49 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
+// Coordinator sends this only after it no longer needs completion evidence.
+message ForgetTransferTasksRequestPB {
+    repeated string task_ids = 1;
+}
+
+// Read-only query of worker-local memory transfer execution records.
+message QueryTransferTasksRequestPB {
+    repeated string task_ids = 1;
+}
+
+message QueryTransferTasksResponsePB {
+    message TaskState {
+        enum State {
+            NOT_FOUND = 0;  // No completion evidence; never treat as finished.
+            RUNNING = 1;    // Completion has not been confirmed.
+            FINISHED = 2;   // No further block access, whether successful or failed.
+        }
+        string task_id = 1;
+        State state = 2;
+    }
+    // One entry per requested ID, including duplicates and missing IDs.
+    // Clients match by ID; a missing response entry is not completion evidence.
+    repeated TaskState tasks = 1;
+}
+
+// Read-only query of worker-local KVCM operation execution records.
+message QueryKVCMOperationsRequestPB {
+    repeated string operation_ids = 1;
+}
+
+message QueryKVCMOperationsResponsePB {
+    message OperationState {
+        enum State {
+            NOT_FOUND = 0;  // No completion evidence; never treat as finished.
+            RUNNING = 1;
+            FINISHED = 2;   // No further block access, whether successful or failed.
+        }
+        string operation_id = 1;
+        State state = 2;
+    }
+    repeated OperationState operations = 1;
+}
+
 message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
@@ -732,6 +775,7 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     int64 timeout_ms = 3;
+    string task_id = 4;  // One execution ID shared by every rank in this submission.
 }
 
 message MemoryOperationResponsePB {
@@ -868,6 +912,7 @@ message RemoteOperationRequestPB {
     repeated int32 block_ids = 4;
     repeated string uris = 5;
     repeated string group_tags = 6;
+    string operation_id = 7;
 }
 
 message RemoteOperationResponsePB {
@@ -992,6 +1037,9 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc ForgetTransferTasks(ForgetTransferTasksRequestPB) returns (EmptyPB);
+    rpc QueryTransferTasks(QueryTransferTasksRequestPB) returns (QueryTransferTasksResponsePB);
+    rpc QueryKVCMOperations(QueryKVCMOperationsRequestPB) returns (QueryKVCMOperationsResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);

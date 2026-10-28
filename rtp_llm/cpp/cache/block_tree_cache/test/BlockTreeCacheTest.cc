@@ -6,10 +6,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -19,6 +21,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -237,6 +240,127 @@ protected:
 
     std::unique_ptr<BlockTreeCache> cache_;
 };
+
+TEST_F(BlockTreeCacheTest, FrozenPollingUsesSnapshotAndKeepsUnknownTasks) {
+    auto& dispatcher = *cache_->transfer_dispatcher_;
+    auto pool = makeStructuralDevicePool(0);
+    const BlockIdxType first = 1, second = 2;
+    TransferResult result(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "timeout"));
+    result.recovery_task_ids = {"first"};
+    FrozenTask initial(result);
+    initial.freeze(pool, first);
+    dispatcher.retainFrozenTask(std::move(initial));
+    dispatcher.pollFrozenTasksWithQuery([&](const auto& ids) {
+        EXPECT_EQ(ids, (std::vector<std::string>{"first"}));
+        const bool unlocked = dispatcher.frozen_mutex_.try_lock();
+        EXPECT_TRUE(unlocked);
+        if (unlocked) {
+            dispatcher.frozen_mutex_.unlock();
+            result.recovery_task_ids = {"second"};
+            FrozenTask added(result);
+            added.freeze(pool, second);
+            dispatcher.retainFrozenTask(std::move(added));
+        }
+        return std::vector<TaskCompletion>{TaskCompletion::UNKNOWN};
+    });
+    EXPECT_TRUE(pool->isFrozen(first));
+    EXPECT_TRUE(pool->isFrozen(second));
+    dispatcher.pollFrozenTasksWithQuery([](const auto& ids) {
+        std::vector<TaskCompletion> states;
+        for (const auto& id : ids) states.push_back(id == "first" ? TaskCompletion::FINISHED : TaskCompletion::PENDING);
+        return states;
+    });
+    EXPECT_FALSE(pool->isAllocated(first));
+    EXPECT_TRUE(pool->isFrozen(second));
+    EXPECT_EQ(dispatcher.frozen_tasks_.size(), 1u);
+}
+
+TEST_F(BlockTreeCacheTest, FrozenTaskReleasesOnlyAfterAllExecutionsFinish) {
+    auto pool = makeStructuralDevicePool(0);
+    const BlockIdxType first = 1, second = 2, permanent = 3;
+    pool->incTreeRef(first, BlockTreeRefType::CACHE);
+    TransferResult result(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "timeout"));
+    FrozenTask final_task(result);
+    final_task.freeze(pool, permanent);
+    result.recovery_task_ids = {"one", "two"};
+    FrozenTask recoverable(result);
+    recoverable.freeze(pool, first);
+    recoverable.freeze(pool, second);
+    auto& dispatcher = *cache_->transfer_dispatcher_;
+    dispatcher.retainFrozenTask(std::move(final_task));
+    dispatcher.retainFrozenTask(std::move(recoverable));
+    dispatcher.releaseCompletedFrozenTasks({"one"});
+    EXPECT_TRUE(pool->isFrozen(first));
+    EXPECT_TRUE(pool->isFrozen(second));
+    EXPECT_EQ(dispatcher.frozen_tasks_.size(), 2u);
+    const auto free_before = pool->freeBlocksNum();
+    dispatcher.releaseCompletedFrozenTasks({"one", "two"});
+    EXPECT_FALSE(pool->isFrozen(first));
+    EXPECT_TRUE(pool->isAllocated(first));
+    EXPECT_EQ(pool->treeRefCount(first), 1u);
+    EXPECT_FALSE(pool->isAllocated(second));
+    EXPECT_EQ(pool->freeBlocksNum(), free_before + 1);
+    EXPECT_TRUE(pool->isFrozen(permanent));
+    EXPECT_EQ(dispatcher.frozen_tasks_.size(), 1u);
+    dispatcher.releaseCompletedFrozenTasks({"one", "two"});
+    EXPECT_EQ(pool->freeBlocksNum(), free_before + 1);
+    pool->decTreeRef(first, BlockTreeRefType::CACHE);
+}
+
+TEST_F(BlockTreeCacheTest, FrozenTaskRetainsRecoveryIdsAndUniqueSlots) {
+    TransferResult result(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "timeout"));
+    EXPECT_TRUE(FrozenTask(result).finalFrozen);
+    result.recovery_task_ids = {"batch1", "batch2"};
+    FrozenTask frozen(result);
+    EXPECT_FALSE(frozen.finalFrozen);
+    auto pool = makeStructuralDevicePool(0);
+    const BlockIdxType block = 1;
+    frozen.freeze(pool, block);
+    frozen.freeze(pool, block);
+    EXPECT_TRUE(pool->isFrozen(block));
+    ASSERT_EQ(frozen.blocks.size(), 1u);
+    cache_->transfer_dispatcher_->retainFrozenTask(std::move(frozen));
+    const auto& saved = cache_->transfer_dispatcher_->frozen_tasks_;
+    ASSERT_EQ(saved.size(), 1u);
+    EXPECT_EQ(saved[0].recovery_task_ids, result.recovery_task_ids);
+    EXPECT_EQ(saved[0].blocks[0].pool.get(), pool.get());
+    EXPECT_EQ(saved[0].blocks[0].block, block);
+}
+
+TEST_F(BlockTreeCacheTest, RecordsOnlyConfirmedTransferCompletion) {
+    class Engine final: public PerRankBlockTransferEngine {
+    public:
+        Engine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
+        std::shared_ptr<TransferAsyncContext> execute(TransferTask) override {
+            entered.set_value();
+            return context;
+        }
+        std::promise<void> entered;
+        std::shared_ptr<TransferBatchAsyncContext> context = std::make_shared<TransferBatchAsyncContext>(0);
+    };
+    using State = TransferTaskRegistry::State;
+    const std::vector<ErrorCode> codes = {ErrorCode::NONE_ERROR, ErrorCode::INVALID_PARAMS,
+        ErrorCode::DEADLINE_EXCEEDED, ErrorCode::EXECUTION_EXCEPTION, ErrorCode::TRANSFER_COMPLETION_UNKNOWN};
+    for (size_t i = 0; i < codes.size(); ++i) {
+        auto engine = std::make_shared<Engine>();
+        BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache_, engine);
+        const auto id = std::to_string(i);
+        auto entered = engine->entered.get_future();
+        auto execution = std::async(std::launch::async, [&] {
+            return cache_->executeTransfer(TransferTask({}, std::chrono::seconds(30), id));
+        });
+        const auto ready = entered.wait_for(std::chrono::seconds(5));
+        EXPECT_EQ(cache_->queryTransferTask(id), State::RUNNING);
+        engine->context->complete(i == 0 ? ErrorInfo::OkStatus() : ErrorInfo(codes[i], "test"));
+        execution.get();
+        ASSERT_EQ(ready, std::future_status::ready);
+        const auto expected = i == 0 ? State::FINISHED : State::RUNNING;
+        EXPECT_EQ(cache_->queryTransferTask(id), expected);
+        EXPECT_EQ(cache_->executeTransfer(TransferTask({}, std::chrono::seconds(30), id)).status.code(),
+                  ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(cache_->queryTransferTask(id), expected);
+    }
+}
 
 TEST_F(BlockTreeCacheTest, IncompleteResidentInsertKeepsPrefixProtectedAndRetrySucceeds) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));

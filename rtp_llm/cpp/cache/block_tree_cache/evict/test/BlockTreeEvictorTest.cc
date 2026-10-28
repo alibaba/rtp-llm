@@ -1099,7 +1099,7 @@ public:
         std::optional<bool> result;
         evictor_->task_runner_->runTransfer(std::make_shared<EvictionTransferTask>(task),
                                             *evictor_->metrics_reporter_,
-                                            [&](ErrorInfo error) { result = error.ok(); });
+                                            [&](TransferResult error) { result = error.ok(); });
         if (!result.has_value()) {
             ADD_FAILURE() << "scripted eviction transfer did not complete inline";
             return false;

@@ -17,6 +17,8 @@ namespace rtp_llm {
 
 struct TreeNode;
 
+enum class TaskCompletion { UNKNOWN, PENDING, FINISHED };
+
 enum class TransferStatus {
     OK,
     INVALID_ARGS,
@@ -124,6 +126,13 @@ struct TransferResult {
 
     // Append every failure message; keep the first error code at equal priority.
     void merge(TransferResult other) {
+        const auto unknown = ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
+        if ((status.code() == unknown && recovery_task_ids.empty())
+            || (other.status.code() == unknown && other.recovery_task_ids.empty())) {
+            recovery_task_ids.clear();
+        } else {
+            recovery_task_ids.insert(recovery_task_ids.end(), other.recovery_task_ids.begin(), other.recovery_task_ids.end());
+        }
         if (other.ok()) {
             return;
         }
@@ -154,6 +163,8 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
+    // Empty on UNKNOWN means unrecoverable; otherwise query every listed execution.
+    std::vector<std::string> recovery_task_ids;
 };
 
 struct DeviceHostCopyOptions {
@@ -318,8 +329,10 @@ class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
 
-    TransferTask(std::vector<TransferDescriptor> descriptors, std::chrono::milliseconds timeout):
-        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors, std::chrono::milliseconds timeout, std::string task_id = {}):
+        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout), task_id_(std::move(task_id)) {}
+
+    const std::string& taskId() const { return task_id_; }
 
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
@@ -351,7 +364,9 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), deadline_);
+        auto task = TransferTask(std::move(descriptors), deadline_);
+        task.task_id_ = task_id_;
+        return task;
     }
 
 private:
@@ -360,6 +375,7 @@ private:
 
     std::vector<TransferDescriptor> descriptors_;
     Clock::time_point               deadline_;
+    std::string                    task_id_;
 };
 
 }  // namespace rtp_llm

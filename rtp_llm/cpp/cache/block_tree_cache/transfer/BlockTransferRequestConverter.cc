@@ -12,6 +12,25 @@
 
 namespace rtp_llm {
 
+TaskCompletion BlockTransferRequestConverter::queryCompletion(const std::string& id,
+    const std::vector<QueryTransferTasksResponsePB>& responses, size_t worker_count) {
+    if (id.empty() || worker_count == 0 || responses.size() != worker_count) return TaskCompletion::UNKNOWN;
+    auto result = TaskCompletion::FINISHED;
+    using PB = QueryTransferTasksResponsePB::TaskState;
+    for (const auto& response : responses) {
+        const PB* found = nullptr;
+        for (const auto& entry : response.tasks()) {
+            if (entry.task_id() != id) continue;
+            if (found) return TaskCompletion::UNKNOWN;
+            found = &entry;
+        }
+        if (!found || (found->state() != PB::FINISHED && found->state() != PB::RUNNING))
+            return TaskCompletion::UNKNOWN;
+        if (found->state() == PB::RUNNING) result = TaskCompletion::PENDING;
+    }
+    return result;
+}
+
 namespace {
 
 const GroupSet* resolveGroupSet(const MemoryOperationRequestPB::CopyItem& item,

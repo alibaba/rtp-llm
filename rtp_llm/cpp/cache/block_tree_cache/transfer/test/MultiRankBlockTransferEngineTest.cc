@@ -31,6 +31,7 @@ struct MultiRankBlockTransferRpcState {
     std::mutex                            mutex;
     std::condition_variable               cv;
     std::vector<MemoryOperationRequestPB> requests;
+    TransferTaskRegistry registry;
 };
 
 struct MultiRankBlockTransferRpcConfig {
@@ -53,6 +54,7 @@ public:
         if (config_.state != nullptr && request->has_mem_request()) {
             {
                 std::lock_guard<std::mutex> lock(config_.state->mutex);
+                config_.state->registry.start(request->mem_request().task_id());
                 config_.state->requests.push_back(request->mem_request());
             }
             config_.state->cv.notify_all();
@@ -74,9 +76,27 @@ public:
                     config_.block_errors.empty() ? config_.mem_response_code : config_.block_errors[index]);
             }
         }
+        if (config_.state && config_.has_mem_response && config_.rpc_status.ok()) {
+            std::lock_guard<std::mutex> lock(config_.state->mutex);
+            config_.state->registry.finish(request->mem_request().task_id());
+            config_.state->cv.notify_all();
+        }
         return config_.rpc_status;
     }
 
+    grpc::Status QueryTransferTasks(grpc::ServerContext*, const QueryTransferTasksRequestPB* request,
+                                    QueryTransferTasksResponsePB* response) override {
+        if (!config_.state) return {grpc::StatusCode::UNAVAILABLE, "no test registry"};
+        for (const auto& id : request->task_ids()) {
+            auto* entry = response->add_tasks();
+            entry->set_task_id(id);
+            using PB = QueryTransferTasksResponsePB::TaskState;
+            auto state = config_.state->registry.query(id);
+            entry->set_state(state == TransferTaskRegistry::State::FINISHED ? PB::FINISHED :
+                             state == TransferTaskRegistry::State::RUNNING ? PB::RUNNING : PB::NOT_FOUND);
+        }
+        return grpc::Status::OK;
+    }
 private:
     MultiRankBlockTransferRpcConfig config_;
 };
@@ -296,6 +316,45 @@ bool executeAndWait(MultiRankBlockTransferEngine&          engine,
     auto context = engine.execute(TransferTask(descriptors, std::chrono::milliseconds(timeout_ms)));
     context->waitDone();
     return context->success();
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, DeadlineThenWorkerCompletionReleasesFrozenTask) {
+    auto state = std::make_shared<MultiRankBlockTransferRpcState>();
+    std::promise<void> release;
+    MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
+    config.response_release = release.get_future().share();
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto manager = makeBroadcastManager({config}, servers);
+    ASSERT_NE(manager, nullptr);
+    auto cache = makeBroadcastCache(manager);
+    auto& dispatcher = *cache->transfer_dispatcher_;
+    dispatcher.stopFrozenPolling();  // Advance recovery explicitly at each checkpoint.
+    auto context = dispatcher.multi_rank_engine_->execute(
+        TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(200)));
+    ASSERT_TRUE(waitForRpcRequests(state, 1, std::chrono::seconds(5)));
+    context->waitDone();
+    auto result = context->result();
+    ASSERT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    ASSERT_EQ(result.recovery_task_ids.size(), 1u);
+    const auto id = result.recovery_task_ids.front();
+    auto pool = makeStructuralDevicePool(0);
+    const BlockIdxType block = 1;
+    FrozenTask task(result);
+    task.freeze(pool, block);
+    dispatcher.retainFrozenTask(std::move(task));
+    dispatcher.pollFrozenTasks();
+    EXPECT_TRUE(pool->isFrozen(block));
+    release.set_value();
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        ASSERT_TRUE(state->cv.wait_for(lock, std::chrono::seconds(5), [&] {
+            return state->registry.query(id) == TransferTaskRegistry::State::FINISHED;
+        }));
+    }
+    dispatcher.pollFrozenTasks();
+    EXPECT_FALSE(pool->isAllocated(block));
+    EXPECT_TRUE(dispatcher.frozen_tasks_.empty());
+    EXPECT_EQ(state->registry.query(id), TransferTaskRegistry::State::FINISHED);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers) {
@@ -638,6 +697,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
 
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 2u);
+    EXPECT_FALSE(state->requests.front().task_id().empty());
+    EXPECT_EQ(state->requests[0].task_id(), state->requests[1].task_id());
     for (const MemoryOperationRequestPB& worker_request : state->requests) {
         ASSERT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::H2D);

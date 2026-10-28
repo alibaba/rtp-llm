@@ -242,7 +242,7 @@ public:
         std::vector<FunctionRequestPB> requests(static_cast<size_t>(parallelism_config_.tp_size));
         const auto&                    spec_info = group_policy_->spec_info_map();
         const std::string              trace_id  = nextTraceId("read", read_trace_sequence_);
-        initializeRequests(requests, REMOTE_OPERATION_READ, trace_id);
+        initializeRequests(requests, REMOTE_OPERATION_READ, trace_id, request.operation_id);
         for (size_t location_idx = 0; location_idx < locations_view.size(); ++location_idx) {
             const size_t key_idx = request.local_matched_blocks_num + location_idx;
             for (const auto& location_spec : locations_view[location_idx]) {
@@ -289,7 +289,7 @@ public:
         static const kv_cache_manager::Locations empty_locations;
         std::vector<FunctionRequestPB>           requests(static_cast<size_t>(parallelism_config_.tp_size));
         ActualUriGather                          actual_uri_gather(requests.size());
-        initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id);
+        initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id, request.operation_id);
         const auto key_indices = unmaskedKeyIndices(write_location.block_mask, valid_keys_size);
         RTP_LLM_CHECK_WITH_INFO(key_indices.size() == write_location.locations.size(),
                                 "KVCM write mask/location mismatch: keys=%zu locations=%zu",
@@ -534,10 +534,12 @@ private:
 
     void initializeRequests(std::vector<FunctionRequestPB>& requests,
                             RemoteOpType                    operation,
-                            const std::string&              trace_id) const {
+                            const std::string&              trace_id,
+                            const std::string&              operation_id) const {
         for (auto& request : requests) {
             request.mutable_remote_request()->set_op(operation);
             request.mutable_remote_request()->set_trace_id(trace_id);
+            request.mutable_remote_request()->set_operation_id(operation_id);
         }
     }
 
@@ -690,6 +692,7 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cach
                                        std::shared_ptr<kvcm::ClientWrapper> client_wrapper):
     StorageBackend(makeStorageBackendExecutor(kv_cache_config.kvcm_asyncwrapper_thread_num,
                                               kv_cache_config.kvcm_asyncwrapper_queue_size)),
+    distributed_completion_queries_(parallelism_config.tp_size > 1 && broadcast_manager != nullptr),
     impl_(std::make_unique<Impl>(cache_config,
                                  kv_cache_config,
                                  runtime_config,

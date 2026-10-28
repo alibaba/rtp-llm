@@ -12,6 +12,24 @@
 namespace rtp_llm {
 namespace {
 
+TEST(TransferStageStateTest, RecoveryIdsRequireEveryUnknownBatchToBeRecoverable) {
+    const auto unknown = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "timeout");
+    TransferResult first(unknown), second(unknown), permanent(unknown);
+    first.recovery_task_ids = {"first"};
+    second.recovery_task_ids = {"second"};
+    TransferResult merged;
+    merged.merge(first);
+    merged.merge(TransferStatus::DISK_IO_ERROR);
+    merged.merge(second);
+    EXPECT_EQ(merged.recovery_task_ids, (std::vector<std::string>{"first", "second"}));
+    merged.merge(permanent);
+    EXPECT_TRUE(merged.recovery_task_ids.empty());
+    permanent.merge(first);
+    EXPECT_TRUE(permanent.recovery_task_ids.empty());
+    merged.merge(second);
+    EXPECT_TRUE(merged.recovery_task_ids.empty());
+}
+
 TEST(TransferStageStateTest, ImmediateCompletionWaitsForSubmitterToken) {
     size_t callback_count = 0;
     auto   state          = std::make_shared<TransferStageState>([&](TransferResult error) {

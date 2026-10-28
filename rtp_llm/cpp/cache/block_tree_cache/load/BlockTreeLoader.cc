@@ -445,21 +445,25 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
     const auto complete = [this, task](ErrorInfo error) noexcept {
         task->phase = LoadTaskRunner::Task::Phase::FINISHED;
         if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+            TransferResult result = task->host_result;
+            result.merge(task->disk_result);
+            FrozenTask frozen(result);
             // Ordinary LOAD references still protect both ends until settlement.
             // Preserve those physical slots before publishing the failure.
             for (const TransferDescriptor& desc : task->load_descs) {
                 const GroupSetPtr& group_set   = tree_->groupSets()[desc.group_set_id];
-                IBlockPool*        source_pool = desc.source_tier == Tier::HOST ?
-                                                     static_cast<IBlockPool*>(group_set->hostPool().get()) :
-                                                     static_cast<IBlockPool*>(group_set->diskPool().get());
+                std::shared_ptr<IBlockPool> source_pool = desc.source_tier == Tier::HOST ?
+                    std::static_pointer_cast<IBlockPool>(group_set->hostPool()) :
+                    std::static_pointer_cast<IBlockPool>(group_set->diskPool());
                 for (BlockIdxType block : desc.source_blocks) {
-                    source_pool->freezeBlock(block);
+                    frozen.freeze(source_pool, block);
                 }
                 const auto& device_pools = group_set->devicePools();
                 for (size_t member = 0; member < device_pools.size(); ++member) {
-                    device_pools[member]->freezeBlock(desc.target_blocks[member]);
+                    frozen.freeze(device_pools[member], desc.target_blocks[member]);
                 }
             }
+            transfer_dispatcher_->retainFrozenTask(std::move(frozen));
         }
         const size_t descriptor_count = task->load_descs.size();
         if (!task->context->completeTransfers(descriptor_count, error.ok())) {

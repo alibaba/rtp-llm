@@ -55,7 +55,7 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
             metrics_reporter.maybeReportCopyError(
                 task->descriptors().front().source_tier, task->descriptors().front().target_tier, result);
             if (on_done) {
-                on_done(std::move(result.status));
+                on_done(std::move(result));
             }
         });
 }

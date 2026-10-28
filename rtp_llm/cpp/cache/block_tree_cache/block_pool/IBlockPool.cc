@@ -126,10 +126,51 @@ void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
+    // A block belongs to one transfer task; repeated freezes keep one hold.
     if (treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0) {
         return;
     }
     incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+}
+
+void IBlockPool::unfreezeBlock(BlockIdxType block) {
+    const auto frozen_index = treeRefTypeIndex(BlockTreeRefType::FROZEN);
+    const auto cache_index  = treeRefTypeIndex(BlockTreeRefType::CACHE);
+    mutateAllocatedBlocks(
+        BlockIdList{block},
+        [this, frozen_index](BlockIdxType block) {
+            RTP_LLM_CHECK(tree_refcounts_by_type_[frozen_index][block] == 1);
+        },
+        [this, frozen_index, cache_index](BlockIdxType block) {
+            const bool was_active = isActiveNoLock(block);
+            const bool was_available = isAvailableNoLock(block);
+
+            // Once the owner confirms that access has stopped, a block without
+            // a CACHE ref is an orphan. Drop its remaining tree ownership as
+            // part of unfreezing; external/request refs still keep the physical
+            // allocation alive until their owners release it.
+            if (tree_refcounts_by_type_[cache_index][block] == 0) {
+                for (size_t ref_type = 0; ref_type < kBlockTreeRefTypeCount; ++ref_type) {
+                    if (tree_refcounts_by_type_[ref_type][block] > 0) {
+                        --tree_referenced_block_counts_[ref_type];
+                        tree_refcounts_by_type_[ref_type][block] = 0;
+                    }
+                }
+                tree_refcounts_[block] = 0;
+                if (onLastTreeRefNoLock(block)) {
+                    freeAllocatedBlockNoLock(block);
+                }
+            } else {
+                tree_refcounts_by_type_[frozen_index][block] = 0;
+                --tree_referenced_block_counts_[frozen_index];
+                --tree_refcounts_[block];
+                if (tree_refcounts_[block] == 0 && onLastTreeRefNoLock(block)) {
+                    freeAllocatedBlockNoLock(block);
+                }
+            }
+            updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
+        });
 }
 
 bool IBlockPool::isFrozen(BlockIdxType block) const {

@@ -24,6 +24,20 @@ public:
         response->mutable_mem_response()->set_code(mem_response_code_);
         return rpc_response_status_;
     }
+    ::grpc::Status QueryTransferTasks(::grpc::ServerContext* context,
+                                      const QueryTransferTasksRequestPB* request,
+                                      QueryTransferTasksResponsePB* response) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
+        if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "query cancelled"};
+        using PB = QueryTransferTasksResponsePB::TaskState;
+        for (const auto& id : request->task_ids()) {
+            auto* entry = response->add_tasks();
+            entry->set_task_id(id);
+            entry->set_state(id == "running" ? PB::RUNNING : id == "finished" ? PB::FINISHED : PB::NOT_FOUND);
+        }
+        return grpc::Status::OK;
+    }
+
     void setSleepMillis(int ms) {
         sleep_millis_ = ms;
     }
@@ -108,6 +122,64 @@ private:
     std::unique_ptr<BroadcastManager> manager_;
     std::vector<int>                  ports_;
 };
+
+TEST_F(BroadcastManagerTest, TransferQueryRoundTripAndTimeoutRetry) {
+    for (int delay_ms : {0, 200}) {
+        auto service = std::make_unique<TestRpcService>();
+        service->setSleepMillis(delay_ms);
+        TestRpcServer server(std::move(service));
+        ASSERT_TRUE(server.start());
+        BroadcastManager manager({"127.0.0.1:" + std::to_string(server.listenPort())});
+        ASSERT_TRUE(manager.init());
+        QueryTransferTasksRequestPB request;
+        for (const auto* id : {"running", "finished", "missing"}) request.add_task_ids(id);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const bool expect_timeout = delay_ms > 0 && attempt == 0;
+            auto result = manager.queryTransferTasks({request}, expect_timeout ? 20 : 2000);
+            ASSERT_NE(result, nullptr);
+            auto done = std::make_shared<std::promise<void>>();
+            auto ready = done->get_future();
+            result->onDone([done] { done->set_value(); });
+            ASSERT_EQ(ready.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            // Unlike waitDone(), this API reports timeout without throwing.
+            const auto error = result->waitForCompletion();
+            if (expect_timeout) {
+                EXPECT_EQ(error.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+                EXPECT_FALSE(result->success());
+                EXPECT_FALSE(result->rpcSucceeded(0));
+                continue;  // Discard any response from a failed RPC.
+            }
+            ASSERT_TRUE(error.ok());
+            ASSERT_TRUE(result->rpcSucceeded(0));
+            const auto responses = result->responses();
+            ASSERT_EQ(responses.size(), 1u);
+            ASSERT_EQ(responses[0].tasks_size(), 3);
+            using PB = QueryTransferTasksResponsePB::TaskState;
+            EXPECT_EQ(responses[0].tasks(0).state(), PB::RUNNING);
+            EXPECT_EQ(responses[0].tasks(1).state(), PB::FINISHED);
+            EXPECT_EQ(responses[0].tasks(2).state(), PB::NOT_FOUND);
+            for (int i = 0; i < 3; ++i) EXPECT_EQ(responses[0].tasks(i).task_id(), request.task_ids(i));
+        }
+    }
+}
+
+TEST(BroadcastResultTest, RecoveryRequiresOnlyTimeoutFailures) {
+    using Result = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    for (bool cq_ok : {false, true}) {
+        for (auto code : {grpc::StatusCode::DEADLINE_EXCEEDED, grpc::StatusCode::UNAVAILABLE}) {
+            auto first = std::make_shared<Result::WorkerRpcContext>();
+            auto second = std::make_shared<Result::WorkerRpcContext>();
+            second->status = grpc::Status(code, "injected failure");
+            second->timeout_ms = 20;
+            Result result({first, second});
+            EXPECT_FALSE(result.onlyTimeoutFailures());
+            result.finishRank(0, true);
+            EXPECT_FALSE(result.onlyTimeoutFailures());
+            result.finishRank(1, cq_ok);
+            EXPECT_EQ(result.onlyTimeoutFailures(), cq_ok && code == grpc::StatusCode::DEADLINE_EXCEEDED);
+        }
+    }
+}
 
 // ---------------------------- init ----------------------------
 

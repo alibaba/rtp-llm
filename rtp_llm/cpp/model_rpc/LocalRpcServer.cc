@@ -1168,6 +1168,42 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     }
 }
 
+::grpc::Status LocalRpcServer::ForgetTransferTasks(::grpc::ServerContext* context,
+                                                  const ForgetTransferTasksRequestPB* request, EmptyPB*) {
+    if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "request cancelled"};
+    auto manager = engine_ ? engine_->getCacheManager() : nullptr;
+    auto cache = manager ? manager->blockTreeCache() : nullptr;
+    if (!cache) return {grpc::StatusCode::UNAVAILABLE, "block tree cache unavailable"};
+    bool finished = true;
+    for (const auto& id : request->task_ids()) {
+        if (!cache->forgetTransferTask(id)) finished = false;
+    }
+    if (!finished) return {grpc::StatusCode::FAILED_PRECONDITION, "transfer still running"};
+    return grpc::Status::OK;
+}
+
+::grpc::Status LocalRpcServer::QueryTransferTasks(::grpc::ServerContext* context,
+                                                 const QueryTransferTasksRequestPB* request,
+                                                 QueryTransferTasksResponsePB* response) {
+    if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "request cancelled"};
+    auto manager = engine_ ? engine_->getCacheManager() : nullptr;
+    if (!manager) return {grpc::StatusCode::UNAVAILABLE, "cache manager unavailable"};
+    if (!manager->queryTransferTasks(*request, *response))
+        return {grpc::StatusCode::UNIMPLEMENTED, "transfer queries unavailable"};
+    return grpc::Status::OK;
+}
+
+::grpc::Status LocalRpcServer::QueryKVCMOperations(::grpc::ServerContext* context,
+                                                   const QueryKVCMOperationsRequestPB* request,
+                                                   QueryKVCMOperationsResponsePB* response) {
+    if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "request cancelled"};
+    auto manager = engine_ ? engine_->getCacheManager() : nullptr;
+    if (!manager) return {grpc::StatusCode::UNAVAILABLE, "cache manager unavailable"};
+    if (!manager->queryKVCMOperations(*request, *response))
+        return {grpc::StatusCode::UNIMPLEMENTED, "KVCM operation queries unavailable"};
+    return grpc::Status::OK;
+}
+
 ::grpc::Status LocalRpcServer::ExecuteFunction(::grpc::ServerContext*     context,
                                                const ::FunctionRequestPB* request,
                                                ::FunctionResponsePB*      response) {

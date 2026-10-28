@@ -399,6 +399,7 @@ TEST_F(KVCMIndependentPoolTest, ExecuteFunctionReportsSdkFailureInResponse) {
     for (auto op : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
         FunctionRequestPB request;
         auto*             remote = request.mutable_remote_request();
+        remote->set_operation_id(op == REMOTE_OPERATION_READ ? "sdk_failure_read" : "sdk_failure_write");
         remote->set_op(op);
         remote->add_group_tags(config_.groupTags()[0]);
         remote->add_block_ids(blocks_[0]);

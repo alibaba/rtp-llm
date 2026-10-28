@@ -20,6 +20,23 @@
 namespace rtp_llm {
 namespace {
 
+TEST(BlockTransferDispatcherTest, StopWakesSleepingPollerAndJoinsBeforeDestruction) {
+    auto multi = std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{}, nullptr);
+    BlockTransferDispatcher dispatcher(nullptr, multi);
+    EXPECT_TRUE(dispatcher.frozen_thread_.joinable());
+    const auto begin = std::chrono::steady_clock::now();
+    dispatcher.stopFrozenPolling();
+    EXPECT_FALSE(dispatcher.frozen_thread_.joinable());
+    EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(1));
+    EXPECT_NO_THROW(dispatcher.stopFrozenPolling());
+}
+
+TEST(BlockTransferDispatcherTest, LocalOnlyDispatcherDoesNotStartPoller) {
+    BlockTransferDispatcher dispatcher(nullptr);
+    EXPECT_FALSE(dispatcher.frozen_thread_.joinable());
+    EXPECT_NO_THROW(dispatcher.stopFrozenPolling());
+}
+
 std::shared_ptr<TransferAsyncContext> okContext() {
     return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
 }

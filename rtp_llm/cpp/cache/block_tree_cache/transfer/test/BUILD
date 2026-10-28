@@ -3,6 +3,15 @@ load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "transfer_task_registry_test",
+    srcs = ["TransferTaskRegistryTest.cc"],
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

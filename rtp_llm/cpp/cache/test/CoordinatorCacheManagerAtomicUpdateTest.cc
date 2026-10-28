@@ -254,6 +254,8 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExte
     for (int owner = 0; owner <= static_cast<int>(BlockTreeRefType::COUNT); ++owner) {
         if (owner == 0) {
             pool->incRef(blocks[1]);
+        } else if (owner == static_cast<int>(BlockTreeRefType::FROZEN) + 1) {
+            pool->freezeBlock(blocks[1]);
         } else {
             pool->incTreeRef(blocks[1], static_cast<BlockTreeRefType>(owner - 1));
         }
@@ -267,6 +269,8 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExte
 
         if (owner == 0) {
             pool->decRef(blocks[1]);
+        } else if (owner == static_cast<int>(BlockTreeRefType::FROZEN) + 1) {
+            pool->unfreezeBlock(blocks[1]);
         } else {
             pool->decTreeRef(blocks[1], static_cast<BlockTreeRefType>(owner - 1));
         }

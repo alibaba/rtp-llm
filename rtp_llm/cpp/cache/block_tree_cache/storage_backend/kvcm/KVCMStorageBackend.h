@@ -38,10 +38,12 @@ protected:
     ErrorInfo          readImpl(const StorageRequest&                           request,
                                 const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
     ErrorInfo          writeImpl(const StorageRequest& request) override;
+    bool               supportsCompletionQueries() const noexcept override { return distributed_completion_queries_; }
     void shutdownImpl() noexcept override;
 
 private:
     class Impl;
+    bool distributed_completion_queries_{false};
     std::unique_ptr<Impl> impl_;
 };
 

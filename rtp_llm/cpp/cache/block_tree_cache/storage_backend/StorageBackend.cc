@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/KVCMOperationId.h"
 
 #include <algorithm>
 #include <mutex>
@@ -39,12 +40,18 @@ struct StorageTaskState {
     StorageRequest   request;
     std::vector<Pin> pins;
     std::once_flag   finish_once;
+    std::function<void(FrozenTask)> retain_frozen;
     void             finish(bool completion_unknown) noexcept {
         std::call_once(finish_once, [this, completion_unknown] {
             if (completion_unknown) {
+                TransferResult result{ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "backend completion unknown")};
+                if (!request.operation_id.empty()) result.recovery_task_ids.push_back(request.operation_id);
+                FrozenTask frozen(result, request.operation_id.empty() ? FrozenTask::QueryKind::TRANSFER :
+                                                                        FrozenTask::QueryKind::KVCM);
                 for (const Pin& pin : pins) {
-                    pin.pool->freezeBlock(pin.block);
+                    frozen.freeze(pin.pool, pin.block);
                 }
+                retain_frozen(std::move(frozen));
             }
             for (const Pin& pin : pins) {
                 pin.pool->decRef(pin.block);
@@ -240,6 +247,19 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
     validateRequest(request, /*allow_null_blocks=*/false);
     auto state     = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request = std::move(request);
+    if (supportsCompletionQueries()) state->request.operation_id = nextKVCMOperationId();
+    state->retain_frozen = [this](FrozenTask task) {
+        std::function<void(FrozenTask)> retainer;
+        {
+            std::lock_guard<std::mutex> lock(frozen_mutex_);
+            retainer = frozen_task_retainer_;
+            if (!retainer) {
+                frozen_tasks_.push_back(std::move(task));
+                return;
+            }
+        }
+        retainer(std::move(task));
+    };
     RTP_LLM_CHECK(initialized_);
 
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
@@ -254,6 +274,11 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
         }
     }
     return state;
+}
+
+void StorageBackend::setFrozenTaskRetainer(std::function<void(FrozenTask)> retainer) {
+    std::lock_guard<std::mutex> lock(frozen_mutex_);
+    frozen_task_retainer_ = std::move(retainer);
 }
 
 void StorageBackend::validateRequest(const StorageRequest& request, bool allow_null_blocks) const {

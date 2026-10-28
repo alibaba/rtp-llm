@@ -18,6 +18,30 @@ using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
 using block_transfer_engine_test::TestGroupConfig;
 
+TEST(BlockTransferRequestConverterTest, QueryRequiresEveryWorkerToConfirmCompletion) {
+    using PB = QueryTransferTasksResponsePB::TaskState;
+    std::vector<QueryTransferTasksResponsePB> responses(2);
+    for (auto& response : responses) {
+        auto* entry = response.add_tasks();
+        entry->set_task_id("task");
+        entry->set_state(PB::FINISHED);
+    }
+    const auto query = [&] { return BlockTransferRequestConverter::queryCompletion("task", responses, 2); };
+    EXPECT_EQ(query(), TaskCompletion::FINISHED);
+    responses[1].mutable_tasks(0)->set_state(PB::RUNNING);
+    EXPECT_EQ(query(), TaskCompletion::PENDING);
+    responses[1].mutable_tasks(0)->set_state(PB::NOT_FOUND);
+    EXPECT_EQ(query(), TaskCompletion::UNKNOWN);
+    responses[1].clear_tasks();
+    EXPECT_EQ(query(), TaskCompletion::UNKNOWN);
+    *responses[1].add_tasks() = responses[0].tasks(0);
+    *responses[1].add_tasks() = responses[0].tasks(0);
+    EXPECT_EQ(query(), TaskCompletion::UNKNOWN);
+    responses.pop_back();
+    EXPECT_EQ(query(), TaskCompletion::UNKNOWN);
+    EXPECT_EQ(BlockTransferRequestConverter::queryCompletion("task", {}, 0), TaskCompletion::UNKNOWN);
+}
+
 std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = true) {
     MemoryLayoutConfig memory_layout;
     memory_layout.layer_num                = 1;

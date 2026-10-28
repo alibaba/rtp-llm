@@ -1261,7 +1261,7 @@ TEST(StorageBackendTest, UnknownReadFreezesBeforeCallbackEvenWhenOwnerReleasedAn
     backend.shutdown();
 }
 
-TEST(StorageBackendTest, UnknownReadFreezesEveryPhysicalPinAndReusesExistingFrozenReference) {
+TEST(StorageBackendTest, UnknownReadFreezesEveryPhysicalPin) {
     for (bool single_pool : {false, true}) {
         auto       first  = std::make_shared<TestBlockPool>();
         auto       second = single_pool ? first : std::make_shared<TestBlockPool>();
@@ -1271,8 +1271,6 @@ TEST(StorageBackendTest, UnknownReadFreezesEveryPhysicalPinAndReusesExistingFroz
             ASSERT_EQ(second->malloc().value(), block);
             second->incRef(block);
         }
-        // A BTC LOAD/EVICT may already have frozen the same block.
-        first->freezeBlock(block);
         auto executor = std::make_shared<HoldingExecutor>();
         executor->setDuplicate(true);
         TestBackend backend(true, executor);

@@ -13,6 +13,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -33,6 +35,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    IsTierEnabledFn                is_tier_enabled,
                                    SettledFn                      settled):
     tree_(tree),
+    transfer_dispatcher_(transfer_dispatcher),
     task_pool_(task_pool),
     metrics_reporter_(&metrics_reporter),
     mutex_(&mutex),
@@ -369,8 +372,8 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
 
 void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept {
     try {
-        task_runner_->runTransfer(task, *metrics_reporter_, [this, task](ErrorInfo error) noexcept {
-            completeEvictionTask(task, std::move(error));
+        task_runner_->runTransfer(task, *metrics_reporter_, [this, task](TransferResult result) noexcept {
+            completeEvictionTask(task, std::move(result));
         });
         return;
     } catch (const std::exception& error) {
@@ -382,8 +385,9 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 }
 
 void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task,
-                                            ErrorInfo                                   error) noexcept {
-    if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+                                            TransferResult                              result) noexcept {
+    if (result.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+        FrozenTask frozen(result);
         // Ordinary source/target references are still held here. Freeze every
         // saved endpoint before rollback can return any of them to a pool.
         for (const TransferDescriptor& desc : task->descriptors()) {
@@ -391,22 +395,24 @@ void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransf
                 continue;
             }
             const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
-            const auto         freeze    = [&group_set](Tier tier, const std::vector<BlockIdxType>& blocks) noexcept {
+            const auto         freeze    = [&group_set, &frozen](Tier tier, const std::vector<BlockIdxType>& blocks) noexcept {
                 if (tier == Tier::DEVICE) {
                     for (size_t i = 0; i < blocks.size(); ++i) {
-                        group_set->devicePools()[i]->freezeBlock(blocks[i]);
+                        frozen.freeze(group_set->devicePools()[i], blocks[i]);
                     }
                 } else {
-                    IBlockPool* pool = tier == Tier::HOST ? static_cast<IBlockPool*>(group_set->hostPool().get()) :
-                                                                       static_cast<IBlockPool*>(group_set->diskPool().get());
-                    pool->freezeBlock(blocks.front());
+                    std::shared_ptr<IBlockPool> pool = tier == Tier::HOST ?
+                        std::static_pointer_cast<IBlockPool>(group_set->hostPool()) :
+                        std::static_pointer_cast<IBlockPool>(group_set->diskPool());
+                    frozen.freeze(std::move(pool), blocks.front());
                 }
             };
             freeze(desc.source_tier, desc.source_blocks);
             freeze(desc.target_tier, desc.target_blocks);
         }
+        transfer_dispatcher_->retainFrozenTask(std::move(frozen));
     }
-    scheduleEvictionSettlement(std::move(task), error.ok());
+    scheduleEvictionSettlement(std::move(task), result.ok());
 }
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,

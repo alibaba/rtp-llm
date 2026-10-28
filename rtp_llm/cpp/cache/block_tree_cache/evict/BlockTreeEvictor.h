@@ -130,7 +130,7 @@ private:
     Tier   watermarkTargetTier(Tier source_tier) const;
     size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
-    void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept;
+    void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, TransferResult result) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
     void runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true);
@@ -157,6 +157,7 @@ private:
                                                                  bool&                high_reached) const;
 
     BlockTree*                          tree_;
+    const BlockTransferDispatcher*      transfer_dispatcher_{nullptr};
     BlockTreeTaskPool*                  task_pool_{nullptr};
     BlockTreeCacheMetricsReporter*      metrics_reporter_{nullptr};
     std::mutex*                         mutex_{nullptr};

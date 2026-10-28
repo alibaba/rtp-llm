@@ -11,6 +11,8 @@ namespace rtp_llm {
 
 class BlockTransferRequestConverter {
 public:
+    static TaskCompletion queryCompletion(const std::string& id,
+        const std::vector<QueryTransferTasksResponsePB>& responses, size_t worker_count);
     static bool encodeTransfer(MemoryOperationRequestPB&       request,
                                const TransferTask&             task,
                                const std::vector<GroupSetPtr>& group_sets);

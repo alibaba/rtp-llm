@@ -8,6 +8,11 @@
 
 namespace rtp_llm {
 namespace {
+TEST(TransferTaskTest, PreservesExecutionIdInSubtask) {
+    TransferTask task({}, std::chrono::milliseconds(100), "coordinator-1");
+    EXPECT_EQ(task.taskId(), "coordinator-1");
+    EXPECT_EQ(task.subtask({}).taskId(), task.taskId());
+}
 
 TEST(TransferResultTest, MergePreservesMessagesAndHighestPriorityCode) {
     for (bool crc_first : {false, true}) {

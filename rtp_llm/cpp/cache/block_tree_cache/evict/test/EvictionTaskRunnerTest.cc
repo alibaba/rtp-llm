@@ -107,6 +107,10 @@ public:
         return batches_.at(index);
     }
 
+    void completeResult(TransferResult result) {
+        contexts_.at(0)->complete(std::move(result));
+    }
+
     void complete(size_t index, bool success) {
         contexts_.at(index)->complete(success ? ErrorInfo::OkStatus() :
                                                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
@@ -137,7 +141,7 @@ protected:
         std::optional<bool> result;
         runner.runTransfer(std::make_shared<EvictionTransferTask>(std::move(task)),
                            metrics_reporter_,
-                           [&](ErrorInfo error) { result = error.ok(); });
+                           [&](TransferResult error) { result = error.ok(); });
         if (!result.has_value()) {
             ADD_FAILURE() << "scripted transfer did not complete inline";
             return false;
@@ -186,6 +190,21 @@ TEST(EvictionTransferTaskTest, ConstructorOwnsDescriptorsAndTimings) {
     EXPECT_EQ(task.timings.front().selected_time_us, 17);
 }
 
+TEST_F(EvictionTaskRunnerTest, PreservesRecoveryIdsInCompletion) {
+    auto engine = std::make_shared<DeferredTransferEngine>(group_sets_);
+    BlockTransferDispatcher dispatcher(engine);
+    EvictionTaskRunner runner(group_sets_, &dispatcher);
+    std::optional<TransferResult> received;
+    runner.runTransfer(std::make_shared<EvictionTransferTask>(makeCopyTask()), metrics_reporter_,
+                       [&](TransferResult result) { received = std::move(result); });
+    TransferResult result(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "timeout"));
+    result.recovery_task_ids = {"batch"};
+    engine->completeResult(result);
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(received->status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_EQ(received->recovery_task_ids, result.recovery_task_ids);
+}
+
 TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
     BlockTransferDispatcher dispatcher(deferred_engine);
@@ -194,7 +213,7 @@ TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
     std::optional<bool>     result;
     size_t                  terminal_count = 0;
 
-    runner.runTransfer(task, metrics_reporter_, [&](ErrorInfo error) {
+    runner.runTransfer(task, metrics_reporter_, [&](TransferResult error) {
         ++terminal_count;
         result = error.ok();
     });
@@ -239,7 +258,7 @@ TEST_F(EvictionTaskRunnerTest, RunTransferOwnsTransferMetricsLifetime) {
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
 
-    runner.runTransfer(task, metrics_reporter_, [&](ErrorInfo error) { result = error.ok(); });
+    runner.runTransfer(task, metrics_reporter_, [&](TransferResult error) { result = error.ok(); });
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 1);

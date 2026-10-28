@@ -409,6 +409,26 @@ TEST_F(KVCacheManagerTest, TaggedAddressLookupIgnoresGroupOrderAndPreservesLayer
     }
 }
 
+TEST_F(KVCacheManagerTest, QueryTransferTasksReturnsMixedStates) {
+    KVCacheManager manager(makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8), false);
+    ASSERT_TRUE(manager.init());
+    ASSERT_NE(manager.blockTreeCache(), nullptr);
+    auto& registry = manager.blockTreeCache()->transfer_task_registry_;
+    ASSERT_TRUE(registry.start("running"));
+    ASSERT_TRUE(registry.start("finished"));
+    ASSERT_TRUE(registry.finish("finished"));
+    QueryTransferTasksRequestPB request;
+    for (const auto* id : {"running", "finished", "missing"}) request.add_task_ids(id);
+    QueryTransferTasksResponsePB response;
+    ASSERT_TRUE(manager.queryTransferTasks(request, response));
+    ASSERT_EQ(response.tasks_size(), 3);
+    using PB = QueryTransferTasksResponsePB::TaskState;
+    EXPECT_EQ(response.tasks(0).state(), PB::RUNNING);
+    EXPECT_EQ(response.tasks(1).state(), PB::FINISHED);
+    EXPECT_EQ(response.tasks(2).state(), PB::NOT_FOUND);
+    for (int i = 0; i < 3; ++i) EXPECT_EQ(response.tasks(i).task_id(), request.task_ids(i));
+}
+
 TEST_F(KVCacheManagerTest, AvailableBlocksUsesCanonicalPoolCount) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
