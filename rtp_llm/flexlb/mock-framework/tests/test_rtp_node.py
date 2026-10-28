@@ -64,6 +64,8 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                     assert actual['local_output_tokens'] == 1
                 else:
                     assert actual['pd_output_tokens'] == 4
+                    assert actual['batch_output_tokens'] == 4
+                    assert actual['cancel_fenced'] is True
                     assert actual['transfer_loaded'] is True
                     assert actual['prefill_available_while_pinned'] == 112
                     assert actual['prefill_available_after_load'] == 128
@@ -79,7 +81,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 (directory / 'metrics.prom').write_text(metrics)
                 samples = [line for line in metrics.splitlines() if line.startswith('mock_engine_forward_seconds_count{')]
                 assert len(samples) == 1
-                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 3)
+                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 6)
                 assert f'role="{role}"' in samples[0]
                 effective = json.loads((directory / 'effective-config.json').read_text())
                 assert effective['compute']['noise']['scale'] == 1

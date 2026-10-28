@@ -48,11 +48,16 @@ class PdGenerationTest {
     private static final class Call implements AutoCloseable {
         final Context.CancellableContext context = Context.current().withCancellation();
         final BlockingQueue<Object> outputs = new LinkedBlockingQueue<>();
-        Call(Harness p, GenerateInputPB input) { context.run(() -> RpcServiceGrpc.newStub(p.channel).generateStreamCall(input, new StreamObserver<>() {
+        Call(Harness p, GenerateInputPB input) { this(p, input, false); }
+        Call(Harness p, GenerateInputPB input, boolean fetch) { context.run(() -> {
+            var observer = new StreamObserver<GenerateOutputsPB>() {
             @Override public void onNext(GenerateOutputsPB value) { outputs.add(value); }
             @Override public void onError(Throwable error) { outputs.add(error); }
             @Override public void onCompleted() { outputs.add("completed"); }
-        })); }
+            };
+            if (fetch) RpcServiceGrpc.newStub(p.channel).fetchResponse(FetchRequestPB.newBuilder().setRequestId(input.getRequestId()).build(), observer);
+            else RpcServiceGrpc.newStub(p.channel).generateStreamCall(input, observer);
+        }); }
         Object next() throws Exception { var value = outputs.poll(4, TimeUnit.SECONDS); assertNotNull(value); return value; }
         GenerateOutputsPB output(int count, boolean finished, int width) throws Exception {
             var value = next(); assertInstanceOf(GenerateOutputsPB.class, value); var output = (GenerateOutputsPB) value;
@@ -71,6 +76,182 @@ class PdGenerationTest {
     private static double metric(Harness node, String name, String label) throws Exception {
         try (var stream = java.net.URI.create((String) node.node.endpoints().get("metrics")).toURL().openStream()) {
             return LocalRpcTest.sample(new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8), name, label);
+        }
+    }
+
+    private static EnqueueBatchResponsePB enqueue(Harness p, long ttl, GenerateInputPB... inputs) {
+        var slot = EnqueueBatchDpSlotPB.newBuilder();
+        for (var input : inputs) slot.addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(input));
+        return RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS).enqueueBatch(
+            EnqueueBatchRequestPB.newBuilder().setBatchId(81).setFetchAttachTimeoutMs(ttl).addDpSlots(slot).build());
+    }
+    private static CancelStatusPB cancel(Harness p, long id) {
+        return RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS)
+            .cancel(CancelRequestPB.newBuilder().setRequestId(id).build()).getStatus();
+    }
+
+    @Test void batchAckOwnsDecodeAndPrefillBeforeFetchWithoutStartingDecodeForward() throws Exception {
+        try (var p = node("prefill", 8, 100); var d = node("decode", 8, 1)) {
+            var request = input(d, 101, 5, 4, 3000, true);
+            var ack = enqueue(p, 2000, request); assertEquals(81, ack.getBatchId()); assertEquals(1, ack.getSuccessesCount());
+            assertEquals(1, d.status().getRunningTaskInfoCount());
+            await(() -> p.status().getRunningTaskInfoCount() == 1);
+            assertEquals(81, p.status().getRunningTaskInfo(0).getBatchId());
+            Thread.sleep(120);
+            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertTrue(p.status().getAvailableKvCache() < 16);
+            try (var fetch = new Call(p, request, true)) {
+                for (int n = 1; n <= 4; n++) fetch.output(n, n == 4, 1);
+                assertEquals("completed", fetch.next());
+            }
+            await(() -> d.status().getRunningTaskInfoCount() == 0 && p.status().getRunningTaskInfoCount() == 0);
+            assertEquals(CancelStatusPB.CANCEL_STATUS_NOT_FOUND, cancel(p, 101));
+        }
+    }
+
+    @Test void enqueueRpcDeadlineDoesNotOwnDeferredGeneration() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            var context = Context.current().withCancellation();
+            var request = input(d, 102, 5, 3, 2000, true);
+            context.call(() -> enqueue(p, 1500, request)); context.cancel(null);
+            Thread.sleep(60);
+            try (var fetch = new Call(p, request, true)) {
+                fetch.output(1, false, 1); fetch.output(2, false, 1); fetch.output(3, true, 1);
+                assertEquals("completed", fetch.next());
+            }
+        }
+    }
+
+    @Test void missingFetchExpiresBothOwnersAndCannotBeAttachedLate() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            var request = input(d, 103, 5, 4, 0, true);
+            assertEquals(1, enqueue(p, 80, request).getSuccessesCount());
+            await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
+            assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
+            try (var fetch = new Call(p, request, true)) { fetch.error(Status.Code.NOT_FOUND); }
+        }
+    }
+
+    @Test void requestBudgetIncludesTheTimeBeforeFetchAndOverridesLongAttachmentLease() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            var request = input(d, 104, 5, 4, 100, true);
+            assertEquals(1, enqueue(p, 3000, request).getSuccessesCount());
+            await(() -> d.status().getRunningTaskInfoCount() == 0 && p.status().getRunningTaskInfoCount() == 0);
+            try (var fetch = new Call(p, request, true)) { fetch.error(Status.Code.NOT_FOUND); }
+        }
+    }
+
+    @Test void cancelBeforeEnqueueFencesFutureAdmissionAndFetchWith8429() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, cancel(p, 105));
+            var request = input(d, 105, 5, 4, 1000, true); var ack = enqueue(p, 1000, request);
+            assertEquals(0, ack.getSuccessesCount()); assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
+            assertEquals(0, d.status().getRunningTaskInfoCount());
+            try (var fetch = new Call(p, request, true)) { assertEquals(8429, code(fetch.error(Status.Code.RESOURCE_EXHAUSTED))); }
+            assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, cancel(p, 105));
+            assertEquals(Status.Code.INVALID_ARGUMENT, assertThrows(StatusRuntimeException.class, () -> cancel(p, 0)).getStatus().getCode());
+        }
+    }
+
+    @Test void cancelUnattachedBatchReleasesBothOwnersAndLeavesPreemptionFence() throws Exception {
+        try (var p = node("prefill", 8, 100); var d = node("decode", 8, 1)) {
+            var request = input(d, 106, 5, 4, 2000, true); enqueue(p, 1500, request);
+            assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, 106));
+            await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
+            assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
+            try (var fetch = new Call(p, request, true)) { assertEquals(8429, code(fetch.error(Status.Code.RESOURCE_EXHAUSTED))); }
+            assertEquals(8429, enqueue(p, 1000, request).getErrors(0).getErrorInfo().getErrorCode());
+        }
+    }
+
+    @Test void cancelAttachedFetchPropagatesPreemptionAndSecondFetchCannotStealIt() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 500)) {
+            var request = input(d, 107, 5, 4, 3000, true); enqueue(p, 100, request);
+            try (var fetch = new Call(p, request, true)) {
+                fetch.output(1, false, 1);
+                try (var duplicate = new Call(p, request, true)) { duplicate.error(Status.Code.ALREADY_EXISTS); }
+                assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, 107));
+                assertEquals(8429, code(fetch.error(Status.Code.RESOURCE_EXHAUSTED)));
+            }
+            await(() -> d.status().getRunningTaskInfoCount() == 0);
+        }
+    }
+
+    @Test void duplicateBatchRejectsEveryEntryWithoutAnyAdmissionAndMixedErrorsStayPerRequest() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            var request = input(d, 108, 5, 4, 2000, true);
+            var duplicate = enqueue(p, 1000, request, request);
+            assertEquals(2, duplicate.getErrorsCount()); assertEquals(0, duplicate.getSuccessesCount());
+            assertEquals(Status.Code.ALREADY_EXISTS.value(), duplicate.getErrors(0).getErrorInfo().getErrorCode());
+            assertEquals(0, d.status().getRunningTaskInfoCount());
+            var invalid = request.toBuilder().setRequestId(109).clearTokenIds().build();
+            var mixed = enqueue(p, 1000, request, invalid);
+            assertEquals(1, mixed.getErrorsCount()); assertEquals(109, mixed.getErrors(0).getRequestId()); assertEquals(1, mixed.getSuccessesCount());
+            cancel(p, 108);
+        }
+    }
+
+    @Test void groupEnvelopeAndInvalidDpRankMissingInputAreHandledWithoutLostEntries() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            var stub = RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+            var request = input(d, 110, 5, 4, 2000, true);
+            var invalid = stub.enqueueGroup(EnqueueGroupRequestPB.newBuilder().setBatchId(82).setDpRank(1)
+                .addRequests(EnqueueGroupInputPB.newBuilder().setInput(request)).addRequests(EnqueueGroupInputPB.getDefaultInstance()).build());
+            assertEquals(2, invalid.getErrorsCount()); assertEquals(82, invalid.getBatchId());
+            var good = stub.enqueueGroup(EnqueueGroupRequestPB.newBuilder().setBatchId(83)
+                .addRequests(EnqueueGroupInputPB.newBuilder().setInput(request)).build());
+            assertEquals(1, good.getSuccessesCount()); cancel(p, 110);
+        }
+    }
+
+    @Test void attachedFetchOutlivesAttachmentLeaseAndCancellingItReleasesDecode() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 180)) {
+            var request = input(d, 111, 5, 6, 3000, true); enqueue(p, 100, request);
+            try (var fetch = new Call(p, request, true)) {
+                fetch.output(1, false, 1); fetch.output(2, false, 1);
+            }
+            await(() -> d.status().getRunningTaskInfoCount() == 0);
+            assertEquals(16, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void batchPreparationFailureCannotReturnSuccess() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 1, 1)) {
+            var ack = enqueue(p, 1000, input(d, 112, 5, 4, 1000, true));
+            assertEquals(0, ack.getSuccessesCount()); assertEquals(602, ack.getErrors(0).getErrorInfo().getErrorCode());
+            assertEquals(0, p.status().getRunningTaskInfoCount());
+        }
+    }
+
+    @Test void closingPrefillWithAnUnfetchedBatchCancelsDecodeReservation() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            enqueue(p, 10000, input(d, 113, 5, 4, 0, true)); p.node.close();
+            await(() -> d.status().getRunningTaskInfoCount() == 0);
+            assertEquals(16, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void duplicateActiveIdDoesNotReplaceTheOriginalDeferredOwner() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+            var request = input(d, 114, 5, 3, 2000, true); enqueue(p, 1500, request);
+            assertEquals(Status.Code.ALREADY_EXISTS.value(), enqueue(p, 1000, request).getErrors(0).getErrorInfo().getErrorCode());
+            try (var fetch = new Call(p, request, true)) {
+                fetch.output(1, false, 1); fetch.output(2, false, 1); fetch.output(3, true, 1); assertEquals("completed", fetch.next());
+            }
+        }
+    }
+
+    @Test void cancellingDuringDecodeAllocationRejectsAdmissionWithoutCancellingAnotherRequest() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1000);
+                var busy = new Call(p, input(d, 115, 5, 4, 4000, true)); var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            busy.output(1, false, 1);
+            var pending = workers.submit(() -> enqueue(p, 2000, input(d, 116, 11, 4, 3000, true)));
+            await(() -> d.status().getWaitingQueryLen() == 1);
+            assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, 116));
+            var ack = pending.get(2, TimeUnit.SECONDS);
+            assertEquals(0, ack.getSuccessesCount()); assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
+            await(() -> d.status().getWaitingQueryLen() == 0);
+            assertEquals(1, d.status().getRunningTaskInfoCount());
         }
     }
 

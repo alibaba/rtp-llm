@@ -57,6 +57,7 @@ final class LocalPrefill implements AutoCloseable {
         }
         CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
         void cancel() { finish(this, Status.CANCELLED.withDescription("Client cancelled local generation"), 0); }
+        void preempt() { finish(this, Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429); }
         void expire() { finish(this, Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
     }
 
@@ -212,6 +213,7 @@ final class LocalPrefill implements AutoCloseable {
         boolean executing = s.runningAt != 0 && !s.ready;
         long nanos = System.nanoTime();
         return TaskInfoPB.newBuilder().setRequestId(s.input.getRequestId()).setInputLength(s.input.getTokenIdsCount())
+            .setBatchId(s.input.hasGroupId() ? s.input.getGroupId().getValue() : 0)
             .setPrefixLength(s.reused).setPriority(s.input.getPriority()).setDpRank(0).setIsWaiting(!executing)
             .setPhase(s.ready ? TaskPhase.TASK_PHASE_KV_ALLOCATED : executing ? TaskPhase.TASK_PHASE_RUNNING : TaskPhase.TASK_PHASE_PENDING)
             .setWaitingTimeMs(TimeUnit.NANOSECONDS.toMillis((s.runningAt != 0 ? s.runningAt : nanos) - s.started))

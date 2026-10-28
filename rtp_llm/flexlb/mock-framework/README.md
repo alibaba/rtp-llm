@@ -197,7 +197,7 @@ RTP真实实现也支持kv_cache_mem_mb，但从字节换算块数需要真实KV
 
 设备块池按引用管理共享前缀：可用容量包含空闲块和未被引用的LRU块，物理free不包含LRU数据。分配先引用命中、再检查净新增需求与reserve，失败回滚引用；需要空闲物理块时才淘汰LRU。增长失败保留已增长的部分，最终由原owner释放。DeviceCache封装原始池租约，完成、取消和关闭只有一次所有权转换；publish可保留已计算P数据供连接器使用，但不会自动推进P/D协议。取消后不能再次发布，关闭清除缓存并拒绝新分配。
 
-组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和具体阶段范围。HTTP /health仅报告已绑定的公共业务接口清单；未配置Prometheus查询时清单为空，配置后绑定下述5个只读接口，不把健康探测扩充为case业务接口。Enqueue、Fetch及独立的原生Cancel RPC尚未实现；GenerateStreamCall已支持下述文本P/D自动接续。节点启动或ALLOCATE通过不表示完整P/D或压力验收。
+组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和具体阶段范围。HTTP /health仅报告已绑定的公共业务接口清单；未配置Prometheus查询时清单为空，配置后绑定下述5个只读接口，不把健康探测扩充为case业务接口。P支持GenerateStreamCall和下述Enqueue/Fetch/Cancel文本P/D链路。节点启动或ALLOCATE通过不表示完整P/D或压力验收。
 
 ### 本地单token请求
 
@@ -247,7 +247,13 @@ D成功时按reuse/device开关写回完整prompt块的key并释放租约，新�
 
 P请求timeout从入口开始，覆盖D预留、P计算、LOAD、D生成及慢消费者等待，与RPC deadline取较早者，不逐阶段重置。取消会关闭当前请求Context、取消P来源和D活动，节点关闭同样回收请求。节点连接池复用到各目标的通道；取消一个请求不会关闭其他请求的连接。P转发使用受控拉取和有限Inbox，P/D均遵守RPC发送就绪状态，避免为慢消费者持续积压整条输出。
 
-Enqueue/Fetch、独立Cancel RPC及其优先级抢占/取流租约语义尚未实现，不通过接受后固定成功或放宽阶段检查补齐；动态batch、正式Master与Client和性能验收仍属后续工作。
+原生批量入口支持EnqueueBatch和EnqueueGroup（仅DP rank 0）。每个请求先得到D的真实ALLOCATE确认，再提交P的Forward队列，成功后才能返回入队ACK；P可在Fetch前计算并持有KV，但此时不向D发送LOAD或启动Decode Forward。FetchResponse单次接入后复用GenerateStreamCall的LOAD、首token、GENERATE和输出背压逻辑，不缓存整段生成结果。batch_id写入P的TaskInfo。重复ID的整批输入全部拒绝，其他非法项分别返回错误；成功项不因同批其他项失败而回滚。当前每个请求仍按既有单请求Forward调度，尚未模拟多请求合批计算。
+
+入队RPC结束或其客户端取消不终止已接受的请求；generate_config.timeout_ms仍覆盖D分配、P排队、等待Fetch和生成全程。fetch_attach_timeout_ms从入队成功开始计时，非正值沿用原生10分钟默认值，接入后撤销，只约束接入等待。未接入超时、Fetch断流、节点关闭都会取消P/D持有者。Fetch重复接入返回ALREADY_EXISTS，未就绪或过期返回NOT_FOUND。批量入口当前要求文本P/D请求、max_new_tokens > 1；单token、图片、多DP明确不支持。
+
+Cancel只针对原生批量请求，保持真实PrefillBatchRpcServer的作用域；直接GenerateStreamCall仍通过RPC取消。Cancel接受正request_id：活动批量请求返回ACCEPTED并锁定8429/RESOURCE_EXHAUSTED，取消P及当前或稍后建立的D链路；这不代表D已完成资源释放。未登记ID返回TOMBSTONED并阻止随后入队；已完成的请求返回NOT_FOUND。抢占后的Fetch和后续同ID入队仍返回8429。墓碑及完成历史保留10分钟，按到期顺序清理；该期间不支持复用请求ID。Mock仍限制最多1024个活动P/D请求，达到上限明确拒绝；历史项不另加请求数量配额，避免长时间发流后突然拒绝新请求。
+
+动态合批计算、正式Master与Client和性能验收仍属后续工作。上述验证使用Mock原生RPC和真实网络，不等同于与真实引擎的差分验收。
 
 ### 共享Decode推进与停止模型
 

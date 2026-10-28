@@ -54,7 +54,7 @@ public final class RtpNode implements AutoCloseable {
         var result = new LinkedHashMap<String, Object>();
         result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
         result.put("rpc", rpcAddress()); result.put("control", api.url()); result.put("metrics", api.url() + "/metrics");
-        result.put("supported_rpc", prefill ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall")
+        result.put("supported_rpc", prefill ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall", "EnqueueBatch", "EnqueueGroup", "FetchResponse", "Cancel")
             : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"));
         result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "text_only", true) : Map.of());
         result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "text_only", true) : Map.of());

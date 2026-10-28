@@ -110,7 +110,24 @@ public final class NativeProbe {
                     throw new IllegalStateException("Invalid automatic P/D output");
             }
             if (count != 4) throw new IllegalStateException("Automatic P/D did not produce four outputs");
-            return Map.of("pd_output_tokens", count, "transfer_loaded", true, "prefill_available_while_pinned", held,
+            var batched = nativeInput.setRequestId(46).build();
+            var ack = pRpc.enqueueBatch(EnqueueBatchRequestPB.newBuilder().setBatchId(7).setFetchAttachTimeoutMs(1000)
+                .addDpSlots(EnqueueBatchDpSlotPB.newBuilder().addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(batched))).build());
+            if (ack.getSuccessesCount() != 1 || ack.getErrorsCount() != 0) throw new IllegalStateException("Batch admission failed");
+            int batchCount = 0;
+            var fetched = pRpc.fetchResponse(FetchRequestPB.newBuilder().setRequestId(46).build());
+            while (fetched.hasNext()) {
+                var output = fetched.next(); batchCount++;
+                if (output.getFlattenOutput().getAuxInfo(0).getOutputLen() != batchCount || output.getFlattenOutput().getFinished(0) != (batchCount == 4))
+                    throw new IllegalStateException("Invalid fetched P/D output");
+            }
+            if (batchCount != 4) throw new IllegalStateException("Fetch did not produce four outputs");
+            var cancelled = pRpc.cancel(CancelRequestPB.newBuilder().setRequestId(47).build());
+            var fenced = pRpc.enqueueBatch(EnqueueBatchRequestPB.newBuilder().addDpSlots(EnqueueBatchDpSlotPB.newBuilder()
+                .addRequests(EnqueueBatchExternalInputPB.newBuilder().setInput(nativeInput.setRequestId(47)))).build());
+            if (cancelled.getStatus() != CancelStatusPB.CANCEL_STATUS_TOMBSTONED || fenced.getErrorsCount() != 1
+                    || fenced.getErrors(0).getErrorInfo().getErrorCode() != 8429) throw new IllegalStateException("Cancel fence failed");
+            return Map.of("batch_output_tokens", batchCount, "cancel_fenced", true, "pd_output_tokens", count, "transfer_loaded", true, "prefill_available_while_pinned", held,
                 "prefill_available_after_load", pAvailable, "decode_available_after_load_cancel", 128);
         } finally { context.cancel(null); p.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }

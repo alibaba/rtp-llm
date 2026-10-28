@@ -24,6 +24,8 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         Source(Entry entry) { this.entry = entry; }
         int stopAfter() { return entry.metadata.getStopAfter(); }
         CompletionStage<LocalPrefill.Result> ready() { return entry.ready.minimalCompletionStage(); }
+        void preempt() { entry.session.preempt(); }
+        void expire() { entry.session.expire(); }
         @Override public void close() { entry.session.cancel(); }
     }
     private final RtpConfig config;

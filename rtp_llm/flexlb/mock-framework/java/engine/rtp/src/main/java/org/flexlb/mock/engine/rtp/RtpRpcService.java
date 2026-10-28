@@ -36,6 +36,33 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return decode == null ? super.remoteGenerate(observer) : decode.open(observer);
     }
 
+    @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
+        if (generation == null) { super.enqueueBatch(request, response); return; }
+        PrefillBatch.enqueue(generation, request, response);
+    }
+
+    @Override public void enqueueGroup(EnqueueGroupRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
+        if (generation == null) { super.enqueueGroup(request, response); return; }
+        var slot = EnqueueBatchDpSlotPB.newBuilder().setDpRank(request.getDpRank());
+        for (var item : request.getRequestsList()) {
+            var external = EnqueueBatchExternalInputPB.newBuilder();
+            if (item.hasInput()) external.setInput(item.getInput());
+            slot.addRequests(external);
+        }
+        PrefillBatch.enqueue(generation, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
+            .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build(), response);
+    }
+
+    @Override public void fetchResponse(FetchRequestPB request, StreamObserver<GenerateOutputsPB> response) {
+        if (generation == null) { super.fetchResponse(request, response); return; }
+        generation.fetch(request.getRequestId(), response);
+    }
+
+    @Override public void cancel(CancelRequestPB request, StreamObserver<CancelResponsePB> response) {
+        if (generation == null) { super.cancel(request, response); return; }
+        reply(response, () -> CancelResponsePB.newBuilder().setStatus(generation.cancel(request.getRequestId())).build());
+    }
+
     @Override public void generateStreamCall(GenerateInputPB request, StreamObserver<GenerateOutputsPB> observer) {
         if (requests == null) { super.generateStreamCall(request, observer); return; }
         if (request.getGenerateConfig().getMaxNewTokens() > 1) { generation.generate(request, observer); return; }
