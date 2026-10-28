@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
+import tempfile
+import os
 
 
 def timestamp():
@@ -11,7 +13,15 @@ def timestamp():
 
 def write_json(path, value):
     path = Path(path)
-    path.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False, default=str, indent=2) + '\n', encoding='utf-8')
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.publish-', encoding='utf-8', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(value, ensure_ascii=False, allow_nan=False, default=str, indent=2) + '\n')
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class Records:

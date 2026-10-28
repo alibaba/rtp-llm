@@ -98,6 +98,15 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     if history_overflow:
         document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
             'interface': 'master/engine/get', 'args': {'role': 'prefill'}})
+    dynamic = replicas == 1 and not batched and not history_overflow
+    if dynamic:
+        document['phases'][0]['timeout'] = '45s'
+        document['phases'][0]['steps'].extend([
+            {'id': 'added', 'describe': '创建新P', 'interface': 'engine/scale_out', 'wait_after': '3s'},
+            {'id': 'after_add', 'describe': 'Master实际看到新P', 'interface': 'master/engine/get'},
+            {'id': 'removed', 'describe': '关闭新P', 'interface': 'engine/scale_in',
+             'args': {'targets': {'ref': 'steps.added'}}, 'wait_after': '12s'},
+            {'id': 'after_remove', 'describe': 'Master清除旧P', 'interface': 'master/engine/get'}])
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
     registry = Registry.standard(); case = compile_case(case_file, registry)
     components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
@@ -162,13 +171,15 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     if history_overflow:
         before = json.loads((output / 'components/master-0/before-master.json').read_text())
         assert before == {'finished_requests': 1025, 'finished_version': 1025}
-        gap = (output / 'components/prefill-0/stderr.log').read_text()
+        gap = (output / 'hosts/engine-shared/stderr.log').read_text()
         assert 'finished_history_gap requested_version=-1 dropped_through=1 latest_version=1025 retained=1024' in gap
     effective = json.loads((output / 'components/master-0/effective-config.json').read_text())
     assert effective['FLEXLB_CONFIG'] == master_config['FLEXLB_CONFIG']
+    native_env = json.loads((output / 'components/master-0/native-environment.json').read_text())
+    assert native_env['HIPPO_ROLE'] == effective['HIPPO_ROLE']
     events = [json.loads(row) for row in (output / 'events.jsonl').read_text().splitlines()]
     started = [event for event in events if event['event'] == 'process_started']
-    assert [event['node'] for event in started] == ['zookeeper', 'prefill-0', 'decode-0'] + [f'master-{i}' for i in range(replicas)]
+    assert [event['node'] for event in started] == ['zookeeper', 'engine-shared'] + [f'master-{i}' for i in range(replicas)]
     election = effective['FLEXLB_SYNC_CONSISTENCY_CONFIG']
     assert election['needConsistency'] is True
     gates = [json.loads(row) for row in (output / 'gates.jsonl').read_text().splitlines()]
@@ -178,6 +189,11 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
                     if event['event'] == 'step_finished' and event['status'] == 'PASS'}
     for step, engine in [('prefills', 'prefill-0'), ('decodes', 'decode-0')] + ([('still_healthy', 'prefill-0')] if history_overflow else []):
         assert observations[step] == {addresses[f'master-{i}']: [addresses[engine]] for i in range(replicas)}
+    if dynamic:
+        master = addresses['master-0']
+        assert observations['after_add'] == {master: sorted([addresses['prefill-0'], *observations['added']])}
+        assert observations['after_remove'] == {master: [addresses['prefill-0']]}
+        assert observations['removed'] == observations['added']
     assert len(gates) == 1 and gates[0]['status'] == 'PASS'
     if replicas == 2:
         other = json.loads((output / 'components/master-1/effective-config.json').read_text())
@@ -194,10 +210,11 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
 
 def adapter_context():
     from types import SimpleNamespace
-    return SimpleNamespace(processes=SimpleNamespace(topology=[
+    topology = [
         {'id': 'master-0', 'rpc': 'm0:1', 'control': 'http://m0', 'role': 'master'},
         {'id': 'master-1', 'rpc': 'm1:1', 'control': 'http://m1', 'role': 'master'},
-        {'id': 'p0', 'rpc': 'p0:1', 'role': 'prefill'}]), query_time='2026-10-28T00:00:00Z', timeout=2)
+        {'id': 'p0', 'rpc': 'p0:1', 'role': 'prefill'}]
+    return SimpleNamespace(processes=SimpleNamespace(topology=topology, history=topology), query_time='2026-10-28T00:00:00Z', timeout=2)
 
 
 @pytest.mark.parametrize('operation,responses,expected', [

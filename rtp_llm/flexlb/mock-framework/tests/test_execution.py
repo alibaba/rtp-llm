@@ -226,3 +226,35 @@ def test_wait_is_interruptible_without_losing_completed_action(setup, tmp_path, 
     finished = [e for e in events(out) if e['event'] == 'step_finished']
     assert len(finished) == 1 and finished[0]['error_stage'] == 'wait_after'
     assert finished[0]['result'] == 2 and not finished[0]['outcome_unknown']
+
+
+def test_multiple_masters_always_use_distinct_processes(setup, tmp_path):
+    case, registry, launch = setup([step()])
+    case.environment['master']['deployment']['replicas'] = 2
+    output = tmp_path / 'out'
+    assert asyncio.run(run_case(case, registry, launch, output))['status'] == 'PASS'
+    starts = [e for e in events(output) if e['event'] == 'process_started']
+    assert {e['node'] for e in starts} == {'master-0', 'master-1'}
+    assert len({e['pid'] for e in starts}) == 2
+    for event in starts:
+        with pytest.raises(ProcessLookupError):
+            os.kill(event['pid'], 0)
+
+
+@pytest.mark.parametrize('exit_code', [None, 0])
+def test_intentional_stop_retains_unreaped_process_for_final_cleanup(exit_code):
+    from types import SimpleNamespace
+    from mock_framework.execution.processes import Processes
+    async def exercise():
+        p = Processes(None, {}, SimpleNamespace())
+        child = SimpleNamespace(returncode=None)
+        p.children.append(('engine-prefill-0', child))
+        async def stop(*args):
+            child.returncode = exit_code
+            return ['did not exit'] if exit_code is None else []
+        p._stop = stop
+        errors = await p.stop_expected('engine-prefill-0', child)
+        assert bool(p.children) == (exit_code is None)
+        assert bool(errors) == (exit_code is None)
+        assert 'engine-prefill-0' in p.expected_stops
+    asyncio.run(exercise())

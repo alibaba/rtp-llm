@@ -42,6 +42,10 @@ public final class RtpNode implements AutoCloseable {
     }
 
     public String rpcAddress() { return "127.0.0.1:" + rpc.getPort(); }
+    public void checkHealthy() {
+        if (closed.get()) throw new IllegalStateException("Engine closed");
+        service.scrapeMetrics();
+    }
     public DeviceCache cache() { return cache; }
     public Map<String, Object> endpoints() {
         boolean prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill;
@@ -59,14 +63,23 @@ public final class RtpNode implements AutoCloseable {
 
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
-        service.close();
-        if (rpc != null) {
-            rpc.shutdownNow();
-            try { rpc.awaitTermination(3, TimeUnit.SECONDS); }
-            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        RuntimeException failure = null;
+        try { service.close(); } catch (RuntimeException error) { failure = error; }
+        try {
+            if (rpc != null) {
+                rpc.shutdownNow();
+                if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("Engine RPC did not terminate");
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            if (failure == null) failure = new IllegalStateException("Interrupted closing Engine", error);
+            else failure.addSuppressed(error);
+        } catch (RuntimeException error) {
+            if (failure == null) failure = error; else failure.addSuppressed(error);
+        } finally {
+            try { if (api != null) api.close(); } finally { cache.close(); }
         }
-        if (api != null) api.close();
-        cache.close();
+        if (failure != null) throw failure;
     }
 
     public static void main(String[] args) throws Exception {

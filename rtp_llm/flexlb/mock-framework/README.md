@@ -2,11 +2,11 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心和 Prometheus。每个 Engine 独立 JVM，实例间使用网络 gRPC。Client 播放器、多 JVM 发压协调、Master 停启和滚动重启、动态缩容、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Client 播放器、多 JVM 发压协调、Master 停启和滚动重启、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## 设计边界
 
-本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；共享 Engine JVM、动态扩缩容和发现更新仍待接通。其后的“当前代码职责”及运行说明描述可执行范围。
+本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 协调及其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
 
 ### Python Case 操作与 Java 实例能力
 
@@ -111,7 +111,7 @@ D 只有 KV 加载成功和生成许可均满足后才进入 Decode；Prefill-on
 | P/D/V Mock Engine | 全部放在同一个 Engine JVM | 每个 Engine 一个 JVM |
 | Client | 每个 Client 独立 JVM | 每个 Client 独立 JVM |
 
-目标是本地运行默认采用共享模式，所有 P/D/V Engine 放在一个 JVM；独立模式用于需要进程隔离的实验。模式在运行开始前确定。共享模式新增 Engine 就在已有宿主创建对象；独立模式新增 Engine 就启动专属 JVM。不实现任意多 JVM/多实例装箱、动态迁移或共享宿主不足时自动另开 JVM。共享指代码复用，实例仍独立拥有缓存容量、请求状态和 Scheduler。
+本地运行默认采用共享模式，已实现的 P/D Engine 放在一个 JVM，ViT 接入后沿用同一放置规则；独立模式用于需要进程隔离的实验。模式在运行开始前确定。共享模式新增 Engine 就在已有宿主创建对象；独立模式新增 Engine 就启动专属 JVM。不实现任意多 JVM/多实例装箱、动态迁移或共享宿主不足时自动另开 JVM。共享指代码复用，实例仍独立拥有缓存容量、请求状态和 Scheduler。
 
 实例使用服务地址区分，同 IP 下用端口区分。控制、业务 RPC 和 metrics 地址之间的对应关系留在发现信息中，不向 Case 暴露额外的 JVM 身份。实例之间统一通过 TCP 通信，共 JVM 不另走 in-process 传输。Python 内部仍须保存进程与实例归属，以处理宿主退出和清理。
 
@@ -159,7 +159,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 1. 从 LocalPrefill/DecodeAdmission 分离协议、调度域和公共执行组件，保留现有超时、取消、P/D 交接及清理行为；先让 RTP 使用公共 Engine。
 2. 把队列、容量等待、选批和完成后的重新入队一起移入 Scheduler，不能只抽 `advance()`。用第二种明确的调度行为验证边界，再按选定版本实现 vLLM 策略；当前 RTP 有界合批不等于完整 RTP/vLLM 调度。
 3. 将 Case 级接口与 Prometheus 查询迁移到 Python，保留实例协议、Java 指标产生及既有校验。迁移完成后删除旧查询服务和重复定义，不长期维护两条调用链。
-4. 接通 Engine 两种放置方式和发现更新；Client 等设计确定后单独实施。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
+4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 等设计确定后单独实施。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
 
 本批落实公共 Scheduler 操作、私有队列、持续 running、有界多请求 Forward、部分批次取消和 PD 确认后释放。强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本及 connector 范围仍待确定。
 
@@ -167,7 +167,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 
 ## 当前代码职责
 
-从本节起记录现有实现和命令。Python 接口与 Java 内部协议已分开；Engine 当前仍逐实例 JVM。共享宿主和动态生命周期属于上面的设计，不是本轮已经实现的运行能力。
+从本节起记录现有实现和命令。Python 接口与 Java 内部协议已分开；Engine 已接通共享/独立宿主和实例扩缩容；Master 与 Client 保持逐实例进程。
 
 | 目录 | 负责内容 |
 | --- | --- |
@@ -274,11 +274,12 @@ uv run --locked mock-case run <case目录>/case.yaml \
   --output <新的运行目录>
 ```
 
-启动配方与 Case 业务配置分开。每类组件按 replicas 启动独立进程，编号 `<组件>-<序号>`；Compute 是组内配置，不单独启动。`command` 是 argv，不经过 shell；cwd 相对配方解析。配方不再包含 bindings；目标选择和查询聚合由 Python 接口函数完成。
+启动配方与 Case 业务配置分开。Master/Client 按 replicas 启动独立进程；Engine 的 replicas 表示逻辑实例数，编号 `<组件>-<序号>`，由 engine_mode 决定放置；Compute 是组内配置，不单独启动。`command` 是 argv，不经过 shell；cwd 相对配方解析。配方不再包含 bindings；目标选择和查询聚合由 Python 接口函数完成。
 
 真实 Master 配方需要顶层 `zookeeper`；P/D 使用 `java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar`。Master classpath 是 `java/master/target/classes` 加 `target/dependencies.txt` 的内容。示意：
 
 ```yaml
+engine_mode: shared  # shared（默认）：一个 Engine JVM；isolated：每实例一个 JVM
 zookeeper:
   command: [<Java21>, -cp, <Master的classpath>, org.flexlb.mock.master.ZookeeperNode]
 components:
@@ -293,9 +294,41 @@ components:
 
 配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
 
+Engine JAR 的默认入口为 `EngineHost`。共享模式下 P/D 的 command、cwd、env 和 startup_timeout 必须一致；角色差异写入各自 config，不能用进程 env 区分同 JVM 的实例。宿主读取 `MOCK_COMPONENTS_DIR`，按实例目录读取配置并创建对象。底层 `RtpNode` 入口仍可用 classpath 直接运行，供配置校验与单节点探针使用。
+
+宿主的 `host/create`、`host/stop`、`host/status` 是内部原子接口，不接收集群副本数。Python `execution/engines.py` 管理放置和实例归属，`interfaces/engines.py` 提供两项 Case 操作：
+
+| 接口 | 参数和回执 |
+| --- | --- |
+| `engine/scale_out` | role 默认 prefill；count 默认 1、范围 1–1024。复用该角色的 Case config，返回新服务地址列表。角色必须已配置。 |
+| `engine/scale_in` | role 默认 prefill；targets 省略时选择该角色全部活动实例，count 省略时关闭整个候选集。count 提供时按候选顺序只选一次；显式 targets 保持输入顺序，否则按创建顺序。返回实际关闭的服务地址列表。 |
+
+空集合、重复/失效地址和超过候选数量的 count 在任何停止前报错。操作成功表示实例与发现文件更新完成，不表示 Master 已传播更新；在后续 step 读取各 Master 的实际观察。部分执行后失败会保留已知事件并结束实验，不重试或伪造整体回滚。
+
+```yaml
+- id: added
+  describe: 增加一个Decode
+  interface: engine/scale_out
+  args: {role: decode, count: 1}
+- id: removed
+  describe: 关闭刚增加的实例
+  interface: engine/scale_in
+  args:
+    role: decode
+    targets: {ref: steps.added}
+```
+
+共享宿主关闭最后一个 Engine 后仍保留，允许再次扩容；独立宿主在关闭实例后回收进程。每次新增使用新编号、目录和未用过的 RPC 地址。`hosts/engine-shared/` 或 `hosts/engine-<实例>/` 保存 JVM 日志，`components/<实例>/` 保存 config、effective-config、endpoints 和 ready，不复制宿主日志到各实例。下线删除 ready，保留 endpoints 作为历史。
+
+`topology.json` 保存当前实例，`topology-history.json` 保存历史端点和起止时间；两者由 Python 原子发布。各 Master 的 discovery.json 随活动 Engine 更新，角色缩到零时写空地址列表。Master 读取接口动态加载历史地址映射，所以仍能如实报告尚未清除的旧地址；是否完成刷新由生产发现实现决定。本仓 Master 的 workerRegistry.health.statusStaleAfterMs 默认 10000，下线后的短期旧地址仍如实返回，验收需覆盖淘汰窗口。最终清理后清空当前发现，历史记录保留。
+
+Prometheus 对每个实例独立抓取，以 RPC 地址作为 instance；宿主不重复输出业务指标。新增实例先完成采集基线，下线前完成末次抓取再移出目标，保留退役目标与历史数据。语义查询按固定时间窗选择生命期有交集的实例，显式 targets 不能引用该窗口内从未存在的实例，覆盖不足仍报错。
+
+Runner 每秒开始一轮宿主健康检查，单次 HTTP 调用限时 10 秒，检查实际成员与 Engine 状态；进程退出另行实时监视。操作期间用同一管理锁隔离成员变更与健康快照。共享宿主意外退出记录受影响实例并使整个实验 ERROR；预期停止仅登记将回收的独立宿主，不屏蔽共享 JVM 意外退出。Master 始终单独 spawn，不进入 EngineHost。
+
 Runner 是持续存活的进程所有者，负责启动、退出监视和最终清理。`Processes` 不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `interfaces/master.py` 按 targets 逐实例调用，并保留每个 Master 的独立结果。
 
-**Master 的 stop/start 尚未接通。** 后续必须由 Runner 侧调用适配器使用进程管理能力实现，不能依赖被停止 Master 自身的控制端口。届时要在发出停止前登记有意退出，启动时恢复该节点端点和监视；意外退出仍须失败。当前任何组件运行中退出仍是异常，不把 `/hook/pre_stop` 当成已经实现的进程停启或滚动重启。
+**Master 的 stop/start 尚未接通。** 后续必须由 Runner 侧调用适配器使用进程管理能力实现，不能依赖被停止 Master 自身的控制端口。届时要在发出停止前登记有意退出，启动时恢复该节点端点和监视；意外退出仍须失败。Engine 独立宿主在确认对象关闭后由 Runner 登记预期退出并回收；其他运行中退出仍是异常，不把 `/hook/pre_stop` 当成已经实现的进程停启或滚动重启。
 
 所有步骤共享所在 phase 的单调时钟预算，step 的 within 只能缩短它。Python 在引用解析后校验参数，返回后校验结果；Java 内部 HTTP 协议另有独立校验与剩余预算。写操作不自动重试，调用开始后的异常或超时记录 outcome_unknown；回执已返回而 expect 不满足记 FAIL，不记结果未知。
 
@@ -326,7 +359,7 @@ Master 使用 127.0.0.1、127.0.0.2 等地址，相同 HTTP 端口，gRPC=HTTP+2
 
 ## RTP 节点与公共校验
 
-节点仅监听本机回环地址，独立 JVM 提供原生 gRPC、控制 HTTP 和指标端点。`endpoints.json` 写实际地址、支持的 RPC 和阶段范围；`/health` 只列已绑定的公共接口，当前 Engine 没有绑定 Case 查询接口，Python 查询直接访问 Prometheus。
+节点仅监听本机回环地址；每个实例独立绑定原生 gRPC、控制 HTTP 和指标端点，共 JVM 不合并这些端点。`endpoints.json` 写实际地址、支持的 RPC 和阶段范围；`/health` 只列已绑定的公共接口，当前 Engine 没有绑定 Case 查询接口，Python 查询直接访问 Prometheus。
 
 ```yaml
 environment:
@@ -470,7 +503,7 @@ prometheus:
 
 Runner 不下载 binary；默认 scrape 1s、startup 30s，目前验证 Prometheus 3.5.0。它在独立运行目录启动采集器，从结构化日志读取系统分配端口，URL 仅保存在 Python 运行上下文与采集产物中，不向 Engine 配置注入查询地址。
 
-组件 ready 后必须提供合法 metrics URL。Runner 原子更新 file discovery，固定节点全部成功抓取两次才执行 phase；动态目标增删尚未接通。每次独立 TSDB、job=mock，不要求用户定义实验 ID。当前 Python 查询只支持 Runner 托管 Prometheus，不接受组件内 prometheus.url/job 作为备用入口。
+组件 ready 后必须提供合法 metrics URL。Runner 原子更新 file discovery，初始节点全部成功抓取两次才执行 phase；新增 Engine 完成两次基线采样后扩容操作才返回，下线前完成最后采样，再从活动 targets 移除，历史采集记录保留。每次独立 TSDB、job=mock，不要求用户定义实验 ID。当前 Python 查询只支持 Runner 托管 Prometheus，不接受组件内 prometheus.url/job 作为备用入口。
 
 收尾等待每个目标在收尾开始后成功采样，再停止组件、ZK，最后 TERM Prometheus，超时才 KILL。最后采样失败、采集器异常退出会标记数据不完整并令实验 ERROR。启动失败/取消仍清理并保留现场。
 

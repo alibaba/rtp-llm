@@ -39,7 +39,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data, allow_unicode=True))
     registry = Registry.standard(); registry.register(addresses)
     case = compile_case(path, registry)
-    launch = prepare_launch({'components': {role: {'command': [str(java), '-jar', str(jar)], 'startup_timeout': '10s'}
+    launch = prepare_launch({'engine_mode': 'isolated', 'components': {role: {'command': [str(java), '-jar', str(jar)], 'startup_timeout': '10s'}
                                             for role in ('prefill', 'decode')}}, case, tmp_path)
     output = tmp_path / 'result'
 

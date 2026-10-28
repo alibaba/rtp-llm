@@ -10,17 +10,18 @@ public final class MasterReads implements MasterStateApi {
     private final String id;
     private final BooleanSupplier leader;
     private final Function<Role, Set<String>> observed;
-    private final Map<String, String> identities;
-    public MasterReads(String id, BooleanSupplier leader, Function<Role, Set<String>> observed, Map<String, String> identities) {
+    private final Supplier<Map<String, String>> identities;
+    public MasterReads(String id, BooleanSupplier leader, Function<Role, Set<String>> observed, Supplier<Map<String, String>> identities) {
         this.id = Objects.requireNonNull(id); this.leader = Objects.requireNonNull(leader);
-        this.observed = Objects.requireNonNull(observed); this.identities = Map.copyOf(identities);
+        this.observed = Objects.requireNonNull(observed); this.identities = Objects.requireNonNull(identities);
     }
     @Override public MasterSet leadership(None args) {
         return new MasterSet(leader.getAsBoolean() ? List.of(new MasterRef(id)) : List.of());
     }
     @Override public PerMasterEngines engines(EngineSelection args) {
+        var known = identities.get();
         var instances = observed.apply(args.role()).stream().map(address -> {
-            var engine = identities.get(address);
+            var engine = known.get(address);
             if (engine == null) throw new IllegalStateException("Master observed an unregistered Engine address: " + address);
             return new EngineRef(engine);
         }).sorted(Comparator.comparing(EngineRef::id)).toList();

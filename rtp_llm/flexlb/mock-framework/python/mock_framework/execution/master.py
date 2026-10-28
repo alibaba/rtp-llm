@@ -6,7 +6,7 @@ from .records import write_json
 from .transport import ExecutionError
 
 
-def master_environment(config, topology, directory):
+def _environment(config, topology, directory, *, require_engines):
     env = {}
     for key, value in config.items():
         if key.isupper():
@@ -43,7 +43,7 @@ def master_environment(config, topology, directory):
                     if port <= 0:
                         raise ValueError('Invalid Engine RPC port')
                     addresses.append(f'{host}:{port}')
-            if not addresses:
+            if require_engines and not addresses:
                 raise ValueError(f'No running Engines for native {role}_endpoint')
             hosts[domain] = addresses
         if not hosts or route['role_endpoints'][0].get('pd_fusion_endpoint') is not None:
@@ -55,5 +55,16 @@ def master_environment(config, topology, directory):
         env['MODEL_SERVICE_CONFIG'] = json.dumps(route, ensure_ascii=False)
     except (ValueError, KeyError, TypeError, AttributeError) as error:
         raise ExecutionError(f'Cannot bind local MODEL_SERVICE_CONFIG: {error}') from error
+    return env
+
+
+def master_environment(config, topology, directory):
+    env = _environment(config, topology, directory, require_engines=True)
     write_json(directory / 'native-environment.json', env)
     return env
+
+
+def refresh_discovery(config, topology, directory):
+    if 'MODEL_SERVICE_CONFIG' in config:
+        # The consumer owns reload timing; only publish the current addresses here.
+        _environment(config, topology, directory, require_engines=False)

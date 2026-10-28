@@ -9,15 +9,16 @@ import socket
 import uuid
 
 from ..config.values import duration, fields, text
-from .records import write_json
+from .records import write_json, timestamp
 from .transport import ExecutionError
 from .monitoring import Prometheus, prepare_prometheus
-from .master import master_environment
+from .master import master_environment, refresh_discovery
+from .engines import EngineHosts, ROLES
 
 
 def prepare_launch(raw, case, base):
     """Launch recipes are developer bindings, separate from case business configuration."""
-    fields(raw, {'components', 'prometheus', 'zookeeper'}, {'components'}, where='launch')
+    fields(raw, {'components', 'prometheus', 'zookeeper', 'engine_mode'}, {'components'}, where='launch')
     if not isinstance(raw['components'], dict):
         raise ExecutionError('launch components must be a mapping')
     if 'zookeeper' in raw['components']:
@@ -55,7 +56,13 @@ def prepare_launch(raw, case, base):
     missing = set(case.environment) - set(components)
     if missing:
         raise ExecutionError(f'Missing component launch recipes: {sorted(missing)}')
-    result = {'components': components}
+    mode = raw.get('engine_mode', 'shared')
+    if mode not in ('shared', 'isolated'):
+        raise ExecutionError('engine_mode must be shared or isolated')
+    engine_recipes = [recipe for role, recipe in components.items() if role in ROLES]
+    if mode == 'shared' and engine_recipes and any(recipe != engine_recipes[0] for recipe in engine_recipes[1:]):
+        raise ExecutionError('Shared Engine JVM requires identical command, cwd, env and startup_timeout for all Engine roles; put instance settings in config')
+    result = {'components': components, 'engine_mode': mode}
     if zookeeper is not None:
         result['zookeeper'] = zookeeper
     if 'prometheus' in raw:
@@ -71,13 +78,38 @@ class Processes:
         self.children, self.monitors, self.urls = [], [], {}
         self.failure = asyncio.get_running_loop().create_future()
         self.closing = False
-        self.topology = []
+        self.topology, self.history = [], []
+        self.expected_stops = set()
+        self.engines = EngineHosts(self)
+        self.health_monitor = None
         self.prometheus = Prometheus(self, records, launch['prometheus']) if 'prometheus' in launch else None
 
     async def _monitor(self, node, child):
         code = await child.wait()
+        if node not in self.expected_stops:
+            affected = sorted(self.engines.hosts.get(node, {}).get('members', ()))
+            self.fail(f'Component {node} exited unexpectedly with code {code}; affected instances: {affected}')
+
+    def fail(self, message):
         if not self.closing and not self.failure.done():
-            self.failure.set_result(f'Component {node} exited unexpectedly with code {code}')
+            self.failure.set_result(message)
+
+    def publish_discovery(self):
+        write_json(self.records.directory / 'topology.json', self.topology)
+        write_json(self.records.directory / 'topology-history.json', self.history)
+        for master in self.history:
+            if master['role'] == 'master':
+                refresh_discovery(self.case.environment['master']['config'], self.topology,
+                                  self.records.directory / 'components' / master['id'])
+
+    async def stop_expected(self, node, child):
+        if child.returncode is not None:
+            raise ExecutionError(f'{node} already exited before intentional stop')
+        self.expected_stops.add(node)
+        errors = await self._stop([(node, child)], 3)
+        if child.returncode is not None:
+            self.children.remove((node, child))
+        return errors
 
     async def guard(self, operation, timeout):
         task = asyncio.create_task(operation)
@@ -137,6 +169,10 @@ class Processes:
         topology = self.topology
         order = {'prefill': 0, 'decode': 0, 'vit': 0, 'master': 1, 'client': 2}
         for role, recipe in sorted(self.launch['components'].items(), key=lambda item: order[item[0]]):
+            if role in ROLES:
+                await self.guard(self.engines.create(role, self.case.environment[role]['deployment']['replicas']),
+                                 float(duration(recipe['startup_timeout'])) * self.case.environment[role]['deployment']['replicas'])
+                continue
             for index in range(self.case.environment[role]['deployment']['replicas']):
                 node = f'{role}-{index}'
                 directory = self.records.directory / 'components' / node
@@ -155,7 +191,7 @@ class Processes:
                     write_json(directory / 'native-environment.json', native_env)
                 topology_file = self.records.directory / 'topology.json'
                 write_json(topology_file, topology)
-                env = {**os.environ, **recipe['env'], **native_env, 'MOCK_TOPOLOGY_FILE': str(topology_file), 'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role,
+                env = {**os.environ, **recipe['env'], **native_env, 'MOCK_TOPOLOGY_FILE': str(topology_file), 'MOCK_TOPOLOGY_HISTORY_FILE': str(self.records.directory / 'topology-history.json'), 'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role,
                        'MOCK_CONFIG_FILE': str(config), 'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}
                 await self.spawn(node, recipe['command'], recipe['cwd'], env, directory)
                 async def await_ready():
@@ -171,9 +207,12 @@ class Processes:
                 if endpoints.is_file():
                     value = json.loads(endpoints.read_text(encoding='utf-8'))
                     topology.append({**value, 'id': node, 'role': role})
-                    write_json(topology_file, topology)
+                    self.history.append({**value, 'id': node, 'role': role, 'started_at': timestamp()})
+                    self.publish_discovery()
                 if self.prometheus:
                     self.prometheus.discover(node, directory)
+        if self.engines.hosts:
+            self.health_monitor = asyncio.create_task(self.engines.monitor())
         if self.prometheus:
             await self.guard(self.prometheus.baseline(), self.prometheus.startup_timeout)
 
@@ -203,6 +242,10 @@ class Processes:
                 await asyncio.wait_for(child.wait(), timeout=3)
             except TimeoutError:
                 errors.append(f'{node}: process did not exit after SIGKILL')
+            if killed:
+                errors.append(f'{node}: did not stop within the grace period; SIGKILL was required')
+            if node in self.expected_stops and child.returncode not in (0, -signal.SIGTERM, 128 + signal.SIGTERM):
+                errors.append(f'{node}: unexpected exit status during stop: {child.returncode}')
             if node == 'prometheus' and (killed or child.returncode != 0):
                 errors.append('prometheus: did not stop gracefully; retained data may be incomplete')
             self.records.emit(event='process_stopped', node=node, code=child.returncode)
@@ -210,6 +253,9 @@ class Processes:
 
     async def close(self):
         self.closing = True
+        if self.health_monitor:
+            self.health_monitor.cancel()
+            await asyncio.gather(self.health_monitor, return_exceptions=True)
         errors = []
         if self.prometheus:
             try:
@@ -219,6 +265,14 @@ class Processes:
         errors.extend(await self._stop([(node, child) for node, child in self.children if node not in ('prometheus', 'zookeeper')], 3))
         errors.extend(await self._stop([(node, child) for node, child in self.children if node == 'zookeeper'], 5))
         errors.extend(await self._stop([(node, child) for node, child in self.children if node == 'prometheus'], 5))
+        if all(child.returncode is not None for _, child in self.children):
+            self.topology.clear()
+            for item in self.history:
+                item.setdefault('stopped_at', timestamp())
+            try:
+                self.publish_discovery()
+            except Exception as error:
+                errors.append(f'discovery cleanup: {error}')
         if self.prometheus:
             self.prometheus.finish(errors)
         for monitor in self.monitors:

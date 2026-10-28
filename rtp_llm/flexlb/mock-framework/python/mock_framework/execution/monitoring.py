@@ -115,6 +115,13 @@ class Prometheus:
         self.metadata['targets'] = dict(self.targets)
         self.save()
 
+    def retire(self, node):
+        target = self.targets.pop(node)
+        self.metadata.setdefault('retired_targets', {})[node] = {**target, 'stopped_at': timestamp()}
+        write_json(self.directory / 'targets.json', list(self.targets.values()))
+        self.metadata['targets'] = dict(self.targets)
+        self.save()
+
     async def scrapes(self):
         result = await asyncio.to_thread(_get, self.url + '/api/v1/targets?state=active')
         if result.get('status') != 'success':
@@ -124,25 +131,26 @@ class Prometheus:
                    if target.get('labels', {}).get('job') == self.JOB and target['labels'].get('instance') in by_address}
         return targets
 
-    async def baseline(self):
+    async def baseline(self, nodes=None):
         if not self.targets:
             raise ExecutionError('Managed Prometheus has no metrics targets')
-        seen = {node: set() for node in self.targets}
+        seen = {node: set() for node in (self.targets if nodes is None else nodes)}
         while True:
             for node, target in (await self.scrapes()).items():
                 if node in seen and target['health'] == 'up':
                     seen[node].add(target['lastScrape'])
             if all(len(times) >= 2 for times in seen.values()):
                 self.baselined = True
-                self.metadata['baseline_at'] = timestamp()
+                self.metadata.setdefault('baseline_at', timestamp())
                 self.save()
                 self.records.emit(event='collection_ready', url=self.url, targets=sorted(self.targets))
                 return
             await asyncio.sleep(.05)
 
-    async def final_scrape(self):
+    async def final_scrape(self, nodes=None):
         if not self.baselined:
             return  # Setup never completed; do not claim a fully collected experiment.
+        selected = set(self.targets if nodes is None else nodes)
         marker = timestamp()
         async with asyncio.timeout(max(5, 2 * self.interval + 2)):
             while True:
@@ -152,9 +160,9 @@ class Prometheus:
                     if node in self.targets and child.returncode is not None:
                         raise ExecutionError(f'{node} exited before final collection')
                 targets = await self.scrapes()
-                if set(targets) == set(self.targets) and all(target['health'] == 'up' and
-                        _epoch(target['lastScrape']) >= _epoch(marker) for target in targets.values()):
-                    self.metadata['final_scrapes'] = {node: target['lastScrape'] for node, target in targets.items()}
+                if selected <= targets.keys() and all(targets[node]['health'] == 'up' and
+                        _epoch(targets[node]['lastScrape']) >= _epoch(marker) for node in selected):
+                    self.metadata.setdefault('final_scrapes', {}).update({node: targets[node]['lastScrape'] for node in selected})
                     self.records.emit(event='collection_finished', after=marker, scrapes=self.metadata['final_scrapes'])
                     self.save()
                     return

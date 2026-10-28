@@ -33,13 +33,8 @@ public final class MasterNode {
         if (!config.path("component_role").asText().equals("master"))
             throw new IllegalArgumentException("Expected a Master component");
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        var topology = json.readTree(Path.of(required("MOCK_TOPOLOGY_FILE")).toFile());
-        var identities = new HashMap<String, String>();
-        for (var node : topology) if (!node.path("role").asText().equals("master") && node.has("rpc")) {
-            if (identities.putIfAbsent(node.path("rpc").asText(), node.path("id").asText()) != null)
-                throw new IllegalArgumentException("Duplicate Engine RPC address");
-        }
-        if (identities.isEmpty()) throw new IllegalArgumentException("Master requires running Engines");
+        var history = Path.of(required("MOCK_TOPOLOGY_HISTORY_FILE"));
+        if (identities(history).isEmpty()) throw new IllegalArgumentException("Master requires running Engines");
         int port = Integer.parseInt(required("MOCK_MASTER_PORT"));
         String host = required("FLEXLB_ADVERTISED_IP");
         var election = json.readTree(required("FLEXLB_SYNC_CONSISTENCY_CONFIG"));
@@ -63,7 +58,7 @@ public final class MasterNode {
             String id = required("MOCK_NODE_ID");
             var reads = new MasterReads(id, consistency::isMaster, role -> workers.statusSnapshot(
                 org.flexlb.dao.route.RoleType.valueOf(role.name().toUpperCase(Locale.ROOT))).values().stream()
-                .map(s -> s.getIp() + ":" + s.getGrpcPort()).collect(Collectors.toSet()), identities);
+                .map(s -> s.getIp() + ":" + s.getGrpcPort()).collect(Collectors.toSet()), () -> identities(history));
             try (var api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(MasterStateApi.class, reads).start()) {
                 String nativeUrl = "http://" + host + ":" + port;
                 json.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("endpoints.json").toFile(), Map.of(
@@ -77,6 +72,17 @@ public final class MasterNode {
                 new CountDownLatch(1).await();
             }
         } finally { context.close(); }
+    }
+    private static Map<String, String> identities(Path path) {
+        try {
+            var known = new HashMap<String, String>();
+            for (var node : new ObjectMapper().readTree(path.toFile())) {
+                if (!Set.of("prefill", "decode", "vit").contains(node.path("role").asText())) continue;
+                if (known.putIfAbsent(node.path("rpc").asText(), node.path("id").asText()) != null)
+                    throw new IllegalArgumentException("Duplicate Engine RPC address");
+            }
+            return known;
+        } catch (java.io.IOException error) { throw new IllegalStateException("Cannot read Engine history", error); }
     }
     private static String required(String key) { return Objects.requireNonNull(System.getenv(key), "Missing " + key); }
 }

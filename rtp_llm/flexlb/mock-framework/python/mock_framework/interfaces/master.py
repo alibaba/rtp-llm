@@ -34,7 +34,7 @@ async def read(ctx, master, operation, args):
 
 
 def identities(ctx):
-    return {item['id']: item['rpc'] for item in ctx.processes.topology}
+    return {item['id']: item['rpc'] for item in ctx.processes.history}
 
 
 @case_interface('master/leadership/get', effect='read')

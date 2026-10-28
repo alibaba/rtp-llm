@@ -50,8 +50,9 @@ def test_backend_errors_nonfinite_and_malformed_results_are_not_valid_observatio
 
 
 def context():
-    return SimpleNamespace(query_time='2026-10-28T00:00:00Z', processes=SimpleNamespace(topology=[
-        {'role': 'prefill', 'rpc': '127.0.0.1:1001'}, {'role': 'prefill', 'rpc': '127.0.0.1:1002'}]))
+    return SimpleNamespace(query_time='2026-10-28T00:00:00Z', processes=SimpleNamespace(history=[
+        {'role': 'prefill', 'rpc': '127.0.0.1:1001', 'started_at': '2026-10-27T00:00:00Z'},
+        {'role': 'prefill', 'rpc': '127.0.0.1:1002', 'started_at': '2026-10-27T00:00:00Z'}]))
 
 
 def test_hit_rate_aggregates_counters_before_division_and_uses_one_query_time(monkeypatch):
@@ -92,3 +93,14 @@ def test_explicit_target_scope_does_not_broadcast_and_latest_is_instant_rate():
         metrics.scope(ctx, metrics.MetricArgs(targets=['old:1']), 'prefill')
     with pytest.raises(ValueError):
         metrics.MetricArgs(targets=[])
+
+
+def test_history_scope_includes_retired_instances_only_when_the_window_overlaps():
+    ctx = context()
+    ctx.processes.history[0]['stopped_at'] = '2026-10-27T23:59:40Z'
+    args = metrics.MetricArgs(range=['-60s', '0s'])
+    assert len(metrics.scope(ctx, args, 'prefill')[1]) == 2
+    args = metrics.MetricArgs(range=['-10s', '0s'])
+    assert metrics.scope(ctx, args, 'prefill')[1] == ['127.0.0.1:1002']
+    with pytest.raises(ExecutionError):
+        metrics.scope(ctx, metrics.MetricArgs(targets=['127.0.0.1:1001'], range=['-10s', '0s']), 'prefill')

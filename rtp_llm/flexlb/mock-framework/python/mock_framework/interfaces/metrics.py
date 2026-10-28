@@ -109,7 +109,10 @@ def window(ctx, args):
 
 
 def scope(ctx, args, role):
-    available = {item['rpc'] for item in ctx.processes.topology if item['role'] == role}
+    at, millis, _ = window(ctx, args)
+    available = {item['rpc'] for item in ctx.processes.history if item['role'] == role
+                 and epoch(item['started_at']) <= at
+                 and ('stopped_at' not in item or epoch(item['stopped_at']) > at - millis / 1000)}
     targets = sorted(available) if args.targets is None else args.targets
     if not targets or set(targets) - available:
         raise ExecutionError(f'No known {role} metric targets or unknown address')

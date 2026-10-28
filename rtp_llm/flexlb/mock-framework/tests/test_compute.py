@@ -30,6 +30,7 @@ def test_java_loader_rejects_invalid_compute_configuration(case_data, compile_da
     result = subprocess.run([str(java), '-cp', classpath, 'org.flexlb.mock.compute.ComputeProbe', str(config), str(tmp_path / 'result')],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode != 0
+    assert 'MOCK_COMPONENTS_DIR' not in result.stderr
     assert not (tmp_path / 'result').exists()
 
 
@@ -74,7 +75,8 @@ def test_java_loader_rejects_invalid_generation_models(case_data, compile_data, 
     write_json(config, {'id': role + '-0', 'component_role': role, 'component': compiled.environment[role]})
     java = Path(os.environ['JAVA_HOME']) / 'bin/java'
     env = dict(os.environ, MOCK_CONFIG_FILE=str(config), MOCK_OUTPUT_DIR=str(tmp_path), MOCK_READY_FILE=str(tmp_path / 'ready.json'))
-    result = subprocess.run([str(java), '-jar', str(ROOT / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')],
+    result = subprocess.run([str(java), '-cp', str(ROOT / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.rtp.RtpNode'],
                             env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode != 0
+    assert 'MOCK_COMPONENTS_DIR' not in result.stderr
     assert not (tmp_path / 'ready.json').exists()
