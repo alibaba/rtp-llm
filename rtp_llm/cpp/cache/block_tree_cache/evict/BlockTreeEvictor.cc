@@ -146,6 +146,9 @@ void BlockTreeEvictor::onInserted(const BlockTreeInsertResult& result) {
     }
     for (const auto& adopted : result.adopted_nodes) {
         for (size_t group_set_id : adopted.second) {
+            // Adoption can replace a lower-tier resource without replacing its tree node.
+            suspendCandidate(adopted.first, group_set_id, Tier::HOST);
+            suspendCandidate(adopted.first, group_set_id, Tier::DISK);
             const int64_t     insert_time_us              = currentTimeUs();
             GroupSetResource& resource                    = adopted.first->group_set_resources[group_set_id];
             resource.candidate_meta.last_access_seq       = nextAccessSeq();
