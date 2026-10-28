@@ -20,6 +20,9 @@ from rtp_llm.dash_sc.client import (
 )
 from rtp_llm.dash_sc.codec import DashScRequestControls, SamplingParams
 
+# Backward-compatible package name used by internal callers.
+OtherParams = DashScRequestControls
+
 
 def __getattr__(name):
     if name == "DashScApp":
@@ -33,6 +36,7 @@ __all__ = [
     "DashScApp",
     "SamplingParams",
     "DashScRequestControls",
+    "OtherParams",
     "build_model_infer_request",
     "dash_sc_grpc_client_channel_options",
     "decode_finish_reason",
