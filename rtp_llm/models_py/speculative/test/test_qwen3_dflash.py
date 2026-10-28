@@ -276,12 +276,21 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
 
         self.assertEqual(draft_config.data_type, DataType.TYPE_BF16)
         self.assertEqual(draft_config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
+        # A real target ModelConfig always carries attn_config with the
+        # target's KV dtype and geometry; _setup_dflash_configs validates
+        # the draft/target byte-layout match through it, so the fixture
+        # must mirror that shape.
         target_config = SimpleNamespace(
             num_layers=64,
             hidden_size=5120,
             vocab_size=248320,
             input_vocab_size=248320,
             capture_aux_hidden_layer_ids=None,
+            attn_config=SimpleNamespace(
+                kv_cache_dtype=KvCacheDataType.BASE,
+                kv_head_num=draft_config.attn_config.kv_head_num,
+                size_per_head=draft_config.attn_config.size_per_head,
+            ),
         )
         sp_config = SimpleNamespace(gen_num_per_cycle=7)
         ModelFactory._setup_dflash_configs(sp_config, target_config, draft_config)
@@ -303,12 +312,21 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
             )
 
         self.assertEqual(draft_config.data_type, DataType.TYPE_BF16)
+        # A real target ModelConfig always carries attn_config with the
+        # target's KV dtype and geometry; _setup_dflash_configs validates
+        # the draft/target byte-layout match through it, so the fixture
+        # must mirror that shape.
         target_config = SimpleNamespace(
             num_layers=64,
             hidden_size=5120,
             vocab_size=248320,
             input_vocab_size=248320,
             capture_aux_hidden_layer_ids=None,
+            attn_config=SimpleNamespace(
+                kv_cache_dtype=KvCacheDataType.BASE,
+                kv_head_num=draft_config.attn_config.kv_head_num,
+                size_per_head=draft_config.attn_config.size_per_head,
+            ),
         )
         sp_config = SimpleNamespace(gen_num_per_cycle=7)
         # Must not raise despite config_dtype being unset.
@@ -320,11 +338,20 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
             sp_dspark_mask_token_id=-1,
             sp_dspark_sample_from_anchor=True,
         )
+        # Real ModelConfigs always carry attn_config with the target's KV
+        # dtype and geometry; _setup_dflash_configs validates the
+        # draft/target byte-layout match through it, so the fixture must
+        # mirror that shape.
         target_config = SimpleNamespace(
             num_layers=64,
             hidden_size=5120,
             vocab_size=248320,
             capture_aux_hidden_layer_ids=None,
+            attn_config=SimpleNamespace(
+                kv_cache_dtype=KvCacheDataType.BASE,
+                kv_head_num=8,
+                size_per_head=128,
+            ),
         )
         draft_config = SimpleNamespace(
             num_layers=5,
@@ -346,7 +373,11 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
             data_type=DataType.TYPE_BF16,
             quantization=None,
             qk_norm=True,
-            attn_config=SimpleNamespace(kv_cache_dtype=KvCacheDataType.FP8),
+            attn_config=SimpleNamespace(
+                kv_cache_dtype=KvCacheDataType.FP8,
+                kv_head_num=8,
+                size_per_head=128,
+            ),
             capture_aux_hidden_layer_ids=None,
         )
 
