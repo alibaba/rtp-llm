@@ -32,10 +32,18 @@ struct BlockTreeInsertHardStopInfo {
     GroupSetTransferState transfer_state;
 };
 
+struct BlockTreeReplacedCandidate {
+    TreeNode* node;
+    size_t    group_set_id;
+    Tier      source_tier;
+};
+
 struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
     std::vector<TreeNode*>                                 inserted_nodes;
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
+    // Original FULL source-tier leaves; consumed under the BlockTreeCache mutex.
+    std::vector<BlockTreeReplacedCandidate> replaced_candidates;
     // Borrowed from the tree; consumed under the BlockTreeCache mutex.
     std::vector<TreeNode*> newly_resident_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
