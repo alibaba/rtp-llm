@@ -546,6 +546,15 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
 
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
             self.mlp.prepare_shared_expert_overlap()
+            from rtp_llm.models_py.modules.qwen4_exp.moe.marlin_nvfp4 import (
+                make_decode_marlin_executor,
+            )
+
+            self.mlp.fused_moe.fused_experts = make_decode_marlin_executor(
+                self.mlp.fused_moe.fused_experts,
+                self._execution_role,
+                max_generate_batch_size,
+            )
         if self.layer_type != HybridAttentionType.LINEAR and getattr(
             config, "enable_qwen4_qsa", False
         ):

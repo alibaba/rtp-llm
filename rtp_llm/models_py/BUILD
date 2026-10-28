@@ -109,6 +109,11 @@ _DSV4_PPU_KERNELS = [
     "kernels/ppu/jit/**/*.py", "kernels/ppu/runtime.py",
 ]
 
+filegroup(
+    name = "qwen4_marlin_jit_sources",
+    srcs = glob(["modules/qwen4_exp/moe/marlin_kernels/**"]),
+)
+
 py_library(
     name = "modules",
     srcs = glob([
@@ -121,6 +126,7 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
+        ":qwen4_marlin_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
     ] + select({
         "@//:using_ppu": [":ppu_sources"],

@@ -128,6 +128,15 @@ py_test(
 )
 
 py_test(
+    name = "marlin_nvfp4_test",
+    srcs = ["marlin_nvfp4_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "indexer_runtime_contract_test",
     srcs = ["indexer_runtime_contract_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
