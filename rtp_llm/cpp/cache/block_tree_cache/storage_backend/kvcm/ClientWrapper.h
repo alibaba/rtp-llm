@@ -22,6 +22,10 @@ class Subscriber;
 
 class ClientWrapper {
 public:
+    // This describes the payload call, not metadata commit or durability. The
+    // owner must retain pages, their pools and this client while UNKNOWN.
+    enum class TransferCompletion { NOT_SUBMITTED, PAYLOAD_COMPLETE, UNKNOWN };
+
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
     explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>());
     virtual ~ClientWrapper();
@@ -84,7 +88,8 @@ public:
     loadKvCachesForTagWithStatus(const std::string&                                          tag,
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  kv_cache_manager::BlockBuffers&                             buffers,
-                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
+                                 TransferCompletion*                                        completion = nullptr);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
@@ -95,7 +100,8 @@ public:
         const std::string&                                          tag,
         const kv_cache_manager::UriStrVec&                          uris,
         const kv_cache_manager::BlockBuffers&                       buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
+        TransferCompletion*                                        completion = nullptr);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,

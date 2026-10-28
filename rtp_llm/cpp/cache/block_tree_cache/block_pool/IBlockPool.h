@@ -133,6 +133,9 @@ protected:
     void                       reserveReleasedBlocksNoLock(size_t additional) {
         released_blocks_.reserve(released_blocks_.size() + additional);
     }
+    void reserveAllReleasedBlocksNoLock() {
+        released_blocks_.reserve(totalBlocksNumNoLock());
+    }
     std::function<void()> capacityChangeCallbackNoLock() const {
         return capacity_change_callback_;
     }

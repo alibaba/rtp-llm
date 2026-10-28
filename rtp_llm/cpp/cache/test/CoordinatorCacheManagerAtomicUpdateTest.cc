@@ -516,7 +516,11 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RetainedBeamsMoveBlockViewsAndMe
                                           &resource->mutableBlockIds(1, "default")};
 
     std::vector<TaggedBlockIdPair> mapping;
+    ASSERT_TRUE(resource->decodeCompletionLifecycle().recordPrefillComputedEnd(8));
+    resource->decodeCompletionSubmitted() = true;
     ASSERT_TRUE(allocator_->updateKVBlock(resource, {1, 0}, true, mapping));
+    EXPECT_EQ(resource->decodeCompletionLifecycle().prefillComputedEnd(), 8);
+    EXPECT_TRUE(resource->decodeCompletionSubmitted());
     EXPECT_TRUE(mapping.empty());
     for (int i = 0; i < 2; ++i) {
         EXPECT_EQ(&resource->mutableBlockIds(i, "default"), before[1 - i]);

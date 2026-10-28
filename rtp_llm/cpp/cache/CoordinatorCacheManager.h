@@ -126,6 +126,7 @@ public:
     }
 
     void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
+    bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) const;
 
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -67,6 +69,9 @@ protected:
     }
 
 private:
+    // Read once when the startup-owned server is constructed, never per RPC.
+    const bool decode_publication_enabled_ = remoteCacheDecodePublicationEnabled();
+
     grpc::Status syncPrefix(PrefillGenerateContext& prefill_context);
     ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
     void         prepareGenerateInput(PrefillGenerateContext& prefill_context);

@@ -31,6 +31,8 @@ cc_library(
         "AssertUtils.h",
         "Logger.h",
         "RemoteCacheConfig.h",
+        "DecodePublicationLifecycle.h",
+        "DecodePublicationBudget.h",
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",

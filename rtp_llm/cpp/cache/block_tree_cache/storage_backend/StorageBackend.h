@@ -23,9 +23,14 @@
 
 namespace rtp_llm {
 
+class BatchKVCacheResource;
+
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
+    // A Decode source owns all target P peers locally; replicas can name the
+    // same page. Only completed-Decode writes may carry this projection.
+    std::vector<BlockIdxType> peer_blocks;
 };
 
 struct StorageBackendMatchMeta {
@@ -71,6 +76,13 @@ public:
     using StorageOperationCompletionUnknown::StorageOperationCompletionUnknown;
 };
 
+// Derived code may use this only with explicit not-submitted or completed
+// payload proof. A generic SDK error is not such a proof.
+class StorageOperationBufferSafeFailure: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 struct StorageMatchResult {
     size_t                                   matched_blocks_num{0};
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
@@ -84,6 +96,11 @@ struct StorageRequest {
     // boundary are already available from Device/Host/Disk.
     size_t                 local_matched_blocks_num{0};
     std::optional<int64_t> request_id;
+    bool decode_completion{false};
+    size_t computed_tokens{0};
+    size_t published_tokens{0};
+    std::optional<int64_t> prefill_computed_tokens;
+    std::shared_ptr<void> completion_budget_lease;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -122,6 +139,20 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
+    class ExternalIoGuard {
+    public:
+        ExternalIoGuard() = default;
+        ExternalIoGuard(ExternalIoGuard&& other) noexcept;
+        ExternalIoGuard& operator=(ExternalIoGuard&& other) noexcept;
+        ~ExternalIoGuard();
+        ExternalIoGuard(const ExternalIoGuard&) = delete;
+        ExternalIoGuard& operator=(const ExternalIoGuard&) = delete;
+        explicit operator bool() const { return backend_ != nullptr; }
+    private:
+        explicit ExternalIoGuard(StorageBackend* backend): backend_(backend) {}
+        StorageBackend* backend_{nullptr};
+        friend class StorageBackend;
+    };
     using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
     using Done           = std::function<void(ErrorInfo error)>;
@@ -142,10 +173,18 @@ public:
     // Returns admission only, not the I/O result; never waits for completion.
     // Source pins live until execution or rejection.
     bool write(StorageWriteTask task);
+    // Optional EOS publication. Non-supporting backends keep their original
+    // behavior; admission is not a successful remote commit.
+    virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) {
+        return false;
+    }
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
 protected:
+    // Worker RPC payloads bypass the executor. Count their whole transaction,
+    // including publishing an UNKNOWN outcome, before shutdown may finalize.
+    ExternalIoGuard trackExternalIo();
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
     std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
@@ -163,6 +202,21 @@ protected:
     virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
     virtual void               onQuarantineChanged(uint64_t, size_t, size_t,
                                                    const StorageQuarantineBreakdown&) noexcept {}
+    virtual bool protectUnknownCompletion() const noexcept { return false; }
+    virtual std::shared_ptr<void> completionResourceOwner() const { return {}; }
+    virtual bool hasUnresolvedExternalIo() const noexcept { return false; }
+    // Called only after application I/O callbacks have joined. True requires
+    // actual transport quiescence, not merely SDK method/worker completion.
+    // This is a nonblocking predicate under the quarantine mutex; it must not
+    // invoke notifyCompletionQuiescence or initiate an SDK fence synchronously.
+    virtual bool quiesceUnknownOperations() noexcept { return false; }
+    // Call after publishing proof, without holding transport locks. Taking
+    // this mutex prevents a notification racing the wait predicate from being
+    // lost before the waiter atomically releases the mutex.
+    void notifyCompletionQuiescence() noexcept {
+        std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        quarantine_cv_.notify_all();
+    }
 
 private:
     enum class Lifecycle {
@@ -174,8 +228,8 @@ private:
     };
     using Operation = std::function<void(Lifecycle outcome)>;
 
-    std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request);
-    void                                 validateRequest(const StorageRequest& request, bool allow_null_blocks) const;
+    std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request, bool for_write = false);
+    void validateRequest(const StorageRequest& request, bool allow_null_blocks, bool for_write = false) const;
     bool                                 dispatch(Operation operation);
     void                                 taskFinished();
     void                                 quarantineTask(
@@ -195,6 +249,8 @@ private:
     size_t                  in_flight_{0};
 
     std::mutex quarantine_mutex_;
+    std::condition_variable quarantine_cv_;
+    std::shared_ptr<storage_backend_detail::StorageTaskState> protected_quarantine_;
     // Preserve the per-operation quarantine metrics and abort threshold.
     size_t                     quarantined_task_count_{0};
     size_t                     quarantined_block_count_{0};
