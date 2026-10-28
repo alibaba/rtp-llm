@@ -28,6 +28,12 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
+# The public overlay keeps a no-op hook. Internal PG downloads a pinned C ABI
+# archive; Rust and its source dependencies are built in the tokenizer repository.
+load("@rtp_deps//:pg_tokenizer.bzl", "pg_tokenizer_deps")
+
+pg_tokenizer_deps()
+
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()

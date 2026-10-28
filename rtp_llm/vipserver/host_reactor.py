@@ -35,17 +35,13 @@ class HostReactor:
             self.started = True
 
     def close(self):
-        if self.started:
-            self.update_domain_thread.stop_flag = True
+        # Wake both workers before waiting for any in-flight HTTP request.
+        self.update_domain_thread.stop_flag = True
+        self.proxy.update_srv_thread.stop_flag = True
+        if self.update_domain_thread.ident is not None:
             self.update_domain_thread.join()
-            self.started = False
-            logging.info(
-                f"vipserver domain update thread stopped. to refresh domains: {self.refresh_cache_domain_srv_lst}"
-            )
-
-        self.update_domain_thread.join()
-        if self.proxy.started:
-            self.proxy.close()
+        self.started = False
+        self.proxy.close()
 
     def update_domain_map(self, new_map: dict[str, list[Host]]):
         self.domain_update_lock.acquire()

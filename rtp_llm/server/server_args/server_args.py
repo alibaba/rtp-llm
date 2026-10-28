@@ -305,10 +305,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
+                                if "=" not in arg and action_item.nargs in (
+                                    None,
+                                    "?",
+                                    1,
+                                ):
                                     # Skip the value if present
                                     if i + 1 < len(args) and not args[i + 1].startswith(
                                         "-"
@@ -324,7 +328,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
                                 if action_item.nargs in (None, "?", 1):
@@ -502,6 +506,19 @@ def init_all_group_args(
     init_pd_separation_group_args(parser, py_env_configs.pd_separation_config)
     init_model_grpc_group_args(parser, py_env_configs.grpc_config)
     init_dash_sc_grpc_group_args(parser, py_env_configs.dash_sc_grpc_config)
+
+    _init_optional_internal_group_args(parser, py_env_configs)
+
+
+def _init_optional_internal_group_args(parser, py_env_configs):
+    # Optional extension boundary: internal fields and defaults are owned by
+    # internal_source, while a standalone open-source installation skips it.
+    from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
+
+    if import_optional_internal_source_entrypoint("config_args"):
+        from internal_source.rtp_llm.config_args import init_internal_group_args
+
+        init_internal_group_args(parser, py_env_configs)
 
 
 def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:

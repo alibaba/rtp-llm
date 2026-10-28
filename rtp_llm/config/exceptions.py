@@ -1,4 +1,5 @@
 from enum import Enum, IntEnum
+from typing import Optional
 
 
 class ExceptionCategory(Enum):
@@ -135,10 +136,18 @@ class ExceptionType(IntEnum):
 
 
 class FtRuntimeException(Exception):
-    def __init__(self, exception_type: ExceptionType, message: str):
+    def __init__(
+        self,
+        exception_type: ExceptionType,
+        message: str,
+        rtp_error_code: Optional[int] = None,
+    ):
         self.exception_type = exception_type
         self.message = message
+        # Keep the local category for retry/error handling while preserving an
+        # upstream business error code in responses.
+        self.rtp_error_code = rtp_error_code
         super().__init__(self.message)
 
     def __reduce__(self):
-        return self.__class__, (self.exception_type, self.message)
+        return self.__class__, (self.exception_type, self.message, self.rtp_error_code)

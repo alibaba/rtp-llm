@@ -27,7 +27,13 @@ const int LISTEN_BACKLOG = 256;
 
 class HttpServer {
 public:
-    HttpServer(anet::Transport* transport = nullptr, size_t threadNum = 2, size_t queueSize = 50);
+    // requestAwareIdleMs is opt-in and requires ordered one-shot responses.
+    // The accepted socket has no idle deadline until its final response posts.
+    HttpServer(anet::Transport* transport          = nullptr,
+               size_t           threadNum          = 2,
+               size_t           queueSize          = 50,
+               bool             orderedResponses   = false,
+               int              requestAwareIdleMs = 0);
     ~HttpServer();
 
 public:
@@ -48,9 +54,11 @@ public:
      *        will break the idle connections intentinally.
      */
     bool Start(const std::string& address,
-               int                timeout     = 5000,
-               int                maxIdleTime = MAX_IDLE_TIME,
-               int                backlog     = LISTEN_BACKLOG);
+               int                timeout        = 5000,
+               int                maxIdleTime    = MAX_IDLE_TIME,
+               int                backlog        = LISTEN_BACKLOG,
+               bool               reusePort      = false,
+               size_t             maxPacketBytes = 0);
 
     /**
      * Stops HttpServer. Will terminate all the ongoing threads and destroy all
@@ -65,6 +73,7 @@ private:
     std::shared_ptr<HttpServerAdapter> _serverAdapter;
     anet::IOComponent*                 _listenIoc{nullptr};
     bool                               _isStopped{false};
+    int                                _requestAwareIdleMs{0};
 
 private:
     AUTIL_LOG_DECLARE();

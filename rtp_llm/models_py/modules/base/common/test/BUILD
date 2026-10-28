@@ -25,7 +25,8 @@ py_test (
     name = "apply_input_embeddings_test",
     srcs = ["apply_input_embeddings_test.py"],
     deps = py_test_deps,
-    exec_properties = {'gpu':'H20'},
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {'gpu': 'H20', 'gpu_count': '2'},
 )
 
 py_test (

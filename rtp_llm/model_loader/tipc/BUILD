@@ -1,7 +1,7 @@
 package(default_visibility = ["//:__subpackages__"])
 load("@arch_config//:arch_select.bzl", "requirement")
 
-requirement(["requests"])
+requirement(["requests", "setuptools"])
 
 py_library(
     name = "tipc",
@@ -19,5 +19,6 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm:utils",
         ":requests",
+        ":setuptools",
     ],
 )

@@ -12,8 +12,13 @@ public:
     ~ANetApp();
 
 public:
-    anet::IOComponent*
-    Listen(const std::string& address, anet::IServerAdapter* serverAdapter, int timeout, int maxIdleTime, int backlog);
+    anet::IOComponent* Listen(const std::string&    address,
+                              anet::IServerAdapter* serverAdapter,
+                              int                   timeout,
+                              int                   maxIdleTime,
+                              int                   backlog,
+                              bool                  reusePort      = false,
+                              size_t                maxPacketBytes = 0);
 
     bool OwnTransport() {
         return _ownTransport;

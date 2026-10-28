@@ -1,5 +1,5 @@
 import types
-from unittest import SkipTest, TestCase, main
+from unittest import TestCase, main
 
 import torch
 
@@ -67,8 +67,7 @@ class ApplyInputEmbeddingsTest(TestCase):
 
 class ApplyInputEmbeddingsCudaTest(TestCase):
     def setUp(self) -> None:
-        if not torch.cuda.is_available():
-            raise SkipTest("CUDA is not available")
+        self.assertTrue(torch.cuda.is_available(), "this target requires CUDA")
 
     def test_cpu_embedding_copies_to_cuda_target_and_converts_dtype(self):
         model = _OverlayModel()
@@ -88,8 +87,9 @@ class ApplyInputEmbeddingsCudaTest(TestCase):
         )
 
     def test_cuda_embedding_copies_to_target_cuda_device(self):
-        if torch.cuda.device_count() < 2:
-            raise SkipTest("requires at least two CUDA devices")
+        self.assertGreaterEqual(
+            torch.cuda.device_count(), 2, "this target requires two CUDA devices"
+        )
 
         model = _OverlayModel()
         inputs_embeds = torch.zeros(3, 4, device="cuda:1", dtype=torch.float16)

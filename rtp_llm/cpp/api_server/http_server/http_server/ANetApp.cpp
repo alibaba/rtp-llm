@@ -22,9 +22,15 @@ ANetApp::~ANetApp() {
     }
 }
 
-anet::IOComponent* ANetApp::Listen(
-    const std::string& address, anet::IServerAdapter* serverAdapter, int timeout, int maxIdleTime, int backlog) {
-    return _transport->listen(address.c_str(), &_streamer, serverAdapter, timeout, maxIdleTime, backlog);
+anet::IOComponent* ANetApp::Listen(const std::string&    address,
+                                   anet::IServerAdapter* serverAdapter,
+                                   int                   timeout,
+                                   int                   maxIdleTime,
+                                   int                   backlog,
+                                   bool                  reusePort,
+                                   size_t                maxPacketBytes) {
+    _streamer.setPkgLimit(maxPacketBytes);
+    return _transport->listen(address.c_str(), &_streamer, serverAdapter, timeout, maxIdleTime, backlog, reusePort);
 }
 
 bool ANetApp::StartPrivateTransport() {
