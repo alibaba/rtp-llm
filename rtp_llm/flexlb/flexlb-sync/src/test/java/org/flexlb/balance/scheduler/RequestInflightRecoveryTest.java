@@ -222,6 +222,24 @@ class RequestInflightRecoveryTest {
     }
 
     @Test
+    void retry001SameLogicalRetryCannotReplaceUnknownAttempt() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.send(DeliveryResult.uncertain(new IllegalStateException("accepted then socket reset")));
+            var duplicate = RequestProtocolTestSupport.register(f.owner, f.context);
+
+            assertTrue(duplicate.isDone(), "a retry of the active logical request must be rejected");
+            assertFalse(duplicate.join().isSuccess());
+            assertTrue(f.owner.requests.isCurrent(f.context));
+            f.assertNextDecodeReservationRejected();
+
+            f.prefillTerminal(0L);
+            f.decodeTerminal();
+            f.drain();
+            f.assertReleased();
+        }
+    }
+
+    @Test
     void orderedPrefixStopsAtBusyDecodeWhileLaterRouteReservesAnOtherwiseDispatchableDecode()
             throws Exception {
         try (Fixture f = new Fixture()) {

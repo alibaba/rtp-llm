@@ -476,6 +476,26 @@ class DecodeStateTest {
         assertEquals(0, state.routingView("decode").engineCapacityUsed());
     }
 
+    @Test
+    void topo002StatusRegressionAndTerminalRecoveryKeepGenerationOwnership() {
+        WorkerStatus status = status();
+        DecodeState state = new DecodeState(status);
+        var reservation = state.tryReserveQueuedRequest(77L, 100L, 200L, 50, CAPACITY).handle();
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+        assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
+
+        calibrate(state, status, Map.of("77", task(77L, TaskPhase.RUNNING)), Map.of());
+        assertEquals(1, state.routingView("decode").totalLoad());
+        calibrate(state, status, Map.of("77", task(77L, TaskPhase.RECEIVED)), Map.of());
+        assertTrue(state.ownership(reservation).owned());
+        assertEquals(1, state.routingView("decode").totalLoad());
+
+        var terminal = calibrate(state, status, Map.of(), Map.of("77", task(77L, TaskPhase.RUNNING)));
+        assertEquals(DecodeRequestStatus.Kind.TERMINAL, terminal.getFirst().kind());
+        assertFalse(state.ownership(reservation).owned());
+        assertEquals(0, state.routingView("decode").totalLoad());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void repeatedAllocationPreservesFirstKvAndExactIdentity(boolean locallyReserved) {
