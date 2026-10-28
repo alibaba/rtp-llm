@@ -460,6 +460,12 @@ class ModelFactory:
         propose_model_config.enable_int8_allreduce_fp16_scale = getattr(
             model_config, "enable_int8_allreduce_fp16_scale", False
         )
+        propose_model_config.prefill_operator_max_tokens = getattr(
+            model_config, "prefill_operator_max_tokens", 0
+        )
+        propose_model_config.draft_prefill_use_decode_buckets = getattr(
+            model_config, "draft_prefill_use_decode_buckets", False
+        )
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

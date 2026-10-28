@@ -409,6 +409,136 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             52,
         )
 
+    def test_spec_draft_prefill_reuses_sparse_decode_buckets(self) -> None:
+        class BucketModel(TaggedSequenceLengthModel):
+            def __init__(self):
+                self.captured_tokens = set()
+
+            def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+                if is_cuda_graph:
+                    self.captured_tokens.add(inputs.input_ids.shape[0])
+                return None
+
+        model = BucketModel()
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            model,
+            8,
+            32,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            num_tokens_per_bs=5,
+            sp_steps=4,
+            decode_capture_batch_sizes=[8, 1, 4, 2, 4],
+            draft_prefill_use_decode_buckets=True,
+        )
+        self.assertEqual(model.captured_tokens, {5, 10, 20, 40})
+        for batch_size, expected_bucket in [
+            (7, 40),
+            (1, 5),
+            (3, 20),
+            (8, 40),
+            (2, 10),
+            (5, 40),
+        ]:
+            with self.subTest(batch_size=batch_size):
+                inputs = _build_target_verify_inputs(
+                    GROUP_TAGS,
+                    {"full": 1, "aux": 2},
+                    batch_size=batch_size,
+                    query_len=5,
+                    prefix_len=11,
+                )
+                inputs.input_hiddens.fill_(batch_size)
+                self.assertTrue(runner.canRun(inputs))
+                self.assertEqual(runner.getCurrentRealGraphSeqLen(), expected_bucket)
+                actual = runner.forward(inputs).hidden_states
+                signature = torch.tensor(
+                    [5 * batch_size, 16 * batch_size, 5 * batch_size, 11 * batch_size],
+                    dtype=torch.bfloat16,
+                    device="cuda",
+                )
+                expected = inputs.input_hiddens + signature
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_spec_draft_prefill_bucket_defaults_and_max_concurrency(self) -> None:
+        class BucketModel(TaggedSequenceLengthModel):
+            def __init__(self):
+                self.captured_tokens = set()
+
+            def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+                if is_cuda_graph:
+                    self.captured_tokens.add(inputs.input_ids.shape[0])
+                return None
+
+        for decode_buckets, opt_in, max_batch_size, expected in [
+            ([1, 2, 4], False, 8, set(range(5, 41, 5))),
+            ([1, 2, 4], True, 8, {5, 10, 20, 40}),
+            ([], False, 10, set(range(5, 51, 5))),
+            ([], True, 10, {5, 40, 50}),
+            ([], True, 16, {5, 40, 80}),
+        ]:
+            with self.subTest(
+                decode_buckets=decode_buckets,
+                opt_in=opt_in,
+                max_batch_size=max_batch_size,
+            ):
+                model = BucketModel()
+                runner = CudaGraphRunner()
+                runner.init_prefill(
+                    model,
+                    max_batch_size,
+                    32,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [],
+                    HIDDEN_SIZE,
+                    GROUP_TAGS,
+                    num_tokens_per_bs=5,
+                    sp_steps=4,
+                    decode_capture_batch_sizes=decode_buckets,
+                    draft_prefill_use_decode_buckets=opt_in,
+                )
+                self.assertEqual(model.captured_tokens, expected)
+                # Replay the largest bucket, then shrink through rounded-up
+                # buckets to check that padded metadata is cleared each time.
+                for batch_size in [max_batch_size, max_batch_size - 1, 3, 1]:
+                    with self.subTest(batch_size=batch_size):
+                        inputs = _build_target_verify_inputs(
+                            GROUP_TAGS,
+                            {"full": 1, "aux": 2},
+                            batch_size=batch_size,
+                            query_len=5,
+                            prefix_len=11,
+                        )
+                        inputs.input_hiddens.fill_(batch_size)
+                        self.assertTrue(runner.canRun(inputs))
+                        expected_bucket = min(
+                            tokens for tokens in expected if tokens >= 5 * batch_size
+                        )
+                        self.assertEqual(
+                            runner.getCurrentRealGraphSeqLen(), expected_bucket
+                        )
+                        actual = runner.forward(inputs).hidden_states
+                        signature = torch.tensor(
+                            [
+                                5 * batch_size,
+                                16 * batch_size,
+                                5 * batch_size,
+                                11 * batch_size,
+                            ],
+                            dtype=torch.bfloat16,
+                            device="cuda",
+                        )
+                        torch.testing.assert_close(
+                            actual, inputs.input_hiddens + signature, rtol=0, atol=0
+                        )
+                # Drop the runner before the next capture session.
+                del runner
+
     def test_spec_draft_prefill_enforces_dense_layout(self) -> None:
         runner = CudaGraphRunner()
         with self.assertRaisesRegex(RuntimeError, "must equal sp_steps_"):

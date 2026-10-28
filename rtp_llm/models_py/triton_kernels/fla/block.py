@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -241,13 +243,15 @@ def store_ssm_state_to_block_map(
     seq_size_per_block: int,
     chunk_size: int,
     block_v: int = 64,
+    chunk_indices: Optional[torch.Tensor] = None,
 ):
     # fp32 required: the Triton kernel accumulates SSM state directly at the
     # loaded dtype; lower precision causes numerical drift across chunks.
     assert (
         h.dtype == torch.float32 and final_states.dtype == torch.float32
     ), "h and final_states must be float32"
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     _, head_num, v, k = ssm_states.shape
     chunk_num = chunk_indices.shape[0]
     block_map_stride_b = block_map.stride(0)

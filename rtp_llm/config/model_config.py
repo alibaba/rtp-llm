@@ -73,6 +73,8 @@ class ModelConfig(CppModelConfig):
         "config_dtype",
         "template_type",
         "model_name",
+        "prefill_operator_max_tokens",
+        "draft_prefill_use_decode_buckets",
         "quant_config",
         "inter_size",
         "moe_inter_size",
@@ -578,6 +580,8 @@ class ModelConfig(CppModelConfig):
         self.model_name: str = (
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
+        self.prefill_operator_max_tokens: int = 0
+        self.draft_prefill_use_decode_buckets: bool = False
         self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
@@ -602,6 +606,20 @@ class ModelConfig(CppModelConfig):
         """
         model_override_args = json.loads(json_model_override_args)
         if model_override_args:
+            if "prefill_operator_max_tokens" in model_override_args:
+                max_tokens = model_override_args["prefill_operator_max_tokens"]
+                if type(max_tokens) is not int or max_tokens < 0 or max_tokens % 64:
+                    raise ValueError(
+                        "prefill_operator_max_tokens must be zero or a positive multiple of 64"
+                    )
+                self.prefill_operator_max_tokens = max_tokens
+            if "draft_prefill_use_decode_buckets" in model_override_args:
+                enabled = model_override_args["draft_prefill_use_decode_buckets"]
+                if type(enabled) is not bool:
+                    raise ValueError(
+                        "draft_prefill_use_decode_buckets must be a boolean"
+                    )
+                self.draft_prefill_use_decode_buckets = enabled
             # Apply rope_scaling override via model_config
             self.apply_rope_scaling_override(model_override_args)
 
