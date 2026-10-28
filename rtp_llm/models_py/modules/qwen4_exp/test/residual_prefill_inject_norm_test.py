@@ -19,8 +19,8 @@ MODULE = (
 
 
 class ResidualPrefillInjectNormTest(unittest.TestCase):
-    def test_unprofitable_medium_prefill_uses_original(self):
-        for rows in (257, 2048):
+    def test_unsupported_prefill_uses_original(self):
+        for rows in (257, 2048, 16385):
             x = torch.empty(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.empty(rows, 2560, device="cuda", dtype=torch.bfloat16)
             gates = torch.empty(rows, 4, device="cuda", dtype=torch.bfloat16)
@@ -28,7 +28,7 @@ class ResidualPrefillInjectNormTest(unittest.TestCase):
             self.assertIsNone(try_inject_grouped_norm(x, sub, gates, gamma, 1e-6))
 
     def test_complete_consumer_exact_and_small_fallback(self):
-        for rows in (1, 4, 257, 2048, 4093, 4096, 8192, 12288):
+        for rows in (1, 4, 257, 2048, 4093, 4096, 8192, 12288, 16384):
             model = oracle.ResidualNormFp8Test().module(True)
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
@@ -39,7 +39,7 @@ class ResidualPrefillInjectNormTest(unittest.TestCase):
             oracle.ResidualNormFp8Test().assert_outputs(actual, expected)
 
     def test_bytes_scale_zero_and_nonfinite_values(self):
-        for rows in (4096, 12288):
+        for rows in (4096, 12288, 16384):
             for kind in ("random", "zero", "wide", "nonfinite"):
                 x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
                 sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
@@ -75,7 +75,7 @@ class ResidualPrefillInjectNormTest(unittest.TestCase):
                 )
 
     def test_graph_reads_input_sublayer_gates_gamma_and_scale(self):
-        for rows in (4096, 12288):
+        for rows in (4096, 12288, 16384):
             model = oracle.ResidualNormFp8Test().module(True)
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
