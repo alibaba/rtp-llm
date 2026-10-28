@@ -186,6 +186,19 @@ class QWenTokenizer(BaseTokenizer):
 
 
 class QWenV2Tokenizer(BaseTokenizer):
+    def _get_tokenizer_class(self, tokenizer_config: Dict[str, Any]):
+        import transformers
+
+        name = tokenizer_config.get("tokenizer_class")
+        if (
+            name in ("Qwen3_5Tokenizer", "TokenizersBackend")
+            and getattr(transformers, name, None) is None
+        ):
+            # These names describe the complete Rust tokenizer stored in the
+            # checkpoint; older Transformers can load that same JSON directly.
+            return transformers.PreTrainedTokenizerFast
+        return super()._get_tokenizer_class(tokenizer_config)
+
     def init_tokenizer(
         self, tokenizer_path: str, config_json: Optional[Dict[str, Any]] = None
     ):
