@@ -1,8 +1,6 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <unordered_map>
 
@@ -72,17 +70,20 @@ bool SingleTypeKVCacheAllocator::doInit() {
         return false;
     }
 
-#if USING_CUDA
-    const char* block_copy_env = std::getenv("RTP_LLM_GPU_BLOCK_ID_COPY");
-    if (allocation_type_ == AllocationType::DEVICE
-        && (block_copy_env == nullptr || std::strcmp(block_copy_env, "0") != 0)) {
-        const auto kv_tensors = full_kv_cache_group_->allLayerCacheBase();
-        const auto scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
+#if USING_CUDA || USING_ROCM
+    if (allocation_type_ == AllocationType::DEVICE) {
+        const auto                     kv_tensors    = full_kv_cache_group_->allLayerCacheBase();
+        const auto                     scale_tensors = full_kv_cache_group_->allLayerScaleCacheBase();
         std::vector<GpuBlockCopyPlane> planes;
         // Only this dense MHA layout is known to be [K/V, head, token, dim].
         // Unknown/quantized/scale/physical-page aggregation layouts keep full copies.
         const auto mha_spec = std::dynamic_pointer_cast<const MHAKVCacheSpec>(spec);
         const bool hnd_tail_copy =
+        // ROCm stores shuffled K/V, not the CUDA HND layout. Keep its
+        // complete-page semantics while removing CPU address expansion.
+#if USING_ROCM
+            false &&
+#endif
             !config_.use_mla && !config_.is_sparse && !config_.use_opaque_kv_cache_store
             && spec->type == KVCacheSpecType::MultiHeadAttention && mha_spec && mha_spec->localKvHeads() > 0
             && mha_spec->headDim() > 0 && mha_spec->localKvHeads() == cache_group.local_kv_head_num
@@ -436,11 +437,11 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
         return true;
     }
 
-    const int        old_batch_size = kv_cache_resource->batchSize();
-    const int        new_batch_size = static_cast<int>(block_src_batch.size());
-    std::vector<int> batch_fork_count(old_batch_size, 0);
+    const int                               old_batch_size = kv_cache_resource->batchSize();
+    const int                               new_batch_size = static_cast<int>(block_src_batch.size());
+    std::vector<int>                        batch_fork_count(old_batch_size, 0);
     std::vector<BlockPool::RequestRefDelta> deltas;
-    int new_blocks_num = 0;
+    int                                     new_blocks_num = 0;
     {
         RTP_LLM_PROFILE_SCOPE("kv_cpu.plan_parents");
         for (const int parent : block_src_batch) {
@@ -450,13 +451,13 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
         std::unordered_map<BlockIdxType, int> counts;
         for (int parent = 0; parent < old_batch_size; ++parent) {
             const auto& blocks = kv_cache_resource->blocks(parent, 0);
-            const int forks = batch_fork_count[parent];
+            const int   forks  = batch_fork_count[parent];
             if (forks == 0) {
                 for (const auto block : blocks) {
                     --counts[block];
                 }
             } else if (forks > 1) {
-                const bool replace_tail = copy_last_block && !blocks.empty();
+                const bool   replace_tail = copy_last_block && !blocks.empty();
                 const size_t shared_count = blocks.size() - (replace_tail ? 1 : 0);
                 for (size_t i = 0; i < shared_count; ++i) {
                     counts[blocks[i]] += forks - 1;
@@ -475,27 +476,27 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
 
     // Prepare all host allocations before committing pool ownership. Survivor
     // slots remain empty until commit; their old resources will be moved once.
-    std::vector<KVCacheResource> new_resources(new_batch_size);
+    std::vector<KVCacheResource>     new_resources(new_batch_size);
     std::vector<std::pair<int, int>> survivors;
-    std::vector<int> tail_destinations;
-    std::vector<TaggedBlockIdPair> new_mapping;
+    std::vector<int>                 tail_destinations;
+    std::vector<TaggedBlockIdPair>   new_mapping;
     survivors.reserve(old_batch_size);
     tail_destinations.reserve(new_blocks_num);
     new_mapping.reserve(new_blocks_num);
     {
         RTP_LLM_PROFILE_SCOPE("kv_cpu.build_beam_tables");
         for (int child = 0; child < new_batch_size; ++child) {
-            const int parent = block_src_batch[child];
-            auto& remaining = batch_fork_count[parent];
+            const int parent    = block_src_batch[child];
+            auto&     remaining = batch_fork_count[parent];
             if (--remaining == 0) {
                 survivors.emplace_back(child, parent);
                 continue;
             }
             auto& resource = new_resources[child];
             resource.initGroups(config_.topologyPtr(), /*materialize_layer_views=*/false);
-            resource.cacheKeys() = kv_cache_resource->cacheKeys(parent);
+            resource.cacheKeys()   = kv_cache_resource->cacheKeys(parent);
             const auto& old_blocks = kv_cache_resource->blocks(parent, 0);
-            auto& blocks = resource.mutableBlockIds(0);
+            auto&       blocks     = resource.mutableBlockIds(0);
             blocks.assign(old_blocks);
             if (copy_last_block && !old_blocks.empty()) {
                 blocks.setAt(old_blocks.size() - 1, NULL_BLOCK_IDX);
@@ -506,14 +507,15 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
     }
 
     BlockIndicesType new_blocks;
-    int required_free_blocks = 0;
+    int              required_free_blocks = 0;
     {
         RTP_LLM_PROFILE_SCOPE("kv_cpu.commit_pool");
         if (!full_kv_cache_group_->reassignRequestBlocks(deltas, new_blocks_num, new_blocks, required_free_blocks)) {
             // The failed transaction left all old refs intact. Evict cached
             // pages only when necessary, then atomically recheck capacity.
             if (!full_kv_cache_group_->ensureFreeBlocks(required_free_blocks)
-                || !full_kv_cache_group_->reassignRequestBlocks(deltas, new_blocks_num, new_blocks, required_free_blocks)) {
+                || !full_kv_cache_group_->reassignRequestBlocks(
+                    deltas, new_blocks_num, new_blocks, required_free_blocks)) {
                 return false;
             }
         }

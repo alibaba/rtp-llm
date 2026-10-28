@@ -10,24 +10,46 @@ cc_import(
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
 )
 
+gpu_block_copy_test_deps = [
+    "//rtp_llm/models_py/bindings/core:gpu_block_copy",
+    "@com_google_googletest//:gtest_main",
+] + torch_deps() + select({
+    "@//:using_rocm": [
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
+    ],
+    "//conditions:default": [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+}) + select({
+    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+    "//conditions:default": [],
+})
+
 cc_test(
     name = "gpu_block_copy_test",
     srcs = ["GpuBlockCopyTest.cc"],
-    deps = [
-        "//rtp_llm/models_py/bindings/core:gpu_block_copy",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-        "@com_google_googletest//:gtest_main",
-    ] + torch_deps() + select({
-        "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
-        "//conditions:default": [],
-    }),
+    deps = gpu_block_copy_test_deps,
     copts = copts(),
     target_compatible_with = select({
         "@//:using_cuda": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
+    name = "gpu_block_copy_rocm_test",
+    srcs = ["GpuBlockCopyTest.cc"],
+    deps = gpu_block_copy_test_deps,
+    copts = copts(),
+    tags = ["rocm"],
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": "MI308X-ROCM7"},
 )
 
 cc_test(
