@@ -86,6 +86,25 @@ py_test(
 )
 
 py_test(
+    name = "concurrent_writeback_billing_acceptance_test",
+    srcs = [
+        "concurrent_writeback_billing_acceptance.py",
+        "concurrent_writeback_billing_acceptance_test.py",
+        "v4_cp_writeback_acceptance.py",
+        "writeback_multiturn_acceptance.py",
+    ],
+)
+
+py_test(
+    name = "writeback_multiturn_acceptance_test",
+    srcs = [
+        "v4_cp_writeback_acceptance.py",
+        "writeback_multiturn_acceptance.py",
+        "writeback_multiturn_acceptance_test.py",
+    ],
+)
+
+py_test(
     name = "writeback_smoke_test",
     srcs = glob(["*.py"], exclude = ["entry.py"]),
     main = "writeback_smoke_test.py",
