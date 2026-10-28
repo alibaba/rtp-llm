@@ -237,3 +237,51 @@ def test_reference_resolves_only_actual_returned_fields():
     assert resolve({'x': Reference('stop', ('affected',))}, {'stop': {'affected': {'instances': []}}}) == {'x': {'instances': []}}
     with pytest.raises(ExecutionError, match='Cannot resolve'):
         resolve(Reference('missing', ()), {})
+
+
+@pytest.mark.parametrize('configuration', [
+    {'binary': '/does/not/exist'},
+    {'binary': sys.executable, 'scrape_interval': '0s'},
+    {'binary': sys.executable, 'scrape_interval': '1.5ms'},
+    {'binary': sys.executable, 'extra': True},
+])
+def test_invalid_collector_configuration_is_rejected_before_launch(probe, tmp_path, configuration):
+    case, _, launch = probe([check()])
+    with pytest.raises((ExecutionError, ValueError)):
+        prepare_launch({**launch, 'prometheus': configuration}, case, tmp_path)
+    assert not (tmp_path / 'output').exists()
+
+
+def test_managed_collector_cannot_override_explicit_query_configuration(probe, tmp_path):
+    case, _, launch = probe([check()])
+    case.environment['master']['config']['prometheus'] = {'url': 'http://localhost:9090', 'job': 'external'}
+    with pytest.raises(ExecutionError, match='cannot be combined'):
+        prepare_launch({**launch, 'prometheus': {'binary': sys.executable}}, case, tmp_path)
+
+
+@pytest.mark.parametrize('behavior', ['exit', 'hang'])
+def test_collector_start_failure_is_recorded_and_its_process_reclaimed(probe, tmp_path, behavior):
+    case, registry, launch = probe([check()])
+    executable = tmp_path / 'bad-prometheus'
+    executable.write_text(f'#!{sys.executable}\nimport time, sys\n' + ('sys.exit(23)\n' if behavior == 'exit' else 'time.sleep(30)\n'))
+    executable.chmod(0o755)
+    launch = prepare_launch({**launch, 'prometheus': {'binary': str(executable), 'startup_timeout': '150ms'}}, case, tmp_path)
+    out = tmp_path / 'failed-collector'
+    result = asyncio.run(run_case(case, registry, launch, out))
+    assert result['status'] == 'ERROR'
+    assert not [e for e in events(out) if e['event'] == 'phase_started']
+    assert json.loads((out / 'prometheus/collection.json').read_text())['complete'] is False
+    assert [e['node'] for e in events(out) if e['event'] == 'process_started'] == ['prometheus']
+    assert_cleaned(out)
+
+
+@pytest.mark.skipif(not os.environ.get('PROMETHEUS_BIN'), reason='Requires real Prometheus')
+def test_managed_collection_rejects_missing_component_metrics_metadata(probe, tmp_path):
+    case, registry, launch = probe([check()])
+    launch = prepare_launch({**launch, 'prometheus': {'binary': os.environ['PROMETHEUS_BIN']}}, case, tmp_path)
+    out = tmp_path / 'missing-metrics'
+    result = asyncio.run(run_case(case, registry, launch, out))
+    assert result['status'] == 'ERROR' and 'requires endpoints.json' in result['error']
+    assert not [e for e in events(out) if e['event'] == 'phase_started']
+    assert json.loads((out / 'prometheus/collection.json').read_text())['complete'] is False
+    assert_cleaned(out)

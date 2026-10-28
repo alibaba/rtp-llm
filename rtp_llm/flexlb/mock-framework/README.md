@@ -1,6 +1,6 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求、Prometheus抓取与指标查询；P/D链路、多JVM Client播放、Runner管理历史指标存储和正式历史查看服务尚未接入，不由测试组件模拟验收。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。P/D链路、多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
@@ -135,11 +135,32 @@ bindings按最长接口前缀指定处理该接口的进程，运行前检查每
 
 Java组件初始化后调用`new ApiServer(address).bind(MasterApi.class, implementation).start()`，Engine和Client同理。服务器依据同一Java接口生成的schema检查参数与返回值；Optional参数缺省传null，非法值不会通过Jackson自动转换成另一种类型。组件可在方法内读取`InvocationContext.current()`，取得run模式、固定queryTime、解析后的观测范围和超时预算。后台模式仍须由组件启动实际活动并返回启动回执，HTTP服务器不替组件虚构后台执行。接口实现处理业务，Python处理expect。
 
-所有步骤按顺序执行。phase使用单调时钟计算总预算，call的within不能超过剩余阶段时间。进程退出、调用异常、空查询或门禁失败都会中止后续步骤并收尾。动作不自动重试；超时记录结果可能未知。收尾对当前运行拥有的进程组先TERM、再KILL，主动取消同样执行收尾。这是进程回收，业务Client的stop/drain、请求记录刷盘和采集器收尾需在对应组件接入时实现。
+所有步骤按顺序执行。phase使用单调时钟计算总预算，call的within不能超过剩余阶段时间。进程退出、调用异常、空查询或门禁失败都会中止后续步骤并收尾。动作不自动重试；超时记录结果可能未知。收尾对当前运行拥有的进程组先TERM、再KILL，主动取消同样执行收尾。托管Prometheus按下述顺序采集并退出；业务Client的stop/drain与请求记录刷盘仍需在Client接入时实现。
 
 每次读取固定query_time；`latest`记录查询点，`[-60s, 0s]`解析为明确起止时间，`all`取唯一发流回执中的started_at到当前查询时刻。原始PromQL不解析内部窗口，记录单点查询和全部返回样本，所有样本必须满足expect，空结果为ERROR。集合eq忽略顺序，拒绝重复身份；Master的Engine集合逐个比较，空Master结果不能通过门禁。
 
-运行目录不覆盖已有目录，保存原始case、编译配置、启动配方、接口清单、代码版本与工作区差异、组件配置和日志、phase/step时间线、门禁实际值及范围、最终结果。PASS表示所执行步骤通过，FAIL表示门禁不满足，ERROR表示执行或数据异常，CANCELLED表示取消；清理异常不能得到PASS。RTP节点已可导出本地链路指标，但运行器尚未管理Prometheus历史存储，也未生成逐请求记录；正式报告的数据保留由后续采集接入完成。测试中的TransportProbe只用于验证真实JVM进程及网络链路，不实现Engine或压测行为。
+运行目录不覆盖已有目录，保存原始case、编译配置、启动配方、接口清单、代码版本与工作区差异、组件配置和日志、phase/step时间线、门禁实际值及范围、最终结果。PASS表示所执行步骤通过，FAIL表示门禁不满足，ERROR表示执行或数据异常，CANCELLED表示取消；清理异常不能得到PASS。配置托管采集时同时保留Prometheus配置、实际版本、目标、日志和TSDB/WAL。逐请求记录与正式历史查看服务尚未接入。测试中的TransportProbe只用于验证真实JVM进程及网络链路，不实现Engine或压测行为。
+
+### Runner托管Prometheus
+
+采集器属于执行设置，放在启动配方中，case顶层不新增字段：
+
+```yaml
+prometheus:
+  binary: /path/to/prometheus
+  scrape_interval: 1s
+  startup_timeout: 30s
+```
+
+binary必须是已提供的可执行文件，相对路径按启动配方目录解析；Runner不下载或安装。scrape_interval默认1s，支持整数毫秒；startup_timeout默认30s，分别约束采集器启动和基线等待。当前验证版本为Prometheus3.5.0，需支持JSON日志和系统分配监听端口。
+
+Runner先在新运行目录的prometheus/下生成配置与空file discovery文件，启动独立进程。Prometheus绑定127.0.0.1:0，Runner从该进程的结构化日志读取实际端口，不预占或猜测端口。组件实际config.json自动注入prometheus.url和job；原始case及编译配置不改写。托管模式下不能再显式配置组件prometheus参数，冲突在启动前报错。
+
+各组件ready后必须在endpoints.json提供匹配的id和metrics URL；缺失或不合法直接报错，不能静默漏采。Runner原子更新targets.json，全部节点成功采样至少两次后才开始phase/step。当前发现的是启动配方创建的固定节点集合，运行中动态增删目标尚未接入。每次运行有独立Prometheus和TSDB，job固定为mock，不要求用户手工创建实验ID。
+
+收尾先等待每个目标在收尾开始后完成一次成功采样，再停止组件，最后向Prometheus发TERM并等待正常退出。超时才KILL；采集器被杀、退出异常或最后采样失败会记录数据不完整并令结果ERROR，不能得到PASS。启动未完成时取消或失败，仍回收所有已拥有进程并保留现场，不宣称已采完实验。
+
+prometheus/保留prometheus.yaml、targets.json、data/、stdout.log、stderr.log及collection.json。collection.json记录版本、实际地址、目标、基线时刻、最后采样时刻和完整性结果；complete表示本次托管边界采集与关闭成功，不替代对中间up样本或业务指标的判断。门禁FAIL与用户取消可以拥有complete=true的采集记录。TSDB不转换为JSON曲线，也不会在收尾删除；服务停止后由后续回放服务读取。数据保存采用Prometheus默认保留策略，本批不增加归档、长期保留或报告服务。
 
 ## RTP节点与缓存底座
 
@@ -202,11 +223,11 @@ EngineMetrics放在共享目录，不依赖RTP协议、缓存实现或调度器�
 
 累计量预建为0，抓取不会清零。缓存命中率按hit tokens增量除以lookup tokens增量做token加权，不能平均每请求命中率。Prefill计算TPS可由完成的compute tokens增量除以Forward seconds sum增量得到，带cache TPS使用input tokens；若要墙钟吞吐则取token counter的rate，两者分母不同。共享层只保存观测值，由查询接口选择对应口径。分母为0时没有可判断的比率，不补成100%或0来通过门禁。
 
-这些指标是新框架的公共口径，不冒充KMonitor原指标。语义查询接口负责PromQL，case优先调用接口；Grafana旧大盘的指标映射、Runner管理Prometheus与历史保留、Client请求指标尚未接入。节点打包测试保存一次metrics.prom供核对，不代表历史采集完成。
+这些指标是新框架的公共口径，不冒充KMonitor原指标。语义查询接口负责PromQL，case优先调用接口；Grafana旧大盘的指标映射与Client请求指标尚未接入。独立节点测试的metrics.prom只是一份快照；托管实验的历史数据保存在Prometheus TSDB。
 
 ### Prometheus指标查询
 
-在RTP组件业务配置中补充两个Mock点分参数，即可在已有控制端口启用查询，不增加新服务进程或case顶层配置：
+托管模式由Runner自动配置查询。若自行提供外部Prometheus，可在RTP组件业务配置中补充两个Mock点分参数，在已有控制端口启用查询：
 
 ```yaml
 environment:
@@ -218,7 +239,7 @@ environment:
       prometheus.job: experiment
 ```
 
-Prometheus由调用方提供，并采集节点endpoints.json中的metrics地址。job应只覆盖本次实验；多个实验共用Prometheus时要使用不同job。共享PrometheusQueries绑定EngineMetricsApi的4个读接口和PrometheusApi；EngineApi继承这些读定义，仍是原有公共接口，没有另列一份路由表。只读节点不会宣称支持scale_in。指标名由EngineMetrics提供，查询不另造一套指标名。
+外部模式由调用方采集节点endpoints.json中的metrics地址，job应只覆盖本次实验；多个实验共用Prometheus时使用不同job。共享PrometheusQueries绑定EngineMetricsApi的4个读接口和PrometheusApi；EngineApi继承这些读定义，仍是原有公共接口，没有另列一份路由表。只读节点不会宣称支持scale_in。指标名由EngineMetrics提供，查询不另造一套指标名。
 
 | 接口 | 计算口径 |
 | --- | --- |
@@ -251,4 +272,4 @@ prometheus/query不接受外层range，也不调用query_range；若表达式需
 PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 ```
 
-测试启动独立Prometheus和两个RTP JVM，保留TSDB、日志、配置、门禁值及时间范围，并检查进程回收。这不表示生产Runner已经负责启动和保留Prometheus；自动采集管理仍待接入。
+集成测试由Runner启动独立Prometheus和两个RTP JVM，验证正常门禁、门禁FAIL、主动取消和采集器被杀时的数据保留与进程回收。若Prometheus同目录有promtool，正常分支还在服务退出后离线读取TSDB，核对累计值。该测试不替代正式Client或P/D验收。

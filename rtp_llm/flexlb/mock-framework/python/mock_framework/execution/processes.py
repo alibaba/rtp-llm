@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import os
 from pathlib import Path
@@ -7,11 +8,12 @@ import signal
 from ..config.values import duration, fields, text
 from .records import write_json
 from .transport import ExecutionError
+from .monitoring import Prometheus, prepare_prometheus
 
 
 def prepare_launch(raw, case, base):
     """Launch recipes are developer bindings, separate from case business configuration."""
-    fields(raw, {'components', 'bindings'}, {'components', 'bindings'}, where='launch')
+    fields(raw, {'components', 'bindings', 'prometheus'}, {'components', 'bindings'}, where='launch')
     if not isinstance(raw['components'], dict) or not isinstance(raw['bindings'], dict):
         raise ExecutionError('launch components/bindings must be mappings')
     components = {}
@@ -46,7 +48,12 @@ def prepare_launch(raw, case, base):
         text(node, 'binding process id')
         if not prefix.endswith('/') or node not in ids:
             raise ExecutionError('Bindings need a route prefix ending in / and an existing process id')
-    return {'components': components, 'bindings': dict(raw['bindings'])}
+    result = {'components': components, 'bindings': dict(raw['bindings'])}
+    if 'prometheus' in raw:
+        result['prometheus'] = prepare_prometheus(raw['prometheus'], base)
+        if any('prometheus' in value.get('config', {}) for role, value in case.environment.items() if role != 'compute'):
+            raise ExecutionError('Managed Prometheus cannot be combined with component prometheus configuration')
+    return result
 
 
 class Processes:
@@ -55,6 +62,7 @@ class Processes:
         self.children, self.monitors, self.urls = [], [], {}
         self.failure = asyncio.get_running_loop().create_future()
         self.closing = False
+        self.prometheus = Prometheus(self, records, launch['prometheus']) if 'prometheus' in launch else None
 
     def endpoint(self, interface):
         prefixes = [p for p in self.launch['bindings'] if interface.startswith(p)]
@@ -80,7 +88,26 @@ class Processes:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    async def spawn(self, node, command, cwd, env, directory):
+        with (directory / 'stdout.log').open('wb') as out, (directory / 'stderr.log').open('wb') as err:
+            spawning = asyncio.create_task(asyncio.create_subprocess_exec(
+                *command, cwd=cwd, env=env, stdout=out, stderr=err, start_new_session=True))
+            try:
+                child = await asyncio.shield(spawning)
+            except asyncio.CancelledError:
+                child = await spawning
+                self.children.append((node, child))
+                self.monitors.append(asyncio.create_task(self._monitor(node, child)))
+                self.records.emit(event='process_started', node=node, pid=child.pid)
+                raise
+        self.children.append((node, child))
+        self.monitors.append(asyncio.create_task(self._monitor(node, child)))
+        self.records.emit(event='process_started', node=node, pid=child.pid)
+        return child
+
     async def start(self):
+        if self.prometheus:
+            await self.guard(self.prometheus.start(), self.prometheus.startup_timeout)
         for role, recipe in self.launch['components'].items():
             for index in range(self.case.environment[role]['deployment']['replicas']):
                 node = f'{role}-{index}'
@@ -88,24 +115,14 @@ class Processes:
                 directory.mkdir(parents=True)
                 config = directory / 'config.json'
                 ready = directory / 'ready.json'
-                write_json(config, {'component_role': role, 'component': self.case.environment[role],
+                component = copy.deepcopy(self.case.environment[role])
+                if self.prometheus:
+                    component['config']['prometheus'] = {'url': self.prometheus.url, 'job': self.prometheus.JOB}
+                write_json(config, {'component_role': role, 'component': component,
                                     'environment': self.case.environment, 'index': index, 'id': node})
                 env = {**os.environ, **recipe['env'], 'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role,
                        'MOCK_CONFIG_FILE': str(config), 'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}
-                with (directory / 'stdout.log').open('wb') as out, (directory / 'stderr.log').open('wb') as err:
-                    spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-                        *recipe['command'], cwd=recipe['cwd'], env=env, stdout=out, stderr=err, start_new_session=True))
-                    try:
-                        child = await asyncio.shield(spawning)
-                    except asyncio.CancelledError:
-                        child = await spawning
-                        self.children.append((node, child))
-                        self.monitors.append(asyncio.create_task(self._monitor(node, child)))
-                        self.records.emit(event='process_started', node=node, pid=child.pid)
-                        raise
-                self.children.append((node, child))
-                self.monitors.append(asyncio.create_task(self._monitor(node, child)))
-                self.records.emit(event='process_started', node=node, pid=child.pid)
+                await self.spawn(node, recipe['command'], recipe['cwd'], env, directory)
                 async def await_ready():
                     while not ready.exists():
                         await asyncio.sleep(.02)
@@ -115,25 +132,29 @@ class Processes:
                     self.urls[node] = value['url']
                 await self.guard(await_ready(), float(duration(recipe['startup_timeout'])))
                 self.records.emit(event='process_ready', node=node, url=self.urls[node])
+                if self.prometheus:
+                    self.prometheus.discover(node, directory)
+        if self.prometheus:
+            await self.guard(self.prometheus.baseline(), self.prometheus.startup_timeout)
 
-    async def close(self):
-        self.closing = True
+    async def _stop(self, children, grace):
         errors = []
-        # Signal the entire owned process group, including grandchildren, even if its leader exited.
-        for node, child in reversed(self.children):
+        # Signal only this run's owned groups, including grandchildren if the leader exited.
+        for node, child in reversed(children):
             try:
                 os.killpg(child.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
             except OSError as error:
                 errors.append(f'{node}: {error}')
-        # A shared grace period avoids multiplying teardown time by replica count.
-        deadline = asyncio.get_running_loop().time() + 3
-        while any(child.returncode is None for _, child in self.children) and asyncio.get_running_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + grace
+        while any(child.returncode is None for _, child in children) and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(.02)
-        for node, child in reversed(self.children):
+        for node, child in reversed(children):
+            killed = False
             try:
                 os.killpg(child.pid, signal.SIGKILL)
+                killed = child.returncode is None
             except ProcessLookupError:
                 pass
             except OSError as error:
@@ -142,7 +163,23 @@ class Processes:
                 await asyncio.wait_for(child.wait(), timeout=3)
             except TimeoutError:
                 errors.append(f'{node}: process did not exit after SIGKILL')
+            if node == 'prometheus' and (killed or child.returncode != 0):
+                errors.append('prometheus: did not stop gracefully; retained data may be incomplete')
             self.records.emit(event='process_stopped', node=node, code=child.returncode)
+        return errors
+
+    async def close(self):
+        self.closing = True
+        errors = []
+        if self.prometheus:
+            try:
+                await self.prometheus.final_scrape()
+            except Exception as error:
+                errors.append(f'prometheus final scrape: {type(error).__name__}: {error}')
+        errors.extend(await self._stop([(node, child) for node, child in self.children if node != 'prometheus'], 3))
+        errors.extend(await self._stop([(node, child) for node, child in self.children if node == 'prometheus'], 5))
+        if self.prometheus:
+            self.prometheus.finish(errors)
         for monitor in self.monitors:
             if not monitor.done():
                 monitor.cancel()
