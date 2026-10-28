@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -138,15 +137,13 @@ class DeviceResource:
     def _ensure_gpus_released(self, timeout: int = 30):
         """Wait until acquired GPUs have no stale compute processes.
 
-        Uses SIGTERM first to allow graceful CUDA cleanup, then SIGKILL
-        as a last resort. Detects zombie GPU contexts (dead processes that
-        still hold GPU memory) which indicate unrecoverable state.
+        A device lock does not establish ownership of compute processes. Never
+        signal an existing workload; test/server managers clean up their children.
 
         Returns True if GPUs are clean, False if zombie contexts detected.
         """
         my_pid = os.getpid()
-        sigterm_sent: Set[int] = set()
-        sigkill_sent: Set[int] = set()
+        reported: Set[int] = set()
         deadline = time.time() + timeout
 
         while time.time() < deadline:
@@ -168,20 +165,11 @@ class DeviceResource:
 
                 all_clear = False
                 for pid in live_stale:
-                    if pid not in sigterm_sent:
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                            logging.info(f"SIGTERM pid {pid} on GPU {gpu_id}")
-                            sigterm_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
-                    elif pid not in sigkill_sent:
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                            logging.info(f"SIGKILL pid {pid} on GPU {gpu_id}")
-                            sigkill_sent.add(pid)
-                        except (ProcessLookupError, PermissionError):
-                            pass
+                    if pid not in reported:
+                        logging.info(
+                            "GPU %s is occupied by pid %s; waiting", gpu_id, pid
+                        )
+                        reported.add(pid)
                 break
 
             if all_clear:

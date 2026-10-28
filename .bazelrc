@@ -328,3 +328,6 @@ test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/lo
 # internal source overrides (only loaded when internal_source symlink exists)
 try-import %workspace%/internal_source/.internal_bazelrc
 try-import %workspace%/internal_source/.cicd_bazelrc
+
+# Preserve shared-device locking for local tests on this branch.
+test --run_under=//tools:nvidia_wheel_env
