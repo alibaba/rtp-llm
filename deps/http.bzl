@@ -1,8 +1,7 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 
-# accl/solar/tnet/ali-rdma-core RPMs are permanently internal-only closed deps.
-# Do NOT add fetch rules for them here: RDMA impls are only buildable with the
-# internal overlay, and no public target may depend on accl.
+# accl/solar/tnet/ali-rdma-core RPMs stay closed-only: deps/impls.bzl declares
+# them and no open target may depend on accl.
 
 def clean_dep(dep):
     return str(Label(dep))
@@ -20,8 +19,8 @@ def http_deps():
     http_archive(
         name = "nvcomp_cuda13_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
-            "https://files.pythonhosted.org/packages/56/c9/f8a1b957f949ab4c4dc29e7f56316a2224b92c78cad9a66aeab2b36f8857/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
+            "https://mirrors.aliyun.com/pypi/packages/56/c9/f8a1b957f949ab4c4dc29e7f56316a2224b92c78cad9a66aeab2b36f8857/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_x86_64.whl",
         ],
         sha256 = "91a4e4b1dc15b0f38e54a3353c917086c99c9f415e1ad79a57d5f28d62b68a4d",
         type = "zip",
@@ -30,8 +29,8 @@ def http_deps():
     http_archive(
         name = "nvcomp_cuda13_arm",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/nvcomp/5.0.0.6/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
-            "https://files.pythonhosted.org/packages/a3/86/e5eccb10e8be41501dfb7191a6b2cff32558d0bba3370ae67f37561caf43/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
+            "https://mirrors.aliyun.com/pypi/packages/a3/86/e5eccb10e8be41501dfb7191a6b2cff32558d0bba3370ae67f37561caf43/nvidia_nvcomp_cu13-5.0.0.6-py3-none-manylinux_2_28_aarch64.whl",
         ],
         sha256 = "13910a5e5dbf7d4ce21c807c801a1f10c261b9a2d538896e93b736c21d7d6b1d",
         type = "zip",
@@ -65,7 +64,7 @@ def http_deps():
         name = "torch_2.1_py310_cpu",
         sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
         urls = [
-            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2%2Bcpu-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
@@ -85,7 +84,7 @@ def http_deps():
         name = "torch_2.8_py310_cuda",
         sha256 = "54d240b5d3b1f9075d4ee6179675a22c1974f7bef1885d134c582678d5180cd3",
         urls = [
-            "https://download.pytorch.org/whl/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
@@ -95,8 +94,8 @@ def http_deps():
         name = "torch_2.11_py310_cuda",
         sha256 = "4c5be01584b7fee22d3c0d04062fd28026044acd07ffd0ee64cbd54b60e62d39",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "https://download.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://mirrors.aliyun.com/pytorch-wheels/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
@@ -106,7 +105,20 @@ def http_deps():
         name = "torch_2.11_py310_cuda-aarch64",
         sha256 = "4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    # Legacy cuda12_arm platform (torch 2.9 + cu129; kept for --define=using_cuda12_arm=true
+    # builds while cuda13_arm is the supported ARM lane).  Wheel mirrored from the
+    # artlab pytorch mirror to rtp-opensource; the sha matches the cuda12_arm lock pin.
+    http_archive(
+        name = "torch_2.9_py310_cuda-aarch64",
+        sha256 = "37780eb80e4319d6e004ea9597353da0b3947681866d7adff4757ece164a5cd9",
+        urls = [
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
@@ -116,7 +128,7 @@ def http_deps():
         name = "torch_rocm",
         sha256 = "521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
@@ -126,7 +138,7 @@ def http_deps():
         name = "aiter",
         sha256 = "47840027132b1caf0e0985a8376d3e6d24f31c994983482378a5caf46ad6c50f",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.aiter"),
@@ -174,7 +186,7 @@ def http_deps():
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda130_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_40-cuda130.x86_64.rpm",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/kv-cache-manager-client-2026_09_15_17_40-cuda130.x86_64.rpm",
         ],
         sha256 = "392ac1aadf4ea9e3bad177a69ae8f35c5c1c59888c8505e8bee01cb8fe88d9e0",
     )
@@ -182,7 +194,7 @@ def http_deps():
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda130_arm",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_09_15_17_39-cuda130.aarch64.rpm",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/kv-cache-manager-client-2026_09_15_17_39-cuda130.aarch64.rpm",
         ],
         sha256 = "84e482dfd219df4a7a240061f43627eafb0e79d582bd67228e2d5cac7ba8ffe4",
     )
@@ -201,7 +213,7 @@ exports_files(["bin/kv_cache_manager_bin"])
     http_archive(
         name = "remote_kv_cache_manager_server_cuda130",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/server/kv_cache_manager_server_2026_08_19_20_01.tar.gz",
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/kv_cache_manager_server_2026_08_19_20_01.tar.gz",
         ],
         sha256 = "facbcee3395e3fa129cf45c7034d82e576fefc5af7017fead26ed795bb6f7bf6",
         build_file_content = """

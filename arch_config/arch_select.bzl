@@ -2,6 +2,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
 
 # to wrapper target relate with different system config
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu = "requirement")
+load("@pip_cuda12_arm_torch//:requirements.bzl", requirement_cuda12_arm = "requirement")
 load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
@@ -10,9 +11,17 @@ load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requireme
 load("@pip_ppu_torch//:requirements.bzl", requirement_ppu = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
+# Endpoint and mirror seams, shared by open- and closed-source builds:
+#   * every custom wheel below is served from the public rtp-opensource
+#     bucket (rtp_llm/<arch>/); official torch wheels resolve from the
+#     mirrors.aliyun.com pytorch mirror. Both are shared by open and closed
+#     builds alike.
+load("@internal_impls//:impls.bzl", "EMBEDDING_ARPC_IMPL", "SUBSCRIBE_IMPL")
+
 # RDMA arch-selects live in the main repo's bazel package (see
 # bazel/rdma_arch_select.bzl for why) and are re-exported here for the
-# canonical @arch_config//:arch_select.bzl consumers.
+# canonical @arch_config//:arch_select.bzl consumers. Both trees use this file
+# verbatim; the internal overlay no longer shadows arch_config.
 load("@rtp_llm//bazel:rdma_arch_select.bzl", _rdma_cache_store_deps = "cache_store_deps", _rdma_rdma_transport_deps = "rdma_transport_deps", _rdma_transfer_backend_deps = "transfer_backend_deps")
 
 def cache_store_deps():
@@ -93,8 +102,10 @@ def requirement(names):
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
+                "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
+                "@rtp_llm//:using_ppu": ppu_deps,
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -103,60 +114,149 @@ def requirement(names):
 def embedding_arpc_deps():
     native.alias(
         name = "embedding_arpc_deps",
-        actual = "@rtp_llm//rtp_llm/cpp/embedding_engine:embedding_engine_arpc_server_impl",
+        actual = EMBEDDING_ARPC_IMPL,
     )
 
 def subscribe_deps():
     native.alias(
         name = "subscribe_deps",
-        actual = "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl",
+        actual = select({
+            "@rtp_llm//:cuda_pre_12_9": SUBSCRIBE_IMPL,
+            "@rtp_llm//:using_cu12_9_or_13_x86": SUBSCRIBE_IMPL,
+            "@rtp_llm//:using_rocm": SUBSCRIBE_IMPL,
+            "//conditions:default": "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl",
+        }),
     )
 
 def whl_deps():
     return select({
         "@rtp_llm//:using_cuda13_x86": [
-            "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            # torch 2.11+cu130 mirrored on OSS (artlab pytorch mirror has no cu130 yet,
+            # source upstream is download.pytorch.org/whl/cu130).
+            "torch==2.11.0+cu130",
+            "torchvision==0.26.0+cu130",
             # CI-built DeepGEMM: opt_glm5 with isolated SM120 GEMMs.
-            "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0%2B122e18b.cu132-cp310-cp310-linux_x86_64.whl",
-            "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
-            "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl",
-            "fast-hadamard-transform@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl",
-            "flash_attn@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl",
-            "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
-            "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
-            "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd20eb.cu132-cp310-cp310-linux_x86_64.whl",
-            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
-            "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+            "deep_gemm==2.8.0+122e18b.cu132",
+            "flash-mla==1.0.0+9241ae3",
+            "deep-ep==2.1.0+a56d615",
+            "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
+            "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
+            "flashinfer-python==0.6.9+8c4f4dcf",
+            "flashinfer-cubin==0.6.9+8c4f4dcf",
+            # Unified rtp_kernel from cuda_extension feat/port-nvfp4-xqa@94fd20eb;
+            # NVFP4 mm only (no XQA wrappers).
+            "rtp-kernel==0.1.0+94fd20eb.cu132",
+            # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
+            # (oss://rtp-maga/0502/).  Project name `fast-safetensors`; import name
+            # `fast_safetensors`.  Required by --load_method fastsafetensors smokes.
+            "fast-safetensors==0.7.3+torch2.11.cu130",
+            "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
+            # flash_attn_3 / nvidia_cutlass_dsl: deferred rebuild for
+            # torch2.11+cu130, omitted from cuda13 lock.
         ],
         "@rtp_llm//:using_cuda13_arm": [
-            "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
-            "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
-            "deep_gemm@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/deep_gemm-2.8.1%2B057ca59-cp310-cp310-linux_aarch64.whl",
-            "flash-mla@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl",
-            "flash-mla-legacy@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla_legacy-1.0.0%2B92fd68b.rtp1-cp310-cp310-linux_aarch64.whl",
-            "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-cp310-cp310-linux_aarch64.whl",
-            "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
-            "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
-            "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd20eb.cu132-cp310-cp310-linux_aarch64.whl",
-            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
-            "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
-            "tilelang@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/tilelang-0.1.15%2Bcuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl",
+            "torch==2.11.0+cu130",
+            "torchvision==0.26.0+cu130",
+            # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
+            "deep_gemm==2.8.1+057ca59",
+            "flash-mla==1.0.0+2e5429f",
+            "flash-mla-legacy==1.0.0+92fd68b.rtp1",
+            "deep-ep==2.1.0+a56d615",
+            "flashinfer-python==0.6.9+8c4f4dcf",
+            "flashinfer-cubin==0.6.9+8c4f4dcf",
+            "rtp-kernel==0.1.0+94fd20eb.cu132",
+            "fast-safetensors==0.7.3+torch2.11.cu130",
+            "fastsafetensors==0.1.20+ali",
+            "tilelang==0.1.15+cuda.gita35f8ddf",
             "apache-tvm-ffi==0.1.12",
+            # flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl
+            # remain deferred.
         ],
-        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
+        "@rtp_llm//:using_cuda12_9_x86": [
+            # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
+            # fetches the same file); the artlab pytorch mirror copy is the
+            # closed-source equivalent.
+            "torch==2.8.0+cu129",
+            "torchvision==0.23.0+cu129",
+            "flash_attn==2.8.3",
+            "flash-attn-3==3.0.0b1",
+            "fast-safetensors==0.7.3+torch2.1.2.cu121",
+            # deep-ep follows the cuda12_9 lock pin (the internal d2fa38c build,
+            # re-hosted on rtp-opensource rtp_llm/cu129/).
+            "deep-ep==1.2.1.10.1+d2fa38c.cu129",
+            "fastsafetensors==0.1.19rc5+ali",
+            "flashinfer-python==0.6.9+e87d610f",
+            "flashinfer-cubin==0.6.9+e87d610f",
+            "cuda-tile==1.4.0",
+            "deep_gemm==2.1.1+ee8d9c7.cu129",
+            "flash-mla==1.0.0+fcaae18.cu129",
+            "fast-hadamard-transform==1.0.4.post1",
+            "nvidia-cutlass-dsl==4.4.2",
+            "nvidia-cutlass-dsl-libs-base==4.4.2",
+            "rtp-kernel==0.1.0+47e3c4a4.cu129",
+        ],
+        "@rtp_llm//:cuda_pre_12_9": [
+            # torch 2.6.0+cu126: the aliyun pytorch mirror wheel (same file http.bzl
+            # torch_2.6_py310_cuda fetches).
+            "torch==2.6.0+cu126",
+            "torchvision==0.21.0+cu126",
+            "flash_attn==2.7.4.post1",
+            "fast-safetensors==0.7.3+torch2.1.2.cu121",
+            "fastsafetensors==0.1.19rc5+ali",
+            "deep-ep==1.2.1+29d31c0",
+            "deep_gemm==2.2.0+9b680f4",
+            "flashinfer-python==0.6.0",
+            "flashinfer-cubin==0.6.0",
+            "apache-tvm-ffi==0.1.8.post2",
+        ],
+        "@rtp_llm//:using_cuda12_arm": [
+            # Legacy ARM cu12 lane (cuda13_arm is the supported one).  torch and
+            # torchvision resolve from upstream; the remaining kernels come from
+            # the rtp-maga/rtp-opensource mirrors.
+            "torch==2.9.0+cu129",
+            "torchvision==0.24.0",
+            "flash_attn==2.8.3",
+            "flash-attn-3==3.0.0b1",
+            "fast-safetensors==0.7.3+torch2.1.2.cu121",
+            "fastsafetensors==0.1.19rc5+ali",
+            "flashinfer-python==0.6.9+e87d610f",
+            "flashinfer-cubin==0.6.9+e87d610f",
+            "deep_gemm==2.1.1+ee8d9c7.cu129",
+            # No OSS mirror for the PAI aarch64 build; this pin mirrors the
+            # cuda12_arm lock, which also points at the artlab path.
+            "deep-ep==1.2.1.11+unknown.pai",
+            "rtp-kernel==0.1.0+47e3c4a4.cu129",
+            "flash-mla==1.0.0+fcaae18.cu129",
+            "fast-hadamard-transform==1.0.4.post1",
+        ],
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
-            "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar",
+            "amdsmi@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/amd_smi.tar",
             # Keep the ROCm AITER/FlyDSL pins synchronized with
             # deps/requirements{,_lock}_rocm.txt.
-            "amd-aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl",
+            "amd-aiter==0.1.23.dev134+g8449f416b",
             "flydsl==0.3.2",
-            "triton@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.8.0%2Bamd.rocm7.2.0.git111ff227-cp310-cp310-linux_x86_64.whl",
-            "triton-kernels@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.git111ff227-py3-none-any.whl",
+            "triton==3.8.0+amd.rocm7.2.0.git111ff227",
+            "triton-kernels==1.0.0+amd.rocm7.2.0.git111ff227",
+            "fast-safetensors==0.7.3+torch2.1.2.rocm",
+            "fastsafetensors==0.1.19rc5+ali",
         ],
+        "@rtp_llm//:using_ppu": [
+            "torch==2.11.0+cu130alios7u2oe",
+            "torchvision==0.26.0+cu130torch2.11.0alios7u2ce",
+            "triton==3.7.0+cu130alios7u2oe",
+            "flash_attn==2.8.2+cu130torch2.11.0alios7u2oe",
+            "flash-attn-3==2.8.2+cu130torch2.11.0alios7u2oe",
+            "flashinfer-python==0.6.8.post1+cu130torch2.11.0alios7u2oe",
+            "deep-ep==2.2.1+cu130torch2.11.0alios7u2oe",
+            "deep-gemm==1.0.0+cu130torch2.11.0alios7u2oe",
+            "flash-mla==2.0.0+cu130torch2.11.0alios7u2oe",
+            "tilelang==0.1.13",
+            "apache-tvm-ffi==0.1.12",
+            "torch-c-dlpack-ext==0.1.5",
+        ],  # PPU SDK 2.2.0 / cu130 / alios7u2 / cp312 wheels
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -193,13 +293,34 @@ def platform_deps():
         "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
     })
 
-def cuda13_x86_test_gpu():
-    """Pool label for CUDA 13 x86 test execution.
+def internal_deps():
+    return select({
+        "@rtp_llm//:cuda_pre_12_9": ["@rtp_llm//rtp_llm:fast-safetensors", "@rtp_llm//rtp_llm:fastsafetensors"],
+        "@rtp_llm//:using_cuda12_9_x86": ["@rtp_llm//rtp_llm:fast-safetensors", "@rtp_llm//rtp_llm:fastsafetensors"],
+        "@rtp_llm//:using_cuda13_x86": ["@rtp_llm//rtp_llm:fast-safetensors", "@rtp_llm//rtp_llm:fastsafetensors"],
+        "@rtp_llm//:using_cuda12_arm": ["@rtp_llm//rtp_llm:fast-safetensors", "@rtp_llm//rtp_llm:fastsafetensors"],
+        "@rtp_llm//:using_cuda13_arm": ["@rtp_llm//rtp_llm:fast-safetensors", "@rtp_llm//rtp_llm:fastsafetensors"],
+        "@rtp_llm//:using_rocm": [],
+        "@rtp_llm//:using_ppu": ["@rtp_llm//rtp_llm:flashinfer-python", "@rtp_llm//rtp_llm:flash-attn-3", "@rtp_llm//rtp_llm:flash-mla"],  # PPU SDK 2.2.0 wheels
+        "//conditions:default": [],
+    })
 
-    Returned through @arch_config so builds can resolve their own pool
-    label; the default value names the SM103 machine class only.
-    """
-    return "SM103_TEST"
+def telemetry_test_deps():
+    return select({
+        "@rtp_llm//:using_cuda12_9_x86": [
+            requirement_gpu_cuda12_9("opentelemetry-sdk"),
+            requirement_gpu_cuda12_9("opentelemetry-exporter-otlp-proto-http"),
+        ],
+        "@rtp_llm//:using_cuda13_x86": [
+            requirement_gpu_cuda13("opentelemetry-sdk"),
+            requirement_gpu_cuda13("opentelemetry-exporter-otlp-proto-http"),
+        ],
+        "//conditions:default": [],
+    })
+
+def cuda13_x86_test_gpu():
+    """Pool label for CUDA 13 x86 test execution (SM103 machine class)."""
+    return "SM103_CU13"
 
 def torch_deps():
     deps = select({
@@ -214,11 +335,6 @@ def torch_deps():
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",
         ],
-        "@rtp_llm//:using_cuda13_arm": [
-            "@torch_2.11_py310_cuda-aarch64//:torch_api",
-            "@torch_2.11_py310_cuda-aarch64//:torch",
-            "@torch_2.11_py310_cuda-aarch64//:torch_libs",
-        ],
         "@rtp_llm//:cuda_pre_12_9": [
             "@torch_2.6_py310_cuda//:torch_api",
             "@torch_2.6_py310_cuda//:torch",
@@ -229,10 +345,20 @@ def torch_deps():
             "@torch_2.11_py310_cuda//:torch",
             "@torch_2.11_py310_cuda//:torch_libs",
         ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "@torch_2.11_py310_cuda-aarch64//:torch_api",
+            "@torch_2.11_py310_cuda-aarch64//:torch",
+            "@torch_2.11_py310_cuda-aarch64//:torch_libs",
+        ],
         "@rtp_llm//:using_cuda12_9_x86": [
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",
+        ],
+        "@rtp_llm//:using_cuda12_arm": [
+            "@torch_2.9_py310_cuda-aarch64//:torch_api",
+            "@torch_2.9_py310_cuda-aarch64//:torch",
+            "@torch_2.9_py310_cuda-aarch64//:torch_libs",
         ],
         "//conditions:default": [
             "@torch_2.1_py310_cpu//:torch_api",
@@ -253,18 +379,10 @@ def cuda_register():
 
 def triton_deps(names):
     return select({
+        "@rtp_llm//:using_ppu": [requirement_ppu(name) for name in names],
+        "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name) for name in names],
         "//conditions:default": [],
     })
-
-def internal_deps():
-    return []
-
-def telemetry_test_deps():
-    # The tracing SDK is optional at runtime. SDK-specific test methods skip
-    # explicitly when it is unavailable, while Trace-off tests remain independent
-    # of interpreter-wide packages. The lock carrying the SDK supplies it through
-    # the architecture-specific dependency selector.
-    return []
 
 def jit_deps():
     return []
