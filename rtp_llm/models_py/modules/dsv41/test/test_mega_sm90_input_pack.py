@@ -2,13 +2,14 @@
 """Host-side launch contracts for the fused SM90 MegaMoE input packer."""
 
 import importlib.util
-import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
+from rtp_llm.models_py.modules.dsv41.moe import mega_sm90_input_packer as packer
 
 _PATH = Path(__file__).resolve().parent.parent / "moe" / "_mega_sm90_input_pack_triton.py"
 _SPEC = importlib.util.spec_from_file_location("_mega_sm90_pack_under_test", _PATH)
@@ -18,10 +19,6 @@ _SPEC.loader.exec_module(_PACK)
 
 class MegaSm90InputPackLaunchTest(unittest.TestCase):
     def setUp(self):
-        env = patch.dict(os.environ)
-        env.start()
-        self.addCleanup(env.stop)
-        os.environ.pop("DSV4_MEGA_MOE_SM90_PACK_BLOCK_M", None)
         if _PACK.triton is None:
             fake_triton = patch.object(
                 _PACK,
@@ -72,21 +69,29 @@ class MegaSm90InputPackLaunchTest(unittest.TestCase):
                 self.assertEqual(kwargs["BLOCK_K"], 8)
                 self.assertEqual(kwargs["num_warps"], 4)
 
-    def test_explicit_block_m_override(self):
-        with patch.dict(os.environ, {"DSV4_MEGA_MOE_SM90_PACK_BLOCK_M": "8"}):
-            self._pack(12)
-        kwargs = self.kernel.__getitem__.return_value.call_args.kwargs
-        self.assertEqual(kwargs["BLOCK_M"], 8)
-        self.kernel.__getitem__.assert_called_once_with((2, 40))
+    def test_factory_selects_sm90_backend_and_falls_back_safely(self):
+        from rtp_llm.device import device_type
+        from rtp_llm.models_py.modules.dsv41.moe import _mega_sm90_input_pack_triton
 
-    def test_invalid_block_m_override_is_rejected(self):
-        for value in ("0", "3", "-4", "64"):
-            with self.subTest(value=value), patch.dict(
-                os.environ, {"DSV4_MEGA_MOE_SM90_PACK_BLOCK_M": value}
-            ):
-                with self.assertRaisesRegex(ValueError, "power of two in"):
-                    self._pack(12)
-        self.kernel.__getitem__.assert_not_called()
+        with patch.object(device_type, "is_sm90", return_value=True), patch.object(
+            _mega_sm90_input_pack_triton, "triton", object()
+        ):
+            self.assertIsInstance(
+                packer.get_mega_sm90_input_packer(),
+                packer.FusedMegaMoeSM90InputPacker,
+            )
+        with patch.object(device_type, "is_sm90", return_value=False):
+            self.assertIsInstance(
+                packer.get_mega_sm90_input_packer(),
+                packer.MegaMoeSM90InputPacker,
+            )
+        with patch.object(device_type, "is_sm90", return_value=True), patch.object(
+            _mega_sm90_input_pack_triton, "triton", None
+        ):
+            self.assertIsInstance(
+                packer.get_mega_sm90_input_packer(),
+                packer.MegaMoeSM90InputPacker,
+            )
 
     def test_empty_input_does_not_launch(self):
         self._pack(0)

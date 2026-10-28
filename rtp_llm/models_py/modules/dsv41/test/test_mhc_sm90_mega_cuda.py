@@ -1,8 +1,6 @@
-"""SM90 exactness and CUDA-graph gate for the opt-in MegaMHC seam."""
+"""SM90 exactness and CUDA-graph gate for the guarded MegaMHC seam."""
 
-import os
 import unittest
-from unittest.mock import patch
 
 import torch
 
@@ -117,15 +115,6 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
 
     def setUp(self):
         _SM90_WARMED_STREAMS.clear()
-        self.env = patch.dict(
-            os.environ,
-            {
-                "DSV41_MEGA_MHC_SM90": "1",
-                "DSV41_MHC_SM90_POST": "0",
-            },
-        )
-        self.env.start()
-        self.addCleanup(self.env.stop)
         self.addCleanup(_SM90_WARMED_STREAMS.clear)
 
     @torch.inference_mode()

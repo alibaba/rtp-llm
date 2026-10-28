@@ -8,7 +8,6 @@ SM100 buffer's packed UE8M0 K32 scales. The scale formula matches DeepGEMM's
 
 from __future__ import annotations
 
-import os
 from typing import Tuple
 
 import torch
@@ -99,13 +98,17 @@ class FusedMegaMoeSM90InputPacker:
 
 
 def get_mega_sm90_input_packer():
-    # Keep rollout explicit after the bitwise and L20Z full-model A/B gates.
-    # The two implementations share the same buffer ABI.
-    mode = os.environ.get("DSV4_MEGA_MOE_SM90_INPUT_PACKER", "torch").strip().lower()
-    if mode == "torch":
+    """Use fused packing on SM90 when its backend is available."""
+    from rtp_llm.device.device_type import is_sm90
+
+    if not is_sm90():
         return MegaMoeSM90InputPacker()
-    if mode == "fused":
-        return FusedMegaMoeSM90InputPacker()
-    raise ValueError(
-        f"invalid DSV4_MEGA_MOE_SM90_INPUT_PACKER={mode!r}; expected torch|fused"
+    try:
+        from . import _mega_sm90_input_pack_triton as backend
+    except (ImportError, OSError):
+        return MegaMoeSM90InputPacker()
+    return (
+        FusedMegaMoeSM90InputPacker()
+        if backend.triton is not None
+        else MegaMoeSM90InputPacker()
     )

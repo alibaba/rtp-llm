@@ -1,7 +1,6 @@
-"""CPU/host contracts for the default-off SM90 materialized-mixes seam."""
+"""CPU/host contracts for the guarded SM90 materialized-mixes seam."""
 
 import contextlib
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -30,37 +29,30 @@ class MhcSm90MegaHostTest(unittest.TestCase):
         self.addCleanup(mega._get_sm90_mixes_backend.cache_clear)
         self.addCleanup(mega._SM90_WARMED_STREAMS.clear)
 
-    def test_switch_defaults_off_and_accepts_only_explicit_truthy_values(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DSV41_MEGA_MHC_SM90", None)
-            self.assertFalse(mega._sm90_requested())
-        for value in ("1", "true", "YES", "on"):
-            with self.subTest(value=value), patch.dict(
-                os.environ, {"DSV41_MEGA_MHC_SM90": value}
+    def test_missing_tilelang_backend_returns_unfused_fallback(self):
+        for error in (ModuleNotFoundError("tilelang"), OSError("backend unavailable")):
+            with self.subTest(error=type(error).__name__), patch.object(
+                mega.importlib, "import_module", side_effect=error
             ):
-                self.assertTrue(mega._sm90_requested())
-        for value in ("0", "", "false", "off", "unexpected"):
-            with self.subTest(value=value), patch.dict(
-                os.environ, {"DSV41_MEGA_MHC_SM90": value}
-            ):
-                self.assertFalse(mega._sm90_requested())
+                mega._get_sm90_mixes_backend.cache_clear()
+                self.assertIsNone(mega._get_sm90_mixes_backend())
+                with patch.object(mega, "is_sm90_supported", return_value=True), patch.object(
+                    mega, "is_supported", return_value=False
+                ):
+                    self.assertIsNone(mega.try_fused_post_pre(**_cpu_args()))
 
-    def test_default_off_and_cpu_never_load_tilelang_or_sm100_backend(self):
+    def test_cpu_shape_never_loads_tilelang_or_sm100_backend(self):
         args = _cpu_args()
         with (
-            patch.dict(os.environ, {}, clear=False),
             patch.object(mega, "_get_sm90_mixes_backend") as sm90_backend,
             patch.object(mega, "_get_mega_mhc") as sm100_backend,
         ):
-            os.environ.pop("DSV41_MEGA_MHC_SM90", None)
             self.assertFalse(mega.is_sm90_supported(**args))
             self.assertIsNone(mega.try_fused_post_pre(**args))
         sm90_backend.assert_not_called()
         sm100_backend.assert_not_called()
 
-        with patch.dict(os.environ, {"DSV41_MEGA_MHC_SM90": "1"}), patch.object(
-            mega, "_get_sm90_mixes_backend"
-        ) as sm90_backend:
+        with patch.object(mega, "_get_sm90_mixes_backend") as sm90_backend:
             self.assertFalse(mega.is_sm90_supported(**args))
         sm90_backend.assert_not_called()
 
@@ -68,7 +60,6 @@ class MhcSm90MegaHostTest(unittest.TestCase):
         args = _cpu_args()
         sentinel = object()
         with (
-            patch.dict(os.environ, {"DSV41_MEGA_MHC_SM90": "1"}),
             patch.object(mega, "is_sm90_supported", return_value=True) as gate,
             patch.object(mega, "_run_sm90_post_pre", return_value=sentinel) as run,
         ):
@@ -81,9 +72,7 @@ class MhcSm90MegaHostTest(unittest.TestCase):
             {"reuse_residual": True},
             {"output_fp8": True},
         ):
-            with self.subTest(kwargs=kwargs), patch.dict(
-                os.environ, {"DSV41_MEGA_MHC_SM90": "1"}
-            ), patch.object(
+            with self.subTest(kwargs=kwargs), patch.object(
                 mega, "is_sm90_supported", return_value=True
             ) as gate, patch.object(
                 mega, "_run_sm90_post_pre"

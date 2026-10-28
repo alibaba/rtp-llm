@@ -1,6 +1,6 @@
 """SM90 post-prenorm delayed-mHC epilogue used by ``v41_mega_mhc``.
 
-This module is imported lazily behind ``DSV41_MEGA_MHC_SM90``.  It intentionally
+This module is imported lazily for guarded SM90 decode shapes. It intentionally
 accepts an already materialized FP32 ``mixes`` tensor and therefore cannot
 change the production prenorm GEMM or split-reduction arithmetic boundary.
 """

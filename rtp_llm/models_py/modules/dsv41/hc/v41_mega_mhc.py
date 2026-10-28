@@ -9,16 +9,15 @@ DeepGEMM initializes persistent split barriers per CUDA stream. Warm up on
 the capture stream before recording a graph; an unwarmed capture stream
 retains the unfused path instead of initializing barriers during capture.
 
-The independent ``DSV41_MEGA_MHC_SM90`` experiment keeps Hopper's existing
+The SM90 path keeps Hopper's existing
 post and prenorm arithmetic boundaries, then fuses only the materialized-mixes
-split/Sinkhorn/apply epilogue. It is decode-bounded and off by default.
+split/Sinkhorn/apply epilogue. It is enabled for guarded decode shapes.
 """
 
 from __future__ import annotations
 
 import importlib
 import math
-import os
 from functools import lru_cache
 from typing import Callable
 
@@ -35,7 +34,6 @@ MHCQuantizedOutput = tuple[
 
 _WARMED_STREAMS: set[tuple[int, int]] = set()
 _SM90_WARMED_STREAMS: set[tuple[int, int]] = set()
-_SM90_ENV = "DSV41_MEGA_MHC_SM90"
 _SM90_MAX_TOKENS = 16
 
 
@@ -51,25 +49,14 @@ def _get_mega_mhc() -> Callable | None:
     return operation if callable(operation) else None
 
 
-def _sm90_requested() -> bool:
-    """The Hopper seam stays independently opt-in until exact GPU gates pass."""
-    return os.environ.get(_SM90_ENV, "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
 @lru_cache(maxsize=1)
 def _get_sm90_mixes_backend():
     try:
         return importlib.import_module(
             "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_mega"
         )
-    except ModuleNotFoundError:
-        # Optional TileLang dependencies are not present in every CPU/build
-        # configuration.  The default-off production path must still import.
+    except (ImportError, OSError):
+        # Optional TileLang dependencies are not present in every build.
         return None
 
 
@@ -261,13 +248,13 @@ def is_sm90_supported(
     next_hc: DelayedHCUnit,
     norm: torch.nn.Module,
 ) -> bool:
-    """Host-only gate for the opt-in SM90 post/prenorm/pre epilogue seam.
+    """Host-only gate for the SM90 post/prenorm/pre epilogue seam.
 
     This gate does not import TileLang or the experimental fused-pre module.
     It intentionally covers only the decode shapes verified by the exact GPU
     test; large/prefill and compacted executions retain their existing path.
     """
-    if not _sm90_requested() or torch.version.hip is not None:
+    if torch.version.hip is not None:
         return False
     if (
         not isinstance(attn_out, torch.Tensor)
@@ -428,7 +415,7 @@ def try_fused_post_pre(
     failures propagate to the caller. ``reuse_residual`` overwrites the input
     residual after its corresponding tiles have been loaded, or the padded
     copy when padding is needed.
-    The default-off SM90 decode seam follows the unfused delayed-post contract
+    The SM90 decode seam follows the unfused delayed-post contract
     and overwrites its dead residual input in place; it rejects the SM100-only
     ``reuse_residual`` mode rather than allocating another graph-pool tensor.
     ``original_tokens`` preserves the installed backend's pre-compaction

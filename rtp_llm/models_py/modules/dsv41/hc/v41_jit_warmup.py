@@ -277,7 +277,8 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         return
     if torch.version.hip is not None:
         return
-    arch_major = torch.cuda.get_device_capability(device)[0]
+    capability = tuple(torch.cuda.get_device_capability(device))
+    arch_major = capability[0]
     if arch_major not in (9, 10):
         return
     common._assert_not_capturing()
@@ -291,10 +292,10 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         arch_major == 10 and bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
     )
     sm90_mega_enabled = (
-        arch_major == 9
+        capability == (9, 0)
         and bool(pairs)
         and small_enabled
-        and v41_mega_mhc._sm90_requested()
+        and v41_mega_mhc._get_sm90_mixes_backend() is not None
     )
     num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()

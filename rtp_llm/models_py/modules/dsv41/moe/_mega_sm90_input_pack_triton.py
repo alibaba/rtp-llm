@@ -9,8 +9,6 @@ directly.
 
 from __future__ import annotations
 
-import os
-
 import torch
 
 try:
@@ -177,15 +175,7 @@ def fused_pack_mega_moe_sm90_inputs(
     x = x.contiguous()
     weights = weights.to(torch.float32).contiguous()
     indices = indices.to(torch.int64).contiguous()
-    block_m_override = os.environ.get("DSV4_MEGA_MOE_SM90_PACK_BLOCK_M")
-    if block_m_override is not None:
-        block_m = int(block_m_override)
-        if block_m <= 0 or block_m > 32 or block_m & (block_m - 1):
-            raise ValueError(
-                "DSV4_MEGA_MOE_SM90_PACK_BLOCK_M must be a power of two in [1, 32]"
-            )
-        num_warps = 4
-    elif tokens < 64:
+    if tokens < 64:
         block_m, num_warps = 4, 4
     elif tokens < 2048:
         block_m, num_warps = 16, 4
