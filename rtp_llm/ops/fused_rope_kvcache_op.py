@@ -1,3 +1,4 @@
+import inspect
 import logging
 from dataclasses import dataclass
 from functools import cache
@@ -24,6 +25,28 @@ def _get_fused_rope_kvcache():
     from rtp_kernel import fused_rope_kvcache
 
     return fused_rope_kvcache
+
+
+@cache
+def _prefill_position_argument() -> str:
+    parameters = inspect.signature(
+        _get_fused_rope_kvcache().prefill_fused_rope_kvcache
+    ).parameters
+    if "position_ids" in parameters:
+        return "position_ids"
+    if "cp_position_ids" in parameters:
+        return "cp_position_ids"
+    raise RuntimeError("rtp_kernel prefill RoPE has no supported position argument")
+
+
+def _prefill_position_kwargs(position_ids: Optional[torch.Tensor]) -> dict:
+    argument = _prefill_position_argument()
+    if argument == "cp_position_ids" and position_ids is not None and position_ids.ndim != 1:
+        raise RuntimeError(
+            "This rtp_kernel version supports only one-dimensional prefill position IDs; "
+            "upgrade rtp_kernel for multi-axis positions"
+        )
+    return {argument: position_ids}
 
 
 @dataclass
@@ -122,7 +145,7 @@ class FusedRopeKVCachePrefillOpBase:
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
             ),
             padding_offset=params.padding_offset,
-            position_ids=params.position_ids,
+            **_prefill_position_kwargs(params.position_ids),
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,

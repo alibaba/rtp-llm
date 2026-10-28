@@ -308,3 +308,17 @@ py_test(
         'gpu_count': '1',
     },
 )
+
+py_test(
+    name = "rope_position_compat_test",
+    srcs = ["rope_position_compat_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
+    name = "fmha_workspace_test",
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
+    srcs = ["fmha_workspace_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
