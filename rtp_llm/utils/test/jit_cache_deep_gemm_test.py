@@ -1,11 +1,16 @@
 import json
 import tempfile
+import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from watchdog.observers import Observer
+
 from rtp_llm.utils import jit_cache_deep_gemm as deepjit
+from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
 
 
@@ -23,6 +28,42 @@ class DeepJitCacheTest(unittest.TestCase):
             ".committed": b"",
         }.items():
             (self.entry / name).write_bytes(payload)
+
+    def test_read_events_do_not_reopen_deepjit_metadata(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.entry.parent.parent,
+        )
+        manager = jit.JitCacheManager(
+            jit.Scope("test", component.local_dir.parent, (component,)), ""
+        )
+        read_observed = threading.Event()
+        on_event = manager.on_any_event
+
+        def handle(event):
+            on_event(event)
+            if event.event_type == "closed_no_write":
+                read_observed.set()
+
+        observer = Observer()
+        observer.schedule(manager, str(component.local_dir), recursive=True)
+        with mock.patch.object(
+            manager, "on_any_event", side_effect=handle
+        ), mock.patch.object(
+            jit, "deepjit_entry_files", wraps=deepjit.deepjit_entry_files
+        ) as validate:
+            observer.start()
+            try:
+                (self.entry / "meta.json").read_text()
+                self.assertTrue(read_observed.wait(timeout=5))
+                validate.assert_not_called()
+                self.assertFalse(manager._dirty.is_set())
+                (self.entry / ".committed").write_bytes(b"")
+                self.assertTrue(manager._dirty.wait(timeout=5))
+                self.assertGreater(validate.call_count, 0)
+            finally:
+                observer.stop()
+                observer.join(timeout=5)
 
     def test_complete_round_trip_excludes_uncommitted_entries(self):
         partial = self.entry.parent / "partial"
