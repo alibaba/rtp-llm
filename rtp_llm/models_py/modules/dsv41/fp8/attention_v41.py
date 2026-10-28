@@ -3638,6 +3638,27 @@ class AttentionV41FP8(AttentionFP8):
         slots.masked_fill_(selected < 0, -1)
         return slots.int()
 
+    _supports_engram_lookup_schedule = True
+
+    def forward_decode(
+        self, x, attn_metadata, kv_cache=None, *, shared_input_quant=None
+    ):
+        hook = getattr(self, "_engram_lookup_schedule", None)
+        if hook is None:
+            return super().forward_decode(
+                x, attn_metadata, kv_cache, shared_input_quant=shared_input_quant
+            )
+        try:
+            hook.before_attention()
+            result = super().forward_decode(
+                x, attn_metadata, kv_cache, shared_input_quant=shared_input_quant
+            )
+            hook.after_attention()
+            return result
+        except BaseException:
+            hook.abort()
+            raise
+
     def _forward_decode_body(self, x, metadata, shared_input_quant=None):
         from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import (
             decode_compute_qkv,
@@ -3680,6 +3701,9 @@ class AttentionV41FP8(AttentionFP8):
             )
         ):
             mega = None
+        hook = getattr(self, "_engram_lookup_schedule", None)
+        if hook is not None:
+            hook.before_projection(mega is not None)
         if mega is not None:
             from rtp_llm.models_py.modules.dsv41.fp8.decode.full_overlap import (
                 try_full_decode,
