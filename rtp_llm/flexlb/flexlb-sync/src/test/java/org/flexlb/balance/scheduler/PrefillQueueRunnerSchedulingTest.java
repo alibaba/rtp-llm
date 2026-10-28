@@ -892,7 +892,7 @@ class PrefillQueueRunnerSchedulingTest {
             allowFirstStatusRead.countDown();
             delivery.allowGroupPrediction.countDown();
             assertNull(runtime.stopAndAwait());
-            scheduler.runtime.shutdown();
+            SchedulerTestSupport.shutdown(scheduler.runtime);
         }
     }
 

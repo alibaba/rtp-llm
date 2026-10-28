@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -131,7 +131,7 @@ class SubmissionShutdownDeadlockTest {
                             .unstarted(
                                     () -> {
                                         try {
-                                            f.runtime.shutdown();
+                                            SchedulerTestSupport.shutdown(f.runtime);
                                             shutdownResult.complete(null);
                                         } catch (Throwable failure) {
                                             shutdownResult.completeExceptionally(failure);
@@ -221,7 +221,7 @@ class SubmissionShutdownDeadlockTest {
                                     config,
                                     router,
                                     reporter,
-                                    mock(DecodeAdmission.class),
+                                    mock(DecodePreemption.class),
                                     new PlacementAvailability(),
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
@@ -235,7 +235,7 @@ class SubmissionShutdownDeadlockTest {
 
         @Override
         public void close() {
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         }
     }
 }

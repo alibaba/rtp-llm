@@ -231,7 +231,7 @@ class RequestCancellationFailureOrderingTest {
             verify(prefill, times(1)).release(null, route);
             verify(decode, times(1)).release(reservation, DecodeResources.ReleaseReason.EXPIRED);
         } finally {
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
         }
     }
 

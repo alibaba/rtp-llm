@@ -42,14 +42,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Shared lifecycle primitives for scheduler contract tests.
  */
 final class RequestProtocolTestSupport {
-    private static final Map<QueuedRequestScheduler.Plan, RequestRoute> observedPlans =
+    private static final Map<QueuedRequestScheduler.PlacementPlan, RequestRoute> observedPlans =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
-    static QueuedRequestScheduler.Plan plan(RequestContext context, RequestRoute routing) {
-        QueuedRequestScheduler.Plan plan;
+    static QueuedRequestScheduler.PlacementPlan plan(RequestContext context, RequestRoute routing) {
+        QueuedRequestScheduler.PlacementPlan plan;
         try {
             var constructor =
-                    QueuedRequestScheduler.Plan.class.getDeclaredConstructor(
+                    QueuedRequestScheduler.PlacementPlan.class.getDeclaredConstructor(
                             GlobalQueueEntry.class,
                             long.class,
                             java.util.concurrent.atomic.AtomicBoolean.class);
@@ -93,12 +93,12 @@ final class RequestProtocolTestSupport {
         return handle;
     }
 
-    static RequestContext planContext(QueuedRequestScheduler.Plan plan) {
+    static RequestContext planContext(QueuedRequestScheduler.PlacementPlan plan) {
         planRouting(plan);
         return ((GlobalQueueEntry) ReflectionTestUtils.getField(plan, "entry")).context;
     }
 
-    static RequestRoute planRouting(QueuedRequestScheduler.Plan plan) {
+    static RequestRoute planRouting(QueuedRequestScheduler.PlacementPlan plan) {
         PlacementResult<?, ?> result =
                 (PlacementResult<?, ?>) ReflectionTestUtils.getField(plan, "result");
         if (result != null && result.value() != null) {
@@ -107,7 +107,7 @@ final class RequestProtocolTestSupport {
         return observedPlans.get(plan);
     }
 
-    static QueuedRequestScheduler.Plan matchingPlan(RequestContext context, RequestRoute routing) {
+    static QueuedRequestScheduler.PlacementPlan matchingPlan(RequestContext context, RequestRoute routing) {
         return org.mockito.ArgumentMatchers.argThat(
                 plan ->
                         plan != null
@@ -116,15 +116,15 @@ final class RequestProtocolTestSupport {
     }
 
     static PlacementResult<RequestRoute, PlacementKey> published(
-            QueuedRequestScheduler.Plan plan, RequestRoute route) {
+            QueuedRequestScheduler.PlacementPlan plan, RequestRoute route) {
         ReflectionTestUtils.setField(plan, "pendingDecodeRollback", null);
         return PlacementResult.success(route);
     }
 
     static boolean adopt(
             QueuedRequestScheduler scheduler,
-            QueuedRequestScheduler.Plan plan,
-            org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult result) {
+            QueuedRequestScheduler.PlacementPlan plan,
+            org.flexlb.balance.eviction.DecodePreemption.PreemptionResult result) {
         var endpoint = planRouting(plan).decodeEp();
         boolean accepted = false;
         Throwable failure = null;
@@ -330,12 +330,12 @@ final class RequestProtocolTestSupport {
             org.flexlb.config.ConfigService service,
             RequestWorkerSelector router,
             org.flexlb.service.monitor.DeliveryMetricsReporter reporter,
-            org.flexlb.balance.eviction.DecodeAdmission eviction,
+            org.flexlb.balance.eviction.DecodePreemption eviction,
             PlacementAvailability availability) {
         var config = service.loadBalanceConfig();
         ReflectionTestUtils.setField(owner, "router", router);
         if (owner instanceof QueuedRequestScheduler queue) {
-            ReflectionTestUtils.setField(queue, "decodeCapacity", eviction);
+            ReflectionTestUtils.setField(queue, "decodePreemption", eviction);
             ReflectionTestUtils.setField(queue, "reporter", reporter);
             ReflectionTestUtils.setField(
                     queue,

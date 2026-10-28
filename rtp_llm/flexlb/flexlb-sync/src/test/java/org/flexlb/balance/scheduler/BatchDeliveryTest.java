@@ -934,11 +934,11 @@ final class LinearDeliveryFixture implements AutoCloseable {
                     endpoint.awaitRetirement();
                 });
         if (expectedShutdownFailure == null) {
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         } else {
             assertSame(
                     expectedShutdownFailure,
-                    assertThrows(RuntimeException.class, runtime::shutdown));
+                    assertThrows(RuntimeException.class, () -> SchedulerTestSupport.shutdown(runtime)));
         }
     }
 }

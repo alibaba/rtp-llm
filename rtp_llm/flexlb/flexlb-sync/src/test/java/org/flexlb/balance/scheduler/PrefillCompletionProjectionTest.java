@@ -262,7 +262,7 @@ class PrefillCompletionProjectionTest {
                     future.join().isSuccess(),
                     "resource completion cannot replace the published response");
         } finally {
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         }
     }
 

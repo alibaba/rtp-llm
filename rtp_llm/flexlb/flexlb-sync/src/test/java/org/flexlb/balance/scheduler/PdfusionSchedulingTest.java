@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -151,7 +151,7 @@ class PdfusionSchedulingTest {
                         reporter,
                         mock(RecentCacheKeyTraceReporter.class),
                         router,
-                        mock(DecodeAdmission.class),
+                        mock(DecodePreemption.class),
                         availability);
         RequestScheduler scheduler = lifecycle;
         try {
@@ -223,7 +223,7 @@ class PdfusionSchedulingTest {
                             .state());
             assertEquals(0, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
         } finally {
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         }
     }
 }

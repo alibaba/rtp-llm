@@ -159,7 +159,7 @@ class RejectedDeliveryWithdrawalRaceTest {
                     // sleeps are needed.
                     var withdrawal =
                             ((QueuedRequestScheduler) owner)
-                                    .claimQueuedRoute(decode, handle, Integer.MAX_VALUE);
+                                    .claimWithdrawal(decode, handle, Integer.MAX_VALUE);
                     if (withdrawal != null) {
                         invalidWithdrawal.compareAndSet(null, withdrawal);
                     }
@@ -225,7 +225,7 @@ class RejectedDeliveryWithdrawalRaceTest {
             if (outstanding != null) {
                 outstanding.finish();
             }
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
             decode.close();
             decode.awaitRetirement();
         }

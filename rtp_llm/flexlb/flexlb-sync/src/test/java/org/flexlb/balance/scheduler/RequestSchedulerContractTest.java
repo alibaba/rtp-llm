@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -149,7 +149,7 @@ class RequestSchedulerContractTest {
             }
             future.get(3, TimeUnit.SECONDS);
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
-            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
         }
     }
 
@@ -166,7 +166,7 @@ class RequestSchedulerContractTest {
             f.scheduler.cancel(901, 0, CancelReason.CLIENT_CANCELLED);
             future.get(3, TimeUnit.SECONDS);
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
-            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
 
             f.requests.onDeadline(deadline, Long.MAX_VALUE);
             SchedulerTestSupport.awaitRequestWork(f.requests.runtime);
@@ -177,7 +177,7 @@ class RequestSchedulerContractTest {
     void queuedTerminationIncludesItsOwnWorkers() throws Exception {
         try (Fixture f = new Fixture(true)) {
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
-            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
 
             var decision =
                     (Thread)
@@ -208,7 +208,7 @@ class RequestSchedulerContractTest {
             runtime.recordFailure(failure);
             runtime.requests().stopAccepting();
             assertFalse(planners.isShutdown(), "stopping intake does not execute shutdown");
-            assertSame(failure, assertThrows(IllegalStateException.class, runtime::shutdown));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime)));
             assertTrue(planners.isTerminated());
             assertFalse(decision.isAlive());
         }
@@ -233,7 +233,7 @@ class RequestSchedulerContractTest {
                             });
             var submission = executor.submit(() -> f.scheduler.submit(request));
             assertFalse(submission.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS).isSuccess());
-            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
         }
     }
 
@@ -281,7 +281,7 @@ class RequestSchedulerContractTest {
             }
             first.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS);
             second.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS);
-            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
 
         } finally {
             resume.countDown();
@@ -309,7 +309,7 @@ class RequestSchedulerContractTest {
                             f.config,
                             f.router,
                             reporter,
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(f.config),
                             org.mockito.Mockito.mock(
@@ -343,7 +343,7 @@ class RequestSchedulerContractTest {
                         "terminal records preserve ownership too");
                 assertSame(owner, runtime.requests().findTerminal(101L).owner());
             } finally {
-                runtime.shutdown();
+                SchedulerTestSupport.shutdown(runtime);
             }
         }
     }
@@ -360,7 +360,7 @@ class RequestSchedulerContractTest {
                     api.submit(request).get(3, TimeUnit.SECONDS).getCode());
             SchedulerTestSupport.runtime(api).requests().stopAccepting();
             SchedulerTestSupport.runtime(api).requests().stopAccepting();
-            SchedulerTestSupport.runtime(api).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(api));
 
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
@@ -404,7 +404,7 @@ class RequestSchedulerContractTest {
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     future.get(3, TimeUnit.SECONDS).getCode());
-            SchedulerTestSupport.runtime(api).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(api));
 
             assertEquals(0, SchedulerTestSupport.repository(f.requests).liveRequestCount());
         } finally {
@@ -430,7 +430,7 @@ class RequestSchedulerContractTest {
             assertEquals(
                     StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     future.get(3, TimeUnit.SECONDS).getCode());
-            SchedulerTestSupport.runtime(api).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(api));
 
             assertNotNull(api.cancel(20, 0, CancelReason.CLIENT_CANCELLED));
             assertNull(api.cancel(999, 0, CancelReason.CLIENT_CANCELLED));
@@ -451,7 +451,7 @@ class RequestSchedulerContractTest {
                 SchedulerTestSupport.runtime(api).requests().stopAccepting();
                 assertTrue(future.isDone());
             }
-            SchedulerTestSupport.runtime(api).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(api));
 
             assertEquals(0, SchedulerTestSupport.repository(f.requests).liveRequestCount());
         }
@@ -485,7 +485,7 @@ class RequestSchedulerContractTest {
                 assertTrue(future.isDone());
                 assertEquals(0, SchedulerTestSupport.repository(f.requests).liveRequestCount());
                 var runtime = SchedulerTestSupport.runtime(api);
-                shutdown = CompletableFuture.runAsync(runtime::shutdown);
+                shutdown = CompletableFuture.runAsync(() -> SchedulerTestSupport.shutdown(runtime));
                 RequestProtocolTestSupport.awaitCondition(() -> runtime.requests().isClosed());
                 var closing = shutdown;
                 assertThrows(
@@ -555,7 +555,7 @@ class RequestSchedulerContractTest {
             assertSame(failure, SchedulerTestSupport.failure(api));
             assertSame(
                     failure,
-                    assertThrows(IllegalStateException.class, f.requests.runtime::shutdown));
+                    assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(f.requests.runtime)));
         }
     }
 
@@ -620,7 +620,7 @@ class RequestSchedulerContractTest {
                             mock(RequestSchedulerReporter.class),
                             mock(RecentCacheKeyTraceReporter.class),
                             router,
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             new PlacementAvailability());
             scheduler = requests;
         }

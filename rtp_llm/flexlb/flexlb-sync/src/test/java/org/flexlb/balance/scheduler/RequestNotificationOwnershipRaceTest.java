@@ -137,7 +137,7 @@ class RequestNotificationOwnershipRaceTest {
             finishWork.countDown();
             finishNotification.countDown();
             ReflectionTestUtils.setField(runtime, "timer", originalTimer);
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         }
     }
 

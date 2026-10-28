@@ -17,6 +17,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -38,6 +39,7 @@ import static com.google.common.base.Preconditions.checkState;
 public final class SchedulerRuntime implements RequestTaskScheduler {
 
     private static final long EXPIRATION_MAINTENANCE_INTERVAL_MS = 60_000L;
+    private static final Duration DEFAULT_SHUTDOWN_TIMEOUT = Duration.ofSeconds(30L);
 
     private final RequestRepository requests;
     private final EndpointRegistry endpoints;
@@ -605,23 +607,45 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         Failures.rethrow(failure, "request executors failed to close");
     }
 
-    /** Spring 停服入口：停止接收、等待请求资源结算，再关闭共享执行设施。 */
-    @PreDestroy
-    void shutdown() {
+    /**
+     * Stops accepting requests and settles the scheduler within one bounded lifecycle operation.
+     * DRAIN keeps requests already registered before the cutoff eligible for placement. If the
+     * placement queue does not drain before the deadline, the operation escalates to IMMEDIATE.
+     */
+    public synchronized ShutdownResult shutdown(ShutdownMode requestedMode, Duration timeout) {
+        Objects.requireNonNull(requestedMode, "requestedMode");
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative()) {
+            throw new IllegalArgumentException("shutdown timeout must not be negative");
+        }
         checkState(
                 executingRequest.get() == null
                         && !responseCompletions.isCompletingOnCurrentThread(),
                 "scheduler shutdown cannot wait for its own request work or response callback");
         requests.stopAccepting();
-        if (!requests.closeRegistration()) {
-            return;
-        }
         AbstractRequestScheduler scheduler;
         synchronized (schedulerLock) {
             scheduler = this.scheduler;
         }
+        long deadlineNanos = shutdownDeadline(timeout);
+        boolean drained = false;
+        ShutdownMode completedMode = requestedMode;
         Throwable firstFailure = null;
+        if (requestedMode == ShutdownMode.DRAIN) {
+            try {
+                drained = scheduler == null || scheduler.awaitPlacementDrain(deadlineNanos);
+            } catch (Throwable failure) {
+                firstFailure = failure;
+            }
+            if (!drained) {
+                completedMode = ShutdownMode.IMMEDIATE;
+            }
+        }
+        if (!requests.closeRegistration()) {
+            return new ShutdownResult(requestedMode, completedMode, drained);
+        }
         if (scheduler != null) {
+            firstFailure = Failures.run(firstFailure, scheduler::stopAdmission);
             firstFailure = Failures.run(firstFailure, scheduler::closePlacement);
             firstFailure = Failures.run(firstFailure, this::awaitAdmissions);
         }
@@ -666,5 +690,35 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
             firstFailure = Failures.append(failure, firstFailure);
         }
         Failures.rethrow(firstFailure, "Scheduler shutdown failed");
+        return new ShutdownResult(requestedMode, completedMode, drained);
+    }
+
+    /** Compatibility entry point for existing package clients; immediate shutdown is explicit. */
+    public ShutdownResult shutdown() {
+        return shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
+    }
+
+    /** Spring invokes the bounded graceful lifecycle operation. */
+    @PreDestroy
+    private void destroy() {
+        shutdown(ShutdownMode.DRAIN, DEFAULT_SHUTDOWN_TIMEOUT);
+    }
+
+    private static long shutdownDeadline(Duration timeout) {
+        long now = System.nanoTime();
+        long nanos;
+        try {
+            nanos = timeout.toNanos();
+        } catch (ArithmeticException overflow) {
+            return Long.MAX_VALUE;
+        }
+        if (nanos == 0L) {
+            return now;
+        }
+        try {
+            return Math.addExact(now, nanos);
+        } catch (ArithmeticException overflow) {
+            return Long.MAX_VALUE;
+        }
     }
 }

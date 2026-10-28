@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.junit.jupiter.api.Test;
 import org.springframework.asm.ClassReader;
@@ -75,6 +76,21 @@ class SchedulerArchitectureTest {
         assertNoImplementationDependency(
                 AbstractRequestScheduler.class, QueuedRequestScheduler.class);
         assertNoImplementationDependency(RequestContext.class, QueuedRequestScheduler.class);
+    }
+
+    @Test
+    void decodePreemptionUsesSchedulerCapabilityInsteadOfQueueImplementation() throws IOException {
+        assertNoImplementationDependency(DecodePreemption.class, QueuedRequestScheduler.class);
+    }
+
+    @Test
+    void decodePreemptionDoesNotOwnPlacementPlanCompletion() {
+        assertFalse(
+                Arrays.stream(DecodePreemption.class.getDeclaredClasses())
+                        .anyMatch(type -> type.getSimpleName().equals("AdmissionTarget")));
+        assertFalse(
+                Arrays.stream(DecodePreemption.class.getDeclaredMethods())
+                        .anyMatch(method -> method.getName().equals("admit")));
     }
 
     @Test

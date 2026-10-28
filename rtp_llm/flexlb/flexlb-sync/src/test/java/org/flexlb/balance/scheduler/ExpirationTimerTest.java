@@ -142,7 +142,7 @@ class ExpirationTimerTest {
             assertEquals(0, ReflectionTestUtils.getField(timer, "registrations"));
             assertEquals(0L, ReflectionTestUtils.getField(runtime, "pendingWork"));
         } finally {
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         }
     }
 

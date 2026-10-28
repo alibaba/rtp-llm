@@ -450,7 +450,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
-        reporter.reportDecodeAdmission(ipPort(), resourceSnapshot());
+        reporter.reportDecodePreemption(ipPort(), resourceSnapshot());
     }
 
     public enum CapacityEdge {

@@ -5,8 +5,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
-import org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult;
+import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.eviction.DecodePreemption.PreemptionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -78,7 +78,7 @@ class RequestSchedulerTest {
                         mock(RequestSchedulerReporter.class),
                         trace,
                         router,
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
         RequestScheduler scheduler = owner;
         try {
@@ -114,7 +114,7 @@ class RequestSchedulerTest {
             assertSame(owner, pd.data().getScheduler());
             verify(router).select(pd, null);
         } finally {
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
         }
     }
 
@@ -135,7 +135,7 @@ class RequestSchedulerTest {
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class),
                         router,
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
         RequestScheduler scheduler = owner;
         try {
@@ -152,7 +152,7 @@ class RequestSchedulerTest {
             assertEquals(0, owner.requests.liveRequestCount());
             verify(router, never()).select(any(), any());
         } finally {
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
         }
     }
 
@@ -181,7 +181,7 @@ class RequestSchedulerTest {
                         service,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
         try {
             CompletableFuture<Response> future = scheduler.submit(context);
@@ -252,7 +252,7 @@ class RequestSchedulerTest {
                                 service,
                                 router,
                                 mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                                 new PlacementAvailability());
         Thread closer = null;
         Thread secondCloser = null;
@@ -352,7 +352,7 @@ class RequestSchedulerTest {
                                 service,
                                 router,
                                 mock(DeliveryMetricsReporter.class),
-                                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                                 new PlacementAvailability());
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.register(lifecycle, context);
@@ -479,7 +479,7 @@ class RequestSchedulerTest {
                         service,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
         try {
             scheduler.submit(unavailable);
@@ -516,7 +516,7 @@ class RequestSchedulerTest {
         RequestWorkerSelector router = mockRouter();
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        DecodeAdmission eviction = org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock();
+        DecodePreemption eviction = org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
         PlacementAvailability availability = new PlacementAvailability();
         RequestContext context = context(config, 897L, 90);
         CompletableFuture<Response> future = new CompletableFuture<>();
@@ -576,8 +576,7 @@ class RequestSchedulerTest {
         if (synchronous) {
             execution.complete(result);
         }
-        when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                        eviction, context, selectedEndpoint))
+        when(eviction.tryReclaim(context, selectedEndpoint))
                 .thenReturn(execution);
         RequestScheduler scheduler =
                 RequestProtocolTestSupport.injectPlacementDependencies(
@@ -590,8 +589,7 @@ class RequestSchedulerTest {
         CompletableFuture<Void> closing = null;
         try {
             scheduler.submit(context);
-            org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                    verify(eviction, timeout(1_000)), context, selectedEndpoint);
+            verify(eviction, timeout(1_000)).tryReclaim(context, selectedEndpoint);
             if (outcome.equals("cancelled")) {
                 assertTrue(future.cancel(false));
             }
@@ -718,7 +716,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             scheduler.submit(context);
@@ -769,7 +767,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         new PlacementAvailability());
         scheduler.submit(context);
         verify(router, timeout(1_000)).select(context, null);
@@ -850,7 +848,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         reporter,
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             scheduler.submit(gate);
@@ -877,8 +875,8 @@ class RequestSchedulerTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         RequestWorkerSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = RequestProtocolTestSupport.schedulerMock();
-        DecodeAdmission decodeCapacity =
-                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock();
+        DecodePreemption decodePreemption =
+                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
         RequestContext lowPriority = context(config, 910L, 10);
         RequestContext highPriority = context(config, 911L, 90);
         CompletableFuture<Response> lowFuture = new CompletableFuture<>();
@@ -920,7 +918,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        decodeCapacity,
+                        decodePreemption,
                         new PlacementAvailability());
         try {
             scheduler.submit(lowPriority);
@@ -983,7 +981,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         scheduler.submit(expired);
         scheduler.submit(follower);
@@ -1070,7 +1068,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             scheduler.submit(blocked);
@@ -1334,7 +1332,7 @@ class RequestSchedulerTest {
                         configService,
                         router,
                         mock(DeliveryMetricsReporter.class),
-                        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                        org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                         availability);
         try {
             scheduler.submit(context);
@@ -1388,8 +1386,7 @@ class RequestSchedulerTest {
         CompletableFuture<Response> waiting = fixture.scheduler.submit(fixture.context);
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
-        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                verify(fixture.decodeCapacity, never()), any(), any());
+        verify(fixture.decodePreemption, never()).tryReclaim(any(), any());
         assertFalse(waiting.isDone());
         verify(fixture.lifecycle, never()).commitRoute(any(), any());
         RequestProtocolTestSupport.close(fixture.scheduler);
@@ -1404,8 +1401,7 @@ class RequestSchedulerTest {
 
         verify(fixture.router, timeout(1_000)).select(fixture.context, null);
         assertFalse(waiting.isDone());
-        org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                verify(fixture.decodeCapacity, never()), any(), any());
+        verify(fixture.decodePreemption, never()).tryReclaim(any(), any());
         verify(fixture.lifecycle, never()).commitRoute(any(), any());
         RequestProtocolTestSupport.close(fixture.scheduler);
     }
@@ -1574,7 +1570,7 @@ class RequestSchedulerTest {
                             });
             org.mockito.Mockito.doAnswer(
                             invocation -> {
-                                QueuedRequestScheduler.Plan plan = invocation.getArgument(0);
+                                QueuedRequestScheduler.PlacementPlan plan = invocation.getArgument(0);
                                 RequestContext context =
                                         RequestProtocolTestSupport.planContext(plan);
                                 long requestId = context.data().getRequestId();
@@ -1621,7 +1617,7 @@ class RequestSchedulerTest {
                                 return RequestProtocolTestSupport.published(plan, request.item);
                             })
                     .when(RequestProtocolTestSupport.publication(lifecycle))
-                    .enqueueRoute(any(QueuedRequestScheduler.Plan.class));
+                    .enqueueRoute(any(QueuedRequestScheduler.PlacementPlan.class));
             DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
             // The exact placement scope finishes after the coordinator retires the queue entry.
             // A delayed Future callback therefore cannot hide a lost capacity handoff.
@@ -1634,7 +1630,7 @@ class RequestSchedulerTest {
                             configService,
                             router,
                             reporter,
-                            org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock(),
+                            org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock(),
                             availability);
         }
 
@@ -1741,8 +1737,8 @@ class RequestSchedulerTest {
 
         private final RequestWorkerSelector router = mockRouter();
 
-        private final DecodeAdmission decodeCapacity =
-                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock();
+        private final DecodePreemption decodePreemption =
+                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
 
         private final AbstractRequestScheduler lifecycle =
                 RequestProtocolTestSupport.schedulerMock();
@@ -1795,7 +1791,7 @@ class RequestSchedulerTest {
                             configService,
                             router,
                             mock(DeliveryMetricsReporter.class),
-                            decodeCapacity,
+                            decodePreemption,
                             availability);
         }
     }

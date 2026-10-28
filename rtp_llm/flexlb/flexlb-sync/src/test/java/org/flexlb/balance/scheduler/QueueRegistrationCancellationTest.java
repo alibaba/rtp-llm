@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -191,7 +191,7 @@ class QueueRegistrationCancellationTest {
             try {
                 assertTrue(registered.await(2L, TimeUnit.SECONDS));
                 assertNotNull(f.queue.cancel(903L, 0L, CancelReason.CLIENT_CANCELLED));
-                SchedulerTestSupport.runtime(f.queue).shutdown();
+                SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.queue));
 
                 assertFalse(submitted.isDone(), "a cancelled hook holds no scheduling resources");
             } finally {
@@ -199,7 +199,7 @@ class QueueRegistrationCancellationTest {
             }
             assertFalse(submitted.get(2L, TimeUnit.SECONDS).get(2L, TimeUnit.SECONDS).isSuccess());
             verify(f.router, never()).select(any(), nullable(String.class));
-            SchedulerTestSupport.runtime(f.queue).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.queue));
         }
     }
 
@@ -250,7 +250,7 @@ class QueueRegistrationCancellationTest {
                             config,
                             router,
                             batches,
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             runtime,
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
@@ -268,7 +268,7 @@ class QueueRegistrationCancellationTest {
 
         @Override
         public void close() {
-            runtime.shutdown();
+            SchedulerTestSupport.shutdown(runtime);
         }
     }
 }

@@ -474,7 +474,7 @@ class RequestLifetimeTest {
                             System.currentTimeMillis()));
             SchedulerTestSupport.awaitRequestWork(registry.runtime);
         } finally {
-            registry.runtime.shutdown();
+            SchedulerTestSupport.shutdown(registry.runtime);
         }
     }
 

@@ -4,7 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -65,7 +65,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
 
     private final RequestWorkerSelector router;
     private final DeliveryMetricsReporter reporter;
-    private final DecodeAdmission decodeCapacity;
+    private final DecodePreemption decodePreemption;
     private final PlacementAvailability availability;
     private final QueueExecutionSettings queueSettings;
     private final int plannerCount;
@@ -79,7 +79,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private final Map<RequestContext, GlobalQueueEntry> queuedEntries = new IdentityHashMap<>();
 
     private final ArrayDeque<QueueEvent> events = new ArrayDeque<>();
-    private final Set<Plan> pendingPreemptions = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<PlacementPlan> pendingPreemptions = Collections.newSetFromMap(new IdentityHashMap<>());
 
     /** Waiting on local preemption slots, independent of physical Worker capacity edges. */
     private final Set<GlobalQueueEntry> preemptionQuotaWaiters =
@@ -89,7 +89,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     // including when the request is cancelled while planning.
     private final Set<GlobalQueueEntry> inFlight =
             Collections.newSetFromMap(new IdentityHashMap<>());
-    private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
+    private final ArrayDeque<PlacementPlan> completedPlans = new ArrayDeque<>();
 
     /** Published by the decision thread; timeout readers never acquire the queue lock. */
     private volatile Map<String, Object> latestQueueWaitSnapshot =
@@ -105,7 +105,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             FlexlbConfig config,
             RequestWorkerSelector router,
             DeliveryMetricsReporter reporter,
-            DecodeAdmission decodeCapacity,
+            DecodePreemption decodePreemption,
             SchedulerRuntime runtime,
             PlacementAvailability availability,
             DecodeResources.AdmissionCapacity capacity,
@@ -114,7 +114,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         this.queueSettings = QueueExecutionSettings.capture(config);
         this.router = Objects.requireNonNull(router, "router");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.decodeCapacity = Objects.requireNonNull(decodeCapacity, "decodeCapacity");
+        this.decodePreemption = Objects.requireNonNull(decodePreemption, "decodePreemption");
         this.availability = Objects.requireNonNull(availability, "availability");
         this.orderedQueue = new OrderedRequestQueue(queueSettings.priorityOrdering());
         this.waitingRequests =
@@ -156,7 +156,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         return true;
     }
 
-    public AdmissionHandle claimQueuedRoute(
+    @Override
+    public AdmissionHandle claimWithdrawal(
             DecodeEndpoint endpoint,
             DecodeResources.ReservationHandle victim,
             int incomingPriority) {
@@ -384,7 +385,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                     drainOnClose();
                     drained = true;
                 }
-                Plan completed;
+                PlacementPlan completed;
                 List<GlobalQueueEntry> candidates;
                 lock.lock();
                 try {
@@ -449,7 +450,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         try {
             planners.execute(
                     () -> {
-                        Plan plan = new Plan(entry, availability.sequence(), closed);
+                        PlacementPlan plan = new PlacementPlan(entry, availability.sequence(), closed);
                         try {
                             if (!entry.removed && !entry.context.data().getFuture().isDone()) {
                                 if (entry.context
@@ -486,11 +487,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                         }
                     });
         } catch (Throwable failure) {
-            publishPlan(Plan.failure(entry, failure, availability.sequence(), closed));
+            publishPlan(PlacementPlan.failure(entry, failure, availability.sequence(), closed));
         }
     }
 
-    private void publishPlan(Plan plan) {
+    private void publishPlan(PlacementPlan plan) {
         lock.lock();
         try {
             completedPlans.addLast(plan);
@@ -500,7 +501,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         }
     }
 
-    private void processCompletedPlan(Plan plan) {
+    private void processCompletedPlan(PlacementPlan plan) {
         boolean retry = false;
         boolean completingPreemption = plan.preemptionCompleted;
         Map<String, Object> diagnostics = plan.result.diagnostics();
@@ -547,7 +548,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                     plan.entry.context.data().getRequestId(),
                     failure);
         } finally {
-            // Plan ownership has settled before this slot becomes eligible again.
+            // PlacementPlan ownership has settled before this slot becomes eligible again.
             lock.lock();
             try {
                 inFlight.remove(plan.entry);
@@ -566,6 +567,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                                 && !plan.entry.context.data().getFuture().isDone())) {
                     orderedQueue.markRequestReadyForRetry(plan.entry);
                 }
+                changed.signalAll();
             } finally {
                 lock.unlock();
             }
@@ -590,7 +592,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
                 });
     }
 
-    private Outcome commit(Plan plan) {
+    private Outcome commit(PlacementPlan plan) {
         GlobalQueueEntry entry = plan.entry;
         boolean reclaimed = plan.preemptionCompleted;
         String rejection = null;
@@ -652,7 +654,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         return Outcome.DONE;
     }
 
-    private boolean tryPriorityRescue(Plan plan, WorkerEndpoint blockedEndpoint) {
+    private boolean tryPriorityRescue(PlacementPlan plan, WorkerEndpoint blockedEndpoint) {
         GlobalQueueEntry entry = plan.entry;
         if (!queueSettings.priorityOrdering() || entry.context.data().getFuture().isDone()) {
             return false;
@@ -661,29 +663,59 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             preemptionQuotaWaiters.add(entry);
             return false;
         }
-        var execution = decodeCapacity.admit(plan, blockedEndpoint);
+        var execution = decodePreemption.tryReclaim(plan.context(), blockedEndpoint);
         if (execution == null) {
             return false;
         }
         pendingPreemptions.add(plan);
-        execution.whenComplete(
-                (result, failure) -> {
-                    plan.preemptionResult = result;
-                    plan.preemptionFailure = failure;
-                    if (failure != null) {
-                        runtime.recordFailure(
-                                failure instanceof java.util.concurrent.CompletionException
-                                                && failure.getCause() != null
-                                        ? failure.getCause()
-                                        : failure);
-                    }
-                    plan.preemptionCompleted = true;
-                    publishPlan(plan);
-                });
+        execution
+                .thenApply(result -> acceptPreemption(plan, blockedEndpoint, result))
+                .whenComplete(
+                        (result, failure) -> {
+                            plan.preemptionResult = result;
+                            plan.preemptionFailure = failure;
+                            if (failure != null) {
+                                runtime.recordFailure(
+                                        failure
+                                                                instanceof
+                                                                        java.util.concurrent
+                                                                                .CompletionException
+                                                        && failure.getCause() != null
+                                                ? failure.getCause()
+                                                : failure);
+                            }
+                            plan.preemptionCompleted = true;
+                            publishPlan(plan);
+                        });
         return true;
     }
 
-    PlacementResult<RequestRoute, PlacementKey> enqueueRoute(Plan plan) {
+    private DecodePreemption.PreemptionResult acceptPreemption(
+            PlacementPlan plan,
+            WorkerEndpoint blockedEndpoint,
+            DecodePreemption.PreemptionResult result) {
+        if (result == null || !result.committed()) {
+            return result;
+        }
+        if (!(blockedEndpoint instanceof DecodeEndpoint decodeEndpoint)) {
+            return result;
+        }
+        var reservation = result.reservation();
+        if (plan.accept(decodeEndpoint, reservation)) {
+            return result;
+        }
+        var status =
+                decodeEndpoint
+                        .release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
+                        .status();
+        checkState(
+                status == DecodeResources.ReservationReleaseResult.RELEASED
+                        || status == DecodeResources.ReservationReleaseResult.STALE,
+                "unaccepted preemption retained Decode resources");
+        return new DecodePreemption.PreemptionResult(null, false, "plan_no_longer_current");
+    }
+
+    PlacementResult<RequestRoute, PlacementKey> enqueueRoute(PlacementPlan plan) {
         RequestContext context = plan.entry.context;
         RequestRoute routing = plan.result.value();
         if (plan.pendingDecodeRollback == null) {
@@ -733,11 +765,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     }
 
     private final class QueuePublication implements Publication {
-        private final Plan plan;
+        private final PlacementPlan plan;
         private final RequestRoute route;
         private boolean published;
 
-        private QueuePublication(Plan plan, RequestRoute route) {
+        private QueuePublication(PlacementPlan plan, RequestRoute route) {
             this.plan = plan;
             this.route = route;
         }
@@ -758,7 +790,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         }
     }
 
-    private boolean park(Plan plan, Map<String, Object> diagnostics) {
+    private boolean park(PlacementPlan plan, Map<String, Object> diagnostics) {
         int depth;
         int[] counts;
         boolean parked;
@@ -890,6 +922,56 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     }
 
     @Override
+    boolean awaitPlacementDrain(long deadlineNanos) {
+        if (Thread.currentThread() == decisionThread) {
+            return true;
+        }
+        boolean interrupted = false;
+        lock.lock();
+        try {
+            while (!placementDrainedLocked() && !closed.get()) {
+                long remaining =
+                        deadlineNanos == Long.MAX_VALUE
+                                ? Long.MAX_VALUE
+                                : deadlineNanos - System.nanoTime();
+                if (remaining <= 0L) {
+                    break;
+                }
+                try {
+                    changed.awaitNanos(remaining);
+                } catch (InterruptedException interruption) {
+                    interrupted = true;
+                    break;
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        lock.lock();
+        try {
+            return placementDrainedLocked() || closed.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    void stopAdmission() {
+        decodePreemption.freezeAdmission();
+    }
+
+    private boolean placementDrainedLocked() {
+        return queuedEntries.isEmpty()
+                && events.isEmpty()
+                && completedPlans.isEmpty()
+                && inFlight.isEmpty()
+                && pendingPreemptions.isEmpty();
+    }
+
+    @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
             availability.removeListener(availabilityListener);
@@ -942,7 +1024,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
     private record QueueEvent(
             EventKind kind, GlobalQueueEntry entry, RequestContext context, PlacementKey key) {}
 
-    public static final class Plan implements AutoCloseable {
+    public static final class PlacementPlan implements AutoCloseable {
         private boolean closed;
         private final AtomicBoolean schedulerClosed;
         private final GlobalQueueEntry entry;
@@ -954,7 +1036,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         private Throwable rollbackFailure;
         private Throwable planningFailure;
         private volatile boolean preemptionCompleted;
-        private org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult preemptionResult;
+        private org.flexlb.balance.eviction.DecodePreemption.PreemptionResult preemptionResult;
         private Throwable preemptionFailure;
         // The plan owns selection pins and uncommitted Decode capacity.
         private PlacementResult<RequestRoute, PlacementKey> result;
@@ -962,7 +1044,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
         // Retained after selection pins close so the request can be parked.
         private PlacementKey waitKey;
 
-        private Plan(
+        private PlacementPlan(
                 GlobalQueueEntry entry, long availabilitySequence, AtomicBoolean schedulerClosed) {
             this.entry = entry;
             this.schedulerClosed = schedulerClosed;
@@ -970,12 +1052,12 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             this.result = PlacementResult.closed();
         }
 
-        static Plan failure(
+        static PlacementPlan failure(
                 GlobalQueueEntry entry,
                 Throwable failure,
                 long availabilitySequence,
                 AtomicBoolean schedulerClosed) {
-            Plan plan = new Plan(entry, availabilitySequence, schedulerClosed);
+            PlacementPlan plan = new PlacementPlan(entry, availabilitySequence, schedulerClosed);
             plan.planningFailure = failure;
             return plan;
         }
@@ -984,7 +1066,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler
             return entry.context;
         }
 
-        /** A false result leaves ownership with DecodeAdmission. */
+        /** A false result leaves the reservation with the caller for rollback. */
         public synchronized boolean accept(
                 DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
             var route = result == null ? null : result.value();

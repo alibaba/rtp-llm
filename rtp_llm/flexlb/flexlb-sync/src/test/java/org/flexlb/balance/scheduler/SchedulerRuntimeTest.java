@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -519,7 +519,10 @@ class SchedulerRuntimeTest {
                 assertNull(observed.get(5, java.util.concurrent.TimeUnit.SECONDS));
             }
             try (var closer = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-                closer.submit(f.runtime::shutdown).get(5, java.util.concurrent.TimeUnit.SECONDS);
+                closer.submit(() -> {
+                            SchedulerTestSupport.shutdown(f.runtime);
+                        })
+                        .get(5, java.util.concurrent.TimeUnit.SECONDS);
             }
             assertFalse(
                     SchedulerTestSupport.responseCompletions(f.runtime)
@@ -558,7 +561,7 @@ class SchedulerRuntimeTest {
                             config,
                             mock(RequestWorkerSelector.class),
                             reporter,
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
                             org.mockito.Mockito.mock(

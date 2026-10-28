@@ -5,7 +5,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -22,6 +22,7 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -132,7 +133,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     .tryReserveDelivery();
         }
         var eviction =
-                new DecodeAdmission(
+                new DecodePreemption(
                         deliveryStrategy,
                         requests,
                         runtime,
@@ -289,7 +290,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     @Override
     public void close() {
-        runtime.shutdown();
+        runtime.shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
     }
 
     private static final class BindingRouter extends RequestWorkerSelector {

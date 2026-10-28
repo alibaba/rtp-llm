@@ -618,7 +618,7 @@ class RequestWorkerSelectorTest {
                                     RequestProtocolTestSupport.adopt(
                                             queueScheduler(context),
                                             RequestProtocolTestSupport.plan(context, route),
-                                            new org.flexlb.balance.eviction.DecodeAdmission
+                                            new org.flexlb.balance.eviction.DecodePreemption
                                                     .PreemptionResult(reservation, false, "test")));
             assertSame(adoptionThrows ? adoptionFailure : cleanupFailure, actual);
             assertEquals(
@@ -650,7 +650,7 @@ class RequestWorkerSelectorTest {
                 RequestProtocolTestSupport.adopt(
                         scheduler,
                         plan,
-                        new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
+                        new org.flexlb.balance.eviction.DecodePreemption.PreemptionResult(
                                 reservation, false, "test")));
         when(route.prefillEp().offerPinned(eq(prefill.pin()), any(), any())).thenReturn(true);
         doThrow(cleanupFailure).when(prefill.pin()).close();
@@ -775,13 +775,13 @@ class RequestWorkerSelectorTest {
                     RequestProtocolTestSupport.adopt(
                             scheduler,
                             plan,
-                            new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
+                            new org.flexlb.balance.eviction.DecodePreemption.PreemptionResult(
                                     existing, false, "first")));
             assertFalse(
                     RequestProtocolTestSupport.adopt(
                             scheduler,
                             plan,
-                            new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
+                            new org.flexlb.balance.eviction.DecodePreemption.PreemptionResult(
                                     incoming, false, "conflict")));
             assertEquals(
                     existing,
@@ -812,7 +812,7 @@ class RequestWorkerSelectorTest {
                                         mock(
                                                 org.flexlb.service.monitor.DeliveryMetricsReporter
                                                         .class),
-                                        mock(org.flexlb.balance.eviction.DecodeAdmission.class),
+                                        mock(org.flexlb.balance.eviction.DecodePreemption.class),
                                         SchedulerTestSupport.runtime(requests),
                                         new PlacementAvailability(),
                                         SchedulingTestConfig.capacity(config),
@@ -1249,7 +1249,7 @@ class RequestWorkerSelectorTest {
                 configService,
                 router,
                 mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
-                mock(org.flexlb.balance.eviction.DecodeAdmission.class),
+                mock(org.flexlb.balance.eviction.DecodePreemption.class),
                 new PlacementAvailability());
     }
 

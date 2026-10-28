@@ -68,6 +68,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                 return future;
             }
             Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
+            boolean operationFinished = false;
             try {
                 var selection = router.select(context, router.resolvePolicyGroup(context));
                 context.data().setSchedulingDiagnostics(selection.diagnostics());
@@ -91,6 +92,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                                     case SUCCESS -> {
                                         RouteDelivery delivery = committed.value();
                                         operation.finish();
+                                        operationFinished = true;
                                         long now = System.currentTimeMillis();
                                         long visibility =
                                                 PrefillPredictionBoundary
@@ -130,7 +132,9 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                         context.data().getRequestId(),
                         selectionFailure);
             } finally {
-                operation.finish();
+                if (!operationFinished) {
+                    operation.finish();
+                }
                 if (failure != null) {
                     publish(context, failure, false);
                 }

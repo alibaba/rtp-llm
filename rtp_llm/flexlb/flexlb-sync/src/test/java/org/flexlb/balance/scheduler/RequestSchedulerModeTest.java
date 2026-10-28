@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -196,7 +196,7 @@ class RequestSchedulerModeTest {
             f.requests.runtime.awaitAdmissions();
             assertEquals(0, f.requests.requests.liveRequestCount());
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
-            SchedulerTestSupport.runtime(f.scheduler).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
 
             if (f.queue != null) {
                 assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
@@ -273,7 +273,7 @@ class RequestSchedulerModeTest {
                             mock(RequestSchedulerReporter.class),
                             mock(RecentCacheKeyTraceReporter.class),
                             router,
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             new PlacementAvailability());
             scheduler = requests;
             queue =
