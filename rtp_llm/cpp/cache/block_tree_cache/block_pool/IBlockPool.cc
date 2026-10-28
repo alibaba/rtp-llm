@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <limits>
 #include <sstream>
 
@@ -130,7 +131,19 @@ void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
     if (treeRefCountNoLock(block, BlockTreeRefType::FROZEN) != 0) {
         return;
     }
-    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+    const size_t frozen_index = treeRefTypeIndex(BlockTreeRefType::FROZEN);
+    incTreeRefNoLock(block, frozen_index);
+    if (config_->pool_type == BlockPoolType::DEVICE) {
+        const size_t frozen_blocks = tree_referenced_block_counts_[frozen_index];
+        const size_t total_blocks  = totalBlocksNumNoLock();
+        if (frozen_blocks * 10 > total_blocks * 3) {
+            RTP_LLM_LOG_ERROR("device pool [%s] frozen blocks exceed 30%%: frozen=%zu total=%zu",
+                              config_->pool_name.c_str(),
+                              frozen_blocks,
+                              total_blocks);
+            std::abort();
+        }
+    }
 }
 
 void IBlockPool::unfreezeBlock(BlockIdxType block) {

@@ -35,12 +35,12 @@ private:
         auto config                  = std::make_shared<DeviceBlockPoolConfig>();
         config->pool_type            = BlockPoolType::DEVICE;
         config->pool_name            = "load_context_test";
-        config->physical_block_count = 4;
+        config->physical_block_count = 5;
         MemoryLayoutConfig layout;
-        layout.block_num                = 4;
+        layout.block_num                = 5;
         layout.layer_num                = 1;
         layout.kv_block_stride_bytes    = 16;
-        layout.kv_block_pool_size_bytes = 64;
+        layout.kv_block_pool_size_bytes = 80;
         config->memory_layouts.push_back(layout);
         return config;
     }

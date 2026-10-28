@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 
 #include <algorithm>
+#include <csignal>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -14,8 +15,8 @@ namespace rtp_llm {
 namespace {
 
 struct TestPoolConfig: public BlockPoolConfigBase {
-    TestPoolConfig(std::string name, size_t blocks) {
-        pool_type            = BlockPoolType::HOST;
+    TestPoolConfig(std::string name, size_t blocks, BlockPoolType type = BlockPoolType::HOST) {
+        pool_type            = type;
         pool_name            = std::move(name);
         physical_block_count = blocks;
     }
@@ -46,8 +47,9 @@ protected:
     }
 };
 
-std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
-    auto pool = std::make_shared<TestPool>(std::make_shared<TestPoolConfig>("test", physical_block_count));
+std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count,
+                                               BlockPoolType pool_type = BlockPoolType::HOST) {
+    auto pool = std::make_shared<TestPool>(std::make_shared<TestPoolConfig>("test", physical_block_count, pool_type));
     pool->init();
     return pool;
 }
@@ -85,6 +87,29 @@ TEST(IBlockPoolTest, UnfreezePreservesCacheAndReleasesOrphans) {
         EXPECT_EQ(pool->first_tree_edges, 1u);
         EXPECT_EQ(pool->last_tree_edges, 1u);
     }
+}
+
+TEST(IBlockPoolTest, DeviceFreezeOverThirtyPercentIsFatal) {
+    auto pool   = makeInitializedPool(/*physical_block_count=*/11, BlockPoolType::DEVICE);
+    auto blocks = pool->malloc(4);
+    ASSERT_TRUE(blocks.has_value());
+
+    for (size_t index = 0; index < 3; ++index) {
+        pool->freezeBlock(blocks->at(index));
+    }
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 3u);
+
+    EXPECT_EXIT(pool->freezeBlock(blocks->at(3)), ::testing::KilledBySignal(SIGABRT), "");
+}
+
+TEST(IBlockPoolTest, HostFreezeOverThirtyPercentIsAllowed) {
+    auto pool   = makeInitializedPool(/*physical_block_count=*/4);
+    auto blocks = pool->malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+
+    pool->freezeBlock(blocks->at(0));
+    pool->freezeBlock(blocks->at(1));
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
 }
 
 TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
