@@ -18,10 +18,10 @@ def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr):
     chosen = tl.full((16,), 0, tl.float32)
     norm = tl.full((), 0, tl.float32)
     for i in tl.static_range(10):
-        # CUB ArgMax in the native router chooses the lower ID on a tie.
-        best, expert = tl.max(
-            probabilities, 0, return_indices=True, return_indices_tie_break_left=True
-        )
+        # Separate reductions keep the native lower-ID tie break and allow
+        # the one-warp integer minimum to use the hardware reduction path.
+        best = tl.max(probabilities, 0)
+        expert = tl.min(tl.where(probabilities == best, experts, 2147483647), 0)
         chosen = tl.where(slots == i, best, chosen)
         norm = norm + best
         # The native 512-expert router scans two 256-element chunks.
