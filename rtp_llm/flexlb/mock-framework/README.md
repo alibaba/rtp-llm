@@ -2,26 +2,27 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Client 播放器、多 JVM 发压协调、Master 停启和滚动重启、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、显式文本请求列表播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。数据集读取、Master 停启和滚动重启、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## 设计边界
 
-本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 协调及其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
+本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通显式文本请求列表播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
 
 ### Python Case 操作与 Java 实例能力
 
-Python 提供面向 Case 的业务接口，Java 提供实例原子能力。
+Python 提供面向 Case 的业务接口，Java Engine 提供实例原子能力。Client 的多 JVM 发压由 Java client0 协调，Python 转交活动级命令，不逐个调度请求。
 
 | 层次 | 职责 |
 | --- | --- |
 | Python Runner | 顺序执行 step、解析引用、固定时间范围、预算和失败处理、记录结果。 |
-| Python Case 接口实现 | 选择实例、扩缩容、分配总流量、跨实例查询与聚合；使用进程管理和发现文件能力。 |
+| Python Case 接口实现 | 选择 Engine、扩缩容、向 client0 提交流量任务、跨实例查询与聚合；使用进程管理和发现文件能力。 |
 | Java 实例协议 | 停止实例、查询自身状态、接收已分配的流量计划等。Engine 宿主另负责创建和关闭本 JVM 内的 Engine 对象。 |
+| Java client0 协调者 | 固定参与者、分配总流量与输入、协调准备/启动/停止、汇总活动状态；与本地请求执行分开。 |
 | Java 公共 Mock Engine | 请求接入、调度循环、资源机制、Forward 执行、输出和指标；组合 RTP 或 vLLM Scheduler。 |
 
-缩容一个 Decode 时，Python 从全局候选集合中选择并固定一个地址，再通知其宿主关闭该实例，更新发现文件并返回实际结果。Java 不接收全局 `count: 1`；不能对每个 JVM 广播一次缩容，否则会缩掉多个实例。Client 总 QPS、请求数和并发预算也只分配一次，实例收到的是自己的份额。
+缩容一个 Decode 时，Python 从全局候选集合中选择并固定一个地址，再通知其宿主关闭该实例，更新发现文件并返回实际结果。Java 不接收全局 `count: 1`；不能对每个 JVM 广播一次缩容，否则会缩掉多个实例。Client 总 QPS、请求数和并发预算由 client0 只分配一次，各 Client 收到自己的份额，不能广播完整总量。
 
-Case 操作放在独立的 Python 实现中，不在 Runner 主循环按接口名堆分支。简单实例调用复用公共传输；扩缩容、流量分配、查询聚合保留各自的业务逻辑，不用一个通用广播器代替。
+Case 操作放在独立的 Python 实现中，不在 Runner 主循环按接口名堆分支。简单实例调用复用公共传输；Engine 扩缩容、client0 流量协调、Python 查询聚合保留各自的业务逻辑，不用一个通用广播器代替。
 
 参数引用只表达取值：前置 step 的返回结果，或已定义的全局配置/发现信息。不增加专用的 leader/group/instance 选择器语言；查询主 Master 后直接引用查询结果。目标省略时默认对应操作域的全部实例，显式空集合或失效地址报错，不能退回全部，也不能自动缩成当前可达集合。需要唯一目标的操作校验数量。引用统一写成 `{ref: steps.<id>}`、`{ref: steps.<id>.<field>}` 或 `{ref: globals.<field>}`。当前全局字段为 masters/prefill/decode/vit 的服务地址列表，目标参数统一为 `targets`。不新增 YAML 流程宏。
 
@@ -35,7 +36,7 @@ Step 统一为一次接口调用，包含 id、describe、interface、args、wit
 
 普通数值查询直接返回数值，单位声明在接口上；地址集合返回列表，动作返回明确回执，逐 Master 状态保留映射。断言按结构和运算符判断，不按 MetricValue、PerMasterEngines 等业务类型名称偷偷聚合。接口文档和清单可以由 Python 定义导出，用于保存实验现场，不再依赖 Java 构建才能编译 Case。
 
-Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner 后台执行。Client 活动的启动回执、跟踪、stop/drain 以及原 run: background 的替代方式留待 Client 设计确定；本轮不引入通用后台任务框架。
+Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner 后台执行。client/start 完成准备和开始命令后返回，Java 自行播放；client/stop 停止并收尾。Client 不引入 task ID、任务 ref 或通用后台任务框架。
 
 本轮重构按职责变化整体重写 Registry、Step 模型、编译和执行主链，联动 CLI、启动配方、夹具和构建入口；复用严格 YAML 解析、进程回收、采集与记录等仍成立的机制。Java 内部端点保留明确的请求/响应协议，但不再声明整套 Case API；配置类型留在所属组件，不能随旧接口目录误删。保留引用重校验、固定时间窗口、错误结果和取消清理的验收，不保留另一套旧 Case 执行入口作为兼容分支。
 
@@ -127,15 +128,80 @@ Runner 在动作前登记预期停止，结合子进程退出和有界健康检�
 
 Python 维护一份权威的当前发现信息，增加、移除和重启换地址均更新该信息；历史端点保留在实验记录中。Master 等消费者能否动态加载发现变更由其自身实现负责，Case 可检查传播结果，框架不替消费者伪造路由更新。显式引用旧地址不能偷偷改指向新实例；一次运行内，Engine 的业务 RPC、控制/metrics 和宿主控制端口统一不复用，跨用途也不能复用，例如不能把旧 metrics 端口分给新 RPC。该约束只覆盖本次 Runner 管理的 Engine 和宿主，不是操作系统级端口预留。
 
-### 多 Client 的流量和结果（待讨论，本轮不实施）
+### Client：播放器控速，Client 发送与管理生命周期
 
-本节保留讨论中的候选方案，尚未解决的 Client 生命周期、输入分片、并发和总 QPS 协调不能视为已定契约。本轮保持 NativeClient 原生收发核心，不实现播放器或据此固化 Case 接口。
+所有 Client 同时只有一份相同的 start 计划。Python 只操作 client0，Java 负责拆分计划和自行发压；Python 不轮询播放进度、不实时检查 QPS。先调用 client/stop 收集上一轮结果，再启动下一轮。
 
-一次流量任务开始前固定 Client 集合，Python 统一规划总 QPS、请求数、并发预算和数据分片，Java Client 读取并执行自己的计划。发请求、消费响应和逐请求计时留在 Java，Python 不进入逐请求发压路径。全局请求序号、输入顺序和随机采样不随 JVM 数变化；trace 时间和 warmup/ramp 不能在各分片重新从头计算。拆分输入避免每个 Client 重复全量解压和播放。
+| 组件 | 职责 |
+| --- | --- |
+| Python | 启动和监视各 JVM，调用 start/stop，最后通过已有指标查询路径执行 QPS 等 Case 检查。 |
+| client0 协调者 | 固定全部参与者，分配总请求数、QPS 和并发额度，协调准备/开始/停止，汇总执行异常与最终结果。 |
+| 播放器 Player | 读取并生成请求，控制产出速度。只有播放器做速率控制。 |
+| Client（LoadClient + NativeClient） | 管理小队列和在途并发，发送请求，消费完整响应，处理超时、取消和终态，产生实际调用指标。 |
 
-首版多 Client 不支持多轮会话，不在运行中增加参与者或自动重分片。停止默认作用于本次任务的全部 Client，也可指定部分；部分停止后其余 Client 保持原分配，不自动补齐被停止部分的 QPS。stop 停止新增发送，drain 等待已有请求结束；最终收尾覆盖原任务全部参与者，已停止实例的历史仍属于任务结果。
+client0 同时参与本地发压，不增加协调进程或选主。单 Client 与多 Client 使用同一流程，client0 到本地和其他 Client 的控制都走 TCP。准备完成后，各 JVM 独立产出和发送，请求与响应不经 client0 中转。client0 意外退出使整体失败，不做接管。
 
-请求记录按 Client 分文件保存，保留全局请求身份、实际发送/首 token/终态事实和完成边界；跨实例查询按目标集合合并，分页不能冒充完整集合。任一 Client 基础设施失败使任务整体失败并停止其他参与者，不通过忽略缺失实例得到成功结果。保存已确认和结果未知的请求，不重放未知请求，也不补造完成记录。
+#### 产出、队列与并发
+
+```text
+播放器按速率产出 → 非阻塞 offer → 有界小队列 → Client 有并发容量时取出 → 原生调用
+```
+
+Client 取快了就在队列为空时等待；取慢了允许小队列暂时积压。队列满时报告执行异常并停止整组，不让播放器阻塞降速，不丢弃后继续，也不自动扩成无限队列。Client 不再把取出的请求移到第二条待执行队列，并发槽位覆盖调用至终态。
+
+请求不携带 planned_at，不增加逐请求发送偏差验收。播放器内部使用单调时钟控制节奏；Client 只从实际调用开始计 TTFT 和请求耗时。开始调用不等于 Master 已接收，客户端终态也不证明远端 KV 已释放。
+
+队列满说明当前配置无法继续执行计划，不能单凭它归责服务端或发压端。播放器慢但队列未满时，留给最终 QPS check 判断。队列会改变短时间发送节奏，本版不承诺严格复现 trace 到达时间。
+
+总流量只分配一次。均匀播放的全局序号 k 对应相对时间 k/Q，再按 k % Client 数分片，各 Client 不从同一个相位重复完整速率。总并发均分，余数按固定参与者顺序分配；不运行时借用配额或重分片。首版每个 Client 至少分到一个请求和一个并发槽位，否则拒绝启动。
+
+#### 只暴露 start/stop
+
+- `client/start`：接收全局计划，所有 Client 准备后下发同一个未来开始时间，成功返回 true。返回只代表开始命令已被接收，不代表播放成功。启动中或尚未收集上一轮结果时再次 start 报错。
+- `client/stop`：参数为空，停止全部播放器及新增调用，等待有界收尾，返回按 Client 服务地址保存的结果。已经自然结束则直接收集原结果；重复 stop 不重放或重新开始。
+
+没有独立的 status/wait/drain Case 接口，没有任务选择参数。Java 内部保留轮次序号以拒绝旧控制命令，Case 不需要知道它。当前 stop 固定整组；部分 Client 停止尚未接通，不能暗中把指定目标扩成全部。
+
+自然结束时，Client 发送完队列剩余项并等待在途请求；主动或异常停止时，未发出的请求不再发送，计入 unsent。单请求业务错误留给 Case 指标门禁，不默认中断整组。队列满、准备失败、参与者失联、收尾超时和产物写失败属于执行异常，client0 停止其余参与者并保留首个原因；故障传播并非多个 JVM 同时发生。
+
+Python 在 stop 或最终清理时收集异常，不增加实时发压监控。开始响应丢失也必须尝试最终 stop，不能据此重发 start。Runner 原有进程退出监视保留。收尾先停 Client、获取结果，再做 Prometheus 最后采样和进程清理；不能遗漏 stop 后仍给出虚假的成功。收尾超时取消剩余调用，记录执行错误，不补造远端释放事实。
+
+#### 第一批可运行范围
+
+当前输入是显式文本请求列表：每项包含 token_ids、max_new_tokens 和可选 priority（默认 50）。不复制旧数据解码器，不做数据生成、数据集读取、循环、多轮、trace、ramp 或动态参与者。每次控制请求受现有 1 MiB 限制，这个入口用于功能接线，不能冒充大规模流式数据播放。后续数据读取接在 Player 的内容来源处，Client 的发送/并发/生命周期边界不变。
+
+启动参数：masters 必须是一个已知 Master 地址的列表，便于引用主 Master 查询结果；requests 是非空请求列表；qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16 条，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h。容量默认值仅用于接线，尚未经过压力校准。
+
+Master 在本轮固定，不动态跟随主节点。单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。当前只支持本机多 JVM；开始时间经本机墙钟转换为各 JVM 的单调时钟，未承诺跨机器时钟同步。准备后 30s 未收到开始命令的 Client 自行报错退出本轮。
+
+```yaml
+# environment 增加 client: {deployment: {replicas: 2}, config: {}}
+# 以下 steps 放在已有 phase 内；globals.masters 在单 Master 环境恰好包含一个地址。
+- id: load
+  describe: 两个 Client 分担同一份流量
+  interface: client/start
+  args:
+    masters: {ref: globals.masters}
+    qps: 2
+    concurrency: 2
+    requests:
+      - {token_ids: [1, 2, 3], max_new_tokens: 3}
+      - {token_ids: [4, 5, 6], max_new_tokens: 3}
+  wait_after: 3s
+- id: stop_load
+  describe: 收集全部 Client 的执行结果
+  interface: client/stop
+```
+
+启动配方中的 client 使用 `java -jar <framework>/java/client/target/mock-client-1.0-SNAPSHOT-all.jar`，仍由 Runner 注入配置、拓扑和独立输出目录。
+
+`client/qps` 复用公共 Python 指标查询，统计 `mock_client_requests_issued_total`，不是完成 QPS。沿用 targets 和 range 参数；最终检查必须选择实际发压窗口，不能用包含空闲和收尾的整个实验时长稀释目标。latest 在自然结束后可能已经为零，all 尚不支持。没有第二套“发压有效性”自动门禁。
+
+各 Client 只上报自己的 issued/finished、TTFT 和请求耗时；client0 不把全局汇总重复上报。缺实例或采样不足按公共查询规则报错。Client 执行结果包含 produced/issued/finished/unsent、在途/队列余量、各终态计数和异常，不把业务错误计数当成执行异常。
+
+每个 Client 在自己的 `playback/<轮次>/` 保存计划与结果；client0 另在 `coordinator/<轮次>/` 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和下一轮不会覆盖旧结果。当前仅落盘计划和汇总，逐请求完整记录及查询仍待实现。
+
+剩余待讨论项收敛为：实际数据集如何读取/分片，是否需要部分停止，逐请求记录格式，以及适合真实负载的队列/并发默认值。QPS 的容忍度和窗口由 Case 检查指定，不在 Client 再定义一份。
 
 ### Python 指标查询与公共指标
 
@@ -159,7 +225,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 1. 从 LocalPrefill/DecodeAdmission 分离协议、调度域和公共执行组件，保留现有超时、取消、P/D 交接及清理行为；先让 RTP 使用公共 Engine。
 2. 把队列、容量等待、选批和完成后的重新入队一起移入 Scheduler，不能只抽 `advance()`。用第二种明确的调度行为验证边界，再按选定版本实现 vLLM 策略；当前 RTP 有界合批不等于完整 RTP/vLLM 调度。
 3. 将 Case 级接口与 Prometheus 查询迁移到 Python，保留实例协议、Java 指标产生及既有校验。迁移完成后删除旧查询服务和重复定义，不长期维护两条调用链。
-4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 等设计确定后单独实施。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
+4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 已接通上述第一批能力，后续按剩余边界推进数据输入和记录。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
 
 本批落实公共 Scheduler 操作、私有队列、持续 running、有界多请求 Forward、部分批次取消和 PD 确认后释放。强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本及 connector 范围仍待确定。
 
@@ -173,11 +239,11 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 | --- | --- |
 | `python/mock_framework/config/` | YAML 解析、检查、点分配置展开、引用和可执行步骤编译。 |
 | `python/mock_framework/execution/` | 初始化、统一 Step 执行、HTTP 传输、断言、记录和清理；`master.py` 负责 Master 原生配置接线，`processes.py` 管理进程和端点。 |
-| `python/mock_framework/interfaces/` | 已接通的 Case 函数：逐 Master 状态、公共指标与原始 PromQL。 |
+| `python/mock_framework/interfaces/` | 已接通的 Case 函数：逐 Master 状态、Client start/stop、公共指标与原始 PromQL。 |
 | `java/interfaces/` | Java 内部端点的类型/校验及共享模型定义；不再定义或导出 Case API。 |
 | `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文。 |
 | `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
-| `java/client/` | 生产协议的调度、Fetch/Generate、真实客户端计时与取消。 |
+| `java/client/` | client0 协调、Player 控速、LoadClient 队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
 | `java/engine/rtp/` | RTP 协议适配、P/D 调度策略、请求资源申请、P/D 交接与前缀树缓存。 |
 | `java/shared/engine/` | EngineLoop/Scheduler 执行边界、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
@@ -216,7 +282,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
   --output <输出目录>/compiled.json
 ```
 
-每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。最新数据格式由 Java Client 读取；播放器和数据读取尚待实现，不提供旧格式兼容、转换器或生成器。
+每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。数据集格式读取尚待实现；目前 Client 只接受 start 参数中的显式文本请求列表，不提供旧格式兼容、转换器或生成器。
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect`、`within` 和 `wait_after`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 
@@ -226,7 +292,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 组件配置分为 `deployment` 和 `config`。原生业务配置原样保留；Mock 点分键在本层展开成对象，不展开原生 JSON 文本。重复键、YAML merge、循环引用、点分路径冲突均报错。`FLEXLB_CONFIG` 保留 JSON 字符串，编译器只检查它是对象且无重复键，业务字段由 Master 加载器检查。
 
-Client 的 `deployment.replicas` 表示 JVM 数量，不能把总 QPS 乘以副本数。当前启动器不落实 CPU、内存或 heap 限制，配置这些限制会拒绝运行。配置编译通过不代表播放器、资源限制或其他未接通能力已执行。
+Client 的 `deployment.replicas` 表示 JVM 数量，不能把总 QPS 乘以副本数。当前启动器不落实 CPU、内存或 heap 限制，配置这些限制会拒绝运行。配置编译通过不代表资源限制或其他未接通能力已执行。
 
 下面的读取保存 Leader 地址列表，后续步骤直接引用整个返回值，不另造句柄或 selector：
 
@@ -256,11 +322,11 @@ phases:
         expect: {gte: 1}
 ```
 
-省略 targets 等价于该操作域全部实例；显式空列表、重复地址或未知地址报错。全局发现信息在 step 开始时取值；已保存的 step 返回值保持原样，不跟着发现变化自动改写。Client 的播放、分布输入、多 JVM 计划及 run/stop/drain Case 接口暂不登记。
+省略 targets 等价于该操作域全部实例；显式空列表、重复地址或未知地址报错。全局发现信息在 step 开始时取值；已保存的 step 返回值保持原样，不跟着发现变化自动改写。Client 控制接口单独约定：start 作用于全部已配置 Client，stop 无参数；指标接口仍可指定 targets。
 
 ### 查询和断言
 
-普通指标优先使用语义接口，YAML 不写 PromQL。当前支持 `latest` 和相对该 step 固定查询时刻的区间 `[-60s, 0s]`；`all` 依赖尚未确定的 Client 活动边界，目前拒绝。
+普通指标优先使用语义接口，YAML 不写 PromQL。当前支持 `latest` 和相对该 step 固定查询时刻的区间 `[-60s, 0s]`；`all` 的跨轮次查询窗口尚未实现，目前拒绝。
 
 `latest` 使用前 60 秒内最近两次样本的 irate；区间使用 increase。执行器固定 `query_time`，指标实现记录实际查询点、表达式和窗口，不重新取墙钟。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值直接返回 float，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
 
@@ -460,7 +526,7 @@ StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概�
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向原 Master 尽力发一次有界 Cancel，不重试结果未知的请求；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。播放器、数据集读取、多 JVM 分片/总 QPS 协调、Client 指标与请求记录、traffic run/stop/drain 的业务实现仍待接通。
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。显式请求列表的 Player、LoadClient、client0 协调和 start/stop 已接通，NativeClient 的原生协议行为保持不变。数据集读取与完整逐请求持久化尚未接通。
 
 ## 指标、采集和查询
 
@@ -509,7 +575,7 @@ Runner 不下载 binary；默认 scrape 1s、startup 30s，目前验证 Promethe
 
 收尾等待每个目标在收尾开始后成功采样，再停止组件、ZK，最后 TERM Prometheus，超时才 KILL。最后采样失败、采集器异常退出会标记数据不完整并令实验 ERROR。启动失败/取消仍清理并保留现场。
 
-prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collection.json；complete 仅说明采集边界及关闭成功，不代替业务指标或中途 up 判断。门禁 FAIL/主动取消也可以有完整采集。曲线不导出 JSON，数据不随收尾删除，后续回放服务在线查询；目前仍用默认保留策略，没有长期归档或正式报告服务。Grafana 大盘映射和 Client 指标尚未实现。
+prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collection.json；complete 仅说明采集边界及关闭成功，不代替业务指标或中途 up 判断。门禁 FAIL/主动取消也可以有完整采集。曲线不导出 JSON，数据不随收尾删除，后续回放服务在线查询；目前仍用默认保留策略，没有长期归档或正式报告服务。Grafana 大盘映射尚未实现；Client 已提供 issued/finished Counter 及 TTFT/请求耗时 Histogram。
 
 ## 当前接口扩展方式
 

@@ -160,3 +160,9 @@ async def cached_tps(ctx, args: MetricArgs) -> float:
 @case_interface('engine/decode/tps', effect='read', unit='tokens/s')
 async def decode_tps(ctx, args: MetricArgs) -> float:
     return await metric(ctx, args, 'decode', 'mock_engine_forward_tokens_total', kind='output')
+
+
+@case_interface('client/qps', effect='read', unit='requests/s')
+async def client_qps(ctx, args: MetricArgs) -> float:
+    """Rate of Client calls started, not successful completions or Master acceptance."""
+    return await metric(ctx, args, 'client', 'mock_client_requests_issued_total')

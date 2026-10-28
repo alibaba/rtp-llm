@@ -83,6 +83,8 @@ class Processes:
         self.expected_stops = set()
         self.engines = EngineHosts(self)
         self.health_monitor = None
+        self.client_pending = False
+        self.client_stop_timeout = 30
         self.prometheus = Prometheus(self, records, launch['prometheus']) if 'prometheus' in launch else None
 
     async def _monitor(self, node, child):
@@ -258,6 +260,13 @@ class Processes:
             self.health_monitor.cancel()
             await asyncio.gather(self.health_monitor, return_exceptions=True)
         errors = []
+        if self.client_pending:
+            from ..interfaces.client import collect
+            try:
+                async with asyncio.timeout(self.client_stop_timeout):
+                    await collect(self, self.records, timestamp(), self.client_stop_timeout)
+            except Exception as error:
+                errors.append(f'client final stop: {type(error).__name__}: {error}')
         if self.prometheus:
             try:
                 await self.prometheus.final_scrape()
