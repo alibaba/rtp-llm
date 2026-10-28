@@ -18,6 +18,7 @@
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -57,6 +58,7 @@ public:
         rpc_succeeded_(worker_rpc_contexts.size(), false),
         completion_times_us_(worker_rpc_contexts.size(), 0),
         completion_wall_times_us_(worker_rpc_contexts.size(), 0),
+        rpc_timed_out_(worker_rpc_contexts.size(), false),
         direction_(std::move(direction)),
         rpc_tag_("request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction_),
         connect_failure_reporter_(std::move(connect_failure_reporter)) {}
@@ -89,6 +91,25 @@ public:
         (void)waitDone(/*timeout_ms=*/0);
     }
 
+    ErrorInfo waitForCompletion() {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        wait_done_cv_.wait(lock, [this] { return done(); });
+        lock.unlock();
+        return errorInfo();
+    }
+
+    ErrorInfo errorInfo() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (!done()) {
+            return ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "broadcast rpc is not complete");
+        }
+        if (!success()) {
+            return ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
+                             fatal_error_.empty() ? "broadcast rpc failed" : fatal_error_);
+        }
+        return ErrorInfo::OkStatus();
+    }
+
     bool success() const {
         return all_request_success_.load(std::memory_order_acquire);
     }
@@ -112,6 +133,17 @@ public:
     std::string failureSummary() const {
         std::lock_guard<std::mutex> lock(wait_done_mutex_);
         return failureSummaryNoLock();
+    }
+
+    bool onlyTimeoutFailures() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (!done() || worker_contexts_.empty()) return false;
+        bool timeout = false;
+        for (size_t i = 0; i < finished_.size(); ++i) {
+            if (!finished_[i] || (!rpc_succeeded_[i] && !rpc_timed_out_[i])) return false;
+            timeout = timeout || rpc_timed_out_[i];
+        }
+        return timeout;
     }
 
     void onDone(DoneCallback callback) {
@@ -177,6 +209,7 @@ public:
                 ++finished_count_;
                 const auto& ctx      = worker_contexts_[rank];
                 rpc_succeeded_[rank] = cq_event_ok && ctx->status.ok();
+                rpc_timed_out_[rank] = cq_event_ok && ctx->status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED;
                 if (!rpc_succeeded_[rank]) {
                     const auto summary = rpc_tag_ + " target_rank=" + std::to_string(rank) + " addr=" + ctx->server_addr
                                          + " grpc_code=" + std::to_string(ctx->status.error_code())
@@ -250,6 +283,7 @@ private:
     std::vector<bool>                              rpc_succeeded_;
     std::vector<int64_t>                           completion_times_us_;
     std::vector<int64_t>                           completion_wall_times_us_;
+    std::vector<bool>                              rpc_timed_out_;
     const std::string                              direction_;
     const std::string                              rpc_tag_;
     const std::function<void(const std::string&)>  connect_failure_reporter_;
@@ -372,6 +406,42 @@ public:
         }
 
         return result;
+    }
+
+    std::shared_ptr<BroadcastResult<ForgetTransferTasksRequestPB, EmptyPB>>
+    forgetTransferTasks(const std::vector<ForgetTransferTasksRequestPB>& requests, int timeout_ms = 200) const {
+        if (timeout_ms <= 0) return nullptr;
+        return broadcast<ForgetTransferTasksRequestPB, EmptyPB>(
+            requests, timeout_ms, [](const auto& stub, const auto& context, const auto& request, auto* cq) {
+                return stub->AsyncForgetTransferTasks(context.get(), request, cq);
+            });
+    }
+
+    std::shared_ptr<BroadcastResult<QueryTransferTasksRequestPB, QueryTransferTasksResponsePB>>
+    queryTransferTasks(const std::vector<QueryTransferTasksRequestPB>& requests, int timeout_ms = 200) const {
+        if (timeout_ms <= 0) return nullptr;
+        return broadcast<QueryTransferTasksRequestPB, QueryTransferTasksResponsePB>(
+            requests, timeout_ms, [](const auto& stub, const auto& context, const auto& request, auto* cq) {
+                return stub->AsyncQueryTransferTasks(context.get(), request, cq);
+            });
+    }
+
+    std::shared_ptr<BroadcastResult<ForgetKVCMOperationsRequestPB, EmptyPB>>
+    forgetKVCMOperations(const std::vector<ForgetKVCMOperationsRequestPB>& requests, int timeout_ms = 200) const {
+        if (timeout_ms <= 0) return nullptr;
+        return broadcast<ForgetKVCMOperationsRequestPB, EmptyPB>(
+            requests, timeout_ms, [](const auto& stub, const auto& context, const auto& request, auto* cq) {
+                return stub->AsyncForgetKVCMOperations(context.get(), request, cq);
+            });
+    }
+
+    std::shared_ptr<BroadcastResult<QueryKVCMOperationsRequestPB, QueryKVCMOperationsResponsePB>>
+    queryKVCMOperations(const std::vector<QueryKVCMOperationsRequestPB>& requests, int timeout_ms = 200) const {
+        if (timeout_ms <= 0) return nullptr;
+        return broadcast<QueryKVCMOperationsRequestPB, QueryKVCMOperationsResponsePB>(
+            requests, timeout_ms, [](const auto& stub, const auto& context, const auto& request, auto* cq) {
+                return stub->AsyncQueryKVCMOperations(context.get(), request, cq);
+            });
     }
 
     size_t workerNum() const {

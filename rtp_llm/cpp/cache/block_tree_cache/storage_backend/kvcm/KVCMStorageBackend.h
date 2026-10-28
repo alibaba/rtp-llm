@@ -67,6 +67,7 @@ protected:
     StorageMatchResult matchImpl(const StorageRequest& request) override;
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
     void writeImpl(const StorageRequest& request) override;
+    bool supportsCompletionQueries() const noexcept override { return distributed_completion_queries_; }
     void shutdownImpl() noexcept override;
     void onRemoteCacheSkipped(const char* stage) noexcept override;
     void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;
@@ -77,6 +78,7 @@ protected:
 
 private:
     class Impl;
+    bool distributed_completion_queries_{false};
     std::unique_ptr<Impl> impl_;
 };
 

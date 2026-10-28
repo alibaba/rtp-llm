@@ -69,6 +69,7 @@ public:
 
     // Keep one permanent tree reference per physical block for this pool's lifetime.
     void freezeBlock(BlockIdxType block) noexcept;
+    void unfreezeBlock(BlockIdxType block);
     bool isFrozen(BlockIdxType block) const;
 
     // Number of distinct blocks carrying at least one tree reference of this type.
