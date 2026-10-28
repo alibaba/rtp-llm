@@ -9,6 +9,22 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "dspark_sample_seed_test",
+    srcs = ["DSparkSampleSeedTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/normal_engine:dspark_sample_seed",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+    tags = ["cpu"],
+)
+
+cc_test(
     name = "dspark_adaptive_budget_test",
     srcs = ["DSparkAdaptiveBudgetTest.cc"],
     copts = copts(),

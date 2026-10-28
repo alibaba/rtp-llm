@@ -1267,8 +1267,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 can_run_graph,
                 "DSpARK %s CUDA graph miss: packed=%d batch=%ld query_rows=%ld. "
                 "Normal decode requires a captured budget and batch bucket; eager fallback is disabled. "
-                "Explicit random_seed requires full-width verification: use adaptive graphs or a fixed full-width "
-                "budget, rather than a smaller fixed budget.",
+                "A seeded stream uses the same bounded geometry as the rest of its batch, so a miss here means "
+                "the round's width did not match any captured budget.",
                 dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target",
                 py_model_inputs.attention_inputs.is_packed_target_verify,
                 py_model_inputs.attention_inputs.input_lengths.size(0),

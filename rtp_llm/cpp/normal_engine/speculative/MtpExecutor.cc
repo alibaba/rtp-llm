@@ -3096,20 +3096,18 @@ MtpExecutor::DSparkVerifyPlan MtpExecutor::prepareDSparkVerifyPlan(const StreamG
         return plan;
     }
     consumeDSparkBudgetObservations();
-    // Freeze the budget and identity order before any proposal draw. Explicit
-    // seeds use separate generators whose domains can overlap; keep their
-    // existing full-width behavior until those domains are explicitly isolated.
+    // Freeze the budget and identity order before any proposal draw.
+    //
+    // A seeded stream takes the same bounded budget as every other stream. The
+    // seed pins sampling, not the verification width: acceptance draws are
+    // keyed by (seed, absolute position) in SpeculativeSampler, so the budget
+    // cannot move a draw to a different position. Forcing such a batch to full
+    // width used to be the only way to keep a seed stable, and it also meant a
+    // single seeded request aborted the whole batch whenever the fixed budget
+    // bank had no full-width graph to replay.
     std::vector<std::pair<int64_t, int64_t>> identities;
     identities.reserve(stream_groups.size());
     for (const auto& stream : stream_groups.allStreams()) {
-        if (stream->generateConfig()->random_seed.has_value()) {
-            if (!dspark_seed_fallback_logged_) {
-                RTP_LLM_LOG_INFO(
-                    "[dspark-confidence] explicit random_seed keeps this batch at full verification width");
-                dspark_seed_fallback_logged_ = true;
-            }
-            return plan;
-        }
         identities.emplace_back(stream->streamId(), static_cast<int64_t>(identities.size()));
         plan.request_ids.push_back(stream->streamId());
     }
@@ -3166,7 +3164,7 @@ MtpExecutor::runDSparkProposal(GptModelInputs&                                  
     // An idle DP rank still participates in proposal/target/commit collectives.
     // Give only a purely fake decode batch the captured packed geometry. Its
     // lengths are fixed before proposal and do not depend on fake confidence;
-    // real requests (including seeded full-width fallback) keep their planner.
+    // real requests keep their planner, including seeded ones.
     const int64_t fake_draft_budget = [&]() -> int64_t {
         if (!isTpRank0() || !dspark_packed_verify_ || dspark_confidence_mode_ != "bounded"
             || role_type_ != RoleType::DECODE || !proposal_input.is_fake_stream || dspark_verify_budget_ < 0

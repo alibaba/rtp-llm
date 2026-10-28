@@ -3384,7 +3384,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftTiesStillUseNormalTargetVerification) {
     }
 }
 
-TEST_F(MtpExecutorTest, testDSparkMetricsKeepCompletedBudgetAcrossZeroAndSeedFallbackRounds) {
+TEST_F(MtpExecutorTest, testDSparkMetricsKeepCompletedBudgetAcrossZeroAndFullWidthRounds) {
     MtpExecutorTestConfig config;
     config.sp_type                   = SP_TYPE_DSPARK;
     config.dspark_mask_token_id      = 0;
@@ -3433,14 +3433,14 @@ TEST_F(MtpExecutorTest, testDSparkMetricsKeepCompletedBudgetAcrossZeroAndSeedFal
     ASSERT_EQ(executor.pending_accept_len_metrics_.size(), 1u);
     EXPECT_EQ(executor.pending_accept_len_metrics_.back().total_verify_draft_token_num, 0);
 
-    // A seeded plan uses the full-width -1 sentinel even while the configured
-    // budget is zero. Metrics must translate that sentinel to B*gamma=10.
-    second->generateConfig()->random_seed = 7;
-    const auto seeded                     = executor.prepareDSparkVerifyPlan(groups);
-    ASSERT_EQ(seeded.draft_budget, -1);
+    // A full-width plan uses the -1 sentinel. Metrics must translate that
+    // sentinel to B*gamma=10.
+    executor.dspark_verify_budget_ = 5;
+    const auto full_width          = executor.prepareDSparkVerifyPlan(groups);
+    ASSERT_EQ(full_width.draft_budget, -1);
     sampled.accept_len = torch::tensor({6, 6}, torch::kInt32);
     MtpMetricsCollector full_metrics;
-    executor.collectDecodeMetrics(groups, ready, sampled, full_metrics, 0, {}, {}, seeded.draft_budget);
+    executor.collectDecodeMetrics(groups, ready, sampled, full_metrics, 0, {}, {}, full_width.draft_budget);
     EXPECT_EQ(full_metrics.sp_engine_collector.verify_budget, 5);
     EXPECT_EQ(full_metrics.sp_engine_collector.decided_draft_token_num, 10);
     EXPECT_EQ(full_metrics.sp_engine_collector.total_accepted_token_num, 2);
@@ -3668,7 +3668,7 @@ TEST_F(MtpExecutorTest, testDSparkConfidenceMetricsOwnGrammarCapAcrossRounds) {
     }
 }
 
-TEST_F(MtpExecutorTest, testDSparkBoundedPlanUsesStableIdentitiesAndSeedFallback) {
+TEST_F(MtpExecutorTest, testDSparkBoundedPlanUsesStableIdentitiesAndKeepsSeededBatchesBounded) {
     MtpExecutorTestConfig config;
     config.sp_type              = SP_TYPE_DSPARK;
     config.dspark_mask_token_id = 0;
@@ -3700,9 +3700,11 @@ TEST_F(MtpExecutorTest, testDSparkBoundedPlanUsesStableIdentitiesAndSeedFallback
     EXPECT_TRUE(torch::equal(reordered_lengths, lengths.flip(0)));
     second->generateInput()->request_id = 30;
     EXPECT_ANY_THROW(executor.prepareDSparkVerifyPlan(groups));
-    second->generateInput()->request_id   = 10;
+    second->generateInput()->request_id = 10;
+    // A seed pins sampling, not the verification width: the seeded stream keeps
+    // the same bounded budget as the rest of its batch.
     second->generateConfig()->random_seed = 7;
-    EXPECT_EQ(executor.prepareDSparkVerifyPlan(groups).draft_budget, -1);
+    EXPECT_EQ(executor.prepareDSparkVerifyPlan(groups).draft_budget, 2);
     second->generateConfig()->random_seed.reset();
     executor.dspark_verify_budget_ = 0;
     EXPECT_EQ(executor.prepareDSparkVerifyPlan(groups).draft_budget, 0);
@@ -3717,7 +3719,7 @@ TEST_F(MtpExecutorTest, testDSparkBoundedPlanUsesStableIdentitiesAndSeedFallback
     }
 }
 
-TEST_F(MtpExecutorTest, testDSparkAdaptivePlanUsesHistoricalConfidenceCostsAndSeedFallback) {
+TEST_F(MtpExecutorTest, testDSparkAdaptivePlanUsesHistoricalConfidenceCostsAndSeededBatchesShareThePolicy) {
     constexpr int         gamma = 3;
     MtpExecutorTestConfig config;
     config.sp_type              = SP_TYPE_DSPARK;
@@ -3763,17 +3765,21 @@ TEST_F(MtpExecutorTest, testDSparkAdaptivePlanUsesHistoricalConfidenceCostsAndSe
     EXPECT_EQ(cheap_full_width.budget_per_request, gamma);
     EXPECT_EQ(cheap_full_width.draft_budget, -1);
 
-    // A seeded batch must not even advance the adaptive exploration cursor.
+    // A seeded batch takes part in the adaptive policy. Acceptance draws are
+    // keyed by (seed, absolute position), so a seed no longer has to freeze the
+    // verification width, and the exploration cursor advances normally.
     executor.dspark_adaptive_budget_      = std::make_unique<spec::DSparkAdaptiveBudget>(gamma, 1);
     second->generateConfig()->random_seed = 7;
     const auto seeded                     = executor.prepareDSparkVerifyPlan(groups);
-    EXPECT_EQ(seeded.draft_budget, -1);
-    EXPECT_EQ(seeded.budget_per_request, -1);
+    EXPECT_EQ(seeded.budget_per_request, 1);
+    EXPECT_EQ(seeded.draft_budget, 2);
     EXPECT_FALSE(seeded.start_event);
     second->generateConfig()->random_seed.reset();
-    const auto cold_start = executor.prepareDSparkVerifyPlan(groups);
-    EXPECT_EQ(cold_start.budget_per_request, 1);
-    EXPECT_EQ(cold_start.draft_budget, 2);
+    // The seeded round consumed the first cold-start candidate, so the next
+    // round explores the following one.
+    const auto next_cold_start = executor.prepareDSparkVerifyPlan(groups);
+    EXPECT_EQ(next_cold_start.budget_per_request, 2);
+    EXPECT_EQ(next_cold_start.draft_budget, 4);
 }
 
 TEST_F(MtpExecutorTest, testDSparkAdaptiveProposalReturnsFrozenChosenBudget) {
@@ -4733,7 +4739,7 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
-TEST_F(MtpExecutorTest, testDSparkPackedFakeTargetAndCommitKeepRowsWhileSeededRealStaysFullWidth) {
+TEST_F(MtpExecutorTest, testDSparkPackedFakeTargetAndCommitKeepRowsAndSeededRealKeepsBoundedRows) {
     constexpr int64_t gamma = 3, vocab = 4, aux_width = 6;
     for (const auto& scenario :
          std::vector<std::pair<bool, int64_t>>{{true, 0}, {true, 1}, {true, gamma}, {false, 1}}) {
@@ -4779,7 +4785,7 @@ TEST_F(MtpExecutorTest, testDSparkPackedFakeTargetAndCommitKeepRowsWhileSeededRe
         const auto    initial_state         = stream->getMtpAsyncDeviceState();
         const auto    initial_tokens        = stream->getCompleteTokenIds()->completeTokenIdsVec(0);
         const auto    initial_rounds        = stream->spIterCount();
-        const bool    packed                = fake && budget < gamma;
+        const bool    packed                = budget < gamma;
         const int64_t rows                  = packed ? budget + 1 : gamma + 1;
         const int32_t anchor                = fake ? 0 : 2;
         const int32_t prefix                = fake ? 1 : 2;
@@ -4830,7 +4836,17 @@ TEST_F(MtpExecutorTest, testDSparkPackedFakeTargetAndCommitKeepRowsWhileSeededRe
         components.fake_target_model->setInputObserver(check_geometry);
         components.fake_draft_prefill_model->setInputObserver(check_geometry);
         if (!fake) {
-            components.fake_sampler->setInputs({SamplerInputs{target_output.logits}});
+            // Rejection sampling keeps the physical dense stride, so the target
+            // logits are re-materialized to gamma+1 rows with the packed rows
+            // scattered back into their dense positions. A single request maps
+            // its packed rows to the leading dense rows.
+            auto sampler_logits = target_output.logits;
+            if (packed) {
+                const auto i64 = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+                sampler_logits = torch::zeros({gamma + 1, vocab}, f32);
+                sampler_logits.index_copy_(0, torch::arange(rows, i64), target_output.logits);
+            }
+            components.fake_sampler->setInputs({SamplerInputs{sampler_logits}});
             SamplerOutput sampled;
             sampled.token_ids = torch::full({gamma + 1, 1}, 3, i32);
             sampled.all_probs = torch::zeros({gamma + 1, vocab}, f32);

@@ -158,7 +158,7 @@ protected:
                                     const torch::Tensor& anchors,
                                     const torch::Tensor& confidence_hidden_logits = torch::Tensor());
     struct DSparkVerifyPlan {
-        // -1 means the original full-width path, including seeded batches.
+        // -1 means the original full-width path (full budget, or no plan).
         int64_t              draft_budget = -1;
         std::vector<int64_t> stable_order;
         // Adaptive observations preserve proposal row identities even if the
@@ -339,7 +339,6 @@ private:
     double                                             dspark_confidence_temperature_ = 1.0;
     int64_t                                            dspark_verify_budget_          = -1;
     bool                                               dspark_packed_verify_          = false;
-    bool                                               dspark_seed_fallback_logged_   = false;
     std::unique_ptr<speculative::DSparkAdaptiveBudget> dspark_adaptive_budget_;
     struct DSparkBudgetObservation {
         std::vector<int64_t>          request_ids;
