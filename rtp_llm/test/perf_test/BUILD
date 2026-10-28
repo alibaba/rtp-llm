@@ -1,5 +1,36 @@
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "beam_full_prefill_reference_test",
+    srcs = [
+        "beam_full_prefill_reference_test.py",
+        "beam_cache_boundary_reference_test.py",
+    ],
+    main = "beam_full_prefill_reference_test.py",
+    deps = ["//rtp_llm:torch"],
+    tags = ["manual", "cpu"],
+)
+
+py_test(
+    name = "beam_cache_boundary_reference_test",
+    srcs = ["beam_cache_boundary_reference_test.py"],
+    deps = ["//rtp_llm:torch"],
+    tags = ["manual", "cpu"],
+)
+
+py_test(
+    name = "beam_replay_test",
+    srcs = ["beam_replay_test.py"],
+    main = "beam_replay_test.py",
+    timeout = "eternal",
+    deps = [
+        ":perf_test_lib",
+        "//rtp_llm:testlib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    tags = ["manual"],
+)
+
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
 # across packages.
