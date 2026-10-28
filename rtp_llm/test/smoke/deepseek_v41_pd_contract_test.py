@@ -20,6 +20,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     # Decode reuse includes the freshly transferred prefill cache. Only the
     # prefill's initial reuse measures a hit from an earlier request.
     reuse_field = "prefill_total_reuse_len"
+    decode_env = {}
 
     def start_servers(self):
         gpu_ids = list(get_gpu_ids())
@@ -83,6 +84,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
             manager = MagaServerManager(
                 env_args={
                     **common_env,
+                    **(self.decode_env if role == "decode" else {}),
                     "REMOTE_SERVER_PORT": peer,
                     "MODEL_SERVICE_CONFIG": route.model_dump_json(),
                 },
