@@ -11,6 +11,7 @@ Python负责case配置编译和执行组织，Java负责组件共享接口与实
 - `java/shared/compute/`：共享Forward batch、公式绑定、确定性噪声、Decode推进、停止模型与可取消计时执行。
 - `java/shared/metrics/`：共享Engine指标定义、独立注册表、Prometheus导出与查询实现。
 - `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
+- `java/client/`：Client原生调度、取流、客户端计时及请求取消；播放器和多JVM协调待接入。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
 - `scripts/`：构建和验证入口。
 
@@ -44,7 +45,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 TTFT使用`client/requests/ttft`，参数为`stat: avg/max/p99`及`range`。时间范围保留为`all`、`latest`或负偏移区间，编译时不转换为墙上时间；接口元数据决定接受哪些形式，后端仍需明确支持具体统计组合。`all`必须位于唯一一次`client/traffic/run`之后，排空后再次run仍报错。
 
-发流必须读取真实响应：调度结果为已入队时调用FetchResponse，其他请求调用GenerateStreamCall，并持续消费到终态。不提供跳过取流、engine自主完成未取流请求或补报客户端指标的压测模式；旧Mock的FETCH_OUTPUT_STREAM、autoFetch、schedule-only分支及mock_backend_ttft_us补报链路全部不承接。Client实现时，在实际收到首token时以自身发送起点计算并上报TTFT，不能用原生响应中的引擎耗时、Forward耗时或引擎完成事件替代；未收到首token则没有TTFT样本，不能填零或伪造成功。当前Java Client尚未实现，这一规则约束后续实现。
+发流必须读取真实响应：调度结果为已入队时调用FetchResponse，其他请求调用GenerateStreamCall，并持续消费到终态。不提供跳过取流、engine自主完成未取流请求或补报客户端指标的压测模式；旧Mock的FETCH_OUTPUT_STREAM、autoFetch、schedule-only分支及mock_backend_ttft_us补报链路全部不承接。Client在实际收到首token时以自身发送起点计算TTFT，不能用原生响应中的引擎耗时、Forward耗时或引擎完成事件替代；未收到首token则没有TTFT样本，不能填零或伪造成功。原生Client收发核心已实现，播放及指标上报待接入。
 
 `prometheus/query`只接受`promql`，不接受外层`range`；编译不解析PromQL，其执行时刻、查询结果和报告点标注由后续执行器记录。普通语义接口不接受原生查询字段。
 
@@ -70,6 +71,18 @@ output_tokens: {distribution: normal, mean: 128, stddev: 32, min: 1, max: 512, s
 随机形式必须提供int64的seed。token数与上下界是非负int32，min≤max；正态先裁剪到[min,max]，再四舍五入到整数，不进行条件重采样，因此配置的mean不是裁剪后样本均值。stddev可为0，数值必须有限。
 
 Java Client实现时应基于seed和稳定逻辑请求身份生成每个请求的一次输出目标，不随JVM数、分片或线程调度顺序改变；同一次请求的重试保留已选目标。覆盖只影响本次输出，不改写数据集settings/observed或输入结构，采样后的实际目标随请求记录保存。此处规定采样语义，实际采样器与多JVM读取在Client批次实现。
+
+## Client原生收发核心
+
+`java/client`的`NativeClient`接收生产FlexlbScheduleRequestPB和单请求总timeout。调用方提供匹配的generate_input、seq_len、max_new_tokens和缓存路由元数据；数据集到请求的构造仍待播放器实现。本层不新增YAML开关或共享业务接口，不加载旧流量格式。
+
+每个请求只调度一次。Master必须返回success=true、code=200和一个有效PREFILL地址；已入队则调用FetchResponse，未入队则将Master给出的P/D地址写入原生输入并调用GenerateStreamCall。当前支持单序列文本P/D；不把融合、ViT或缺失路由转换为成功。每次只预取一个响应，逐帧验证请求身份、INT32 token载荷/形状、递增输出长度和终态；收到finished后仍等待流正常结束，空流、截断及终态后的额外帧都是错误，不保留全部输出载荷。
+
+`Call.firstToken()`在客户端第一次收到有效token时完成，值为包含Master调度和网络等待的单调时钟耗时；没有首token则异常结束，不产生数值。`Call.completion()`只产生一次Result，保存发送墙钟时间、可空TTFT、总耗时、已收到token数、终态及原生错误码。失败发生在首token之后时仍保留已观测TTFT；原生aux.first_token_cost_time_us始终不参与客户端计时。这些事件供后续指标与请求记录消费，本批没有提前接入Prometheus Client指标。
+
+同一总deadline覆盖Schedule及后续取流；原生输入提供更短timeout_ms时取较短预算，并把gRPC deadline向服务端传播。显式取消、超时或错误会终止当前RPC，并向原Master尽力发送一次有界Cancel（request_id及已知batch_id），不重发结果未知的请求。Cancel失败有日志，不承诺远端已释放。多个请求共享连接、分别持有取消上下文；close停止接收新请求、取消活动请求、等待有界Cancel并关闭本Client拥有的连接。
+
+测试覆盖真实网络协议及新RTP P/D节点；其中调度服务是测试夹具，不代表生产Master已接入。独立JVM测试让新Client进程分别执行Generate和Enqueue→Fetch，实际消费两端结果。播放器、数据集读取、多JVM分片/总QPS协调、Client指标与case业务入口仍待后续批次。
 
 ## 共享Compute
 

@@ -21,9 +21,9 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     for group in environment.values():
         group['config']['compute.expression'] = '1 + batchSize'
     data = {'id': 'native_node_probe', 'describe': '仅验证节点启动及原生状态协议', 'environment': environment,
-            'phases': [{'id': 'observe', 'describe': '测试客户端在此期间读取原生状态', 'timeout': '10s',
+            'phases': [{'id': 'observe', 'describe': '测试客户端在此期间读取原生状态', 'timeout': '15s',
                         'steps': [{'call': {'id': 'wait', 'describe': '保留节点供测试客户端读取', 'interface': 'runtime/wait',
-                                            'args': {'duration': '5s'}}}]}]}
+                                            'args': {'duration': '8s'}}}]}]}
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data, allow_unicode=True))
     registry = Registry.load(ROOT / 'build/interfaces.json')
     case = compile_case(path, registry)
@@ -74,6 +74,20 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                     assert actual['decode_available_after_cancel'] == 128
                     assert endpoints['remote_generation']['stages'] == ['ALLOCATE', 'LOAD', 'GENERATE', 'PREFILL_COMPLETE']
                     assert endpoints['remote_generation']['load'] is True
+                    client_result = tmp_path / 'client.json'
+                    client_classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'),
+                        str(ROOT / 'java/client/target/classes'), classpath])
+                    client = await asyncio.to_thread(subprocess.run,
+                        [str(java), '-cp', client_classpath, 'org.flexlb.mock.client.ClientProbe',
+                         prefill['rpc'], endpoints['rpc'], str(client_result)],
+                        capture_output=True, text=True, timeout=10)
+                    assert client.returncode == 0, client.stderr
+                    observed = json.loads(client_result.read_text())
+                    assert observed['schedule_calls'] == 2
+                    for mode in ('generate', 'fetch'):
+                        assert observed[mode]['outcome'] == 'success'
+                        assert observed[mode]['output_tokens'] == 3
+                        assert 0 < observed[mode]['ttft_ns'] <= observed[mode]['elapsed_ns']
                 with urllib.request.urlopen(endpoints['metrics'], timeout=2) as response:
                     assert response.status == 200
                     assert response.headers.get_content_type() == 'text/plain'
@@ -81,7 +95,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 (directory / 'metrics.prom').write_text(metrics)
                 samples = [line for line in metrics.splitlines() if line.startswith('mock_engine_forward_seconds_count{')]
                 assert len(samples) == 1
-                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 6)
+                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 10)
                 assert f'role="{role}"' in samples[0]
                 effective = json.loads((directory / 'effective-config.json').read_text())
                 assert effective['compute']['noise']['scale'] == 1

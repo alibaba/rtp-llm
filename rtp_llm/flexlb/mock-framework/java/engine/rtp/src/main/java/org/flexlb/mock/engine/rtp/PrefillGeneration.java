@@ -89,6 +89,10 @@ final class PrefillGeneration implements AutoCloseable {
                 response.onError(call.priorityPreempted ? preempted() : Status.NOT_FOUND.withDescription("No fetchable request").asRuntimeException()); return;
             }
             if (call.response != null) { response.onError(Status.ALREADY_EXISTS.withDescription("Fetch already attached").asRuntimeException()); return; }
+            if (System.nanoTime() >= call.deadline || call.attachmentDeadline != null && call.attachmentDeadline.isExpired()) {
+                call.finish(RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("Fetch attachment expired"), 603));
+                response.onError(Status.NOT_FOUND.withDescription("Fetch request expired").asRuntimeException()); return;
+            }
             call.attach(response);
         }
     }
@@ -146,6 +150,7 @@ final class PrefillGeneration implements AutoCloseable {
         PrefillTransfer.Source source;
         Future<?> worker;
         ScheduledFuture<?> timeout, attachment;
+        Deadline attachmentDeadline;
         boolean terminal, priorityPreempted;
         Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis) {
             this.input = input; this.target = target; this.deferred = response == null;
@@ -157,6 +162,7 @@ final class PrefillGeneration implements AutoCloseable {
         synchronized void attach(ServerCallStreamObserver<GenerateOutputsPB> response) {
             this.response = response;
             if (attachment != null) attachment.cancel(false);
+            attachmentDeadline = null;
             response.setOnCancelHandler(() -> finish(Status.CANCELLED.asRuntimeException()));
             response.setOnReadyHandler(() -> { synchronized (this) { notifyAll(); } });
             notifyAll();
@@ -181,11 +187,14 @@ final class PrefillGeneration implements AutoCloseable {
                 synchronized (this) {
                     if (terminal) return;
                     source = transfer.start(TransferRequest.newBuilder().setClientId(config.id()).setInput(input).setBlockSize(config.blockSize()).build(), deadline);
-                    if (deferred) attachment = deadlines.schedule(() -> {
-                        synchronized (this) {
-                            if (response == null) finish(RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("Fetch attachment expired"), 603));
-                        }
-                    }, attachMillis, TimeUnit.MILLISECONDS);
+                    if (deferred) {
+                        attachmentDeadline = Deadline.after(attachMillis, TimeUnit.MILLISECONDS);
+                        attachment = deadlines.schedule(() -> {
+                            synchronized (this) {
+                                if (response == null) finish(RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("Fetch attachment expired"), 603));
+                            }
+                        }, attachMillis, TimeUnit.MILLISECONDS);
+                    }
                     admitted.complete(null);
                     while (!terminal && response == null) wait();
                     if (terminal) return;
@@ -223,8 +232,13 @@ final class PrefillGeneration implements AutoCloseable {
         }
         GenerateRequestPB frame(RemoteStage stage) { return GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id()).build(); }
         synchronized void send(GenerateOutputsPB output) throws InterruptedException {
-            while (!terminal && !response.isCancelled() && !response.isReady()) wait();
+            while (!terminal && !response.isCancelled() && !response.isReady()) {
+                long remaining = deadline == Long.MAX_VALUE ? Long.MAX_VALUE : deadline - System.nanoTime();
+                if (remaining <= 0) throw RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("P/D request budget expired"), 603);
+                TimeUnit.NANOSECONDS.timedWait(this, remaining);
+            }
             if (terminal || response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
+            if (System.nanoTime() >= deadline) throw RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("P/D request budget expired"), 603);
             response.onNext(output);
         }
         synchronized void finish(Throwable error) {
