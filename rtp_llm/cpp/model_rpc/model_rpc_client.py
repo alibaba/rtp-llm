@@ -174,6 +174,25 @@ async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle
         can_observe_rpc_status = callable(getattr(response_iterator, "code", None))
     except Exception:  # noqa: BLE001 - optional grpc.aio observation
         can_observe_rpc_status = False
+    if client_span is None and not abandoned_event.is_set():
+        # Without tracing, active consumption only needs the owned EOF read.
+        # Observe status after ownership transfers to cleanup, so tracing stays
+        # optional without losing trailer protection or bounded cancellation.
+        ownership_waiter = asyncio.create_task(abandoned_event.wait())
+        try:
+            if terminal_read_task is None:
+                await ownership_waiter
+            else:
+                done, _ = await asyncio.wait(
+                    {ownership_waiter, terminal_read_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if terminal_read_task in done and not abandoned_event.is_set():
+                    return None
+        finally:
+            if not ownership_waiter.done():
+                ownership_waiter.cancel()
+                await asyncio.gather(ownership_waiter, return_exceptions=True)
     status = None
     status_task = None
     abandoned_task = None
@@ -1548,7 +1567,7 @@ class ModelRpcClient(object):
                         _read_rpc_response(response_stream)
                     )
                     terminal_read_task.add_done_callback(_consume_settlement_task)
-                if client_span is not None and _engine_reported_finished(output_py):
+                if _engine_reported_finished(output_py):
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
                     # while the server is still settling the RPC. The application
