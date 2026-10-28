@@ -957,7 +957,7 @@ public class DeliveryDispatcher {
                     registration == null
                             ? null
                             : AbstractRequestScheduler.PreemptionEvent.receipt(
-                                    registration, endpoint, reply, detail, claim);
+                                    registration.reservation(), endpoint, reply, detail, claim);
             var acknowledgement =
                     registration != null || claim == null
                             ? null

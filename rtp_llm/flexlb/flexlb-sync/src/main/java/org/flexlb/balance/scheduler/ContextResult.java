@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
@@ -290,7 +291,10 @@ public final class ContextResult {
     public record ResponseCandidate(
             RequestContext owner, ResponseKind kind, End result, long nowMs) {}
 
-    public sealed interface DeliveryEvidence
+    /** Immutable delivery or preemption fact entering the scheduler state machine. */
+    public interface DeliveryFact {}
+
+    public sealed interface DeliveryEvidence extends DeliveryFact
             permits TransportResult,
                     Prediction,
                     RouteDelivered,
@@ -321,6 +325,20 @@ public final class ContextResult {
     public record PreparationFailure(
             DeliveryClaim delivery, RequestRoute route, String detail, long nowMs)
             implements DeliveryEvidence {}
+
+    public record PreemptionFact(
+            PreemptionRegistration attempt,
+            PreemptionCancelPhase phase,
+            boolean release,
+            DecodeEndpoint endpoint,
+            DecodeResources.ReservationHandle reservation,
+            String detail,
+            CleanupAcknowledgement cleanup)
+            implements DeliveryFact {
+        public PreemptionFact {
+            Objects.requireNonNull(attempt, "attempt");
+        }
+    }
 
     public interface GrantValue {
         RequestContext owner();
