@@ -40,7 +40,7 @@ def is_supported(logits, ids, weights):
         and torch.version.hip is None
         and logits.ndim == 2
         and logits.shape[1] == 512
-        and 0 < logits.shape[0] <= 8192
+        and 0 < logits.shape[0] <= 16384
         and logits.dtype in (torch.bfloat16, torch.float32)
         and logits.stride(-1) == 1
         and logits.stride(0) > 0
