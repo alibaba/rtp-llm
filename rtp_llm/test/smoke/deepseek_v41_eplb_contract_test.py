@@ -11,6 +11,16 @@ from rtp_llm.test.smoke.eplb_smoke_checks import check_eplb_applied
 
 
 class DeepSeekV41EplbContractTest(full_contract.DeepSeekV41FullContractTest):
+    # Recorded with the same MegaSE configuration before gate mapping fusion.
+    golden_filename = "full_feature_cp2_dp2_mega_se.json"
+    # Cover the native decode MegaMHC -> MegaGate -> MegaMoE-SE route.
+    decode_env = {
+        "DSV4_MOE_STRATEGY": "mega_se",
+        "DSV4_USE_MEGA_MOE_SE": "1",
+        "DSV41_MEGA_SHARED_EXPERT": "1",
+        "DSV4_MEGA_GATE": "1",
+    }
+
     def test_graph_engram_and_prefix_reuse(self):
         # Keep the original verdict while checking migration before unittest
         # runs the parent's registered server cleanups.

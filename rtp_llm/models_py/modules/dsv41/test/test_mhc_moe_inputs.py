@@ -130,7 +130,7 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
             indices.fill_(1)
             weights.copy_(x[:, :6].float())
 
-        def launch(y, tokens, device, expert_load=None, eplb_layer=None):
+        def launch(y, tokens, device, expert_load=None):
             # Consumer-visible result depends on freshly written activations
             # and routing metadata; stale buffers or reversed out fail.
             buf = strategy._mega_buf
@@ -158,6 +158,50 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 moe(x[:1], torch.arange(1), mhc_inputs=inputs)
         kernel.assert_not_called()
+
+    def test_prepared_eplb_maps_once_after_optional_fake_balance(self):
+        for fake_balance in (False, True):
+            with self.subTest(fake_balance=fake_balance):
+                strategy = make_strategy()
+                moe = make_moe(strategy)
+                x = torch.ones((6, _DIM), dtype=torch.bfloat16)
+                inputs = strategy.prepare_mhc_inputs(x)
+                state = SimpleNamespace(
+                    logical_to_physical=torch.empty((384, 65), dtype=torch.int32),
+                    logical_count=torch.empty(384, dtype=torch.int32),
+                    map_ids=Mock(side_effect=lambda ids: ids + 20),
+                )
+                moe.eplb_layer = state
+                strategy._launch = Mock()
+
+                def balance(indices, weights):
+                    indices.fill_(5)
+                    weights.fill_(1)
+
+                if fake_balance:
+                    strategy.fake_balance_expert = balance
+
+                def gate_kernel(
+                    x, *args, out, to_physical_map, logical_count, **kwargs
+                ):
+                    self.assertIs(
+                        to_physical_map,
+                        state.logical_to_physical,
+                    )
+                    self.assertIs(logical_count, state.logical_count)
+                    out[0].fill_(39)
+                    out[1].fill_(0.5)
+
+                with patch.object(mega_gate, "_native_gate", return_value=gate_kernel):
+                    moe(x, torch.arange(6), mhc_inputs=inputs)
+                self.assertTrue(
+                    torch.all(inputs.topk_idx == (25 if fake_balance else 39))
+                )
+                self.assertTrue(
+                    torch.all(inputs.topk_weights == (1 if fake_balance else 0.5))
+                )
+                self.assertEqual(state.map_ids.call_count, int(fake_balance))
+                strategy._launch.assert_called_once()
 
     def test_mhc_writes_external_outputs_and_keeps_bf16_and_state(self):
         case = make_case((1, 6), "cpu")
@@ -347,6 +391,7 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
             )
             try:
                 experts, inter, topk, capacity = 32, 1536, 6, 256
+                physical_experts = experts + 16
                 strategy = MegaMoEStrategySE.__new__(MegaMoEStrategySE)
                 torch.nn.Module.__init__(strategy)
                 strategy.cfg = MoeCfg(
@@ -354,13 +399,14 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     dim=_DIM,
                     moe_inter_dim=inter,
                     n_routed_experts=experts,
+                    n_physical_experts=physical_experts,
                     n_activated_experts=topk,
                     swiglu_limit=10.0,
                     ep_size=1,
                     ep_rank=0,
-                    n_local_experts=experts,
+                    n_local_experts=physical_experts,
                     local_expert_start=0,
-                    local_expert_end=experts,
+                    local_expert_end=physical_experts,
                     max_tokens_per_rank=capacity,
                     shared_fp8_block_size=32,
                     is_decode_role=True,
@@ -373,7 +419,7 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                 strategy._mega_group = dist.group.WORLD
                 strategy._mega_buf = deep_gemm.get_symm_buffer_for_mega_moe(
                     group=dist.group.WORLD,
-                    num_experts=experts,
+                    num_experts=physical_experts,
                     num_max_tokens_per_rank=capacity,
                     num_topk=topk,
                     hidden=_DIM,
@@ -391,7 +437,7 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                 )
 
                 def weights(n, k, routed):
-                    count = experts if routed else 1
+                    count = physical_experts if routed else 1
                     quantized, scales = [], []
                     for _ in range(count):
                         value = (torch.randn((n, k), device="cuda") * 0.01).bfloat16()
@@ -434,21 +480,31 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     _weight_bf16=lambda: gate_weight,
                 )
                 buf = strategy._mega_buf
+
+                def placement(copies, shift):
+                    logical = torch.cat(
+                        (torch.arange(experts), torch.arange(16) // copies)
+                    ).roll(shift)
+                    mapping = torch.full((experts, 17), -1, dtype=torch.int32)
+                    replicas = torch.zeros(experts, dtype=torch.int32)
+                    for slot, expert in enumerate(logical.tolist()):
+                        mapping[expert, replicas[expert]] = slot
+                        replicas[expert] += 1
+                    return mapping.cuda(), replicas.cuda()
+
+                layouts = (placement(1, 7), placement(4, 19))
                 eplb_layer = EplbLayer(
                     0,
-                    (
-                        (torch.arange(experts, device="cuda", dtype=torch.int32) + 7)
-                        % experts
-                    ).view(-1, 1),
-                    torch.ones(experts, device="cuda", dtype=torch.int32),
+                    layouts[0][0].clone(),
+                    layouts[0][1].clone(),
                     strategy.get_eplb_weights(),
                 )
-                counts = torch.zeros(experts, device="cuda", dtype=torch.int32)
+                counts = torch.zeros(physical_experts, device="cuda", dtype=torch.int32)
                 expert_load = ExpertLoadContext(counts)
 
                 def assert_counts(rows):
                     expected_counts = torch.bincount(
-                        buf.topk_idx[:rows].flatten(), minlength=experts
+                        buf.topk_idx[:rows].flatten(), minlength=physical_experts
                     )
                     torch.testing.assert_close(
                         counts.long(), expected_counts, rtol=0, atol=0
@@ -466,6 +522,8 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     for mapped in (False, True)
                     for rows in (192, 6, 160)
                 ):
+                    eplb_layer.logical_to_physical.copy_(layouts[0][0])
+                    eplb_layer.logical_count.copy_(layouts[0][1])
                     moe.eplb_layer = eplb_layer if mapped else None
                     strategy.fake_balance_expert = (
                         FakeBalanceExpert(experts, topk, 0, 1, 1) if enabled else None
@@ -485,9 +543,22 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                         self.assertIsNotNone(inputs)
                         out = v41_mega_mhc.try_fused_post_pre(**case, moe_inputs=inputs)
                         self.assertIsNotNone(out)
-                        return moe(
-                            out[1], ids, expert_load=expert_load, mhc_inputs=inputs
+                        # The prepared native gate must perform the map itself;
+                        # fake balance overwrites the native physical IDs with
+                        # logical IDs before applying the original Torch mapping.
+                        guard = (
+                            patch.object(
+                                eplb_layer,
+                                "map_ids",
+                                side_effect=AssertionError("duplicate EPLB mapping"),
+                            )
+                            if mapped and not enabled
+                            else nullcontext()
                         )
+                        with guard:
+                            return moe(
+                                out[1], ids, expert_load=expert_load, mhc_inputs=inputs
+                            )
 
                     expected = packed().clone()
                     assert_counts(rows)
@@ -499,7 +570,7 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                             % experts
                         )
                         if mapped:
-                            balanced = (balanced + 7) % experts
+                            balanced = eplb_layer.map_ids(balanced)
                         torch.testing.assert_close(
                             expected_ids, balanced, rtol=0, atol=0
                         )
@@ -531,15 +602,41 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=stream):
                         captured = direct()
-                    for _ in range(3):
+                    tracked = (
+                        eplb_layer.logical_to_physical,
+                        eplb_layer.logical_count,
+                        buf.topk_idx,
+                        buf.topk_weights,
+                        captured,
+                    )
+                    addresses = tuple(t.data_ptr() for t in tracked)
+                    for replay in range(3):
                         case["attn_out"].add_(0.0625)
                         case["previous"].pre_mix_out.mul_(0.97)
+                        if mapped:
+                            # Keep executor weights fixed: this compares native
+                            # mapping against Torch for the same new placement,
+                            # not the numerical effect of a weight migration.
+                            mapping, replicas = layouts[(replay + 1) % len(layouts)]
+                            eplb_layer.logical_to_physical.copy_(mapping)
+                            eplb_layer.logical_count.copy_(replicas)
                         graph.replay()
                         actual = captured.clone()
+                        actual_ids = buf.topk_idx[:rows].clone()
+                        actual_weights = buf.topk_weights[:rows].clone()
                         assert_counts(rows)
                         expected = packed().clone()
                         assert_counts(rows)
                         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                        torch.testing.assert_close(
+                            actual_ids, buf.topk_idx[:rows], rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(
+                            actual_weights, buf.topk_weights[:rows], rtol=0, atol=0
+                        )
+                        self.assertEqual(
+                            addresses, tuple(t.data_ptr() for t in tracked)
+                        )
             finally:
                 try:
                     deep_gemm.destroy_localizer()

@@ -296,8 +296,29 @@ class EplbPrivateMoeContractTest(unittest.TestCase):
                         strategy.fake_balance_expert = override
                     final_logical = overridden if fake_balance else logical
                     layer = SimpleNamespace(
-                        map_ids=mock.Mock(side_effect=lambda ids: ids + 10)
+                        logical_to_physical=torch.arange(
+                            10, 14, dtype=torch.int32
+                        ).view(4, 1),
+                        logical_count=torch.ones(4, dtype=torch.int32),
+                        map_ids=mock.Mock(side_effect=lambda ids: ids + 10),
                     )
+
+                    def native_gate(
+                        x, gate, rank, *, out, to_physical_map, logical_count
+                    ):
+                        self.assertEqual(rank, strategy.cfg.ep_rank)
+                        self.assertIs(
+                            to_physical_map,
+                            layer.logical_to_physical,
+                        )
+                        self.assertIs(
+                            logical_count,
+                            layer.logical_count,
+                        )
+                        indices, weights = out
+                        indices.copy_(to_physical_map[logical, 0])
+                        weights.fill_(0.25)
+
                     pointer = buf.topk_idx.data_ptr()
                     context = SimpleNamespace(
                         expert_token_counts=torch.zeros(3, dtype=torch.int32)
@@ -370,14 +391,17 @@ class EplbPrivateMoeContractTest(unittest.TestCase):
                                 )
                             )
                         with mock.patch.object(
-                            mega_gate, "mega_gate", side_effect=pack
+                            mega_gate, "mega_gate", side_effect=native_gate
                         ):
-                            for entry in entries:
+                            for entry_index, entry in enumerate(entries):
                                 layer.map_ids.reset_mock()
                                 torch.testing.assert_close(
                                     entry(), torch.full_like(x, 2)
                                 )
-                                layer.map_ids.assert_called_once()
+                                if entry_index == 2 and not fake_balance:
+                                    layer.map_ids.assert_not_called()
+                                else:
+                                    layer.map_ids.assert_called_once()
 
     def test_four_mega_input_streams_use_physical_rank_phase(self):
         # Three replicas expose wrong phases on both ranks 2 and 3.

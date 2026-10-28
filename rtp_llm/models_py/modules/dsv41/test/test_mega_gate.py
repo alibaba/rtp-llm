@@ -146,12 +146,35 @@ class MegaGateHostTest(unittest.TestCase):
                 routed_scaling_factor=2.5,
                 ep_rank=3,
                 scoring_func="sqrtsoftplus",
+                to_physical_map=None,
+                logical_count=None,
             ),
         )
         self.assertEqual(indices.dtype, torch.int64)
         self.assertEqual(weights.dtype, torch.float32)
         torch.testing.assert_close(indices, global_ids.expand(8, 6))
         torch.testing.assert_close(weights.sum(-1), torch.full((8,), 2.5))
+
+    def test_eplb_maps_are_borrowed_by_native_gate(self):
+        mapping = torch.empty((384, 65), dtype=torch.int32)
+        counts = torch.empty(384, dtype=torch.int32)
+        indices = torch.empty((8, 6), dtype=torch.int64)
+        weights = torch.empty((8, 6), dtype=torch.float32)
+        kernel = Mock()
+        with patch.object(_MEGA_GATE, "_native_gate", return_value=kernel):
+            actual_weights, actual_indices = _MEGA_GATE.mega_gate(
+                self.x,
+                self.gate,
+                ep_rank=31,
+                out=(indices, weights),
+                to_physical_map=mapping,
+                logical_count=counts,
+            )
+        self.assertIs(kernel.call_args.kwargs["to_physical_map"], mapping)
+        self.assertIs(kernel.call_args.kwargs["logical_count"], counts)
+        self.assertEqual(kernel.call_args.kwargs["ep_rank"], 31)
+        self.assertIs(actual_indices, indices)
+        self.assertIs(actual_weights, weights)
 
     def test_native_errors_propagate_without_retry(self):
         kernel = Mock(side_effect=RuntimeError("native failure"))
@@ -200,6 +223,7 @@ class MegaGateMoETest(unittest.TestCase):
                         moe._gate_pack_static = True
                         moe._has_visual_tokens = False
                         moe._routed_includes_shared = includes_shared
+                        moe.eplb_layer = None
                         moe.gate = object()
                         strategy = Mock(return_value=x * 2)
                         strategy.cfg = SimpleNamespace(ep_rank=3)
@@ -225,13 +249,19 @@ class MegaGateMoETest(unittest.TestCase):
                         )
                         if enabled:
                             native.assert_called_once_with(x, moe.gate, 3)
-                            strategy.assert_called_once_with(x, weights, indices)
+                            strategy.assert_called_once_with(
+                                x, weights, indices, expert_load=None, eplb_layer=None
+                            )
                             strategy.forward_with_gate_pack.assert_not_called()
                         else:
                             native.assert_not_called()
                             strategy.assert_not_called()
                             strategy.forward_with_gate_pack.assert_called_once_with(
-                                x, moe.gate, input_ids
+                                x,
+                                moe.gate,
+                                input_ids,
+                                expert_load=None,
+                                eplb_layer=None,
                             )
                         self.assertEqual(
                             moe._shared_executor.finish.call_count,
@@ -240,6 +270,104 @@ class MegaGateMoETest(unittest.TestCase):
 
 
 class MegaGateCudaTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_fused_eplb_matches_torch_mapping_after_graph_updates(self):
+        from rtp_llm.eplb.runtime import EplbLayer
+
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        if torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("SM10x required")
+        self.assertIsNotNone(_MEGA_GATE._native_gate(), "bf16_mega_gate required")
+        experts, redundant = 384, 64
+
+        def placement(copies, shift):
+            logical = torch.cat(
+                (
+                    torch.arange(experts),
+                    experts - 1 - torch.arange(redundant) // copies,
+                )
+            ).roll(shift)
+            mapping = torch.full((experts, redundant + 1), -1, dtype=torch.int32)
+            counts = torch.zeros(experts, dtype=torch.int32)
+            for physical, expert in enumerate(logical.tolist()):
+                mapping[expert, counts[expert]] = physical
+                counts[expert] += 1
+            return mapping.cuda(), counts.cuda()
+
+        generator = torch.Generator(device="cuda").manual_seed(20261028)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            layouts = [placement(1, 7), placement(4, 19), placement(2, 31)]
+            gate = _gate(
+                torch.randn(
+                    (experts, 5120),
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                    generator=generator,
+                )
+                * 0.01,
+                torch.arange(experts, device="cuda", dtype=torch.float32) * 4,
+            )
+            for rank in (0, 3, 31):
+                for rows in (1, 32, 192):
+                    with self.subTest(rank=rank, rows=rows):
+                        state = EplbLayer(
+                            0,
+                            layouts[0][0].clone(),
+                            layouts[0][1].clone(),
+                            [torch.empty((experts + redundant, 1), device="cuda")],
+                            replica_offset=rank,
+                        )
+                        x = torch.randn(
+                            (rows, 5120),
+                            device="cuda",
+                            dtype=torch.bfloat16,
+                            generator=generator,
+                        )
+
+                        def fused():
+                            return _MEGA_GATE.mega_gate(
+                                x,
+                                gate,
+                                rank,
+                                to_physical_map=state.logical_to_physical,
+                                logical_count=state.logical_count,
+                            )
+
+                        _MEGA_GATE.mega_gate(x, gate, rank)
+                        fused()
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph, stream=stream):
+                            weights, indices = fused()
+                        tracked = (
+                            state.logical_to_physical,
+                            state.logical_count,
+                            weights,
+                            indices,
+                        )
+                        addresses = tuple(t.data_ptr() for t in tracked)
+                        previous = None
+                        for mapping, counts in layouts:
+                            state.logical_to_physical.copy_(mapping)
+                            state.logical_count.copy_(counts)
+                            graph.replay()
+                            ref_weights, logical = _MEGA_GATE.mega_gate(x, gate, rank)
+                            torch.testing.assert_close(
+                                indices, state.map_ids(logical), rtol=0, atol=0
+                            )
+                            torch.testing.assert_close(
+                                weights, ref_weights, rtol=0, atol=0
+                            )
+                            if previous is not None:
+                                self.assertFalse(torch.equal(indices, previous))
+                            previous = indices.clone()
+                            self.assertEqual(
+                                addresses, tuple(t.data_ptr() for t in tracked)
+                            )
+        stream.synchronize()
+
     def test_finite_reference_and_graph_replay(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA required")

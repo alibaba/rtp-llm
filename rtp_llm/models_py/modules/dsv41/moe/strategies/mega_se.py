@@ -436,15 +436,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         tokens: int,
         device: torch.device,
         expert_load=None,
-        eplb_layer=None,
     ) -> None:
         import deep_gemm
 
-        self.finalize_routing(
-            self._mega_buf.topk_idx[:tokens],
-            self._mega_buf.topk_weights[:tokens],
-            eplb_layer,
-        )
         self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
             f"dsv4.mega_moe_se.layer{self.cfg.layer_id}.before_deepgemm", device
@@ -473,10 +467,13 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         tokens = x.size(0)
         block_m = self._block_m(tokens)
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
-        y = self._mega_y[:tokens]
-        self._launch(
-            y, tokens, x.device, expert_load=expert_load, eplb_layer=eplb_layer
+        self.finalize_routing(
+            self._mega_buf.topk_idx[:tokens],
+            self._mega_buf.topk_weights[:tokens],
+            eplb_layer,
         )
+        y = self._mega_y[:tokens]
+        self._launch(y, tokens, x.device, expert_load=expert_load)
         return y
 
     def prepare_mhc_inputs(self, x: torch.Tensor) -> MegaMoEInputs | None:
@@ -523,17 +520,25 @@ class MegaMoEStrategySE(MegaMoEStrategy):
             or x.dtype != torch.bfloat16
         ):
             raise ValueError("MegaMHC inputs must belong to this MoE invocation")
+        physical_map, logical_count = None, None
+        if eplb_layer is not None:
+            physical_map = eplb_layer.logical_to_physical
+            logical_count = eplb_layer.logical_count
         with record_function_range("dsv4.moe.deepgemm_mega_gate"):
             mega_gate(
                 x,
                 gate,
                 self.cfg.ep_rank,
                 out=(inputs.topk_idx, inputs.topk_weights),
+                to_physical_map=physical_map,
+                logical_count=logical_count,
             )
+        # Fake balance overwrites the native IDs with logical IDs; preserve its
+        # existing override-then-map order.
+        if self.fake_balance_expert is not None:
+            self.finalize_routing(inputs.topk_idx, inputs.topk_weights, eplb_layer)
         y = self._mega_y[: x.shape[0]]
-        self._launch(
-            y, x.shape[0], x.device, expert_load=expert_load, eplb_layer=eplb_layer
-        )
+        self._launch(y, x.shape[0], x.device, expert_load=expert_load)
         return y
 
     def forward_with_gate_pack(
@@ -577,9 +582,10 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
-        self._launch(
-            y, tokens, x.device, expert_load=expert_load, eplb_layer=eplb_layer
+        self.finalize_routing(
+            buf.topk_idx[:tokens], buf.topk_weights[:tokens], eplb_layer
         )
+        self._launch(y, tokens, x.device, expert_load=expert_load)
         return y
 
 
