@@ -550,6 +550,10 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         block_m = self._block_m(tokens)
         buf = self._mega_buf
         y = self._mega_y[:tokens]
+        physical_map, logical_count = None, None
+        if eplb_layer is not None:
+            physical_map = eplb_layer.logical_to_physical
+            logical_count = eplb_layer.logical_count
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = gate._project_scores(x, gate._weight_bf16())
         with record_function_range("dsv4.moe.mega_se_gate_pack"):
@@ -567,6 +571,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     block_m=block_m,
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
+                    to_physical_map=physical_map,
+                    logical_count=logical_count,
+                    ep_rank=self.cfg.ep_rank,
                 )
             else:
                 pack_nonhash(
@@ -581,10 +588,14 @@ class MegaMoEStrategySE(MegaMoEStrategy):
                     block_m=block_m,
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
+                    to_physical_map=physical_map,
+                    logical_count=logical_count,
+                    ep_rank=self.cfg.ep_rank,
                 )
-        self.finalize_routing(
-            buf.topk_idx[:tokens], buf.topk_weights[:tokens], eplb_layer
-        )
+        if self.fake_balance_expert is not None:
+            self.finalize_routing(
+                buf.topk_idx[:tokens], buf.topk_weights[:tokens], eplb_layer
+            )
         self._launch(y, tokens, x.device, expert_load=expert_load)
         return y
 
