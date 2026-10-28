@@ -95,8 +95,7 @@ class ExpirationTimerTest {
                         owner, new RequestProtocolTestSupport.Registered(route, future));
                 var claim = owner.claimDelivery(route, DeliveryClaimKind.ROUTE_DECISION, 0L, null);
                 assertNotNull(claim);
-                owner.onDeliveryEvidence(
-                        claim, new ContextResult.Prediction(claim, nowMs + 20_000L, nowMs));
+                owner.onDeliveryFact(new ContextResult.Prediction(claim, nowMs + 20_000L, nowMs));
             }
             var before = context.snapshot();
             var exact = before.deadlines().token(kind);

@@ -89,7 +89,7 @@ class SchedulerRuntimeTest {
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     f.runtime, "requestWorkers", workers);
-            assertSame(error, assertThrows(AssertionError.class, f.runtime::shutdown));
+            assertSame(error, assertThrows(AssertionError.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
         }
     }
 
@@ -231,7 +231,7 @@ class SchedulerRuntimeTest {
                 runtime, "deliveries", deliveries);
         runtime.registerScheduler(scheduler);
 
-        assertSame(expected, assertThrows(IllegalStateException.class, runtime::shutdown));
+        assertSame(expected, assertThrows(IllegalStateException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
 
         var order = inOrder(scheduler, runtime, deliveries, endpoints);
         order.verify(scheduler).closePlacement();
@@ -302,7 +302,7 @@ class SchedulerRuntimeTest {
                     RequestProtocolTestSupport.register(
                             other, RequestProtocolTestSupport.context(f.config, 9104L));
 
-            f.runtime.shutdown();
+            f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
 
             assertFalse(installedResult.join().isSuccess());
             assertFalse(otherResult.join().isSuccess());
@@ -331,7 +331,7 @@ class SchedulerRuntimeTest {
             var expected = new IllegalStateException("cancellation failed");
             doThrow(expected).when(other).cancel(otherContext, 0L, CancelReason.SHUTDOWN);
 
-            assertSame(expected, assertThrows(IllegalStateException.class, f.runtime::shutdown));
+            assertSame(expected, assertThrows(IllegalStateException.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
 
             assertFalse(installedResult.join().isSuccess());
             assertFalse(otherResult.join().isSuccess());
@@ -371,14 +371,14 @@ class SchedulerRuntimeTest {
                     new IllegalStateException("cancellation failed before scheduler registration");
             doThrow(expected).when(owner).cancel(context, 0L, CancelReason.SHUTDOWN);
 
-            assertSame(expected, assertThrows(IllegalStateException.class, runtime::shutdown));
+            assertSame(expected, assertThrows(IllegalStateException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
 
             assertFalse(result.join().isSuccess());
             assertEquals(0, runtime.requests().liveRequestCount());
             verify(endpoints).close();
             assertTrue(SchedulerTestSupport.cleanupExecutor(runtime).isTerminated());
         } finally {
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -434,7 +434,7 @@ class SchedulerRuntimeTest {
             }
             assertSame(
                     taskFails ? taskFailure : submissionFailure,
-                    assertThrows(IllegalStateException.class, f.runtime::shutdown));
+                    assertThrows(IllegalStateException.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
         }
     }
 
@@ -461,7 +461,7 @@ class SchedulerRuntimeTest {
                                 assertSame(caller, Thread.currentThread());
                             }
                             var rejected =
-                                    assertThrows(IllegalStateException.class, f.runtime::shutdown);
+                                    assertThrows(IllegalStateException.class, () -> f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
                             assertTrue(
                                     rejected.getMessage()
                                             .contains("own request work or response callback"));
@@ -494,8 +494,7 @@ class SchedulerRuntimeTest {
                 var delivery =
                         RequestProtocolTestSupport.claimBatchWithoutPrediction(
                                 owner, route, 7L, () -> true);
-                owner.onDeliveryEvidence(
-                        delivery,
+                owner.onDeliveryFact(
                         new ContextResult.TransportResult(
                                 delivery,
                                 org.flexlb.balance.delivery.DeliveryResult.delivered(),
@@ -569,7 +568,7 @@ class SchedulerRuntimeTest {
         }
 
         public void close() {
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 }

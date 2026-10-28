@@ -194,8 +194,7 @@ class RequestInflightRecoveryTest {
                             new IllegalStateException("Prefill prepare failed")));
             f.drain();
             assertEquals(1L, f.decode.routingView().totalLoad());
-            f.owner.onDeliveryEvidence(
-                    f.claim,
+            f.owner.onDeliveryFact(
                     new ContextResult.CleanupAcknowledgement(
                             f.claim,
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -465,8 +464,7 @@ class RequestInflightRecoveryTest {
                                 owner, route, BATCH_ID, () -> true);
                 assertNotNull(claim);
                 assertTrue(owner.tryStartSend(claim));
-                owner.onDeliveryEvidence(
-                        claim,
+                owner.onDeliveryFact(
                         new ContextResult.Prediction(
                                 claim,
                                 org.flexlb.balance.prediction.PrefillPredictionBoundary
@@ -485,8 +483,7 @@ class RequestInflightRecoveryTest {
                                                         .getLifetime(),
                                                 System.currentTimeMillis()),
                                 System.currentTimeMillis()));
-                owner.onDeliveryEvidence(
-                        claim,
+                owner.onDeliveryFact(
                         new ContextResult.TransportResult(
                                 claim, result, System.currentTimeMillis()));
             }
@@ -576,8 +573,7 @@ class RequestInflightRecoveryTest {
                             .delivery(claim)
                             .toCompletableFuture()
                             .isDone()) {
-                owner.onDeliveryEvidence(
-                        claim,
+                owner.onDeliveryFact(
                         new ContextResult.CleanupAcknowledgement(
                                 claim,
                                 ContextResult.CancelEvidenceKind.CLEANED,

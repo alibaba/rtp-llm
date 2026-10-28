@@ -184,8 +184,7 @@ class RequestConfirmationTimeoutTest {
                                 : RequestProtocolTestSupport.claimRouteWithoutPrediction(
                                         requests, item, commitPrefill);
                 assertNotNull(claim);
-                requests.onDeliveryEvidence(
-                        claim,
+                requests.onDeliveryFact(
                         new ContextResult.Prediction(
                                 claim,
                                 org.flexlb.balance.prediction.PrefillPredictionBoundary
@@ -212,8 +211,7 @@ class RequestConfirmationTimeoutTest {
                                 java.util.concurrent.CompletableFuture.completedFuture(
                                         EngineGrpcClient.CancelReply.REQUEST_CLEANED));
                 assertTrue(claim.item().ctx().data().getScheduler().tryStartSend(claim));
-                requests.onDeliveryEvidence(
-                        claim,
+                requests.onDeliveryFact(
                         new ContextResult.TransportResult(
                                 claim,
                                 DeliveryResult.uncertain(

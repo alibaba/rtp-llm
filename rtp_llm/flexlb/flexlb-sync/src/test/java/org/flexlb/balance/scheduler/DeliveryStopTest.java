@@ -70,7 +70,7 @@ class DeliveryStopTest {
             assertEquals(PreemptionRegistration.Reply.WAITING, secondAnswer.get(2, TimeUnit.SECONDS));
         } finally {
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -101,7 +101,7 @@ class DeliveryStopTest {
                     .onDeliveryFact(any(ContextResult.DeliveryFact.class));
         } finally {
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -138,7 +138,7 @@ class DeliveryStopTest {
         } finally {
             firstRpc.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -159,7 +159,7 @@ class DeliveryStopTest {
             assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
         } finally {
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -191,7 +191,7 @@ class DeliveryStopTest {
             assertTrue(runtime.signals().delivery(claim).toCompletableFuture().isDone());
         } finally {
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -218,7 +218,7 @@ class DeliveryStopTest {
             verifyNoInteractions(runtime.engineClient);
         } finally {
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -272,7 +272,7 @@ class DeliveryStopTest {
                                     () -> {
                                         try {
                                             dispatcher.awaitStops(runtime);
-                                            runtime.shutdown();
+                                            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
                                             closed.complete(null);
                                         } catch (Throwable failure) {
                                             closed.completeExceptionally(failure);
@@ -286,7 +286,7 @@ class DeliveryStopTest {
             if (closer != null) {
                 closer.join(6_000L);
             }
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -334,7 +334,7 @@ class DeliveryStopTest {
             assertFalse(runtime.signals().delivery(claim).toCompletableFuture().isDone());
         } finally {
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -407,7 +407,7 @@ class DeliveryStopTest {
             if (closer != null) {
                 closer.join(2_000);
             }
-            assertThrows(IllegalStateException.class, runtime::shutdown);
+            assertThrows(IllegalStateException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
         }
     }
 
@@ -443,7 +443,7 @@ class DeliveryStopTest {
         } finally {
             runtime.signals().completeDelivery(first);
             runtime.signals().completeDelivery(second);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -507,7 +507,7 @@ class DeliveryStopTest {
         } finally {
             reply.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             runtime.signals().completeDelivery(claim);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -587,7 +587,7 @@ class DeliveryStopTest {
                                     fact -> fact instanceof ContextResult.PreemptionFact));
         } finally {
             runtime.signals().completeDelivery(claim);
-            var reported = assertThrows(IllegalStateException.class, runtime::shutdown);
+            var reported = assertThrows(IllegalStateException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
             assertSame(firstFailure.get(), reported);
             assertEquals(failures - 1, reported.getSuppressed().length);
         }
@@ -660,7 +660,7 @@ class DeliveryStopTest {
             while ((task = queued.poll()) != null) {
                 task.run();
             }
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -726,7 +726,7 @@ class DeliveryStopTest {
                             .isEmpty());
             assertFalse(runtime.signals().preemption(registration).toCompletableFuture().isDone());
         } finally {
-            assertSame(rejectedFact, assertThrows(IllegalStateException.class, runtime::shutdown));
+            assertSame(rejectedFact, assertThrows(IllegalStateException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO)));
         }
     }
 
@@ -785,7 +785,7 @@ class DeliveryStopTest {
             while ((task = queued.poll()) != null) {
                 task.run();
             }
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -812,7 +812,7 @@ class DeliveryStopTest {
             assertDoesNotThrow(() -> cleanup.stop(claim).join());
             assertDoesNotThrow(() -> cleanup.stop(claim).join());
         } finally {
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -848,7 +848,7 @@ class DeliveryStopTest {
                     runtime, "stopWorkers", original);
             // Real shutdown rethrows any recorded facility failure, so this checks the entire
             // lifecycle.
-            assertThrows(RuntimeException.class, runtime::shutdown);
+            assertThrows(RuntimeException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
         }
     }
 
@@ -884,7 +884,7 @@ class DeliveryStopTest {
                     "physical settlement belongs only to the exact claim");
             verifyNoInteractions(channel);
         } finally {
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -913,7 +913,7 @@ class DeliveryStopTest {
             runtime.signals().completeDelivery(claim);
             assertDoesNotThrow(() -> runtime.signals().delivery(claim).toCompletableFuture().join());
         } finally {
-            assertThrows(RuntimeException.class, runtime::shutdown);
+            assertThrows(RuntimeException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
         }
     }
 
@@ -958,7 +958,7 @@ class DeliveryStopTest {
         } finally {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     runtime, "stopWorkers", original);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 

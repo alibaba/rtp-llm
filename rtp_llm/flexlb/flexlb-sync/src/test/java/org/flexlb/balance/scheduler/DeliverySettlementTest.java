@@ -194,8 +194,7 @@ class DeliverySettlementTest {
                     .ctx()
                     .data()
                     .getScheduler()
-                    .onDeliveryEvidence(
-                            member.claim(),
+                    .onDeliveryFact(
                             new ContextResult.TransportResult(
                                     member.claim(),
                                     DeliveryResult.delivered(),
@@ -243,8 +242,7 @@ class DeliverySettlementTest {
                     .ctx()
                     .data()
                     .getScheduler()
-                    .onDeliveryEvidence(
-                            successful.claim(),
+                    .onDeliveryFact(
                             new ContextResult.TransportResult(
                                     successful.claim(),
                                     DeliveryResult.delivered(),
@@ -425,8 +423,7 @@ class DeliverySettlementTest {
             ledger.commit(131L, List.of(member.item()));
             DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
             DeliverySettlementTestSupport.decodeStatus(decode, 131L, false);
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.RouteDelivered(
                             member.claim(), 0L, System.currentTimeMillis()));
             assertTrue(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -541,8 +538,7 @@ class DeliverySettlementTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        member.claim(),
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 member.claim(),
                                 DeliveryResult.notSent(
@@ -570,8 +566,7 @@ class DeliverySettlementTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        member.claim(),
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 member.claim(),
                                 DeliveryResult.uncertain(new IllegalStateException("reply lost")),
@@ -638,8 +633,7 @@ class DeliverySettlementTest {
                                             .ctx()
                                             .data()
                                             .getScheduler()
-                                            .onDeliveryEvidence(
-                                                    member.claim(),
+                                            .onDeliveryFact(
                                                     new ContextResult.TransportResult(
                                                             member.claim(),
                                                             DeliveryResult.prefillRejected(
@@ -689,8 +683,7 @@ class DeliverySettlementTest {
                                 .ctx()
                                 .data()
                                 .getScheduler()
-                                .onDeliveryEvidence(
-                                        member.claim(),
+                                .onDeliveryFact(
                                         new ContextResult.TransportResult(
                                                 member.claim(),
                                                 DeliveryResult.delivered(),
@@ -788,8 +781,7 @@ class DeliverySettlementTest {
             if (decodeStatusFirst) {
                 DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, false);
             } else {
-                registry.onDeliveryEvidence(
-                        member.claim(),
+                registry.onDeliveryFact(
                         new ContextResult.TransportResult(
                                 member.claim(), unknown, System.currentTimeMillis()));
             }
@@ -800,8 +792,7 @@ class DeliverySettlementTest {
             assertTrue(member.requestContext().data().hasGenerateInput());
 
             if (decodeStatusFirst) {
-                registry.onDeliveryEvidence(
-                        member.claim(),
+                registry.onDeliveryFact(
                         new ContextResult.TransportResult(
                                 member.claim(), unknown, System.currentTimeMillis()));
             } else {
@@ -871,8 +862,7 @@ class DeliverySettlementTest {
             EngineGrpcClient.CancelReply ack) throws Exception {
         Member member = dispatchedMember(120L);
         try {
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.TransportResult(
                             member.claim(),
                             DeliveryResult.delivered(),
@@ -922,8 +912,7 @@ class DeliverySettlementTest {
 
             assertTerminalsSettledAndArchived(member);
         } finally {
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -983,8 +972,7 @@ class DeliverySettlementTest {
                             DeliverySettlementTestSupport.decodeStatus(
                                     member.item().decodeEp(), 123L, true);
                     case 'S' ->
-                            registry.onDeliveryEvidence(
-                                    member.claim(),
+                            registry.onDeliveryFact(
                                     new ContextResult.TransportResult(
                                             member.claim(),
                                             DeliveryResult.uncertain(
@@ -1008,8 +996,7 @@ class DeliverySettlementTest {
             assertTerminalsSettledAndArchived(member);
             assertFalse(member.item().future().get(2, TimeUnit.SECONDS).isSuccess());
         } finally {
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -1035,8 +1022,7 @@ class DeliverySettlementTest {
                     threads.submit(
                             () -> {
                                 await(start);
-                                registry.onDeliveryEvidence(
-                                        member.claim(),
+                                registry.onDeliveryFact(
                                         new ContextResult.TransportResult(
                                                 member.claim(),
                                                 DeliveryResult.uncertain(
@@ -1150,8 +1136,7 @@ class DeliverySettlementTest {
             assertFalse(
                     cancellations.containsKey(121L),
                     "both Worker terminals already prove remote cleanup; no Cancel ACK is required");
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.TransportResult(
                             member.claim(),
                             uncertainDelivery
@@ -1163,8 +1148,7 @@ class DeliverySettlementTest {
 
             assertTerminalsSettledAndArchived(member);
         } finally {
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.CleanupAcknowledgement(
                             member.claim(),
                             ContextResult.CancelEvidenceKind.CLEANED,
@@ -1179,8 +1163,7 @@ class DeliverySettlementTest {
             boolean senderFirst, boolean workerSuccessful) throws Exception {
         Member member = dispatchedMember(125L);
         if (senderFirst) {
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.TransportResult(
                             member.claim(),
                             DeliveryResult.delivered(),
@@ -1216,8 +1199,7 @@ class DeliverySettlementTest {
         long responseObservedAtNanos = System.nanoTime();
         if (!senderFirst) {
             assertEquals(0L, member.requestContext().data().getAckAtNanos());
-            registry.onDeliveryEvidence(
-                    member.claim(),
+            registry.onDeliveryFact(
                     new ContextResult.TransportResult(
                             member.claim(),
                             DeliveryResult.delivered(),
@@ -1353,8 +1335,7 @@ class DeliverySettlementTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        member.claim(),
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 member.claim(),
                                 DeliveryResult.prefillRejected(

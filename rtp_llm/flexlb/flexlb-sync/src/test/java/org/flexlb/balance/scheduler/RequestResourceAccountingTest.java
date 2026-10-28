@@ -160,12 +160,10 @@ class RequestResourceAccountingTest {
             assertEquals(1, f.decode.resourceSnapshot().activeDispatchPermits());
             try (var member = prepared.value()) {
                 var failure = new IllegalStateException("snapshot materialization failed");
-                f.requests.onDeliveryEvidence(
-                        null,
+                f.requests.onDeliveryFact(
                         new ContextResult.PreparationFailure(
                                 null, f.item, failure.getMessage(), System.currentTimeMillis()));
-                f.requests.onDeliveryEvidence(
-                        null,
+                f.requests.onDeliveryFact(
                         new ContextResult.PreparationFailure(
                                 null, f.item, failure.getMessage(), System.currentTimeMillis()));
                 assertFalse(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -223,8 +221,7 @@ class RequestResourceAccountingTest {
                     .ctx()
                     .data()
                     .getScheduler()
-                    .onDeliveryEvidence(
-                            claim,
+                    .onDeliveryFact(
                             new ContextResult.TransportResult(
                                     claim,
                                     new DeliveryResult(
@@ -263,8 +260,7 @@ class RequestResourceAccountingTest {
                         f.requests.claimDelivery(
                                 f.item, DeliveryClaimKind.ROUTE_DECISION, 0L, member.decode());
                 assertNotNull(claim);
-                f.requests.onDeliveryEvidence(
-                        claim,
+                f.requests.onDeliveryFact(
                         new ContextResult.RouteDelivered(
                                 claim,
                                 org.flexlb.balance.prediction.PrefillPredictionBoundary
@@ -349,8 +345,7 @@ class RequestResourceAccountingTest {
                     .ctx()
                     .data()
                     .getScheduler()
-                    .onDeliveryEvidence(
-                            claim,
+                    .onDeliveryFact(
                             new ContextResult.TransportResult(
                                     claim,
                                     DeliveryResult.notSent(
@@ -379,8 +374,7 @@ class RequestResourceAccountingTest {
                     .ctx()
                     .data()
                     .getScheduler()
-                    .onDeliveryEvidence(
-                            claim,
+                    .onDeliveryFact(
                             new ContextResult.TransportResult(
                                     claim,
                                     DeliveryResult.uncertain(
@@ -410,8 +404,7 @@ class RequestResourceAccountingTest {
             TaskPhase confirmed, TaskPhase regressed) throws Exception {
         try (Fixture f = new Fixture()) {
             var claim = f.handoff();
-            f.requests.onDeliveryEvidence(
-                    claim,
+            f.requests.onDeliveryFact(
                     new ContextResult.TransportResult(
                             claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -441,8 +434,7 @@ class RequestResourceAccountingTest {
     void prefillCompletionAfterDecodeAcceptanceRemainsSettledAtDecodeTerminal() throws Exception {
         try (Fixture f = new Fixture()) {
             var claim = f.handoff();
-            f.requests.onDeliveryEvidence(
-                    claim,
+            f.requests.onDeliveryFact(
                     new ContextResult.TransportResult(
                             claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
@@ -469,8 +461,7 @@ class RequestResourceAccountingTest {
     void inactivityWaitsForRemoteCleanupWithoutInventingPhysicalKvRelease() throws Exception {
         try (Fixture f = new Fixture()) {
             var claim = f.handoff();
-            f.requests.onDeliveryEvidence(
-                    claim,
+            f.requests.onDeliveryFact(
                     new ContextResult.TransportResult(
                             claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             f.decodeStatus(Map.of("101", task(ID)), Map.of(), TOTAL_KV - HARD_KV);
@@ -498,8 +489,7 @@ class RequestResourceAccountingTest {
                     .ctx()
                     .data()
                     .getScheduler()
-                    .onDeliveryEvidence(
-                            oldClaim,
+                    .onDeliveryFact(
                             new ContextResult.TransportResult(
                                     oldClaim,
                                     DeliveryResult.delivered(),
