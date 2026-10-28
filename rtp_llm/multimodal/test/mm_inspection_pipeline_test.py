@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import json
 import multiprocessing
 import os
 import pickle
@@ -8,7 +9,7 @@ import time
 from functools import partial
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -66,6 +67,7 @@ class SourceProvider(GreenNetProvider):
         if not hold:
             self.release.set()
         self.calls = []
+        self.request_ids = []
 
     def is_enabled(self):
         return True
@@ -75,6 +77,7 @@ class SourceProvider(GreenNetProvider):
 
     async def submit_sources(self, request, mm_inputs, sources):
         self.calls.append(([item.url for item in mm_inputs], list(sources)))
+        self.request_ids.append(request.id)
         provider = self
 
         class Handle(GreenNetHandle):
@@ -306,6 +309,109 @@ class WorkerInspectionTest(TestCase):
 class InspectionPipelineTest(TestCase):
     _make_engine = helpers.MMProcessEngineGreenNetTest._make_engine
     _make_input = helpers.MMProcessEngineGreenNetTest._make_input
+
+    def _enable_access_log(self, engine):
+        engine.vit_config.disable_access_log = False
+        # Keep the real MMAccessLogger serializer, replacing only its sinks.
+        engine._access_logger.logger = MagicMock()
+        engine._access_logger.query_logger = MagicMock()
+
+    def _assert_access_ids(self, engine, expected):
+        for sink in (
+            engine._access_logger.query_logger,
+            engine._access_logger.logger,
+        ):
+            records = [json.loads(call.args[0]) for call in sink.info.call_args_list]
+            self.assertEqual(len(records), len(expected))
+            self.assertEqual(
+                {record["id"]: record["external_request_id"] for record in records},
+                expected,
+            )
+
+    def test_sync_access_ids_match_inspection_single_multi_and_cached(self):
+        for count in (1, 2):
+            for external_id in ("dash-sync", ""):
+                with self.subTest(count=count, external_id=external_id):
+                    engine = self._make_engine(SourceModel())
+                    provider = SourceProvider()
+                    engine._inspection._greennet_provider = provider
+                    self._enable_access_log(engine)
+                    media = [
+                        self._make_input(f"https://example.com/sync-{i}.jpg")
+                        for i in range(count)
+                    ]
+                    try:
+                        engine._embed_with_greennet_sync(
+                            media, request_id=71, external_request_id=external_id
+                        )
+                        expected_id = external_id or "71"
+                        self.assertTrue(provider.request_ids)
+                        self.assertEqual(set(provider.request_ids), {expected_id})
+                        self._assert_access_ids(engine, {71: expected_id})
+                        # Reusing tensors must not reuse the previous caller's ID.
+                        engine._embed_with_greennet_sync(
+                            media, request_id=72, external_request_id="dash-cached"
+                        )
+                        self._assert_access_ids(
+                            engine, {71: expected_id, 72: "dash-cached"}
+                        )
+                    finally:
+                        engine.stop()
+
+    def test_concurrent_async_access_ids_match_inspection(self):
+        engine = self._make_engine(SourceModel())
+        provider = SourceProvider()
+        engine._inspection._greennet_provider = provider
+        self._enable_access_log(engine)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(2) as executor:
+                futures = [
+                    executor.submit(
+                        engine.get_embedding_result,
+                        [self._make_input(f"https://example.com/async-{rid}.jpg")],
+                        request_id=rid,
+                        external_request_id=external_id,
+                    )
+                    for rid, external_id in ((81, "dash-async"), (82, ""))
+                ]
+                for future in futures:
+                    self.assertEqual(len(future.result(timeout=10)), 1)
+            self._assert_access_ids(engine, {81: "dash-async", 82: "82"})
+            self.assertCountEqual(provider.request_ids, ["dash-async", "82"])
+        finally:
+            engine.stop()
+
+    def test_embedding_error_keeps_access_ids_in_sync_and_async(self):
+        for asynchronous in (False, True):
+            with self.subTest(asynchronous=asynchronous):
+                engine = self._make_engine(SourceModel())
+                engine._inspection._greennet_provider = SourceProvider()
+                self._enable_access_log(engine)
+                media = [self._make_input("https://example.com/failure.jpg")]
+                try:
+                    method = (
+                        engine.get_embedding_result
+                        if asynchronous
+                        else engine._embed_with_greennet_sync
+                    )
+                    with patch.object(
+                        engine,
+                        "_compute_embeddings",
+                        side_effect=ValueError("embedding failed"),
+                    ):
+                        with self.assertRaisesRegex(ValueError, "embedding failed"):
+                            method(
+                                media,
+                                request_id=91,
+                                external_request_id="dash-failed",
+                            )
+                    self._assert_access_ids(engine, {91: "dash-failed"})
+                    record = json.loads(
+                        engine._access_logger.logger.info.call_args.args[0]
+                    )
+                    self.assertEqual(record["exception"], "embedding failed")
+                finally:
+                    engine.stop()
 
     def test_cancelled_queued_continuation_finishes_terminal_future(self):
         source, queued = concurrent.futures.Future(), concurrent.futures.Future()
