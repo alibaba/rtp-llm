@@ -8,8 +8,9 @@ from ..config.model import CallStep, CheckStep, Reference
 from ..config.values import duration
 from .assertions import compare
 from .processes import Processes
+from .master import invoke_master
 from .records import Records, timestamp, write_json
-from .transport import ExecutionError
+from .transport import ExecutionError, post
 
 
 def resolve(value, results):
@@ -104,7 +105,11 @@ async def run_case(case, registry, launch, directory):
                                        'context': {'run': step.run if isinstance(step, CallStep) else 'foreground',
                                                    'query_time': query_time, 'observation': observed,
                                                    'timeout_ms': max(1, int(budget * 1000))}}
-                            actual = await processes.guard(processes.invoke(payload), budget)
+                            endpoint = processes.endpoint(step.interface)
+                            native_master = 'MODEL_SERVICE_CONFIG' in case.environment.get('master', {}).get('config', {})
+                            request = (invoke_master(processes.urls, endpoint, payload)
+                                       if native_master and step.interface.startswith('master/') else post(endpoint, payload))
+                            actual = await processes.guard(request, budget)
                         actual = _value(actual, spec['returns'], {}, step.id + '.result')
                         if spec['returns'].get('name') == 'QueryResult' and _epoch(actual['query_time']) != _epoch(query_time):
                             raise ExecutionError('Query response does not match the fixed invocation time')

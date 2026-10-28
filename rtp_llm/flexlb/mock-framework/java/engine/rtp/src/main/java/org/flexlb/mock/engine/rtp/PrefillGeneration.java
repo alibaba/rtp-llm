@@ -36,7 +36,6 @@ final class PrefillGeneration implements AutoCloseable {
     }
 
     private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis) {
-        DecodeAdmission.validateOutput(input);
         transfer.validate(input);
         if (input.getGenerateConfig().getMaxNewTokens() <= 1 || !input.getGenerateConfig().getCanUsePdSeparation())
             throw Status.UNIMPLEMENTED.withDescription("Batch and multi-token requests require P/D separation").asRuntimeException();

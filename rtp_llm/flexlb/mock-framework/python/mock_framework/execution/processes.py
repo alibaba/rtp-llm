@@ -10,7 +10,7 @@ import uuid
 
 from ..config.values import duration, fields, text
 from .records import write_json
-from .transport import ExecutionError, post
+from .transport import ExecutionError
 from .monitoring import Prometheus, prepare_prometheus
 from .master import master_environment
 
@@ -119,22 +119,6 @@ class Processes:
         self.monitors.append(asyncio.create_task(self._monitor(node, child)))
         self.records.emit(event='process_started', node=node, pid=child.pid)
         return child
-
-    async def invoke(self, payload):
-        interface = payload['interface']
-        if 'zookeeper' in self.launch and interface in ('master/leadership/get', 'master/engine/get'):
-            instances = [] if interface == 'master/leadership/get' else {}
-            for node in self.urls:
-                if node.startswith('master-'):
-                    value = (await post(self.urls[node], payload))['instances']
-                    if isinstance(instances, list):
-                        instances.extend(value)
-                    else:
-                        if set(instances) & set(value):
-                            raise ExecutionError('Duplicate Master identity in read results')
-                        instances.update(value)
-            return {'instances': instances}
-        return await post(self.endpoint(interface), payload)
 
     async def start(self):
         if self.prometheus:

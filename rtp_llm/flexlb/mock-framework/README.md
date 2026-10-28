@@ -1,125 +1,201 @@
-# Mock框架
+# Mock 框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、文本P/D生成、共享Decode推进及停止模型、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。真实Master已提供单实例本地接线，多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
+这是独立重写的实验框架。Python 编译 Case、编排本次运行的进程、执行步骤和门禁；Java 定义公共接口并实现组件。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-## 目录与构建
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心和 Prometheus。每个 Engine 独立 JVM，实例间使用网络 gRPC。Client 播放器、多 JVM 发压协调、Master 停启和滚动重启、动态缩容、ViT/vLLM 及历史查看服务尚未接通；Java 接口已声明不等于运行能力已实现。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
-- `python/mock_framework/config/`：YAML读取、配置检查、点分参数展开、步骤编译。
-- `java/interfaces/`：组件接口的唯一权威定义、公共类型和清单生成。
-- `python/mock_framework/execution/`：本地进程初始化、顺序执行、HTTP调用、门禁比较、收尾和运行记录。
-- `java/runtime/`：将接口实现绑定为HTTP端点，按接口清单校验参数与回执，提供单次调用上下文。
-- `java/shared/compute/`：共享Forward batch、公式绑定、确定性噪声、Decode推进、停止模型与可取消计时执行。
-- `java/shared/metrics/`：共享Engine指标定义、独立注册表、Prometheus导出与查询实现。
-- `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
-- `java/client/`：Client原生调度、取流、客户端计时及请求取消；播放器和多JVM协调待接入。
-- `java/shared/cache/`：跨Engine复用的物理block容量与独立引用管理；每个实例、每个存储层独立建池。
-- `java/master/`：真实生产Master的启动入口和共享读取接口适配，不重新实现调度。
-- `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
-- `scripts/`：构建和验证入口。
+## 代码职责
 
-使用Java21、仓库已有的Maven Wrapper和uv：
+| 目录 | 负责内容 |
+| --- | --- |
+| `python/mock_framework/config/` | YAML 解析、检查、点分配置展开、引用和可执行步骤编译。 |
+| `python/mock_framework/execution/` | 初始化、顺序执行、HTTP 传输、断言、记录和清理；`master.py` 负责 Master 配置接线及逐 Master 读取聚合，`processes.py` 只管理进程和端点。 |
+| `java/interfaces/` | 公共接口、参数/返回类型及清单生成，是组件接口的唯一权威定义。 |
+| `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文。 |
+| `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
+| `java/client/` | 生产协议的调度、Fetch/Generate、真实客户端计时与取消。 |
+| `java/engine/rtp/` | RTP 配置、原生 RPC、请求执行、P/D 交接与前缀树缓存。 |
+| `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
+| `java/shared/cache/` | 每个池独立的物理 block 容量、所有者引用与释放。 |
+| `java/shared/metrics/` | Engine 指标、注册表、Prometheus 导出与查询。 |
+| `tests/`、各模块 `src/test/` | Python/跨语言集成与 Java 测试；探针不作为正式业务入口。 |
+| `scripts/` | 构建和检查入口。 |
+
+共享指代码复用，不是不同实例共享资源。RTP 策略留在 RTP；后续 vLLM 可以复用 batch、计算、噪声、容量和指标组件，自行实现引擎协议与策略。
+
+## 构建与检查
+
+在本目录使用 Java 21、仓库 Maven Wrapper 和 uv：
 
 ```sh
 export JAVA_HOME=<Java21目录>
-./scripts/check.sh
+./scripts/build.sh
+PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 ```
 
-`build.sh`编译Java并运行测试，然后生成`build/interfaces.json`。Python没有另一份组件接口枚举；`runtime/wait`由Python定义为执行器内置动作，不制造Java端点。生成目录不入库；Python依赖锁定在`uv.lock`。Java构建直接构建生产`flexlb-common`和`flexlb-grpc`，复用实际公式与生成协议，不继承旧Mock或online_eval构建。新组件只保留所用依赖，不引入生产模块的Spring等传递运行依赖。
+`build.sh` 运行 Java 测试并生成 `build/interfaces.json`；`check.sh` 继续运行 Python 测试。缺少 `PROMETHEUS_BIN` 时跳过真实采集集成测试。多 Master 测试需要操作系统支持对应的 127/8 地址；macOS 未配置回环别名时跳过双 Master 测试，不自动改系统网络。生成目录不入库，Python 依赖由 `uv.lock` 锁定。
 
-Master模块另行构建生产cache/sync/api并沿用生产依赖管理，Spring只进入Master运行时，不进入RTP节点或Client收发核心。框架构建使用普通API JAR，跳过Boot重打包和Whale分发归档，保留proto生成和测试；生产独立构建的默认打包行为不变。
+构建复用生产 `flexlb-common`、`flexlb-grpc` 的公式与协议。Master 还使用生产 cache/sync/api，Spring 只进入 Master 运行时。框架构建跳过 Boot 重打包和 Whale 分发归档，不改变生产模块独立构建的默认行为。
 
-## 编译case
+## Case 配置和编译
 
 ```sh
 uv run --locked mock-case compile <case目录>/case.yaml \
-  --catalog build/interfaces.json \
-  --shared-root <共享资源根目录> \
+  --catalog build/interfaces.json --shared-root <共享资源根目录> \
   --output <输出目录>/compiled.json
 ```
 
-私有相对路径基于case目录解析；显式提供共享根时，`data/`、`datasets/`、`views/`路径以共享根解析。编译只解析路径，不检查数据内容或启动查询。标准输入由Java Client读取，不提供旧xz/JSONL兼容、转换器或生成器。
+每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。最新数据格式由 Java Client 读取；播放器和数据读取尚待实现，不提供旧格式兼容、转换器或生成器。
 
-根字段为`id`、可选`name`、`describe`、`environment`、`phases`和可选`view`。phase顺序执行，每个step只包含`call`或`check`。动作允许`run`和`within`，读取必须提供`expect`。每个phase必须有正的`timeout`。标识符全局唯一，引用只能指向已完成定义的前置步骤及其声明返回字段，不允许向前引用。
+顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 是 `call` 或带 `expect` 的 `check`。phase 必须有正的 `timeout`，动作可设 `run` 和 `within`。ID 全局唯一，只能引用已定义的前置步骤返回字段。
 
-组件使用`deployment/config`分层；Engine首版仅`rtp`。Client的`deployment.replicas`表示JVM数量，编译不把总QPS乘以副本数。资源限制实际落实由后续启动器负责，不因配置编译通过而宣称已执行。
+组件配置分为 `deployment` 和 `config`。原生业务配置原样保留；Mock 点分键在本层展开成对象，不展开原生 JSON 文本。重复键、YAML merge、循环引用、点分路径冲突均报错。`FLEXLB_CONFIG` 保留 JSON 字符串，编译器只检查它是对象且无重复键，业务字段由 Master 加载器检查。
 
-`config`保留原生字段，点分Mock键展开为对象；只展开本层键，不改写原生JSON内容。重复键、YAML merge、循环引用、点分路径冲突均报错。`FLEXLB_CONFIG`保留原始JSON文本，编译检查JSON对象及重复键，原生业务字段是否合法仍由Master自己的加载器检查。
+Client 的 `deployment.replicas` 表示 JVM 数量，不能把总 QPS 乘以副本数。当前启动器不落实 CPU、内存或 heap 限制，配置这些限制会拒绝运行。配置编译通过不代表播放器、资源限制或其他未接通能力已执行。
 
-## 指标和断言
-
-TTFT使用`client/requests/ttft`，参数为`stat: avg/max/p99`及`range`。时间范围保留为`all`、`latest`或负偏移区间，编译时不转换为墙上时间；接口元数据决定接受哪些形式，后端仍需明确支持具体统计组合。`all`必须位于唯一一次`client/traffic/run`之后，排空后再次run仍报错。
-
-发流必须读取真实响应：调度结果为已入队时调用FetchResponse，其他请求调用GenerateStreamCall，并持续消费到终态。不提供跳过取流、engine自主完成未取流请求或补报客户端指标的压测模式；旧Mock的FETCH_OUTPUT_STREAM、autoFetch、schedule-only分支及mock_backend_ttft_us补报链路全部不承接。Client在实际收到首token时以自身发送起点计算TTFT，不能用原生响应中的引擎耗时、Forward耗时或引擎完成事件替代；未收到首token则没有TTFT样本，不能填零或伪造成功。原生Client收发核心已实现，播放及指标上报待接入。
-
-`prometheus/query`只接受`promql`，不接受外层`range`；编译不解析PromQL，其执行时刻、查询结果和报告点标注由后续执行器记录。普通语义接口不接受原生查询字段。
-
-`expect`支持`eq`、`count`或`gte/lte`上下界。单位为秒的接口允许`2s`这类阈值；集合引用按Java声明类型校验。Master逐实例的Engine集合可与操作回执的Engine集合引用比较，不能通过合并各Master结果掩盖不一致。compile仅编译断言，真正的比较逻辑由执行器实现。
-
-播放配置支持trace时间节奏或uniform总QPS，模式专属字段不混用。输出长度调整仅支持固定整数、均匀分布和正态分布，调用时实际采样、播放和优先级语义归Java Client。Client尚未接入，输出分布当前只编译与校验，不生成随机样本或启动请求。
-
-### 输出长度调整
-
-`input.prepare.output_tokens`可为非负整数，也可为带`distribution`的对象。类型、参数和约束在Java `OutputTokens`定义，Python读取生成清单，不维护第二份分布参数表。
+播放契约支持 trace 节奏或 uniform 总 QPS，二者专属字段不能混用。`input.prepare.output_tokens` 支持固定非负整数，以及以下两种分布；定义来自 Java `OutputTokens`，Python 不维护第二份参数表：
 
 ```yaml
-# 固定值
 output_tokens: 128
-
-# 整数均匀分布，包含min/max两个端点
+# 或整数均匀分布，含两个端点
 output_tokens: {distribution: uniform, min: 64, max: 256, seed: 42}
-
-# 正态分布：mean/stddev是原始分布参数，单位为token
+# 或正态分布，裁剪后四舍五入，不做条件重采样
 output_tokens: {distribution: normal, mean: 128, stddev: 32, min: 1, max: 512, seed: 42}
 ```
 
-随机形式必须提供int64的seed。token数与上下界是非负int32，min≤max；正态先裁剪到[min,max]，再四舍五入到整数，不进行条件重采样，因此配置的mean不是裁剪后样本均值。stddev可为0，数值必须有限。
+随机分布必须有 int64 seed，token 上下界为非负 int32；`min≤max`，数值有限，`stddev` 可为 0。这些目前只编译校验，实际采样待 Client 播放器实现。采样应按 seed 和稳定请求身份确定，不随分片/JVM/线程变化；重试保留同一目标。覆盖不修改数据集的 settings/observed 或输入拓扑，实际目标写入请求记录。
 
-Java Client实现时应基于seed和稳定逻辑请求身份生成每个请求的一次输出目标，不随JVM数、分片或线程调度顺序改变；同一次请求的重试保留已选目标。覆盖只影响本次输出，不改写数据集settings/observed或输入结构，采样后的实际目标随请求记录保存。此处规定采样语义，实际采样器与多JVM读取在Client批次实现。
+### 查询和断言
 
-## Client原生收发核心
+普通指标优先使用语义接口，YAML 不写 PromQL。例如 TTFT 契约为 `client/requests/ttft`，参数 `stat: avg/max/p99` 和 `range`；Client 指标实现尚未接入。查询范围为：
 
-`java/client`的`NativeClient`接收生产FlexlbScheduleRequestPB和单请求总timeout。调用方提供匹配的generate_input、seq_len、max_new_tokens和缓存路由元数据；数据集到请求的构造仍待播放器实现。本层不新增YAML开关或共享业务接口，不加载旧流量格式。
+- `latest`：查询当前采集周期，具体统计方式由接口实现决定。
+- `[-60s, 0s]`：相对于该检查固定时刻的明确区间，也可查询过去的区间。
+- `all`：唯一一次 `client/traffic/run` 返回的 `started_at` 到本次检查时刻，不从 Prometheus 启动算起。使用前必须已经发流，排空后也不允许再次 run。
 
-每个请求只调度一次。Master必须返回success=true、code=200和一个有效PREFILL地址；已入队则调用FetchResponse，未入队则将Master给出的P/D地址写入原生输入并调用GenerateStreamCall。当前支持单序列文本P/D；不把融合、ViT或缺失路由转换为成功。每次只预取一个响应，逐帧验证请求身份、INT32 token载荷/形状、递增输出长度和终态；收到finished后仍等待流正常结束，空流、截断及终态后的额外帧都是错误，不保留全部输出载荷。
+编译保留相对范围，执行器固定 `query_time` 并记录绝对范围；查询后端不能在收到请求时重新取时钟。`expect` 支持 `eq`、`count`、`gte/lte`；秒单位阈值可写 `2s`。集合 `eq` 忽略顺序、拒绝重复身份；Master 的 Engine 集合逐 Master 比较，不取并集掩盖差异，空 Master 集合不能通过。
 
-`Call.firstToken()`在客户端第一次收到有效token时完成，值为包含Master调度和网络等待的单调时钟耗时；没有首token则异常结束，不产生数值。`Call.completion()`只产生一次Result，保存发送墙钟时间、可空TTFT、总耗时、已收到token数、终态及原生错误码。失败发生在首token之后时仍保留已观测TTFT；原生aux.first_token_cost_time_us始终不参与客户端计时。这些事件供后续指标与请求记录消费，本批没有提前接入Prometheus Client指标。
+特殊查询使用 `prometheus/query`，只接受 `promql`，没有外层 `range`。它在固定 `query_time` 执行一次 instant query；历史窗口写进表达式。报告记录查询点、表达式和样本，不推断表达式内部的门禁范围或自动生成曲线。普通语义接口不接受原始查询字段。
 
-同一总deadline覆盖Schedule及后续取流；原生输入提供更短timeout_ms时取较短预算，并把gRPC deadline向服务端传播。显式取消、超时或错误会终止当前RPC，并向原Master尽力发送一次有界Cancel（request_id及已知batch_id），不重发结果未知的请求。Cancel失败有日志，不承诺远端已释放。多个请求共享连接、分别持有取消上下文；close停止接收新请求、取消活动请求、等待有界Cancel并关闭本Client拥有的连接。
+## 本地运行与生命周期
 
-测试覆盖真实网络协议及新RTP P/D节点；其中调度服务是测试夹具，不代表生产Master已接入。独立JVM测试让新Client进程分别执行Generate和Enqueue→Fetch，实际消费两端结果。播放器、数据集读取、多JVM分片/总QPS协调、Client指标与case业务入口仍待后续批次。
+```sh
+uv run --locked mock-case run <case目录>/case.yaml \
+  --catalog build/interfaces.json --launch <启动配方.yaml> \
+  --output <新的运行目录>
+```
 
-## 真实Master本地接线
+启动配方与 Case 业务配置分开。每类组件按 replicas 启动独立进程，编号 `<组件>-<序号>`；Compute 是组内配置，不单独启动。`command` 是 argv，不经过 shell；cwd 相对配方解析。`bindings` 按最长接口前缀定位入口，不承担指标求和或 Client 数据分片。
 
-`java/master`的入口为`org.flexlb.MasterNode`，与生产Application、同步器和调度器运行于同一JVM，不启动第二个Master子进程，也不引入Mock调度器。启动classpath为本模块`target/classes`加构建生成的`target/dependencies.txt`；启动配方可使用`java -cp <classpath> org.flexlb.MasterNode`，建议为生产Spring初始化预留60s的startup_timeout。
+真实 Master 配方需要顶层 `zookeeper`；P/D 使用 `java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar`。Master classpath 是 `java/master/target/classes` 加 `target/dependencies.txt` 的内容。示意：
 
-Case的`environment.master.config`保存原生环境变量字符串：`FLEXLB_CONFIG`是原样JSON文本，`MODEL_SERVICE_CONFIG`是原生模型路由JSON。Runner先启动本次运行独占的ZooKeeper，再启动P/D/V、Master和Client，与YAML中组件的书写顺序无关。它根据已启动Engine的endpoints.json维护topology.json，将MODEL_SERVICE_CONFIG中的hosts/discovery_file替换为本次运行的discovery.json；service_id、组和各角色发现域名仍来自原配置。FLEXLB_CONFIG不改写。单个本地组内各角色的实例集合由对应启动结果生成，不读取线上VIP。
+```yaml
+zookeeper:
+  command: [<Java21>, -cp, <Master的classpath>, org.flexlb.mock.master.ZookeeperNode]
+components:
+  master:
+    command: [<Java21>, -cp, <Master的classpath>, org.flexlb.MasterNode]
+    startup_timeout: 60s
+  prefill:
+    command: [<Java21>, -jar, <RTP的JAR绝对路径>]
+  decode:
+    command: [<Java21>, -jar, <RTP的JAR绝对路径>]
+bindings:
+  master/: master-0
+  engine/: prefill-0
+  prometheus/: prefill-0
+```
 
-当前支持单/多Master，仍限制一个模型endpoint组、独立角色和grpc协议。本批验证P/D；ViT Engine尚未实现，发现格式预留同样的角色映射但不宣称ViT链路已通过。发现文件使用实际Engine gRPC端口，由生产WorkerAddressService按grpc协议转换内部HTTP身份；不假设Engine控制HTTP端口与gRPC端口相邻。复制来的原始配置保留在config.json，实际环境和发现地址另存native-environment.json、effective-config.json和discovery.json；Master日志写入自己的运行目录。/prometheus沿用生产Master指标，endpoints.json同时登记业务、控制与指标地址。
+配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
 
-只绑定MasterStateApi的两个读取接口：master/engine/get读取生产WorkerDirectory的当前角色集合并映射为Engine句柄，未知地址明确报错，不按部署数量伪造或悄悄忽略；结果以Master ID分别返回。master/leadership/get读取各Master的生产isMaster声明，Runner汇总真实声明集合；master/engine/get逐个读取并保留每个Master的结果，不将Engine集合取并集。单/多Master使用相同读取流程。master/process/stop/start和滚动重启尚未接入。
+Runner 是持续存活的进程所有者，负责启动、退出监视和最终清理。`Processes` 不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `execution/master.py` 逐节点调用；其他接口使用正常 binding。聚合由是否使用原生 Master 配置决定，不由是否配置 ZK 来改变业务分发。
 
-单/多Master统一开启生产ZooKeeper选举，不提供standalone分支。启动配方必须配置顶层`zookeeper`，与组件配方相同，入口是`java -cp <Master的classpath> org.flexlb.mock.master.ZookeeperNode`。这是实际ZooKeeper服务，独立JVM、独立数据目录，使用已有ZooKeeper依赖；不复用旧框架启动器，也不修改生产代码。Runner分配连接地址和本次实验的HIPPO_ROLE，覆盖运行时FLEXLB_SYNC_CONSISTENCY_CONFIG为needConsistency=true，使用6s会话超时，实际值保存到native-environment.json、effective-config.json和zookeeper/master-environment.json。原始Case配置仍单独保存。
+**Master 的 stop/start 尚未接通。** 后续必须由 Runner 侧调用适配器使用进程管理能力实现，不能依赖被停止 Master 自身的控制端口。届时要在发出停止前登记有意退出，启动时恢复该节点端点和监视；意外退出仍须失败。当前任何组件运行中退出仍是异常，不把 `/hook/pre_stop` 当成已经实现的进程停启或滚动重启。
 
-Master依次使用127.0.0.1、127.0.0.2等回环IPv4地址，HTTP端口相同、gRPC端口统一为HTTP+2；端口在Engine启动后探测，实际启动若发生抢占则明确失败。这样符合生产选举用IP作为身份、转发共用端口的约束。Linux默认支持127/8回环；macOS没有配置相应别名时，多Master启动明确报错，应在Linux开发机运行，不会自动修改操作系统网络配置。每次实验有独立ZK和选举路径，互不共享选举状态。
+所有步骤共享所在 phase 的单调时钟预算，call 的 within 只能缩短它。HTTP 调用按接口 schema 校验参数/回执，Java 通过 `InvocationContext` 取得 run 模式、固定查询时刻、观测范围和剩余预算。后台动作由组件真正启动活动并返回回执，HTTP 层不虚构后台执行。动作不自动重试，超时须保留结果可能未知这一事实。
 
-Master发布ready前必须从实际ZK选举取得Leader地址，不能将进程启动视为选举成功。任一组件或ZK意外退出都使实验失败；收尾先停止组件，再停止ZK，最后停止Prometheus，保留ZK数据及日志供排查。ZooKeeper启动配方属于Runner运行配置，不放进Case的业务组件配置。
+进程退出、调用异常、空指标结果或门禁失败都会中止后续步骤并收尾。收尾对本次拥有的进程组先 TERM 后 KILL；主动取消也清理。结果为 PASS/FAIL/ERROR/CANCELLED，清理或采集异常不能得到 PASS。
 
-真实接线测试另外启动生产Master JVM、新P/D JVM和Client探针JVM，覆盖DIRECT/NON_BATCH的Generate与QUEUE/FIXED_WINDOW/BATCH的Enqueue→Fetch；与前一节保留的调度协议夹具测试区分记录。这些是小流量本地接线验证，不作为远程开发机/CI大规模稳定性或压力能力验收。现阶段保留每个Engine一个JVM及跨实例gRPC，是否长期保留以这些后续测量为准。
+运行目录不覆盖已有目录，保存原始 Case、编译配置、启动配方、接口清单、代码版本和工作区差异、组件配置和日志、phase/step 时间线、门禁范围/真实值/阈值/结果。逐请求持久化及正式历史查看服务尚未接入。测试 TransportProbe 只验证进程与传输，不替代业务实现。
 
-## Block容量与RTP前缀树
+## 真实 Master 适配
 
-[共享层设计与RTP实现边界](https://alidocs.dingtalk.com/i/nodes/XPwkYGxZV347LdvpHrkaYkzrJAgozOKL)记录当前约定和main对齐范围。
+`org.flexlb.MasterNode` 与生产 Application、同步器和调度器在同一 JVM，不另起 Master 子进程，也不实现 Mock 调度器。Case 的 `environment.master.config` 使用原生环境变量字符串：`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。
 
-Block管理从零重写，删除旧812行RTP BlockPool；共享指RTP和后续vLLM复用代码，不是跨实例共享资源。
+Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书写顺序无关。已启动 Engine 的 `endpoints.json` 形成 topology/discovery；Runner 只替换 `MODEL_SERVICE_CONFIG` 的 hosts/discovery_file，保留 service_id、组和角色域名，不读取线上 VIP，不改写 `FLEXLB_CONFIG`。当前只支持一个 endpoint 组、分离角色和 gRPC；ViT 发现映射可表达，但 ViT Engine 尚未实现。
 
-- `java/shared/cache/BlockPool`只管理容量和引用。每个所有者持有独立的Reference；close幂等，不能释放其他所有者的份额，也不能把一个池的引用交给另一个池。REQUEST、CACHE、LOAD、STORE、EVICTION分开计数；只有CACHE引用的block算可回收容量，active和free分别统计。分配不足不部分扣账，释放会唤醒容量等待者。
-- RTP `cache/BlockTree`管理前缀和叶子候选；`cache/DeviceCache`管理RTP准入、复用、增长、完成和取消。它们依赖共享BlockPool，旧Pool不作兼容入口。移除旧的flat-LRU模式、测试专用retention、直接插入、无调用publish及回调。
-- 对齐2026-10-28 fetch的main `7cdc40370e5129c5f3d70a40d7cdc54633a7955`：real统一创建BlockTreeCache。tree与LRU不属于同一维度；仅有树结构，原生device_eviction_policy可取lru（默认）、lfu、fifo，分别改变树内候选排序。Full设备池只驱逐未引用叶子，逐个回收所需数量，保留仍可匹配的父节点；match刷新热度，release和重叠insert不刷新。不是整段无分叉链强制回收。
-- RTP适配器负责扣除test_block_num中的保留block 0、按reserve_block_ratio计算门槛；这些规则不进入共享容量类。失败准入回滚本次复用引用；增长失败保留已取得的部分，最后由所属请求释放。
+发现使用实际 Engine gRPC 端口，生产 WorkerAddressService 再转换内部 HTTP 身份，不假定 Mock 控制端口相邻。原始组件配置、实际环境、effective-config 和 discovery 分开保存；Master 暴露生产 `/prometheus`。
 
-当前接通的是既有单池Full-attention device模拟范围，不代表完整复刻real的混合attention或多层级缓存。最新real含DEVICE/HOST/DISK，本地层级之外还有远端backend。host等层可以直接复用同一个容量类，但各自建池；候选、下沉/丢弃和搬运提交/失败由Engine实现。RTP Mock的host/disk/remote链路尚未接通，显式开启enable_memory_cache、enable_disk_cache或enable_remote_cache会拒绝启动，避免忽略配置。
+只绑定 `MasterStateApi` 的两个读取接口：
 
-## 共享Compute
+| 接口 | 行为 |
+| --- | --- |
+| `master/leadership/get` | 读取各 Master 的生产 isMaster 声明，返回声明自己为 Leader 的 Master 句柄集合。数量由 expect 判断，不伪造唯一 Leader。 |
+| `master/engine/get` | 读取各 Master 的 WorkerDirectory，按角色映射 Engine 句柄，逐 Master 返回。未知地址报错，不能按部署数量补齐或将各节点取并集。 |
+
+单/多 Master 全部使用生产 ZK 选举，不提供 standalone 分支。独立 ZookeeperNode 使用已有依赖、独立 JVM/数据目录；Runner 分配地址和本次 HIPPO_ROLE，运行时同步配置为 needConsistency=true、会话超时 6s，并保存实际值。ready 必须等到真实选举产生 Leader。
+
+Master 使用 127.0.0.1、127.0.0.2 等地址，相同 HTTP 端口，gRPC=HTTP+2，适配生产以 IP 作为身份和共用转发端口的约束。端口启动时被抢占则失败，不静默换协议。Linux 默认支持 127/8；macOS 缺少别名时明确报错。实验之间不共享 ZK 或选举路径。清理先停止组件，再停止 ZK，最后停止 Prometheus，保留日志和数据。
+
+接线测试分别覆盖 DIRECT/NON_BATCH 的 Generate、QUEUE/FIXED_WINDOW/BATCH 的 Enqueue→Fetch。协议夹具测试和真实 Master 接线测试分开；用生产 pre_stop 钩子观察选举不等于完成 Master 生命周期动作。
+
+## RTP 节点与公共校验
+
+节点仅监听本机回环地址，独立 JVM 提供原生 gRPC、控制 HTTP 和指标端点。`endpoints.json` 写实际地址、支持的 RPC 和阶段范围；`/health` 只列已绑定的公共接口，未启用查询时没有业务接口。
+
+```yaml
+environment:
+  prefill:
+    engine: rtp
+    config:
+      SEQ_SIZE_PER_BLOCK: "64"
+      MAX_SEQ_LEN: "32768"
+      MAX_BATCH_TOKENS_SIZE: "8192"
+      REUSE_CACHE: "true"
+      TEST_BLOCK_NUM: "1025"
+      RESERVE_BLOCK_RATIO: "5"
+      compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
+```
+
+原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`、`max_context_batch_size=1`。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
+
+RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：多模态、adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
+
+### 执行和 P/D 交接
+
+- P 的 `GenerateStreamCall(max_new_tokens=1)` 走 LocalPrefill，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
+- 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillGeneration 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
+- D 的 DecodeAdmission 管理资源和状态，只有 GENERATE 后进入计算队列；一轮一个执行槽、轮转请求，尚不合并动态 batch。每轮增长 KV、执行公式等待后才提交输出；临时容量不足等待 allocation generation 变化，永久不足返回 602。
+
+P 的内部 `PrefillTransfer.start()` 注册活跃来源并复用 LocalPrefill 计算。Forward 完成后 KV 仍由请求持有；只有网络 `Read` 成功交付后才完成 P 并释放。正式服务**只保留 Read RPC，没有外部 Prepare RPC**；测试从包内 start 建立来源或调用正式生成链路，不为探针注册额外协议。
+
+D 的 LOAD 从 peer_addrs 对应 P 发起真实网络 Read，校验 client/request 身份、完整 prompt、block size 和单 Reader 所有权；不能用缓存中存在的 key 冒充活跃来源。返回元数据为 block size、输入长度、完整块 cache keys 和 stop_after；不复制 KV 张量，不模拟 RDMA/TCP cache-store 或带宽。D 验证成功且预算有效后才能确认 LOAD，传入 KV 不算 D 历史命中，也不提前提交为缓存。
+
+Read 等待计算就绪；D 取消/超时会取消 P 来源，P 取消/关闭也使 LOAD 失败。`load_cache_timeout_ms` 默认 5s，非正值按原生回退 5s，同时受总 deadline 限制。没有 Reader 或 Read 入口校验失败时，来源仍由正式 P 请求所有者管理，受请求取消、timeout/deadline 和节点关闭约束。
+
+原生 EnqueueBatch/EnqueueGroup 当前只支持 DP rank 0、文本 P/D 和 max_new_tokens>1。入队 ACK 前必须取得 D 分配确认；P 可在 Fetch 前计算并持有 KV，但不能先发 LOAD 或执行 D。Fetch 单次接入后使用相同输出链路，不缓存整段结果。重复 ID 的整批项拒绝，其他非法项各自返回错误；成功项不因其他项失败而回滚。
+
+已接受的批量请求不随入队 RPC 结束而取消；请求 timeout 覆盖全程，Fetch 接入期限默认 10min，接入后撤销。Fetch 重复为 ALREADY_EXISTS，过期/缺失为 NOT_FOUND。Cancel 只面向批量请求；活动项 ACCEPTED，未登记项 TOMBSTONED，已完成项 NOT_FOUND；抢占锁定原生 8429，墓碑和完成记录保留 10min。ACK 不承诺远端已经释放，直接 Generate 通过 RPC 取消。
+
+P/D 都按实际 Forward 计时，token 是重复输入末 token 的模拟载荷，不做词表推理。incremental 返回新 token，否则返回累计输出；aux.output_len 始终累计。P 首 token 计入总长度，非推测模式 D 执行 N−1 轮。Client TTFT 必须来自实际接收，不能使用 Engine aux 或计算耗时替代。
+
+请求总预算取 timeout_ms 和 RPC deadline 较早者，不逐阶段重置；取消、超时和关闭只释放一次，旧回调不能影响复用身份的新请求。602/603/605 使用原生 ErrorDetailsPB。P 转发采用受控拉取/有限 Inbox，遵守发送就绪；共享连接不随单请求取消关闭。Mock 保护上限是 1024 活动请求，TaskHistory 保留 1024 项，缺失旧版本返回 OUT_OF_RANGE，不冒充完整历史。
+
+WorkerStatus 报真实等待/执行任务、finished/version，available_concurrency 保持生产默认 0，KV 以 token 为单位；CacheStatus 提供 block size 与版本。D 当前要求 input+max_new_tokens<max_seq_len，未实现真实截断/reserveStep。成功且 reuse/device 均开启时写回完整 prompt 块；失败不提交，生成内容不额外建索引。没有完整动态 batch、GPU 或混合 KV 布局模拟。
+
+## Block 容量与 RTP 缓存
+
+共享 `BlockPool` 只管理物理容量和引用。每个实例/存储层各自建池，每个所有者持有独立 Reference，close 幂等，不能释放其他所有者份额或混用池。REQUEST/CACHE/LOAD/STORE/EVICTION 分别计数；只有 CACHE 引用的块算可回收容量，free 和 available 分开，分配失败不部分扣账，释放唤醒等待者。
+
+RTP 的 `BlockTree` 管前缀与叶子候选，`DeviceCache` 管准入、复用、增长、完成和取消。按 2026-10-28 fetch 的 main `7cdc40370e5129c5f3d70a40d7cdc54633a7955`，real 统一使用 BlockTreeCache；`lru/lfu/fifo` 是树内候选排序，不是 tree 之外的模式。只驱逐未引用叶子，按需逐个回收，保留可匹配父节点；match 刷新热度，release/重叠 insert 不刷新。
+
+容量使用原生 `test_block_num` 和 `reserve_block_ratio`，不支持旧 `capacity.device_blocks/reserve_blocks`。block 0 不可分配，可用块数=test_block_num−1；token 容量再乘 block size。reserve 是原生百分比向下取整，默认 5%，约束首次分配，允许运行中增长使用预留。先引用命中再校验净新增需求，失败回滚；增长失败保留已取得部分，由请求最终释放。
+
+仅缓存完整块，命中排除 prompt 最后 token；遵守全局/请求 reuse 和 device 开关，D 还遵守 disable_decode_first_malloc_device_reuse。成功完成才提交新 key，取消不提交。当前只有 Full-attention device 池；host/disk/remote 尚未接通，显式开启对应 enable_*_cache 会拒绝启动。共享容量类可供各层使用，迁移与驱逐策略仍由 Engine 实现。
+
+## Compute、Decode 和停止模型
+
+每个组只在自己的 config 中放一份模型，没有 `environment.compute` 或覆盖优先级：
 
 ```yaml
 environment:
@@ -142,65 +218,61 @@ environment:
       decode.seed: 42
 ```
 
-各组件组在自己的config中配置一份Compute公式和噪声，不再提供顶层environment.compute，也没有组内/顶层覆盖优先级；旧位置直接报错。Java仍共用同一个ComputeModel实现，配置位置不影响组件复用。配置schema由Java的ComputeSpec、DecodeSpec、StoppingSpec生成，Python不另写字段表。Python校验结构、类型和概率边界，Java初始化时解析公式、补默认值并检查随机模型必需的seed；运行时检查真实batch的计算结果。RTP启动必须提供本组公式，不从其他组或旧标定文件静默回退。
+组件加载器负责读取自己的文件外壳。RTP 用 `RtpConfig.load()` 提取本组 compute，再调用 `ComputeModel.fromJson()`；共享 Compute 不认识 Runner 的 component/environment 格式，不再提供 fromComponentFile。测试探针自行提取配置。effective-config 保存补齐默认值后的结果。schema 来自 Java ComputeSpec/DecodeSpec/StoppingSpec，Python 不复制字段表。
 
-`ForwardBatch`保留各DP分组及完整请求长度、已匹配cache、目标输出长度、已生成长度、本轮stepTokens、优先级和图片原始shape。Engine自己构造batch、计算cache、处理图片和推进请求状态。`ForwardModel`只接收batch并返回基础Duration；默认`FormulaForward`当前只支持一个非空DP，多DP明确报错，不擅自求和或取最大值。其他模型实现可以直接读取完整输入，不必修改公共输入类型。
+`ForwardBatch` 保留 DP、请求输入长度/cache 匹配/目标输出/已生成/stepTokens/优先级/图片原始 shape。Engine 构造 batch；ForwardModel 只返回 Duration。默认 FormulaForward 只接受一个非空 DP，不暗自合并多个 DP。
 
-公式复用生产`ArithmeticFormula`的运算、函数、`param(name, value)`和`sum(...)`。常量参数直接写在表达式里，不另设parameters映射；param初始值遵循生产工具的解析时求值语义，应使用常量，不引用运行时batch变量。式子结果单位为毫秒，保留小数至纳秒精度，不隐式加1ms下限。未知变量、非法作用域、负值、非有限值和耗时溢出均报错。
+公式复用生产 ArithmeticFormula 的函数、`param(name, value)`、`sum(...)`。param 初始值按解析时求值，只用常量；不新增参数映射。结果单位 ms，可保留到 ns，不设隐式 1ms 下限；未知变量、负数、非有限值和溢出报错。逐请求变量只能在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。`totalComputeTokens^2` 和 `sum(computeTokens^2)` 不等价。computeTokens=input−hit，contextTokens=input+generated，stepTokens 由 Engine 提供，图片不计算特征 token。
 
-逐请求变量包括inputTokens、hitCacheTokens、computeTokens、hasHitCache、outputTokens、generatedTokens、contextTokens、stepTokens、priority、imageCount、imagePixels。它们只在`sum(...)`中绑定；batch层使用batchSize、dpRank及自动派生的total/max变量，例如totalComputeTokens、maxInputTokens。`totalComputeTokens^2`与`sum(computeTokens^2)`含义不同，保留实际请求分布。`computeTokens=inputTokens-hitCacheTokens`、`contextTokens=inputTokens+generatedTokens`；stepTokens直接取Engine提供值，不由共享层推断batch如何形成。图片仅保留原始shape及按公式需要使用的像素数，不计算预处理或特征token数。
+噪声先乘 scale，再加高斯；默认 scale=1，stddev_ms/stddev_ratio=0，二者按平方和开根合并。启用随机噪声须有 seed 与正的 max_deviation_ms，裁剪扰动后耗时下限为 0。按 seed、Engine 身份、角色和 batch 身份确定一次 Sample，不随调用顺序改变；不同真实 batch 使用不同身份。
 
-噪声先按scale缩放基础耗时，再加高斯扰动；scale默认1，stddev_ms/stddev_ratio默认0，两者按平方和开根组合标准差。启用高斯时必须显式提供seed和正的max_deviation_ms；扰动裁剪到该上下界，最终耗时下限为0。一次Forward只取样一次。随机数由seed、Engine身份、角色与batch身份决定，不依赖调用顺序或共享随机游标。不同batch必须提供不同的实际调用身份；同一身份重算得到同一计划耗时。
+`plan()` 只算耗时，`SimulatedCompute.submit()` 才等待；Execution 可取消，唯一终态为 COMPLETED/CANCELLED。关闭取消未完成项并拒绝新任务，回调在独立虚拟线程执行。共享 Compute 不提交缓存、不释放 Engine 资源，也不把计时完成当请求成功。
 
-组件通过`ComputeModel.fromComponentFile`读取Runner生成的本组配置，通过`effectiveConfiguration()`取得含默认值的配置用于保存。`plan`只计算Sample，`SimulatedCompute.submit`才启动等待，返回Execution；Engine通过`Execution.cancel()`取消，completion返回唯一的COMPLETED或CANCELLED结果及实际elapsedNanos。计时器关闭会取消所有未完成计算并拒绝新任务，业务回调在独立虚拟线程执行，不阻塞其他计时或取消。共享层不提交cache、不释放Engine资源，也不把计算完成当作请求成功；这些动作由Engine依据真实结果执行。
+DecodeStepModel 默认每轮 1 token。推测配置用 draft_tokens、acceptance_rate、seed：按首次拒绝得到接受前缀 A，再提交纠正/奖励 token，即 C=A+1；固定独立接受率 α、草稿长 k 时是封顶几何模型，E[C]=1+α+…+α^k，见[经典推测解码论文](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)。这不宣称复现所有 MTP/EAGLE。计算按验证数收费，指标按实际提交数累计，KV 覆盖验证上下文，接近输出上限缩短草稿预算。
 
-Compute已接入RTP Prefill和Decode链路；完成Forward时记录实际计时和token数。组件测试不作为完整Engine行为、TPS或压测验收。
+StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概率要求 seed。固定 EOS hazard 是 Mock 的封顶几何近似，不是线上长度规律；遵守 min/max_new_tokens，ignore_eos 强制上限。P 按稳定请求身份只抽样一次，经 LOAD 传 stop_after，D 不重复抽样；跨过停止位置只提交允许部分，仍计验证成本。首 token 即结束时使用 PREFILL_COMPLETE 释放 D，不再执行 Decode。真实 observed 长度或输出覆盖由 Client 指定目标并 ignore_eos。
 
-## 扩展接口
+## Client 原生收发核心
 
-在所属Java API添加方法：Master读取放`MasterStateApi`（由`MasterApi`继承），动作放`MasterApi`；其他组件使用`EngineApi`或`ClientApi`。使用`@Endpoint`声明接口名、动作/读取类别和可选单位；使用Java record声明参数，`@Argument`说明可选性和范围。引用类型直接从record类型生成，不再维护另一份类型名称。实现放所属组件，不放Python。重新构建即生成包含新方法的清单。
+`NativeClient` 接收 FlexlbScheduleRequestPB 和单请求总 timeout。请求只调度一次；要求成功响应及有效 P 地址。已入队走 FetchResponse，其他走 GenerateStreamCall，并写入 Master 返回的 P/D 路由。不提供不 Fetch、不消费完整流、Engine 代报 TTFT 或 schedule-only 模式。
 
-编译器根据清单校验参数和返回引用，不为新接口修改parser/compiler。Java方法必须有一个record参数，即使无参数也使用`Types.None`；同名接口和不支持的类型在生成清单时失败。完全新增一组Java API时在`InterfaceRegistry.standard()`登记其接口类。
+每次只预取一个响应，验证身份、INT32 载荷/形状、递增长度和终态；finished 后仍须正常结束，空流/截断/终态后额外帧均失败，不保留全部输出。firstToken 从发送的单调时钟到实际收到首 token，包含调度和网络；没有首 token 就没有数值。completion 记录发送墙钟、可空 TTFT、总耗时、收到 token 数及终态/错误码；后续失败保留已观测 TTFT，不读取 aux 耗时代替。
 
-跨语言扩展测试覆盖Java新增方法→生成参数和返回类型→Python直接编译调用及错误类型拒绝；它只验证接口扩展和配置编译，不替代网络调用、Engine行为或性能验收。
+同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向原 Master 尽力发一次有界 Cancel，不重试结果未知的请求；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-## 本地执行底座
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。播放器、数据集读取、多 JVM 分片/总 QPS 协调、Client 指标与请求记录、traffic run/stop/drain 的业务实现仍待接通。
 
-```sh
-uv run --locked mock-case run <case目录>/case.yaml \
-  --catalog build/interfaces.json \
-  --launch <启动配方.yaml> \
-  --output <新的运行目录>
-```
+## 指标、采集和查询
 
-启动配方是开发接线配置，不放入case业务区域，也不新增一套业务接口定义。RTP节点使用下述独立JAR入口；Master启动入口见下一节，Client播放器尚未提供。
+EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册表，`GET /metrics` 标准文本导出。事件发生时更新累计量，抓取时读取瞬时量，没有常驻采样线程。固定标签 engine/role/node，额外维度仅下表枚举，不放 request ID、cache key 或异常文本。
 
-```yaml
-components:
-  master:
-    command: [<Java21可执行文件>, -cp, <组件classpath>, <组件入口类>]
-    cwd: <组件工作目录>
-    startup_timeout: 30s
-    env: {}
-bindings:
-  master/: master-0
-```
+| 指标 | 类型 | 含义 |
+| --- | --- | --- |
+| mock_engine_requests_started_total | Counter | 校验并接纳后加一，入口拒绝不计。 |
+| mock_engine_requests_finished_total | Counter，outcome=success/cancelled/timeout/error | 每个已接纳请求唯一终态，节点关闭计 error，不代替 Client 成功率。 |
+| mock_engine_cache_lookup_tokens_total / mock_engine_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
+| mock_engine_forward_tokens_total | Counter，kind=input/compute/output | 成功完成 Forward 的 token；P 为输入、输入减命中、1；D 的 input/compute 为验证数，output 为实际提交数。取消的 Forward 不补成功计算。 |
+| mock_engine_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
+| mock_engine_requests | Gauge，state=waiting/running | 当前等待/执行数。 |
+| mock_engine_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 含可驱逐缓存，不等于 free。 |
 
-配方为environment中每类组件启动replicas个独立进程，编号为`<组件>-<从0开始的序号>`；compute作为配置传入，不独立启动。command是argv数组，不经过shell。cwd相对启动配方解析。组件从`MOCK_CONFIG_FILE`读取本实例配置和完整environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR`提供实例身份、角色与输出目录。`MOCK_READY_FILE`由组件初始化并绑定API后，通过`ApiServer.publishReady`原子发布，端口由系统分配。启动超时或提前退出都失败并回收已启动进程。
+累计量预建 0，抓取不清零；分母为 0 不补比率。以下实现放共享 PrometheusQueries，通过节点控制端口绑定，不为只读节点宣称 scale_in 能力：
 
-bindings按最长接口前缀指定处理该接口的进程，运行前检查每个步骤都有绑定。该映射指定一个接口实现的入口，不执行副本指标求和或流量分片；Client组的协调和聚合由后续Client实现承担。当前本地启动器不落实CPU、内存或heap限制，配置这些限制时直接拒绝执行，避免把未落实的资源配置当作已生效。
+| 接口 | 口径 |
+| --- | --- |
+| engine/cache/hit_rate | P 历史命中 token 增量／输入 token 增量，token 加权；可选 engines。 |
+| engine/prefill/tps | P 实际计算 token 增量／完成 Forward 耗时增量。 |
+| engine/prefill/tps_with_cache | P 输入 token 增量／完成 Forward 耗时增量，输入含命中。 |
+| engine/decode/tps | D 完成 Forward 输出 token 增量／墙钟时间。 |
+| prometheus/query | 固定 query_time 的一次 scalar 或 float instant vector，保留标签、数值和 sample_time。 |
 
-Java组件初始化后调用`new ApiServer(address).bind(MasterApi.class, implementation).start()`，Engine和Client同理。服务器依据同一Java接口生成的schema检查参数与返回值；Optional参数缺省传null，非法值不会通过Jackson自动转换成另一种类型。组件可在方法内读取`InvocationContext.current()`，取得run模式、固定queryTime、解析后的观测范围和超时预算。后台模式仍须由组件启动实际活动并返回启动回执，HTTP服务器不替组件虚构后台执行。接口实现处理业务，Python处理expect。
+普通接口过滤本次 job、engine、role，先逐条 Counter 算增量再聚合以处理 reset；hit_rate 不能平均节点比率。空 engines 报错，选择器转义。range 在固定 end 执行单次 instant query，窗口=end−start，精度 ms，低于 1ms 拒绝；latest 用检查前 60s 内最近两次采样的 irate，不平均整分钟。缺少采样或没有可计算 Forward 时报错。
 
-所有步骤按顺序执行。phase使用单调时钟计算总预算，call的within不能超过剩余阶段时间。进程退出、调用异常、空查询或门禁失败都会中止后续步骤并收尾。动作不自动重试；超时记录结果可能未知。收尾对当前运行拥有的进程组先TERM、再KILL，主动取消同样执行收尾。托管Prometheus按下述顺序采集并退出；业务Client的stop/drain与请求记录刷盘仍需在Client接入时实现。
+原始 PromQL 不自动加 job/engine 过滤。matrix/string/native histogram、非有限值、查询 warning 或后端失败都不作为有效门禁；普通指标恰好一个有限值。原始空 vector 可以传回，但门禁为 ERROR。全部样本须满足 expect。查询不重试，HTTP 和求值均受步骤剩余预算限制。
 
-每次读取固定query_time；`latest`记录查询点，`[-60s, 0s]`解析为明确起止时间，`all`取唯一发流回执中的started_at到当前查询时刻。原始PromQL不解析内部窗口，记录单点查询和全部返回样本，所有样本必须满足expect，空结果为ERROR。集合eq忽略顺序，拒绝重复身份；Master的Engine集合逐个比较，空Master结果不能通过门禁。
+### Runner 托管 Prometheus
 
-运行目录不覆盖已有目录，保存原始case、编译配置、启动配方、接口清单、代码版本与工作区差异、组件配置和日志、phase/step时间线、门禁实际值及范围、最终结果。PASS表示所执行步骤通过，FAIL表示门禁不满足，ERROR表示执行或数据异常，CANCELLED表示取消；清理异常不能得到PASS。配置托管采集时同时保留Prometheus配置、实际版本、目标、日志和TSDB/WAL。逐请求记录与正式历史查看服务尚未接入。测试中的TransportProbe只用于验证真实JVM进程及网络链路，不实现Engine或压测行为。
-
-### Runner托管Prometheus
-
-采集器属于执行设置，放在启动配方中，case顶层不新增字段：
+启动配方可加入：
 
 ```yaml
 prometheus:
@@ -209,178 +281,16 @@ prometheus:
   startup_timeout: 30s
 ```
 
-binary必须是已提供的可执行文件，相对路径按启动配方目录解析；Runner不下载或安装。scrape_interval默认1s，支持整数毫秒；startup_timeout默认30s，分别约束采集器启动和基线等待。当前验证版本为Prometheus3.5.0，需支持JSON日志和系统分配监听端口。
+Runner 不下载 binary；默认 scrape 1s、startup 30s，目前验证 Prometheus 3.5.0。它在独立运行目录启动采集器，从结构化日志读取系统分配端口，写入组件实际 config 的 prometheus.url/job，不修改原始 Case。托管模式与手配这两个参数冲突时报错。
 
-Runner先在新运行目录的prometheus/下生成配置与空file discovery文件，启动独立进程。Prometheus绑定127.0.0.1:0，Runner从该进程的结构化日志读取实际端口，不预占或猜测端口。组件实际config.json自动注入prometheus.url和job；原始case及编译配置不改写。托管模式下不能再显式配置组件prometheus参数，冲突在启动前报错。
+组件 ready 后必须提供合法 metrics URL。Runner 原子更新 file discovery，固定节点全部成功抓取两次才执行 phase；动态目标增删尚未接通。每次独立 TSDB、job=mock，不要求用户定义实验 ID。若自用外部 Prometheus，组件可配置 `prometheus.url` 和 `prometheus.job`；调用方负责采集及实验隔离。
 
-各组件ready后必须在endpoints.json提供匹配的id和metrics URL；缺失或不合法直接报错，不能静默漏采。Runner原子更新targets.json，全部节点成功采样至少两次后才开始phase/step。当前发现的是启动配方创建的固定节点集合，运行中动态增删目标尚未接入。每次运行有独立Prometheus和TSDB，job固定为mock，不要求用户手工创建实验ID。
+收尾等待每个目标在收尾开始后成功采样，再停止组件、ZK，最后 TERM Prometheus，超时才 KILL。最后采样失败、采集器异常退出会标记数据不完整并令实验 ERROR。启动失败/取消仍清理并保留现场。
 
-收尾先等待每个目标在收尾开始后完成一次成功采样，再停止组件，最后向Prometheus发TERM并等待正常退出。超时才KILL；采集器被杀、退出异常或最后采样失败会记录数据不完整并令结果ERROR，不能得到PASS。启动未完成时取消或失败，仍回收所有已拥有进程并保留现场，不宣称已采完实验。
+prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collection.json；complete 仅说明采集边界及关闭成功，不代替业务指标或中途 up 判断。门禁 FAIL/主动取消也可以有完整采集。曲线不导出 JSON，数据不随收尾删除，后续回放服务在线查询；目前仍用默认保留策略，没有长期归档或正式报告服务。Grafana 大盘映射和 Client 指标尚未实现。
 
-prometheus/保留prometheus.yaml、targets.json、data/、stdout.log、stderr.log及collection.json。collection.json记录版本、实际地址、目标、基线时刻、最后采样时刻和完整性结果；complete表示本次托管边界采集与关闭成功，不替代对中间up样本或业务指标的判断。门禁FAIL与用户取消可以拥有complete=true的采集记录。TSDB不转换为JSON曲线，也不会在收尾删除；服务停止后由后续回放服务读取。数据保存采用Prometheus默认保留策略，本批不增加归档、长期保留或报告服务。
+## 如何扩展公共接口
 
-## RTP节点与缓存底座
+在所属 Java API 加 `@Endpoint` 方法，Master 状态放 MasterStateApi，动作放 MasterApi，Engine/Client 同理。一个方法接收一个 record 参数，无参数用 Types.None；参数注解描述范围/可选性，类型及返回引用直接从 record 生成。重新构建即可更新清单，Python 不新增枚举或改 compiler。
 
-构建生成`java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar`，包含生产生成的gRPC/protobuf类型及新组件所需运行依赖。启动配方中使用`command: [<Java21>, -jar, <该JAR绝对路径>]`，组件可为prefill或decode；每个副本独立JVM，端口由系统分配，当前仅监听本机回环地址。
-
-```yaml
-environment:
-  prefill:
-    engine: rtp
-    config:
-      SEQ_SIZE_PER_BLOCK: "64"
-      MAX_SEQ_LEN: "32768"
-      MAX_BATCH_TOKENS_SIZE: "8192"
-      REUSE_CACHE: "true"
-      TEST_BLOCK_NUM: "1025"
-      RESERVE_BLOCK_RATIO: "5"
-      compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
-```
-
-原生字段支持server_args的小写名称或Whale环境变量的大写名称；同一字段两种写法同时存在时报错，不做静默优先级覆盖。整数/布尔字段接受对应原生env文本，保留原始业务配置，不展开其中的JSON文本。当前读取seq_size_per_block、max_seq_len、max_batch_tokens_size、reuse_cache、enable_device_cache、disable_decode_first_malloc_device_reuse、load_cache_timeout_ms、reserve_block_ratio、tp_size、dp_size、dp_rank；其他原生内容保留但不宣称已实现其业务效果。block size和max seq length必须显式配置，不从虚拟GPU型号或真实模型结构猜测；当前仅支持dp_size=1、dp_rank=0。
-
-容量沿用RTP原生test_block_num/TEST_BLOCK_NUM和reserve_block_ratio/RESERVE_BLOCK_RATIO，不再支持capacity.device_blocks或capacity.reserve_blocks。真实设备池的block 0不可分配，因此test_block_num必须至少为2，实际可用块数=test_block_num-1，总token容量=可用块数×seq_size_per_block。预留水位按可用块数×原生百分比做整数除法，向下取整，默认5%；它是首次分配的容量门禁，不阻止运行中请求使用预留进行增长。effective-config.json保存物理块数、可用块数、预留水位与模型默认值。
-
-RTP真实实现也支持kv_cache_mem_mb，但从字节换算块数需要真实KV布局；当前Mock不加载模型层/head或GPU内存，要求显式test_block_num，不根据部署内存或虚拟GPU型号猜测。复制的其他原生配置保留，但不能据此宣称未实现的功能生效。这里只对齐单池容量语义，未实现混合KV分组的物理布局。
-
-节点在原生gRPC提供CheckHealth、GetWorkerStatus和GetCacheStatus，P支持下述本地GenerateStreamCall子集，D支持RemoteGenerate的ALLOCATE、LOAD与GENERATE子集。健康返回OK；WorkerStatus使用RoleType.PREFILL/DECODE和对应类型枚举，available_concurrency保持生产默认0，KV容量使用token单位；CacheStatus另外提供block size。缓存键版本只随已发布键集合变化，同版本省略键列表，但每次仍返回当前可用容量。precision暂为FP16的Mock状态标记，不模拟量化或真实模型布局。
-
-设备块池按引用管理共享前缀：可用容量包含空闲块和未被引用的LRU块，物理free不包含LRU数据。分配先引用命中、再检查净新增需求与reserve，失败回滚引用；需要空闲物理块时才淘汰LRU。增长失败保留已增长的部分，最终由原owner释放。DeviceCache封装原始池租约，完成、取消和关闭只有一次所有权转换；publish可保留已计算P数据供连接器使用，但不会自动推进P/D协议。取消后不能再次发布，关闭清除缓存并拒绝新分配。
-
-组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和具体阶段范围。HTTP /health仅报告已绑定的公共业务接口清单；未配置Prometheus查询时清单为空，配置后绑定下述5个只读接口，不把健康探测扩充为case业务接口。P支持GenerateStreamCall和下述Enqueue/Fetch/Cancel文本P/D链路。节点启动或ALLOCATE通过不表示完整P/D或压力验收。
-
-### 本地单token请求
-
-P节点接受文本原生token_ids、max_new_tokens=1的GenerateStreamCall。生产PrefillRpcServer对这种请求同样走LocalRpcServer，不启用P/D；即使can_use_pd_separation为true也不会走D。该路径使用FIFO、每轮一个请求、max_context_batch_size=1；显式配置更大context batch时启动报错，不默认为已支持batch。本地多token、prefill-only零输出、图片、adapter、自定义unique_key、beam/多返回和额外logits/hidden-state等输出模式尚未实现，明确拒绝，不套固定成功帧。
-
-LocalPrefill管理请求与状态，PrefixKeys计算原生文本前缀，LocalResponse只负责响应编码。请求实际经过排队→KV分配→共享Compute估时及等待→原生输出→释放；排队阶段不占KV，选中时才匹配和分配。命中遵守全局与单请求reuse开关，不能复用最后一个prompt token；只索引完整块，不发布partial block。只有成功结束且全局/请求reuse与device cache均启用时才写回缓存。
-
-结果是一帧finished输出，Tensor为little-endian INT32、shape=[1,1,1]。token值重复输入末token，是模拟载荷，不做真实模型推理或采样。aux_info包含实际输入长度、命中长度和输出长度；等待由共享公式和噪声决定，不用固定响应绕过计算。
-
-请求timeout_ms从接收开始独立计时，覆盖排队和执行，不随阶段重置；RPC deadline和流取消也会终止对应Session。回调持有Session身份，延迟取消不能作用于后来复用相同request_id的请求。完成、取消、超时和关闭在同一所有权边界处理一次，释放后不能再次提交cache。602/603/605通过原生ErrorDetailsPB尾部元数据返回；不自动重试资源分配，也不因取消而发送成功帧。
-
-WorkerStatus返回实际waiting/running任务、队列数、finished任务与latest_finished_version。当前Mock入口固定最多1024个活动请求；完成历史也保留1024条，调用方请求的旧版本已丢失时返回OUT_OF_RANGE，避免把缺失历史当作完整结果。该上限是本地Mock保护，不宣称是real Engine的调度规则。此本地P路径不含动态batch、GPU、完整重试策略或压力能力验收；多token文本使用下述P/D路径。
-
-### D资源准备
-
-D通过原生双向RemoteGenerate接受文本单序列ALLOCATE。DecodeAdmission持有请求及租约，RtpRpcService只适配原生协议；TaskHistory与RtpErrors分别统一P/D的完成版本和原生错误编码。资源身份采用client_id和request_id组合，同一身份不能覆盖已有owner，不同client可以使用相同request_id。活动数量仍受1024的Mock保护上限约束。
-
-ACK只在实际分配成功且截止时间未到时发出。临时容量不足时等待资源变化，唤醒后只有allocation generation改变才再次申请；不使用旧的短重试次数/预算将健康等待提前判失败。永久需求超出可用物理容量时返回602。请求timeout_ms与RPC deadline取更早者，覆盖排队、等待确认及持有阶段；取消、半关闭、超时和节点关闭均释放一次，不发布尚未计算的数据。timeout_ms=0表示没有该项预算，仍受RPC取消/deadline及节点生命周期约束。
-
-首次分配的历史前缀复用遵守全局/单请求reuse、device cache及原生disable_decode_first_malloc_device_reuse；该开关默认false，与CacheConfig.h默认一致。命中只取完整块，排除最后prompt token；已由本请求传输的KV不能冒充历史命中。LOAD得到的KV只归当前请求持有，取消不会生成新cache key。
-
-WorkerStatus区分TASK_PHASE_RECEIVED和TASK_PHASE_KV_ALLOCATED。分配、LOAD等待及已LOAD等待生成均不报告为RUNNING；收到GENERATE后才进入Decode队列并记录实际Forward、输出token和终态。endpoints.json明确remote_generation支持ALLOCATE、LOAD、GENERATE、PREFILL_COMPLETE，load=true；ACK声明supports_prefill_completion。越序、重复LOAD或重复GENERATE失败并释放租约；GENERATE后的请求流半关闭允许继续接收输出，前置阶段半关闭仍取消请求。
-
-### P→D元数据交接
-
-P通过独立的Mock内部gRPC服务`mock.rtp.PrefillTransfer`提供Prepare和Read，与原生RPC共用端口，地址及metadata_only标记写入endpoints.json的mock_transfer。协议定义在RTP目录的prefill_transfer.proto，不进入case公共接口清单，也不宣称兼容真实cache-store的TCP/RDMA协议。这里只模拟请求数据就绪、块布局和资源交接，不生成或复制KV张量，不模拟传输带宽。
-
-Prepare输入client_id、原生GenerateInputPB和block_size；它复用LocalPrefill的FIFO、历史命中、共享Compute及KV租约。max_new_tokens可以大于1，但此阶段只计算Prefill及第一个模拟token，不执行D生成。Forward完成后发出一条TransferMetadata，包含block_size、input_tokens和完整块的cache_keys，流保持打开，含partial尾块的实际KV租约继续占用。数据没有读取前，既不归还容量，也不以仅存在于LRU的key冒充活跃来源。P请求ID在本节点活动期间唯一，传输身份为client_id与request_id；调用方必须先建立Prepare，再发起D LOAD。
-
-D的ALLOCATE.peer_addrs填写一个P的mock_transfer地址，LOAD帧沿用原生语义，不重新提交来源。D先持有自己的实际租约，再调用Read；Read核对身份、完整prompt和block size，若Forward尚未完成则等待同一个就绪结果。每个来源只接受一个Reader；读取成功交付元数据后，P完成并释放租约，Prepare流结束。D再校验元数据与本地块布局，收到完整成功响应且预算未过期后才确认LOAD；P传来的前缀不计为D历史命中，也不提前发布为可复用D缓存。
-
-找不到活跃来源、prompt或block size不同、重复Reader、连接失败、请求超时都不会产生LOAD成功确认。load_cache_timeout_ms遵循原生名称与大写env别名，默认5秒，非正值按原生回退为5秒；同时受D请求总预算及RPC deadline限制。D在Read期间取消/超时会关闭来源连接，中断P的计算并回收两侧租约；P取消、过期或关闭也会令等待中的Read及LOAD失败。尚未建立Reader或读取被入口校验拒绝时，P仍由Prepare拥有；Prepare必须有请求timeout或RPC deadline，避免无人读取时永久占用，生产者也应在失败时取消自己的Prepare流。
-
-该内部服务仍支持测试客户端显式Prepare/Read；正式P/D入口使用同一个PrefillTransfer注册来源，不绕回本机发起另一条Prepare RPC。内部来源由P请求所有者管理，允许无deadline请求；外部Prepare仍要求有限deadline。真实Master及正式Client尚未接入，节点间验证不替代正式case验收。
-
-### 文本P/D自动生成
-
-P的原生GenerateStreamCall对max_new_tokens>1且can_use_pd_separation=true的请求启用P/D，要求role_addrs中恰好一个有效DECODE地址。max_new_tokens=1仍走原有本地路径。PrefillGeneration负责整条P/D调用，LocalPrefill只负责本地Forward及交接前的KV；D在LOAD成功后由DecodeAdmission继续推进生成。节点端点的pd_generation描述这一能力，公共case接口不新增P/D内部动作。
-
-阶段顺序依据真实PrefillRpcServer：先向D发ALLOCATE并等待ACK，再启动P计算，随后发LOAD、输出P首token、等待LOAD确认、发送GENERATE并转发D输出。首token已计入总输出长度；未启用推测时，长度N需要D执行N-1次Forward，启用后按实际接受长度推进，不重复输出首token。NativeProbe通过两个独立打包JVM验证此链路，测试客户端只向P提交一次请求。
-
-D当前使用一个模拟执行槽，每轮轮转活动请求，尚不合并动态batch。每轮向共享Compute提供原始输入长度、历史命中、目标输出长度、已生成长度、本轮verifyTokens作为stepTokens及优先级；公式和噪声实际计时完成后才提交本轮输出。每轮前按验证上下文长度增长KV；临时不足等待allocation generation变化，不阻塞其他可执行请求，永久不足返回602，超时返回603。WorkerStatus区分等待和执行，记录执行累计时间与实际D迭代数，Prometheus每轮记录一次完成事件。
-
-模拟token重复首token值，不执行真实词表采样或语言推理；EOS使用下述停止模型。return_incremental=true时每帧仅含本轮提交的新token，否则返回当前累计输出，aux.output_len始终为累计长度，最后一帧finished=true。P保留自己的TTFT，并分别记录P与D的历史命中；总命中沿用P口径，不把两端命中相加。暂不支持stop words、真实草稿张量/原生推测提案交接、额外位置交接、beam、多返回、多模态及额外logits等输出，均显式拒绝。当前要求input+max_new_tokens小于D的max_seq_len，超过时返回605；不宣称已实现真实引擎的长度截断与reserveStep策略。
-
-D成功时按reuse/device开关写回完整prompt块的key并释放租约，新增生成内容暂不建立额外缓存索引。取消或失败不发布新D缓存。D成功/失败只是Engine口径，仍不替代正式Client成功率。
-
-P请求timeout从入口开始，覆盖D预留、P计算、LOAD、D生成及慢消费者等待，与RPC deadline取较早者，不逐阶段重置。取消会关闭当前请求Context、取消P来源和D活动，节点关闭同样回收请求。节点连接池复用到各目标的通道；取消一个请求不会关闭其他请求的连接。P转发使用受控拉取和有限Inbox，P/D均遵守RPC发送就绪状态，避免为慢消费者持续积压整条输出。
-
-原生批量入口支持EnqueueBatch和EnqueueGroup（仅DP rank 0）。每个请求先得到D的真实ALLOCATE确认，再提交P的Forward队列，成功后才能返回入队ACK；P可在Fetch前计算并持有KV，但此时不向D发送LOAD或启动Decode Forward。FetchResponse单次接入后复用GenerateStreamCall的LOAD、首token、GENERATE和输出背压逻辑，不缓存整段生成结果。batch_id写入P的TaskInfo。重复ID的整批输入全部拒绝，其他非法项分别返回错误；成功项不因同批其他项失败而回滚。当前每个请求仍按既有单请求Forward调度，尚未模拟多请求合批计算。
-
-入队RPC结束或其客户端取消不终止已接受的请求；generate_config.timeout_ms仍覆盖D分配、P排队、等待Fetch和生成全程。fetch_attach_timeout_ms从入队成功开始计时，非正值沿用原生10分钟默认值，接入后撤销，只约束接入等待。未接入超时、Fetch断流、节点关闭都会取消P/D持有者。Fetch重复接入返回ALREADY_EXISTS，未就绪或过期返回NOT_FOUND。批量入口当前要求文本P/D请求、max_new_tokens > 1；单token、图片、多DP明确不支持。
-
-Cancel只针对原生批量请求，保持真实PrefillBatchRpcServer的作用域；直接GenerateStreamCall仍通过RPC取消。Cancel接受正request_id：活动批量请求返回ACCEPTED并锁定8429/RESOURCE_EXHAUSTED，取消P及当前或稍后建立的D链路；这不代表D已完成资源释放。未登记ID返回TOMBSTONED并阻止随后入队；已完成的请求返回NOT_FOUND。抢占后的Fetch和后续同ID入队仍返回8429。墓碑及完成历史保留10分钟，按到期顺序清理；该期间不支持复用请求ID。Mock仍限制最多1024个活动P/D请求，达到上限明确拒绝；历史项不另加请求数量配额，避免长时间发流后突然拒绝新请求。
-
-动态合批计算、正式Master与Client和性能验收仍属后续工作。上述验证使用Mock原生RPC和真实网络，不等同于与真实引擎的差分验收。
-
-### 共享Decode推进与停止模型
-
-DecodeStepModel只计算一轮提出、接受、提交及验证多少token，不管理RTP协议或KV。默认draft_tokens=0，每轮提交/验证1个token。开启推测时必须显式设置acceptance_rate，随机接受率还必须有seed；不预设某个模型的接受率。按首次拒绝截断连续接受前缀A，再加一个纠正/奖励token，即C=A+1。对长度k、固定独立接受率α，P(A=j)=α^j(1-α)（j<k），P(A=k)=α^k，因此E[C]=1+α+…+α^k。这是[经典推测解码论文§3.1](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)的封顶几何模型，不是二项分布，也不宣称复现每种MTP/EAGLE或树状验证算法。
-
-Compute按本轮实际验证数收费，输出指标只累计实际提交数。α=0时仍支付验证草稿的开销。KV预留覆盖本轮验证上下文，未提交的草稿不会推进逻辑生成长度或进入新增缓存索引；预留块由同一请求持有到后续使用或终态释放，保持当前真实StreamCacheResource尚不支持部分缩容的边界。接近max_new_tokens时缩短草稿预算。
-
-StoppingModel配置放在Prefill的generation中，默认eos_probability=0，即输出到请求上限；随机概率必须显式seed。它以固定EOS hazard的封顶几何分布近似自然停止，遵守min_new_tokens与max_new_tokens，ignore_eos强制使用上限。固定hazard是Mock假设，不是线上长度的普遍规律；已有真实observed长度或Client明确输出覆盖时，应由Client设置目标并ignore_eos，不再二次随机EOS。
-
-P按稳定request_id为每个请求只确定一次stop_after，通过Mock内部LOAD元数据传给D。随机数不使用节点名、JVM号或共享随机游标；请求身份需稳定。D不能重复配置generation，不重新抽样；接受长度模型只允许放在Decode的decode中。开启推测后跨过停止位置，只提交到stop_after，但仍计实际验证开销。若首token结束，P发最终首帧并在LOAD后发送PREFILL_COMPLETE，D释放且不重复输出首token，不执行Decode Forward。模型按请求身份及轮次确定随机数，容量等待和重新调度不会重新抽样。
-
-### 共享Engine指标
-
-`endpoints.json`的`metrics`给出Prometheus抓取URL，与控制接口共用HTTP端口，仅接受`GET /metrics`。使用Prometheus官方Java simpleclient 0.16.0及TextFormat导出标准0.0.4文本。每个节点有独立注册表，不使用默认全局注册表；没有常驻采样线程，累计量在事件发生时更新，瞬时量在抓取时读取。
-
-EngineMetrics放在共享目录，不依赖RTP协议、缓存实现或调度器。其他Engine使用同一组件，传入事件和当前状态即可。固定标签为`engine`、`role`、`node`，额外维度仅为下表枚举，不把请求ID、cache key或异常文本放进标签。
-
-| 指标 | 类型与额外标签 | 上报时机与含义 |
-| --- | --- | --- |
-| `mock_engine_requests_started_total` | Counter | 校验并接纳请求后加一；不支持的协议、重复ID和入口超限不计入。 |
-| `mock_engine_requests_finished_total` | Counter，`outcome=success/cancelled/timeout/error` | 已接纳请求只记录一次终态；节点关闭计error。这是Engine结果，不能替代Client最终成功率。 |
-| `mock_engine_cache_lookup_tokens_total` | Counter | 成功获得KV租约时累计输入token数，包括已命中的部分。 |
-| `mock_engine_cache_hit_tokens_total` | Counter | 同一次分配中实际复用的历史前缀token数；后续请求取消不撤销已发生的查找。 |
-| `mock_engine_forward_tokens_total` | Counter，`kind=input/compute/output` | 活跃请求的Forward完成时记录输入、实际计算和输出token数。P路径分别为输入长度、输入减命中、1；D的input/compute为本轮验证token数，output为实际提交数。被取消或超时的Forward不补记成功计算。 |
-| `mock_engine_forward_seconds` | Histogram | 完成Forward的实际计时，单位秒，排除请求排队时间；提供bucket、sum、count。它不是Client TTFT。 |
-| `mock_engine_requests` | Gauge，`state=waiting/running` | 当前排队、执行数量。 |
-| `mock_engine_kv_tokens` | Gauge，`state=total/available/free/held` | 当前KV容量，单位token。available含可淘汰的未引用缓存，不能当作物理free。 |
-
-累计量预建为0，抓取不会清零。缓存命中率按hit tokens增量除以lookup tokens增量做token加权，不能平均每请求命中率。Prefill计算TPS可由完成的compute tokens增量除以Forward seconds sum增量得到，带cache TPS使用input tokens；若要墙钟吞吐则取token counter的rate，两者分母不同。共享层只保存观测值，由查询接口选择对应口径。分母为0时没有可判断的比率，不补成100%或0来通过门禁。
-
-这些指标是新框架的公共口径，不冒充KMonitor原指标。语义查询接口负责PromQL，case优先调用接口；Grafana旧大盘的指标映射与Client请求指标尚未接入。独立节点测试的metrics.prom只是一份快照；托管实验的历史数据保存在Prometheus TSDB。
-
-### Prometheus指标查询
-
-托管模式由Runner自动配置查询。若自行提供外部Prometheus，可在RTP组件业务配置中补充两个Mock点分参数，在已有控制端口启用查询：
-
-```yaml
-environment:
-  prefill:
-    engine: rtp
-    config:
-      # 其余原生配置与Mock容量照常填写
-      prometheus.url: http://127.0.0.1:9090
-      prometheus.job: experiment
-```
-
-外部模式由调用方采集节点endpoints.json中的metrics地址，job应只覆盖本次实验；多个实验共用Prometheus时使用不同job。共享PrometheusQueries绑定EngineMetricsApi的4个读接口和PrometheusApi；EngineApi继承这些读定义，仍是原有公共接口，没有另列一份路由表。只读节点不会宣称支持scale_in。指标名由EngineMetrics提供，查询不另造一套指标名。
-
-| 接口 | 计算口径 |
-| --- | --- |
-| `engine/cache/hit_rate` | Prefill历史命中token增量／输入token增量，可用engines选择节点；结果0～1。 |
-| `engine/prefill/tps` | Prefill实际计算token增量／完成Forward耗时增量。 |
-| `engine/prefill/tps_with_cache` | Prefill输入token增量／完成Forward耗时增量，输入包含命中部分。 |
-| `engine/decode/tps` | Decode完成Forward的output token增量／墙钟时间。本地D尚未执行请求，不能据此宣称D请求链路已完成。 |
-| `prometheus/query` | 原始表达式在固定query_time执行一次，返回scalar或float instant vector，记录标签、数值和sample_time。 |
-
-普通Engine接口自动过滤配置的job和engine，并按接口限定role；先对每条Counter计算增量，再聚合，保留多节点重启Counter reset的正确处理。缓存命中率做token加权，不平均节点比率；空engines集合直接报错，不能退化为选全部。选择器值做PromQL字符串和正则转义。
-
-显式range使用Runner已经记录的绝对start/end，不在网络调用时重新取时钟。后端用单次instant query在end求值，窗口为end-start；例如[-60s,-10s]查询的是过去50秒，终点也在过去。时间精度为Prometheus的毫秒；小于1ms的范围拒绝执行。latest使用检查时刻前60秒内最近两次采样的irate，表示当前采集周期，不平均整分钟；最近一分钟没有足够采样或没有可计算的Forward时会报错。
-
-已产生数据时，case仍这样检查：
-
-```yaml
-- check:
-    id: prefill_tps
-    describe: 检查过去一分钟的Prefill计算速度
-    interface: engine/prefill/tps
-    args: {range: [-60s, 0s]}
-    expect: {gte: 100}
-```
-
-prometheus/query不接受外层range，也不调用query_range；若表达式需要观察历史，在PromQL中自行使用范围函数，并返回单点数值。该逃生接口按原始表达式执行，不自动改写job/engine过滤条件。matrix、string、原生histogram返回类型、非有限值、查询警告和后端失败不作为有效门禁数据；普通指标必须恰好返回一个有限值。原始PromQL空向量可返回空samples，但Runner会将门禁记为ERROR。查询不重试，HTTP与Prometheus求值均受当前步骤剩余预算限制。
-
-真实采集集成测试需显式提供本机Prometheus，未提供时只跳过这项集成测试，其余仍执行：
-
-```sh
-PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
-```
-
-集成测试由Runner启动独立Prometheus和两个RTP JVM，验证正常门禁、门禁FAIL、主动取消和采集器被杀时的数据保留与进程回收。若Prometheus同目录有promtool，正常分支还在服务退出后离线读取TSDB，核对累计值。该测试不替代正式Client或P/D验收。
+实现放组件自己的适配器，使用 ApiServer 绑定；进程生命周期动作由 Runner 适配器执行，不能把管理自身进程的能力放进被管理 JVM。新增整组 API 只在 InterfaceRegistry.standard 登记一次。同名接口或不支持类型生成时失败；跨语言测试验证新增定义可直接编译和拒绝错误参数，业务实现另测。

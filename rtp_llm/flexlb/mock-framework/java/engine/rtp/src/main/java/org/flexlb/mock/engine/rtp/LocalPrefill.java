@@ -86,13 +86,7 @@ final class LocalPrefill implements AutoCloseable {
         if (config.role() != Role.prefill || (retained ? input.getGenerateConfig().getMaxNewTokens() < 1 : input.getGenerateConfig().getMaxNewTokens() != 1))
             throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
         var generation = input.getGenerateConfig();
-        if (input.getMultimodalInputsCount() > 0 || input.hasV41Inputs() || input.hasMultimodalTokenLayout()
-                || generation.getNumBeams() > 1 || generation.getNumReturnSequences() > 1 || generation.getVariableNumBeamsCount() > 0
-                || generation.hasAdapterName() || !generation.getUniqueKey().isEmpty()
-                || generation.getReturnPromptLogits() || generation.getReturnHiddenStates() || generation.getReturnLogits()
-                || generation.getReturnAllHiddenStates() || generation.getReturnAllProbs() || generation.getReturnSoftmaxProbs()
-                || generation.getReturnCumLogProbs() || generation.getCalculateLoss() != 0)
-            throw Status.UNIMPLEMENTED.withDescription("Unsupported multimodal/adapter/shape or extra output mode").asRuntimeException();
+        RtpRequestValidation.supported(input);
         if (input.getTokenIdsCount() < 1 || (long) input.getTokenIdsCount() + 1 > config.maxSeqLen()
                 || config.maxBatchTokens() > 0 && input.getTokenIdsCount() > config.maxBatchTokens()
                 || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()

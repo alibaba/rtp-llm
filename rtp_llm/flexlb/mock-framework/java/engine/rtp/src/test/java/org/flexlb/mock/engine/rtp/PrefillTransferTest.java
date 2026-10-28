@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.grpc.*;
 import io.grpc.stub.StreamObserver;
+import io.grpc.netty.NettyServerBuilder;
+import java.net.InetSocketAddress;
+import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -32,18 +35,34 @@ class PrefillTransferTest {
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", block).put("reuse_cache", true).put("load_cache_timeout_ms", 1200);
         ((ObjectNode) root.path("component").path("config").path("compute")).put("expression", Integer.toString(millis));
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
-        return new Harness(RtpNode.start(RtpConfig.load(path)));
+        return new Harness(RtpConfig.load(path));
     }
     static void await(BooleanSupplier condition) throws Exception {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
         while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
     }
     private static final class Harness implements AutoCloseable {
-        final RtpNode node;
+        final DeviceCache cache;
+        final RtpRpcService service;
+        final PrefillTransfer transfer;
+        final Server server;
         final ManagedChannel channel;
-        Harness(RtpNode node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
+        Harness(RtpConfig config) throws Exception {
+            cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
+            service = new RtpRpcService(config, cache);
+            transfer = (PrefillTransfer) service.transfer();
+            var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(service);
+            if (transfer != null) builder.addService(transfer);
+            server = builder.build().start();
+            service.rpcAddress(rpcAddress());
+            channel = ManagedChannelBuilder.forTarget(rpcAddress()).usePlaintext().build();
+        }
+        String rpcAddress() { return "127.0.0.1:" + server.getPort(); }
         WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
-        @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
+        @Override public void close() throws Exception {
+            service.close(); server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); cache.close();
+        }
     }
     private static final class Replies<T> implements StreamObserver<T>, AutoCloseable {
         final Context.CancellableContext context = Context.current().withCancellation();
@@ -55,16 +74,18 @@ class PrefillTransferTest {
         void error(Status.Code expected) throws Exception { var value = next(); assertInstanceOf(Throwable.class, value); assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); }
         @Override public void close() { context.cancel(null); }
     }
-    private Replies<TransferMetadata> prepare(Harness p, GenerateInputPB input) throws Exception {
-        var replies = new Replies<TransferMetadata>();
-        replies.context.run(() -> PrefillTransferGrpc.newStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS).prepare(transfer(input, 2), replies));
+    private PrefillTransfer.Source prepare(Harness p, GenerateInputPB input) throws Exception {
+        var source = p.transfer.start(transfer(input, 2), Long.MAX_VALUE);
         await(() -> p.status().getRunningTaskInfoCount() == 1);
-        return replies;
+        return source;
+    }
+    private void ready(PrefillTransfer.Source source) throws Exception {
+        assertTrue(source.ready().toCompletableFuture().get(3, TimeUnit.SECONDS).status().isOk());
     }
     private StreamObserver<GenerateRequestPB> allocate(Harness p, Harness d, GenerateInputPB input, Replies<GenerateOutputsPB> replies) throws Exception {
         var request = replies.context.call(() -> RpcServiceGrpc.newStub(d.channel).remoteGenerate(replies));
         request.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId()).setClientId("client")
-            .setInput(input).addPeerAddrs(p.node.rpcAddress()).build());
+            .setInput(input).addPeerAddrs(p.rpcAddress()).build());
         assertInstanceOf(GenerateOutputsPB.class, replies.next()); return request;
     }
     private static GenerateRequestPB load(long id) { return GenerateRequestPB.newBuilder().setStage(RemoteStage.LOAD).setRequestId(id).build(); }
@@ -74,11 +95,11 @@ class PrefillTransferTest {
             var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1));
             assertNull(replies.values.poll(80, TimeUnit.MILLISECONDS));
             assertEquals(10, p.status().getAvailableKvCache()); assertEquals(10, d.status().getAvailableKvCache());
-            assertInstanceOf(TransferMetadata.class, source.next());
+            ready(source);
             var ack = (GenerateOutputsPB) replies.next(); assertTrue(ack.hasErrorInfo()); assertEquals(0, ack.getErrorInfo().getErrorCodeValue());
-            assertEquals("completed", source.next()); await(() -> p.status().getAvailableKvCache() == 16);
+            await(() -> p.status().getRunningTaskInfoCount() == 0); await(() -> p.status().getAvailableKvCache() == 16);
             assertEquals(10, d.status().getAvailableKvCache()); assertEquals(0, d.status().getRunningTaskInfo(0).getPrefixLength());
-            assertEquals(0, d.status().getRunningQueryLen()); assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, d.status().getRunningQueryLen()); assertTrue(d.cache.snapshot(-1, true).keys().isEmpty());
             request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.GENERATE).setFirstGenerateTokenId(5).build());
             for (int count = 2; count <= 4; count++) {
                 var output = (GenerateOutputsPB) replies.next();
@@ -91,12 +112,13 @@ class PrefillTransferTest {
 
     @Test void readyDataRemainsPinnedWithoutAReader() throws Exception {
         try (var p = node("prefill", 2, 1); var source = prepare(p, input(1, 5, 2000))) {
-            var metadata = (TransferMetadata) source.next(); assertEquals(5, metadata.getInputTokens()); assertEquals(2, metadata.getCacheKeysCount());
+            ready(source);
+            assertEquals(4, source.stopAfter());
             assertEquals(10, p.status().getAvailableKvCache());
             assertEquals(TaskPhase.TASK_PHASE_KV_ALLOCATED, p.status().getRunningTaskInfo(0).getPhase());
             assertTrue(p.status().getRunningTaskInfo(0).getExecutionTimeMs() > 0);
             source.close(); await(() -> p.status().getAvailableKvCache() == 16 && p.status().getRunningTaskInfoCount() == 0);
-            assertTrue(p.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertTrue(p.cache.snapshot(-1, true).keys().isEmpty());
         }
     }
 
@@ -105,13 +127,13 @@ class PrefillTransferTest {
             var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1)); source.close();
             var value = replies.next(); assertInstanceOf(Throwable.class, value);
             await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
-            assertTrue(p.node.cache().snapshot(-1, true).keys().isEmpty()); assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertTrue(p.cache.snapshot(-1, true).keys().isEmpty()); assertTrue(d.cache.snapshot(-1, true).keys().isEmpty());
         }
     }
 
     @Test void loadCannotUseAnUnrelatedCachedPrefixOrMissingRequest() throws Exception {
         try (var p = node("prefill", 2, 1); var d = node("decode", 2, 1); var replies = new Replies<GenerateOutputsPB>()) {
-            p.node.cache().acquire(2, List.of()).lease().complete(PrefixKeys.completeBlocks(input(1, 5, 2000), 2));
+            p.cache.acquire(2, List.of()).lease().complete(PrefixKeys.completeBlocks(input(1, 5, 2000), 2));
             var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1)); replies.error(Status.Code.NOT_FOUND);
             assertEquals(16, d.status().getAvailableKvCache());
         }
@@ -119,7 +141,7 @@ class PrefillTransferTest {
 
     @Test void mismatchedPromptFailsWithoutConsumingSource() throws Exception {
         try (var p = node("prefill", 2, 1); var d = node("decode", 2, 1); var source = prepare(p, input(1, 5, 2000)); var replies = new Replies<GenerateOutputsPB>()) {
-            assertInstanceOf(TransferMetadata.class, source.next());
+            ready(source);
             var request = allocate(p, d, input(1, 4, 2000), replies); request.onNext(load(1)); replies.error(Status.Code.FAILED_PRECONDITION);
             assertEquals(10, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
         }
@@ -127,7 +149,7 @@ class PrefillTransferTest {
 
     @Test void mismatchedBlockSizeFailsWithoutConsumingSource() throws Exception {
         try (var p = node("prefill", 2, 1); var d = node("decode", 4, 1); var source = prepare(p, input(1, 5, 2000)); var replies = new Replies<GenerateOutputsPB>()) {
-            source.next(); var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1)); replies.error(Status.Code.FAILED_PRECONDITION);
+            ready(source); var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1)); replies.error(Status.Code.FAILED_PRECONDITION);
             assertEquals(10, p.status().getAvailableKvCache()); assertEquals(32, d.status().getAvailableKvCache());
         }
     }
@@ -135,8 +157,8 @@ class PrefillTransferTest {
     @Test void dDeadlineWhileWaitingForPDoesNotAcknowledgeOrCommitData() throws Exception {
         try (var p = node("prefill", 2, 700); var d = node("decode", 2, 1); var source = prepare(p, input(1, 5, 2000)); var replies = new Replies<GenerateOutputsPB>()) {
             var request = allocate(p, d, input(1, 5, 250), replies); request.onNext(load(1)); replies.error(Status.Code.DEADLINE_EXCEEDED);
-            assertEquals(16, d.status().getAvailableKvCache()); assertInstanceOf(Throwable.class, source.next());
-            await(() -> p.status().getAvailableKvCache() == 16); assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertEquals(16, d.status().getAvailableKvCache()); assertFalse(source.ready().toCompletableFuture().get(3, TimeUnit.SECONDS).status().isOk());
+            await(() -> p.status().getAvailableKvCache() == 16); assertTrue(d.cache.snapshot(-1, true).keys().isEmpty());
             assertTrue(replies.values.isEmpty());
         }
     }
@@ -146,23 +168,24 @@ class PrefillTransferTest {
             var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1));
             // Wait until the D has opened the reader, then cancel its owning native RPC.
             Thread.sleep(80); replies.close();
-            source.error(Status.Code.CANCELLED);
+            assertEquals(Status.Code.CANCELLED, source.ready().toCompletableFuture().get(3, TimeUnit.SECONDS).status().getCode());
             await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
-            assertTrue(p.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertTrue(p.cache.snapshot(-1, true).keys().isEmpty());
         }
     }
 
     @Test void nodeCloseDuringLoadTerminatesSourceAndD() throws Exception {
         try (var p = node("prefill", 2, 1000); var d = node("decode", 2, 1); var source = prepare(p, input(1, 5, 2000)); var replies = new Replies<GenerateOutputsPB>()) {
-            var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1)); p.node.close();
+            var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1)); p.close();
             assertInstanceOf(Throwable.class, replies.next()); await(() -> d.status().getAvailableKvCache() == 16);
         }
     }
 
     @Test void readySourceExpiresWithoutAReaderAndCannotBeReadAfterExpiry() throws Exception {
         try (var p = node("prefill", 2, 1); var source = prepare(p, input(1, 5, 250))) {
-            source.next(); source.error(Status.Code.DEADLINE_EXCEEDED);
-            assertEquals(16, p.status().getAvailableKvCache()); assertTrue(p.node.cache().snapshot(-1, true).keys().isEmpty());
+            ready(source); await(() -> p.status().getRunningTaskInfoCount() == 0);
+            assertEquals(603, p.status().getFinishedTaskList(0).getErrorInfo().getErrorCode());
+            assertEquals(16, p.status().getAvailableKvCache()); assertTrue(p.cache.snapshot(-1, true).keys().isEmpty());
             var error = assertThrows(StatusRuntimeException.class, () -> PrefillTransferGrpc.newBlockingStub(p.channel)
                 .withDeadlineAfter(1, TimeUnit.SECONDS).read(transfer(input(1, 5, 250), 2)));
             assertEquals(Status.Code.NOT_FOUND, error.getStatus().getCode());
@@ -171,21 +194,20 @@ class PrefillTransferTest {
 
     @Test void aSecondLoadDoesNotProduceAnotherAcknowledgementOrRetainDResources() throws Exception {
         try (var p = node("prefill", 2, 1); var d = node("decode", 2, 1); var source = prepare(p, input(1, 5, 2000)); var replies = new Replies<GenerateOutputsPB>()) {
-            source.next(); var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1));
-            assertInstanceOf(GenerateOutputsPB.class, replies.next()); assertEquals("completed", source.next());
+            ready(source); var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1));
+            assertInstanceOf(GenerateOutputsPB.class, replies.next()); await(() -> p.status().getRunningTaskInfoCount() == 0);
             request.onNext(load(1)); replies.error(Status.Code.FAILED_PRECONDITION);
             assertEquals(16, d.status().getAvailableKvCache()); assertEquals(1, d.status().getFinishedTaskListCount());
         }
     }
 
-    @Test void retainedSourceRequiresBoundedLifetimeAndDuplicateDoesNotReplaceOwner() throws Exception {
-        try (var p = node("prefill", 2, 1)) {
-            var invalid = new Replies<TransferMetadata>();
-            PrefillTransferGrpc.newStub(p.channel).prepare(transfer(input(1, 5, 0), 2), invalid); invalid.error(Status.Code.INVALID_ARGUMENT);
-            try (var source = prepare(p, input(1, 5, 2000)); var duplicate = new Replies<TransferMetadata>()) {
-                source.next(); PrefillTransferGrpc.newStub(p.channel).prepare(transfer(input(1, 5, 2000), 2), duplicate);
-                duplicate.error(Status.Code.ALREADY_EXISTS); assertEquals(10, p.status().getAvailableKvCache());
-            }
+    @Test void duplicateSourceDoesNotReplaceOwner() throws Exception {
+        try (var p = node("prefill", 2, 1); var source = prepare(p, input(1, 5, 2000))) {
+            ready(source);
+            var error = assertThrows(StatusRuntimeException.class,
+                () -> p.transfer.start(transfer(input(1, 5, 2000), 2), Long.MAX_VALUE));
+            assertEquals(Status.Code.ALREADY_EXISTS, error.getStatus().getCode());
+            assertEquals(10, p.status().getAvailableKvCache());
         }
     }
 }

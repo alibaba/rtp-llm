@@ -5,7 +5,6 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.*;
 import org.flexlb.mock.api.model.ComputeSpec;
 import org.flexlb.mock.api.model.Types.Role;
@@ -30,15 +29,6 @@ public final class ComputeModel {
     public static ComputeModel fromJson(JsonNode node) throws IOException {
         rejectNull(node);
         return new ComputeModel(JSON.treeToValue(node, ComputeSpec.class));
-    }
-
-    /** Reads the runner's component config file, with the original native business values left intact. */
-    public static ComputeModel fromComponentFile(Path path) throws IOException {
-        JsonNode root = JSON.readTree(path.toFile());
-        if (root.path("environment").has("compute")) throw new IllegalArgumentException("Move environment.compute to component.config.compute");
-        var node = root.path("component").path("config").path("compute");
-        if (node.isMissingNode()) throw new IllegalArgumentException("Missing component.config.compute");
-        return fromJson(node);
     }
 
     public ComputeSpec configuration() { return configuration; }

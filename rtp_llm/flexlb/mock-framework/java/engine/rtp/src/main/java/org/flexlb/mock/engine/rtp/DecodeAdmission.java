@@ -135,11 +135,9 @@ final class DecodeAdmission implements AutoCloseable {
                 || request.getInput().getRequestId() != request.getRequestId())
             throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid ALLOCATE frame or identity"), 605);
         var input = request.getInput(); var generation = input.getGenerateConfig();
-        if (input.getMultimodalInputsCount() > 0 || input.hasV41Inputs() || input.hasMultimodalTokenLayout()
-                || generation.hasAdapterName() || !generation.getUniqueKey().isEmpty() || generation.getPrefillOnly()
-                || generation.getNumBeams() > 1 || generation.getNumReturnSequences() > 1 || generation.getVariableNumBeamsCount() > 0)
-            throw Status.UNIMPLEMENTED.withDescription("Decode reservation currently supports single-sequence text only").asRuntimeException();
-        validateOutput(input);
+        RtpRequestValidation.supported(input);
+        if (generation.getPrefillOnly())
+            throw Status.UNIMPLEMENTED.withDescription("Decode does not support prefill_only").asRuntimeException();
         if ((long) input.getTokenIdsCount() + generation.getMaxNewTokens() >= config.maxSeqLen())
             throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Mock requires input + output below max_seq_len"), 605);
         if (input.getTokenIdsCount() < 1 || input.getTokenIdsCount() >= config.maxSeqLen()
@@ -232,14 +230,6 @@ final class DecodeAdmission implements AutoCloseable {
             call.response.onNext(GenerateOutputsPB.newBuilder().setRequestId(call.key.request())
                 .setErrorInfo(RpcErrorPB.newBuilder().setErrorCodeValue(0)).build());
         } catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
-    }
-
-    static void validateOutput(GenerateInputPB input) {
-        var g = input.getGenerateConfig();
-        if (g.getReturnPromptLogits() || g.getReturnHiddenStates() || g.getReturnLogits() || g.getReturnAllHiddenStates()
-                || g.getReturnAllProbs() || g.getReturnSoftmaxProbs() || g.getReturnCumLogProbs() || g.getCalculateLoss() != 0
-                || g.getStopWordsList().getRowsCount() > 0 || g.getSpEdit() || g.getSpInputLookup())
-            throw Status.UNIMPLEMENTED.withDescription("Extra outputs, stop words and speculative generation are not supported").asRuntimeException();
     }
 
     private synchronized void resume(Call call) {

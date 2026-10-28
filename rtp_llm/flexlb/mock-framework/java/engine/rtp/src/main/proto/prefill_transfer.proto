@@ -17,9 +17,6 @@ message TransferMetadata {
   uint32 stop_after = 4; // Resolved once by P, independent of Decode round size.
 }
 service PrefillTransfer {
-  // Owns the P computation and pins its data until cancellation, deadline or node shutdown.
-  // Emits one ready message; the stream remains open while Read may consume the data.
-  rpc Prepare(TransferRequest) returns (stream TransferMetadata);
-  // Waits for the matching Prepare to finish its Forward; never accepts mere LRU cache presence.
+  // Waits for the matching local source to finish its Forward; never accepts mere LRU cache presence.
   rpc Read(TransferRequest) returns (TransferMetadata);
 }

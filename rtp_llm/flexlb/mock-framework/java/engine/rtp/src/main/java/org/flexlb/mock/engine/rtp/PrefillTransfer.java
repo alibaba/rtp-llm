@@ -4,7 +4,6 @@ import io.grpc.*;
 import io.grpc.stub.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
-import java.util.function.Consumer;
 import org.flexlb.mock.engine.rtp.transfer.*;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 
@@ -36,9 +35,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
 
     void validate(GenerateInputPB input) { requests.validate(input, true); }
 
-    Source start(TransferRequest request, long deadline) { return start(request, deadline, result -> {}, result -> {}); }
-
-    private Source start(TransferRequest request, long deadline, Consumer<TransferMetadata> ready, Consumer<LocalPrefill.Result> terminal) {
+    Source start(TransferRequest request, long deadline) {
         var key = key(request); layout(request); requests.validate(request.getInput(), true); var entry = new Entry(request, metadata(request));
         synchronized (entry) {
             if (active.putIfAbsent(key, entry) != null)
@@ -47,37 +44,18 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                 var session = requests.submit(request.getInput(), deadline, true); entry.session = session;
                 session.termination.thenAccept(result -> {
                     active.remove(key, entry);
-                    synchronized (entry) { entry.ready.complete(result); terminal.accept(result); }
+                    synchronized (entry) { entry.ready.complete(result); }
                 });
                 session.completion().thenAccept(result -> {
                     synchronized (entry) {
                         if (!result.status().isOk()) return; // Termination callback owns failure delivery.
-                        try { requests.requireReady(session); ready.accept(entry.metadata); entry.ready.complete(result); }
+                        try { requests.requireReady(session); entry.ready.complete(result); }
                         catch (RuntimeException error) { session.cancel(); }
                     }
                 });
                 return new Source(entry);
             } catch (RuntimeException error) { active.remove(key, entry); throw error; }
         }
-    }
-
-    @Override public void prepare(TransferRequest request, StreamObserver<TransferMetadata> observer) {
-        var response = (ServerCallStreamObserver<TransferMetadata>) observer; var context = Context.current();
-        var accepted = new AtomicReference<Source>();
-        response.setOnCancelHandler(() -> { var source = accepted.get(); if (source != null) source.close(); });
-        try {
-            if (context.getDeadline() == null && request.getInput().getGenerateConfig().getTimeoutMs() <= 0)
-                throw Status.INVALID_ARGUMENT.withDescription("Prepare requires a request or RPC deadline for retained KV").asRuntimeException();
-            var source = start(request, deadline(context), result -> {
-                if (response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-                response.onNext(result);
-            }, result -> {
-                if (response.isCancelled()) return;
-                if (result.status().isOk()) response.onCompleted();
-                else response.onError(RtpErrors.failure(result.status(), result.engineCode()));
-            });
-            accepted.set(source); if (response.isCancelled()) source.close();
-        } catch (StatusRuntimeException error) { response.onError(error); }
     }
 
     @Override public void read(TransferRequest request, StreamObserver<TransferMetadata> observer) {

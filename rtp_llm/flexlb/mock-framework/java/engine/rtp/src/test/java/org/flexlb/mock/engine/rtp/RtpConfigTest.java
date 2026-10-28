@@ -66,6 +66,12 @@ class RtpConfigTest {
         config.remove("generation"); config.putObject("decode"); assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
+    @Test void componentLoaderOwnsDuplicateFieldsAndEnvelopeValidation() throws Exception {
+        var path = directory.resolve("duplicate.json");
+        Files.writeString(path, JSON.writeValueAsString(root()).replace("\"compute\":{", "\"compute\":{},\"compute\":{"));
+        assertThrows(java.io.IOException.class, () -> RtpConfig.load(path));
+    }
+
     @Test void requiresExplicitGeometryAndMatchingRoleFormula() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("seq_size_per_block"); assertThrows(IllegalArgumentException.class, () -> load(root));

@@ -70,6 +70,35 @@ class PdGenerationTest {
             assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value; }
         @Override public void close() { context.cancel(null); }
     }
+    @Test void allGenerationPathsRejectTheSameUnsupportedInputsBeforeAdmission() throws Exception {
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            var modes = List.<java.util.function.Consumer<GenerateConfigPB.Builder>>of(
+                g -> g.getStopWordsListBuilder().addRowsBuilder().addValues(1),
+                g -> g.setSpEdit(true), g -> g.setSpInputLookup(true),
+                g -> g.setReturnLogits(true), g -> g.setNumBeams(2), g -> g.setAdapterName(com.google.protobuf.StringValue.of("adapter")));
+            long id = 1000;
+            for (var mode : modes) {
+                for (int length : new int[]{1, 2}) {
+                    var request = input(d, id++, 4, length, 1000, true).toBuilder();
+                    mode.accept(request.getGenerateConfigBuilder());
+                    try (var call = new Call(p, request.build())) { call.error(Status.Code.UNIMPLEMENTED); }
+                    var rejected = new LinkedBlockingQueue<Throwable>();
+                    var remote = RpcServiceGrpc.newStub(d.channel).withDeadlineAfter(2, TimeUnit.SECONDS).remoteGenerate(new StreamObserver<GenerateOutputsPB>() {
+                        public void onNext(GenerateOutputsPB value) { fail("Unsupported input was admitted"); }
+                        public void onError(Throwable error) { rejected.add(error); }
+                        public void onCompleted() { fail("Unsupported input completed"); }
+                    });
+                    remote.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setClientId("validation")
+                        .setRequestId(request.getRequestId()).setInput(request).build());
+                    var error = rejected.poll(3, TimeUnit.SECONDS);
+                    assertNotNull(error); assertEquals(Status.Code.UNIMPLEMENTED, Status.fromThrowable(error).getCode());
+                }
+            }
+            assertEquals(0, p.status().getRunningTaskInfoCount()); assertEquals(0, d.status().getRunningTaskInfoCount());
+            assertEquals(32, p.status().getAvailableKvCache()); assertEquals(32, d.status().getAvailableKvCache());
+        }
+    }
+
     private static long code(Throwable error) throws Exception {
         return ErrorDetailsPB.parseFrom(Status.trailersFromThrowable(error).get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
     }

@@ -177,3 +177,63 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     for event in started:
         with pytest.raises(ProcessLookupError):
             os.kill(event['pid'], 0)
+
+
+@pytest.mark.parametrize('interface,responses,expected', [
+    ('master/leadership/get', [{'instances': [{'id': 'master-0'}]}, {'instances': []}],
+     {'instances': [{'id': 'master-0'}]}),
+    ('master/engine/get', [{'instances': {'master-0': [{'id': 'p0'}]}}, {'instances': {'master-1': []}}],
+     {'instances': {'master-0': [{'id': 'p0'}], 'master-1': []}}),
+])
+def test_master_adapter_reads_every_master_without_unioning_engine_views(monkeypatch, interface, responses, expected):
+    import asyncio
+    from mock_framework.execution import master
+    calls = []
+    payload = {'interface': interface, 'args': {}}
+
+    async def post(url, request):
+        assert request is payload
+        calls.append(url)
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(master, 'post', post)
+    actual = asyncio.run(master.invoke_master({'master-0': 'http://m0', 'prefill-0': 'http://p0',
+                                               'master-1': 'http://m1'}, 'http://m0', payload))
+    assert actual == expected
+    assert calls == ['http://m0', 'http://m1']
+
+
+@pytest.mark.parametrize('interface,responses,error', [
+    ('master/engine/get', [{'instances': {'same': []}}, {'instances': {'same': []}}], 'Duplicate Master'),
+    ('master/engine/get', [{'instances': []}], 'per-Master mapping'),
+    ('master/leadership/get', [{'instances': {}}], 'must return a list'),
+])
+def test_master_adapter_rejects_ambiguous_or_malformed_read_results(monkeypatch, interface, responses, error):
+    import asyncio
+    from mock_framework.execution import master
+    values = iter(responses)
+
+    async def post(url, payload):
+        return next(values)
+
+    monkeypatch.setattr(master, 'post', post)
+    with pytest.raises(ExecutionError, match=error):
+        asyncio.run(master.invoke_master({f'master-{n}': f'http://m{n}' for n in range(len(responses))},
+                                         'http://m0', {'interface': interface}))
+
+
+def test_master_adapter_requires_a_real_master_and_other_calls_keep_their_binding(monkeypatch):
+    import asyncio
+    from mock_framework.execution import master
+    with pytest.raises(ExecutionError, match='No running Master'):
+        asyncio.run(master.invoke_master({}, 'http://m0', {'interface': 'master/leadership/get'}))
+    calls = []
+
+    async def post(url, payload):
+        calls.append((url, payload))
+        return {'result': 'normal binding'}
+
+    monkeypatch.setattr(master, 'post', post)
+    payload = {'interface': 'master/config/get'}
+    assert asyncio.run(master.invoke_master({'master-0': 'http://m0'}, 'http://bound', payload)) == {'result': 'normal binding'}
+    assert calls == [('http://bound', payload)]
