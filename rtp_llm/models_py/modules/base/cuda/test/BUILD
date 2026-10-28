@@ -35,6 +35,16 @@ py_test(
     exec_properties = {"gpu": "RTX_5000_PRO"},
 )
 
+py_test(
+    name = "fusedqkrmsnorm_ppu_test",
+    srcs = ["fusedqkrmsnorm_test.py"],
+    main = "fusedqkrmsnorm_test.py",
+    args = ["FusedQKRMSNormPpuTest"],
+    deps = py_test_deps,
+    tags = ["manual", "PPU-ZW810E"],
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+)
+
 py_test (
     name = "layernorm_test",
     srcs = ["layernorm_test.py"],
