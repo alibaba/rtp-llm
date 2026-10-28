@@ -70,10 +70,57 @@ bool NormalGenerateStream::consumerReadyWithoutLock() const {
     return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
 }
 
+void NormalGenerateStream::fillFrontendMetricCounters(GenerateOutputs& generate_results) {
+    if (!generate_input_->generate_config->frontend_metric_streaming) {
+        return;
+    }
+    generate_results.frontend_sp_tpot_samples                    = frontend_sp_tpot_samples_;
+    generate_results.frontend_context_token_num                  = frontend_context_token_num_;
+    generate_results.frontend_context_token_num_with_cache       = frontend_context_token_num_with_cache_;
+    generate_results.frontend_context_execute_time_us            = frontend_context_execute_time_us_;
+    generate_results.frontend_context_execute_time_with_cache_us = frontend_context_execute_time_with_cache_us_;
+    generate_results.frontend_generate_token_num                 = frontend_generate_token_num_;
+    generate_results.frontend_generate_execute_time_us           = frontend_generate_execute_time_us_;
+}
+
+GenerateOutputs NormalGenerateStream::prepareFrontendMetricOutput() {
+    const size_t    step_output_len = seqLength() - last_frontend_metric_output_pos_;
+    GenerateOutputs generate_results;
+    generate_results.request_id           = request_id_;
+    generate_results.frontend_metric_only = true;
+    fillFrontendMetricCounters(generate_results);
+
+    for (int i = 0; i < nextBatchSize(); ++i) {
+        GenerateOutput generate_output;
+        generate_output.finished = false;
+        if (generate_input_->generate_config->aux_info) {
+            generate_output.aux_info.iter_count   = iter_count_;
+            generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            generate_output.aux_info.first_token_cost_time_us           = complete_token_ids_->firstTokenLatencyUs();
+            generate_output.aux_info.wait_time_us                       = wait_time_us_;
+            generate_output.aux_info.input_len                          = generate_input_->inputLength();
+            generate_output.aux_info.prefix_len                         = generate_input_->prefix_length;
+            generate_output.aux_info.output_len                         = seqLength() - generate_input_->inputLength();
+            generate_output.aux_info.step_output_len                    = step_output_len;
+            generate_output.aux_info.reuse_len                          = initial_reuse_length_;
+            generate_output.aux_info.pd_sep                             = queryPdSep();
+            generate_output.aux_info.speculative_verify_rounds          = speculative_verify_rounds_;
+            generate_output.aux_info.speculative_accepted_token_num     = speculative_accepted_token_num_;
+            generate_output.aux_info.speculative_proposed_draft_tokens  = speculative_proposed_draft_tokens_;
+            generate_output.aux_info.context_execute_time_us            = context_execute_time_us_;
+            generate_output.aux_info.context_execute_time_with_cache_us = context_execute_time_with_cache_us_;
+            generate_output.aux_info.generate_execute_time_us           = generate_execute_time_us_;
+        }
+        generate_results.generate_outputs.emplace_back(std::move(generate_output));
+    }
+    return generate_results;
+}
+
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+    fillFrontendMetricCounters(generate_results);
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -165,6 +212,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
+            generate_output.aux_info.speculative_verify_rounds           = speculative_verify_rounds_;
+            generate_output.aux_info.speculative_accepted_token_num      = speculative_accepted_token_num_;
+            generate_output.aux_info.speculative_proposed_draft_tokens   = speculative_proposed_draft_tokens_;
+            generate_output.aux_info.context_execute_time_us             = context_execute_time_us_;
+            generate_output.aux_info.context_execute_time_with_cache_us  = context_execute_time_with_cache_us_;
+            generate_output.aux_info.generate_execute_time_us            = generate_execute_time_us_;
             generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
             generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
             generate_output.aux_info.generation_prefill_cuda_graph_status =
@@ -207,6 +260,20 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_results.generate_outputs.emplace_back(std::move(generate_output));
     }
     return generate_results;
+}
+
+void NormalGenerateStream::enqueueFrontendMetricOutput(GenerateOutputs&& output) {
+    for (auto it = generate_outputs_.rbegin(); it != generate_outputs_.rend(); ++it) {
+        if (it->frontend_metric_only) {
+            *it = std::move(output);
+            consumer_cv_->notify_all();
+            return;
+        }
+    }
+    if (generate_outputs_.size() + 1 < kOutputCapacity) {
+        generate_outputs_.push_back(std::move(output));
+        consumer_cv_->notify_all();
+    }
 }
 
 void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_results) {
@@ -288,6 +355,9 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     bool pd_sep_first_token = queryPdSep();
     bool need_update        = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
+        if (generate_input_->generate_config->frontend_metric_streaming) {
+            enqueueFrontendMetricOutput(prepareFrontendMetricOutput());
+        }
         return;
     }
 
@@ -303,7 +373,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    last_output_pos_ = seqLength();
+    last_output_pos_                 = seqLength();
+    last_frontend_metric_output_pos_ = last_output_pos_;
 }
 
 GenerationPrefillCudaGraphStatus NormalGenerateStream::generationPrefillCudaGraphStatus() const {

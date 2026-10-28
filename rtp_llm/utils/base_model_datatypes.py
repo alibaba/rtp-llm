@@ -1,6 +1,16 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import torch
 
@@ -92,6 +102,10 @@ class GenerateInput:
     v41_inputs: Any = None
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_tags: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_observer: Optional[Callable[[Any, int], None]] = field(
+        default=None, repr=False, compare=False
+    )
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
     # Internal receipt from ViT metadata, bound to the selected worker and media.
     # It is not accepted from request headers/config or sent to the model RPC.
@@ -159,6 +173,12 @@ class AuxInfo:
         GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
     )
 
+    speculative_verify_rounds: int = 0
+    speculative_accepted_token_num: int = 0
+    speculative_proposed_draft_tokens: int = 0
+    context_execute_time_us: int = 0
+    context_execute_time_with_cache_us: int = 0
+    generate_execute_time_us: int = 0
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 
@@ -185,6 +205,31 @@ class GenerateOutput:
 @dataclass
 class GenerateOutputs:
     generate_outputs: Sequence[GenerateOutput] = field(default_factory=list)
+    # Internal transport marker. Unlike AuxInfo fields, this wrapper-level
+    # value is consumed by BackendRPCServerVisitor and is never serialized in
+    # an outward inference response.
+    frontend_metric_only: bool = field(default=False, repr=False, compare=False)
+    frontend_sp_tpot_samples: List[tuple[int, float]] = field(
+        default_factory=list, repr=False, compare=False
+    )
+    frontend_context_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_token_num_with_cache: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_with_cache_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)

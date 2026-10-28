@@ -23,7 +23,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -142,13 +141,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -386,6 +385,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
+    int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+    if (tps_execute_time_us <= 0)
+        tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+    stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
+    stream_groups.addGenerateExecuteTimeUs(tps_execute_time_us);
+    stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
+    stream_groups.addFrontendGenerateExecuteMetrics(tps_execute_time_us,
+                                                    static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
     if (useStreamAsync() && is_decode_only && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -398,10 +405,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
-        }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         return dispatchOutputAsync(stream_groups,
@@ -427,10 +430,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             result = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         }
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
-        }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         if (profile_step_finish_) {

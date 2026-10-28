@@ -103,12 +103,13 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         init_batch_size, maxBatchSize(), max_seq_len_, model_config.attn_config.tokens_per_block);
     complete_token_ids_->init(input, extra_reserve_token_num);
 
-    last_output_pos_ = seqLength();
+    last_output_pos_                 = seqLength();
+    last_frontend_metric_output_pos_ = last_output_pos_;
 
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -122,9 +123,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
         && !model_config.hidden_state_capture_layer_ids.empty()
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::INVALID_PARAMS,
-                    "chunked prefill incompatible: hidden_state_capture");
+        reportEvent(
+            StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: hidden_state_capture");
         return;
     }
     if (!input->fake_query && chunk_size > 0
@@ -138,13 +138,12 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              config.return_hidden_states                     ? "return_hidden_states" :
                              config.return_all_hidden_states                 ? "return_all_hidden_states" :
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
-                             input->custom_output_token_position >= 0       ? "custom_output" :
+                             input->custom_output_token_position >= 0        ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
                                                                                nullptr;
         if (reason != nullptr) {
-            reportEvent(StreamEvents::Error,
-                        ErrorCode::INVALID_PARAMS,
-                        "chunked prefill incompatible: " + std::string(reason));
+            reportEvent(
+                StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
             return;
         }
         setChunkSize(static_cast<int>(chunk_size));
@@ -1207,6 +1206,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     if (update_info.speculative_propose_step > 0) {
+        speculative_verify_rounds_++;
+        speculative_accepted_token_num_ += accept_token_num;
+        speculative_proposed_draft_tokens_ += update_info.speculative_propose_step;
         sp_iter_count_++;
         speculative_accepted_tokens_per_pos_.resize(update_info.speculative_propose_step, 0);
         const int accepted_draft_tokens =
@@ -1688,4 +1690,59 @@ std::pair<std::string, uint32_t> GenerateStream::prefillAddr() const {
     return std::make_pair("", 0);
 }
 
+void GenerateStream::addContextExecuteTimeUs(int64_t execute_time_us) {
+    if (execute_time_us > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        context_execute_time_us_ += execute_time_us;
+    }
+}
+
+void GenerateStream::addContextExecuteTimeWithCacheUs(int64_t execute_time_us) {
+    if (execute_time_us > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        context_execute_time_with_cache_us_ += execute_time_us;
+    }
+}
+
+void GenerateStream::addGenerateExecuteTimeUs(int64_t execute_time_us) {
+    if (execute_time_us > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        generate_execute_time_us_ += execute_time_us;
+    }
+}
+
+void GenerateStream::addFrontendContextExecuteMetrics(int64_t execute_time_us,
+                                                      int64_t context_token_num,
+                                                      int64_t context_token_num_with_cache) {
+    if (execute_time_us <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (context_token_num > 0) {
+        frontend_context_token_num_ += context_token_num;
+        frontend_context_execute_time_us_ += execute_time_us;
+    }
+    if (context_token_num_with_cache > 0) {
+        frontend_context_token_num_with_cache_ += context_token_num_with_cache;
+        frontend_context_execute_time_with_cache_us_ += execute_time_us;
+    }
+}
+
+void GenerateStream::addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num) {
+    if (execute_time_us > 0 && generate_token_num > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        frontend_generate_execute_time_us_ += execute_time_us;
+        frontend_generate_token_num_ += generate_token_num;
+    }
+}
+
+int64_t GenerateStream::contextExecuteTimeUs() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return context_execute_time_us_;
+}
+
+int64_t GenerateStream::contextExecuteTimeWithCacheUs() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return context_execute_time_with_cache_us_;
+}
 }  // namespace rtp_llm

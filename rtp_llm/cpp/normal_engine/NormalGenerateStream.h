@@ -32,10 +32,18 @@ public:
     void                             updateOutput(const StreamUpdateInfo& update_info) override;
     GenerationPrefillCudaGraphStatus generationPrefillCudaGraphStatus() const override;
 
+    std::shared_ptr<PendingFrontendSpTpotSample> beginFrontendSpTpotSample() {
+        return frontend_sp_tpot_samples_->begin();
+    }
+
 private:
-    GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
-    void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
-    bool            consumerReadyWithoutLock() const override;
+    std::shared_ptr<FrontendSpTpotSamples> frontend_sp_tpot_samples_ = std::make_shared<FrontendSpTpotSamples>();
+    void                                   fillFrontendMetricCounters(GenerateOutputs& output);
+    GenerateOutputs                        prepareFrontendMetricOutput();
+    void                                   enqueueFrontendMetricOutput(GenerateOutputs&& output);
+    GenerateOutputs                        prepareGenerateOutput(const StreamUpdateInfo& update_info);
+    void                                   enqueueGenerateOutput(GenerateOutputs&& generate_results);
+    bool                                   consumerReadyWithoutLock() const override;
 
     static constexpr size_t kOutputCapacity = 1000;
 

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <cstddef>
 #include <memory>
 #include <tuple>
@@ -75,28 +76,28 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         // it keeps the full checkpoint config instead of an MTP module plan.
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                          model_config,
-                                                                          base_params.parallelism_config,
-                                                                          base_params.runtime_config,
-                                                                          base_params.pd_sep_config,
-                                                                          base_params.concurrency_config,
-                                                                          base_params.fmha_config,
-                                                                          base_params.kv_cache_config,
-                                                                          base_params.profiling_debug_logging_config,
-                                                                          base_params.hw_kernel_config,
-                                                                          base_params.device_resource_config,
-                                                                          base_params.moe_config,
-                                                                          base_params.model_specific_config,
-                                                                          base_params.sp_config,
-                                                                          base_params.cache_store_config,
-                                                                          base_params.misc_config,
-                                                                          base_params.arpc_config,
-                                                                          base_params.grpc_config,
-                                                                          base_params.ffn_disaggregate_config,
-                                                                          base_params.vit_config,
-                                                                          std::move(*gpt_weight),
-                                                                          py::none(),
-                                                                          py_eplb)));
+                                                                           model_config,
+                                                                           base_params.parallelism_config,
+                                                                           base_params.runtime_config,
+                                                                           base_params.pd_sep_config,
+                                                                           base_params.concurrency_config,
+                                                                           base_params.fmha_config,
+                                                                           base_params.kv_cache_config,
+                                                                           base_params.profiling_debug_logging_config,
+                                                                           base_params.hw_kernel_config,
+                                                                           base_params.device_resource_config,
+                                                                           base_params.moe_config,
+                                                                           base_params.model_specific_config,
+                                                                           base_params.sp_config,
+                                                                           base_params.cache_store_config,
+                                                                           base_params.misc_config,
+                                                                           base_params.arpc_config,
+                                                                           base_params.grpc_config,
+                                                                           base_params.ffn_disaggregate_config,
+                                                                           base_params.vit_config,
+                                                                           std::move(*gpt_weight),
+                                                                           py::none(),
+                                                                           py_eplb)));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
@@ -309,6 +310,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
             auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(parallelism_config.dp_rank));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+            startKmonServiceStatus(params.metrics_reporter);
         }
         return params;
     } catch (const std::exception& e) {
@@ -439,6 +441,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                              token_processor));
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
+            setKmonServiceServing(true);
             return;
         }
     }
@@ -464,6 +467,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
 
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
+    setKmonServiceServing(true);
     grpc_server_->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
 }
@@ -483,7 +487,12 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     }
 }
 
+void RtpLLMOp::setServing(bool serving) {
+    setKmonServiceServing(serving);
+}
+
 void RtpLLMOp::stop() {
+    setKmonServiceServing(false);
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
         if (model_rpc_service_) {
@@ -557,7 +566,8 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("stop", &RtpLLMOp::stop);
+        .def("stop", &RtpLLMOp::stop)
+        .def("set_serving", &RtpLLMOp::setServing);
 }
 
 }  // namespace rtp_llm

@@ -402,6 +402,35 @@ class BatchedTerminalOutputTest(TestCase):
         asyncio.run(exercise(True))
 
 
+class FrontendMetricTransportTest(TestCase):
+    def setUp(self):
+        self.input = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(frontend_metric_streaming=True),
+        )
+        self.response = GenerateOutputsPB()
+        flat = self.response.flatten_output
+        flat.finished.append(False)
+        flat.output_ids.data_type = TensorPB.INT32
+        flat.output_ids.shape.extend([1, 1, 1])
+        flat.output_ids.int32_data = struct.pack("<i", 7)
+
+    def test_frontend_metric_frame_preserves_wrapper_counters(self):
+        self.response.frontend_metric_only = True
+        self.response.frontend_context_token_num.value = 2
+        self.response.frontend_generate_token_num.value = 3
+        sample = self.response.frontend_sp_tpot_samples.add()
+        sample.sequence_id = 7
+        sample.tpot_us = 125.0
+        outputs = trans_output(self.input, self.response, StreamState())
+        self.assertTrue(outputs.frontend_metric_only)
+        self.assertEqual(outputs.frontend_context_token_num, 2)
+        self.assertEqual(outputs.frontend_generate_token_num, 3)
+        self.assertEqual(outputs.frontend_sp_tpot_samples, [(7, 125.0)])
+
+
 class ModelRpcClientTest(TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)

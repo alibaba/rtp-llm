@@ -105,3 +105,9 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "frontend_sp_tpot_samples_test",
+    srcs = ["FrontendSpTpotSamplesTest.cc"],
+    deps = ["//rtp_llm/cpp/engine_base/stream:frontend_sp_tpot_samples", "@com_google_googletest//:gtest", "@com_google_googletest//:gtest_main"],
+)

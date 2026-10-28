@@ -791,6 +791,9 @@ def trans_input(input_py: GenerateInput):
     _rapm = input_py.generate_config.return_all_probs
     generate_config_pb.return_all_probs = _rapm != ReturnAllProbsMode.NONE
     generate_config_pb.return_all_probs_mode = _rapm + 1
+    generate_config_pb.frontend_metric_streaming = (
+        input_py.generate_config.frontend_metric_streaming
+    )
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
@@ -1068,7 +1071,43 @@ def trans_output(
             "end_pos": pl_pb.end_pos,
         }
 
-    outputs_py = GenerateOutputs()
+    outputs_py = GenerateOutputs(
+        frontend_metric_only=bool(outputs_pb.frontend_metric_only),
+        frontend_context_token_num=(
+            int(outputs_pb.frontend_context_token_num.value)
+            if outputs_pb.HasField("frontend_context_token_num")
+            else None
+        ),
+        frontend_context_token_num_with_cache=(
+            int(outputs_pb.frontend_context_token_num_with_cache.value)
+            if outputs_pb.HasField("frontend_context_token_num_with_cache")
+            else None
+        ),
+        frontend_context_execute_time_us=(
+            int(outputs_pb.frontend_context_execute_time_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_us")
+            else None
+        ),
+        frontend_context_execute_time_with_cache_us=(
+            int(outputs_pb.frontend_context_execute_time_with_cache_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_with_cache_us")
+            else None
+        ),
+        frontend_generate_token_num=(
+            int(outputs_pb.frontend_generate_token_num.value)
+            if outputs_pb.HasField("frontend_generate_token_num")
+            else None
+        ),
+        frontend_sp_tpot_samples=[
+            (int(sample.sequence_id), float(sample.tpot_us))
+            for sample in outputs_pb.frontend_sp_tpot_samples
+        ],
+        frontend_generate_execute_time_us=(
+            int(outputs_pb.frontend_generate_execute_time_us.value)
+            if outputs_pb.HasField("frontend_generate_execute_time_us")
+            else None
+        ),
+    )
     input_token_ids = input_py.token_ids.reshape(1, -1)
 
     # 遍历每个 beam/output
@@ -1103,6 +1142,18 @@ def trans_output(
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 decode_disk_reuse_len=aux_info_pb.decode_disk_reuse_len,
+                speculative_verify_rounds=int(aux_info_pb.speculative_verify_rounds),
+                speculative_accepted_token_num=int(
+                    aux_info_pb.speculative_accepted_token_num
+                ),
+                speculative_proposed_draft_tokens=int(
+                    aux_info_pb.speculative_proposed_draft_tokens
+                ),
+                context_execute_time_us=int(aux_info_pb.context_execute_time_us),
+                context_execute_time_with_cache_us=int(
+                    aux_info_pb.context_execute_time_with_cache_us
+                ),
+                generate_execute_time_us=int(aux_info_pb.generate_execute_time_us),
                 speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos

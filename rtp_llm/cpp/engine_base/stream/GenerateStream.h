@@ -260,7 +260,7 @@ public:
     // When useChunkWindow() is true, contextLength() returns the current chunk length.
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
-        chunk_size_ = chunk_size;
+        chunk_size_     = chunk_size;
         max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
     }
     int maxChunkSize() const {
@@ -276,7 +276,7 @@ public:
     int  currentChunkLen() const;  // tokens to compute in the current chunk
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
-    void advanceChunk();  // reuse_length_ += currentChunkLen()
+    void advanceChunk();           // reuse_length_ += currentChunkLen()
     int  cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
     }
@@ -295,8 +295,17 @@ public:
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
-    void step();
-    void spStep();
+    void    step();
+    void    spStep();
+    void    addContextExecuteTimeUs(int64_t execute_time_us);
+    void    addContextExecuteTimeWithCacheUs(int64_t execute_time_us);
+    void    addGenerateExecuteTimeUs(int64_t execute_time_us);
+    void    addFrontendContextExecuteMetrics(int64_t execute_time_us,
+                                             int64_t context_token_num,
+                                             int64_t context_token_num_with_cache);
+    void    addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num);
+    int64_t contextExecuteTimeUs() const;
+    int64_t contextExecuteTimeWithCacheUs() const;
 
     // Raw multimodal accessors — return the full per-image vectors/tensor unfiltered.
     // Stream is a pure data holder; NormalModelInputGatherer omits fully reused images
@@ -887,8 +896,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
@@ -931,14 +940,27 @@ protected:
     size_t                             iter_count_    = 0;
     size_t                             sp_iter_count_ = 0;
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
-    size_t                             last_output_pos_      = 0;
-    int                                initial_reuse_length_ = 0;
-    int                                reuse_length_         = 0;
-    int                                local_reuse_length_   = 0;
-    int                                device_reuse_length_  = 0;
-    int                                remote_reuse_length_  = 0;
-    int                                host_reuse_length_    = 0;
-    int                                disk_reuse_length_    = 0;
+    int64_t                            speculative_verify_rounds_                   = 0;
+    int64_t                            speculative_accepted_token_num_              = 0;
+    int64_t                            speculative_proposed_draft_tokens_           = 0;
+    int64_t                            context_execute_time_us_                     = 0;
+    int64_t                            context_execute_time_with_cache_us_          = 0;
+    int64_t                            generate_execute_time_us_                    = 0;
+    int64_t                            frontend_context_token_num_                  = 0;
+    int64_t                            frontend_context_token_num_with_cache_       = 0;
+    int64_t                            frontend_context_execute_time_us_            = 0;
+    int64_t                            frontend_context_execute_time_with_cache_us_ = 0;
+    int64_t                            frontend_generate_token_num_                 = 0;
+    int64_t                            frontend_generate_execute_time_us_           = 0;
+    size_t                             last_frontend_metric_output_pos_             = 0;
+    size_t                             last_output_pos_                             = 0;
+    int                                initial_reuse_length_                        = 0;
+    int                                reuse_length_                                = 0;
+    int                                local_reuse_length_                          = 0;
+    int                                device_reuse_length_                         = 0;
+    int                                remote_reuse_length_                         = 0;
+    int                                host_reuse_length_                           = 0;
+    int                                disk_reuse_length_                           = 0;
     // Chunked prefill normally gates on RUNNING so admission-time calls keep whole-segment
     // semantics. Prefill warmup explicitly opts in because it bypasses the scheduler.
     int  chunk_size_          = 0;

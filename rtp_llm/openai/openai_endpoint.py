@@ -681,23 +681,49 @@ class OpenaiEndpoint(object):
         return self.render_chat(chat_request)
 
     async def chat_completion_async(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
     ) -> CompleteResponseAsyncGenerator:
         rendered_input = await self.render_chat_async(chat_request)
         return self._chat_completion_from_inputs(
-            request_id, chat_request, raw_request, rendered_input
+            request_id,
+            chat_request,
+            raw_request,
+            rendered_input,
+            frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=frontend_metric_observer,
         )
 
     def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
     ) -> CompleteResponseAsyncGenerator:
         rendered_input = self.render_chat(chat_request)
         return self._chat_completion_from_inputs(
-            request_id, chat_request, raw_request, rendered_input
+            request_id,
+            chat_request,
+            raw_request,
+            rendered_input,
+            frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=frontend_metric_observer,
         )
 
     def _chat_completion_from_inputs(
-        self, request_id, chat_request, raw_request, rendered_input
+        self,
+        request_id,
+        chat_request,
+        raw_request,
+        rendered_input,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
     ):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
@@ -757,6 +783,8 @@ class OpenaiEndpoint(object):
             self.backend_rpc_server_visitor,
             chat_request,
             headers=request_headers,
+            frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=frontend_metric_observer,
             **(
                 {"v41_inputs": rendered_input.v41_inputs}
                 if rendered_input.v41_inputs is not None
