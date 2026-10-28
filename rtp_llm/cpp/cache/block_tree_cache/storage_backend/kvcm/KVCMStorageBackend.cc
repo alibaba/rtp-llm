@@ -652,13 +652,20 @@ public:
                                size_t                            block_count,
                                const StorageQuarantineBreakdown& breakdown) noexcept {
         reportQuarantineMetrics(generation, task_count, block_count, breakdown);
-        if (parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0 && total_device_block_count_ > 0) {
+        if (task_count > 0 && parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0
+            && total_device_block_count_ > 0) {
+            // Quarantine metrics count per-task pins; capacity counts each
+            // physical block once, using the same FROZEN state as BTC.
+            size_t frozen_block_count = 0;
+            for (const auto& [tag, pool] : pools_by_tag_) {
+                frozen_block_count += pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
+            }
             const long double threshold = static_cast<long double>(total_device_block_count_) * quarantine_abort_ratio_;
-            if (static_cast<long double>(block_count) > threshold) {
+            if (static_cast<long double>(frozen_block_count) > threshold) {
                 RTP_LLM_LOG_ERROR("KVCM quarantined block capacity exceeded on rank 0; aborting process: "
-                                  "quarantined_blocks=%zu total_device_blocks=%zu abort_ratio=%.6f "
+                                  "frozen_blocks=%zu total_device_blocks=%zu abort_ratio=%.6f "
                                   "threshold_blocks=%.3Lf",
-                                  block_count,
+                                  frozen_block_count,
                                   total_device_block_count_,
                                   quarantine_abort_ratio_,
                                   threshold);
