@@ -522,6 +522,13 @@ public class DeliveryDispatcher {
 
     private static final int MAX_ATTEMPTS = 8;
 
+    /**
+     * Result of the remote stop workflow.
+     *
+     * <p>This is an intermediate delivery fact. {@link #REMOTE_CLEANED} confirms only that the
+     * remote RPC accepted cleanup; it does not close the request, release the Decode ledger, or
+     * archive the Context. Those transitions require the matching Scheduler evidence.
+     */
     enum StopResult {
         NOT_SENT,
         REMOTE_CLEANED,

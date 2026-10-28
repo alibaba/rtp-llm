@@ -1,7 +1,9 @@
 package org.flexlb.balance.scheduler;
 
+import java.time.Duration;
+
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -21,6 +23,10 @@ import static org.mockito.Mockito.withSettings;
 
 /** Builds real request owners and shared facilities; contains no request state machine. */
 public final class SchedulerTestSupport {
+    static ShutdownResult shutdown(SchedulerRuntime runtime) {
+        return runtime.shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
+    }
+
     public static void useRealCancelReply(AbstractRequestScheduler scheduler) {
         org.mockito.Mockito.doCallRealMethod()
                 .when(scheduler)
@@ -305,7 +311,7 @@ public final class SchedulerTestSupport {
                 requests,
                 trace,
                 mock(RequestWorkerSelector.class),
-                mock(DecodeAdmission.class),
+                mock(DecodePreemption.class),
                 new PlacementAvailability(),
                 false);
     }
@@ -317,7 +323,7 @@ public final class SchedulerTestSupport {
             RequestSchedulerReporter requests,
             RecentCacheKeyTraceReporter trace,
             RequestWorkerSelector router,
-            DecodeAdmission eviction,
+            DecodePreemption eviction,
             PlacementAvailability availability) {
         return create(config, batches, requests, trace, router, eviction, availability, true);
     }
@@ -328,7 +334,7 @@ public final class SchedulerTestSupport {
             RequestSchedulerReporter requests,
             RecentCacheKeyTraceReporter trace,
             RequestWorkerSelector router,
-            DecodeAdmission eviction,
+            DecodePreemption eviction,
             PlacementAvailability availability,
             boolean startPlacement) {
         var runtime =
@@ -351,7 +357,7 @@ public final class SchedulerTestSupport {
             DeliveryMetricsReporter batches,
             RecentCacheKeyTraceReporter trace,
             RequestWorkerSelector router,
-            DecodeAdmission eviction,
+            DecodePreemption eviction,
             PlacementAvailability availability) {
         return create(runtime, config, batches, trace, router, eviction, availability, true);
     }
@@ -362,7 +368,7 @@ public final class SchedulerTestSupport {
             DeliveryMetricsReporter batches,
             RecentCacheKeyTraceReporter trace,
             RequestWorkerSelector router,
-            DecodeAdmission eviction,
+            DecodePreemption eviction,
             PlacementAvailability availability,
             boolean startPlacement) {
         var snapshot = config.loadBalanceConfig();

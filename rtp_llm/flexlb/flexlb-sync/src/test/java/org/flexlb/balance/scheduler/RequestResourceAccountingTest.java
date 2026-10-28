@@ -831,7 +831,7 @@ class RequestResourceAccountingTest {
                 admission.finish();
                 prefillHandoff.close();
                 prefill.release(routeReservation, null);
-                runtime.shutdown();
+                SchedulerTestSupport.shutdown(runtime);
             } finally {
                 decode.close();
             }

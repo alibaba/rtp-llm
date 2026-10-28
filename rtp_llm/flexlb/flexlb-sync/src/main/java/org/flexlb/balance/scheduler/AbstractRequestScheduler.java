@@ -162,6 +162,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         return future;
     }
 
+    /** Waits for placement work accepted before shutdown to finish. Queue schedulers override it. */
+    boolean awaitPlacementDrain(long deadlineNanos) {
+        return true;
+    }
+
+    /** Freezes new Decode admission before an immediate shutdown settles active requests. */
+    void stopAdmission() {}
+
     @Override
     public final RequestState cancel(long id, long batchId, CancelReason reason) {
         Objects.requireNonNull(reason);
@@ -526,6 +534,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             var update = ctx.completePlacement(handle.token, result, System.currentTimeMillis());
             if (update.kind() == UpdateKind.STALE) {
+                handle.notifyPlacementFailure();
                 return;
             }
             var after = update.after();
@@ -573,8 +582,18 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 problem = Failures.run(problem, () -> advanceRequest(ctx, ctx.snapshot()));
             }
             if (problem != null) {
+                problem = Failures.run(problem, handle::notifyPlacementFailure);
+            }
+            if (problem != null) {
                 runtime.recordFailure(problem);
             }
+        } catch (Throwable completionFailure) {
+            try {
+                handle.notifyPlacementFailure();
+            } catch (Throwable cleanupFailure) {
+                completionFailure.addSuppressed(cleanupFailure);
+            }
+            throw completionFailure;
         } finally {
             runtime.finishAdmission();
         }
@@ -1753,6 +1772,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     void closePlacement() {}
+
+    /** Claim one local Decode route for an admission replacement; unsupported modes return null. */
+    public AdmissionHandle claimWithdrawal(
+            DecodeEndpoint endpoint,
+            DecodeResources.ReservationHandle victim,
+            int incomingPriority) {
+        return null;
+    }
 
     protected boolean queueControl(RequestContext ctx, RequestRoute withdrawn) {
         return false;

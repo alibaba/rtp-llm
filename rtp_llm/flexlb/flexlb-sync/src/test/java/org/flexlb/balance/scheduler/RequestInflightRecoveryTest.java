@@ -586,7 +586,7 @@ class RequestInflightRecoveryTest {
             drain();
             endpoints.close();
             drain();
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
         }
     }
 

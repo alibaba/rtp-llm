@@ -61,7 +61,7 @@ class DirectRequestLifetimeRaceTest {
                         mock(RequestSchedulerReporter.class),
                         mock(RecentCacheKeyTraceReporter.class),
                         router,
-                        mock(org.flexlb.balance.eviction.DecodeAdmission.class),
+                        mock(org.flexlb.balance.eviction.DecodePreemption.class),
                         new PlacementAvailability());
         try {
             var context = RequestProtocolTestSupport.context(config, 101L);

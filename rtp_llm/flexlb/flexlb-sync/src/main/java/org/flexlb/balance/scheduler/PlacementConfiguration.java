@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -10,7 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 
-/** Assembles the scheduler, Prefill delivery, and Decode admission from startup config. */
+/** Assembles the scheduler, Prefill delivery, and Decode preemption from startup config. */
 @Configuration(proxyBeanMethods = false)
 public class PlacementConfiguration {
 
@@ -34,7 +34,7 @@ public class PlacementConfiguration {
     public RequestScheduler requestScheduler(
             @Lazy RequestWorkerSelector router,
             DeliveryMetricsReporter reporter,
-            @Lazy DecodeAdmission decodeCapacity,
+            @Lazy DecodePreemption decodePreemption,
             PlacementAvailability availability,
             SchedulerRuntime runtime,
             ConfigService configService,
@@ -47,7 +47,7 @@ public class PlacementConfiguration {
                         config,
                         router,
                         reporter,
-                        decodeCapacity,
+                        decodePreemption,
                         availability,
                         capacity,
                         traceReporter);
@@ -60,7 +60,7 @@ public class PlacementConfiguration {
             FlexlbConfig config,
             RequestWorkerSelector router,
             DeliveryMetricsReporter reporter,
-            DecodeAdmission decodeCapacity,
+            DecodePreemption decodePreemption,
             PlacementAvailability availability,
             AdmissionCapacity capacity,
             RecentCacheKeyTraceReporter traceReporter) {
@@ -70,7 +70,7 @@ public class PlacementConfiguration {
                             config,
                             router,
                             reporter,
-                            decodeCapacity,
+                            decodePreemption,
                             runtime,
                             availability,
                             capacity,

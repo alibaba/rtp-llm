@@ -205,7 +205,7 @@ public class RequestSchedulerReporter {
     }
 
     /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
-    public void reportDecodeAdmission(String endpoint, ResourceSnapshot view) {
+    public void reportDecodePreemption(String endpoint, ResourceSnapshot view) {
         FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
         monitor.report(AUTO_TPM_DECODE_RESERVED_COUNT, tags, view.reservedCount());
         monitor.report(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, tags, view.routing().inflightHardKv());

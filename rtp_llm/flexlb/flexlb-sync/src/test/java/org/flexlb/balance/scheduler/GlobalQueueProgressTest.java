@@ -5,8 +5,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
-import org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult;
+import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.eviction.DecodePreemption.PreemptionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -487,7 +487,7 @@ class GlobalQueueProgressTest {
                     new ConcurrentHashMap<
                             Long,
                             CompletableFuture<
-                                    org.flexlb.balance.eviction.DecodeAdmission
+                                    org.flexlb.balance.eviction.DecodePreemption
                                             .PreemptionResult>>();
             var attempts = new ConcurrentHashMap<Long, AtomicInteger>();
             var decode = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
@@ -512,14 +512,13 @@ class GlobalQueueProgressTest {
                             f.admissionBlocked.remove(id);
                         }
                     };
-            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                            f.eviction, any(), eq(decode)))
+            when(f.eviction.tryReclaim(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 RequestContext context = call.getArgument(0);
                                 var operation =
                                         new CompletableFuture<
-                                                org.flexlb.balance.eviction.DecodeAdmission
+                                                org.flexlb.balance.eviction.DecodePreemption
                                                         .PreemptionResult>();
                                 pending.put(context.data().getRequestId(), operation);
                                 return operation;
@@ -535,7 +534,7 @@ class GlobalQueueProgressTest {
                         pending.containsKey(1003L), "preemption operations must remain bounded");
                 pending.get(1001L)
                         .complete(
-                                new org.flexlb.balance.eviction.DecodeAdmission.PreemptionResult(
+                                new org.flexlb.balance.eviction.DecodePreemption.PreemptionResult(
                                         null, false, "no victim"));
                 awaitCondition(() -> f.admitted.contains(1003L));
                 assertEquals(
@@ -547,7 +546,7 @@ class GlobalQueueProgressTest {
                         .forEach(
                                 operation ->
                                         operation.complete(
-                                                new org.flexlb.balance.eviction.DecodeAdmission
+                                                new org.flexlb.balance.eviction.DecodePreemption
                                                         .PreemptionResult(
                                                         null, false, "test finished")));
             }
@@ -560,7 +559,7 @@ class GlobalQueueProgressTest {
             throws Exception {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1101L;
-            DecodeEndpoint decode = f.blockDecodeAdmission(id);
+            DecodeEndpoint decode = f.blockDecodePreemption(id);
             var reservation = new DecodeResources.ReservationHandle(1L, id, 7L);
             var result = new PreemptionResult(reservation, false, "committed");
             var reply = new CompletableFuture<PreemptionResult>();
@@ -579,8 +578,7 @@ class GlobalQueueProgressTest {
                         commit.set(Thread.currentThread());
                         admission.accept(requestId);
                     };
-            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                            f.eviction, any(), eq(decode)))
+            when(f.eviction.tryReclaim(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -620,11 +618,10 @@ class GlobalQueueProgressTest {
             throws Exception {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1102L;
-            DecodeEndpoint decode = f.blockDecodeAdmission(id);
+            DecodeEndpoint decode = f.blockDecodePreemption(id);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
-            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                            f.eviction, any(), eq(decode)))
+            when(f.eviction.tryReclaim(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -666,12 +663,11 @@ class GlobalQueueProgressTest {
             throws Exception {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1104L;
-            DecodeEndpoint decode = f.blockDecodeAdmission(id);
+            DecodeEndpoint decode = f.blockDecodePreemption(id);
             var reservation = new DecodeResources.ReservationHandle(3L, id, 17L);
             var reply = new CompletableFuture<PreemptionResult>();
             CountDownLatch invoked = new CountDownLatch(1);
-            when(org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                            f.eviction, any(), eq(decode)))
+            when(f.eviction.tryReclaim(any(), eq(decode)))
                     .thenAnswer(
                             call -> {
                                 invoked.countDown();
@@ -726,8 +722,7 @@ class GlobalQueueProgressTest {
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.scheduler, 1);
             f.submit(1107L, "b");
             awaitCondition(() -> f.admitted.contains(1107L));
-            org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                    verify(f.eviction, never()), any(), any());
+            verify(f.eviction, never()).tryReclaim(any(), any());
             assertFalse(f.admitted.contains(1106L));
             f.decodeBlocked.remove(1106L);
             f.release("a");
@@ -756,8 +751,7 @@ class GlobalQueueProgressTest {
             assertEquals(2, attempts.get());
             org.junit.jupiter.api.Assertions.assertNotSame(old.get(), f.routes.get(1201L));
             verify(old.get(), times(1)).close();
-            org.flexlb.balance.eviction.DecodeAdmissionTestSupport.reclaim(
-                    verify(f.eviction, never()), any(), any());
+            verify(f.eviction, never()).tryReclaim(any(), any());
         }
     }
 
@@ -831,8 +825,8 @@ class GlobalQueueProgressTest {
 
         private final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
 
-        private final DecodeAdmission eviction =
-                org.flexlb.balance.eviction.DecodeAdmissionTestSupport.mock();
+        private final DecodePreemption eviction =
+                org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
 
         private static FlexlbConfig twoPlannerConfig() {
             FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
@@ -890,7 +884,7 @@ class GlobalQueueProgressTest {
                             });
             org.mockito.Mockito.doAnswer(
                             commit -> {
-                                QueuedRequestScheduler.Plan plan = commit.getArgument(0);
+                                QueuedRequestScheduler.PlacementPlan plan = commit.getArgument(0);
                                 RequestContext context =
                                         RequestProtocolTestSupport.planContext(plan);
                                 long id = context.data().getRequestId();
@@ -940,7 +934,7 @@ class GlobalQueueProgressTest {
                             availability);
         }
 
-        private DecodeEndpoint blockDecodeAdmission(long requestId) {
+        private DecodeEndpoint blockDecodePreemption(long requestId) {
             DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
             AtomicInteger attempts = new AtomicInteger();
             onAdmission =
