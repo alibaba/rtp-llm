@@ -219,6 +219,46 @@ class RequestDeliveryClaimStateTest {
         assertEquals(DecodeResources.ReleaseReason.COUNTERPART_FINISHED, context.releaseReason());
     }
 
+    @Test
+    void life004DuplicateTerminalAndLateActiveEventsRemainMonotonic() {
+        var fixture = fixture(DeliveryClaimKind.BATCH_ENQUEUE, false);
+        var context = fixture.context();
+        RequestCleanupPassTest.granted(context.beginSend(fixture.delivery(), 1002L));
+        var terminal =
+                context.recordEngineEvidence(
+                        new EngineEvidence(
+                                fixture.route(),
+                                fixture.reservation(),
+                                RoleType.DECODE,
+                                EngineKind.COMPLETED,
+                                0L,
+                                null,
+                                1003L));
+        RequestCleanupPassTest.ended(context.beginClose(terminal.after().pendingEnd(), 1004L));
+        var first =
+                context.recordDeliveryResult(
+                        new TransportResult(fixture.delivery(), DeliveryResult.delivered(), 1005L));
+        assertEquals(RequestState.Phase.COMPLETED, RequestState.from(context.snapshot()).state());
+        assertTrue(first.after().deliveryReleasable());
+
+        var duplicate =
+                context.recordDeliveryResult(
+                        new TransportResult(fixture.delivery(), DeliveryResult.delivered(), 1006L));
+        assertEquals(UpdateKind.NO_CHANGE, duplicate.kind());
+        var lateActive =
+                context.recordEngineEvidence(
+                        new EngineEvidence(
+                                fixture.route(),
+                                fixture.reservation(),
+                                RoleType.DECODE,
+                                EngineKind.ACTIVE,
+                                0L,
+                                null,
+                                1007L));
+        assertEquals(UpdateKind.APPLIED, lateActive.kind());
+        assertEquals(RequestState.Phase.COMPLETED, RequestState.from(context.snapshot()).state());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void allLedgerProofCannotArchiveBeforeTheBatchSenderExits(boolean failed) {
