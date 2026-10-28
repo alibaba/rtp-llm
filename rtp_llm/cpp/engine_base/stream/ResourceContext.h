@@ -25,6 +25,8 @@ struct ResourceContext {
     bool enable_disk_cache{false};
     bool enable_remote_cache{false};
     bool ignore_request_cache_switches{false};
+    // Snapshotted during engine cache configuration, before streams are made.
+    bool enable_decode_publication{false};
 
     void initCacheConfig(const KVCacheConfig& kv_cache_config);
 };

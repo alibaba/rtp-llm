@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 #include <memory>
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <type_traits>
 #include <unistd.h>
 #include <vector>
@@ -252,6 +254,50 @@ TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
     pool.incRef(*block);
     pool.decRef(*block);
     EXPECT_FALSE(pool.isAllocated(*block));
+}
+
+TEST(DeviceBlockPoolTest, PublicationPinReleasesDespiteThrowingCapacityNotification) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    pool.incRef(block);
+    size_t notifications = 0;
+    pool.setCapacityChangeCallback([&] {
+        ++notifications;
+        throw std::runtime_error("injected observer failure");
+    });
+    auto release = pool.pinForRemotePublication(block);
+    EXPECT_EQ(pool.refCount(block), 2u);
+    pool.decRef(block);
+    EXPECT_TRUE(pool.isAllocated(block));
+    EXPECT_NO_THROW(release());
+    EXPECT_EQ(notifications, 1u);
+    EXPECT_FALSE(pool.isAllocated(block));
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+}
+
+TEST(DeviceBlockPoolTest, PublicationPinCallbackAllocationFailureDoesNotAcquireReference) {
+    struct Observer {
+        std::shared_ptr<bool> fail;
+        explicit Observer(std::shared_ptr<bool> flag): fail(std::move(flag)) {}
+        Observer(const Observer& other): fail(other.fail) {
+            if (*fail) { throw std::bad_alloc(); }
+        }
+        Observer(Observer&&) noexcept = default;
+        void operator()() const {}
+    };
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    pool.incRef(block);
+    auto fail = std::make_shared<bool>(false);
+    pool.setCapacityChangeCallback(Observer(fail));
+    *fail = true;
+    EXPECT_THROW(pool.pinForRemotePublication(block), std::bad_alloc);
+    EXPECT_EQ(pool.refCount(block), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    *fail = false;
+    pool.decRef(block);
 }
 
 TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {

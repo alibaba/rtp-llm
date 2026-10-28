@@ -177,6 +177,10 @@ public:
         remoteAllocateResource(context);
     }
 
+    void remoteGenerateForTest(PrefillGenerateContext& context) {
+        remoteGenerate(context);
+    }
+
     void setContextErrorForTest(PrefillGenerateContext& context, const ErrorInfo& error_info) {
         setContextError(context, error_info);
     }
@@ -237,6 +241,67 @@ protected:
     grpc::ServerContext          server_context_;
     kmonitor::MetricsReporterPtr metrics_reporter_;
 };
+
+TEST_F(PrefillRpcServerTest, GenerateHandoffExplicitlyExcludesSampledTokenOnlyWhenEnabledAndReady) {
+    class HandoffClient final: public PrefillGenerateContext::ClientStream {
+    public:
+        bool Read(GenerateOutputsPB*) override {
+            return false;
+        }
+        bool NextMessageSize(uint32_t*) override {
+            return false;
+        }
+        bool Write(const GenerateRequestPB& request, grpc::WriteOptions) override {
+            writes.push_back(request);
+            return true;
+        }
+        void WaitForInitialMetadata() override {}
+        bool WritesDone() override {
+            return true;
+        }
+        grpc::Status Finish() override {
+            return grpc::Status::OK;
+        }
+        std::vector<GenerateRequestPB> writes;
+    };
+    for (const std::string mode : {"enabled", "disabled", "not_ready", "error"}) {
+        SCOPED_TRACE(mode);
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "0" : "1");
+        GenerateInputPB request;
+        auto            context = makeContext(&request);
+        context->meta           = std::make_shared<RpcServerRuntimeMeta>();
+        context->request_id     = 42;
+        auto stream             = makeWaitingStream();
+        // Model output: three prompt tokens have KV, token 7 was just sampled.
+        stream->complete_token_ids_->data(0)[3] = 7;
+        stream->complete_token_ids_->setSeqLength(4);
+        if (mode != "not_ready") {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+        }
+        if (mode == "error") {
+            stream->reportError(ErrorCode::CANCELLED, "failed prefill");
+        }
+        context->setStream(stream);
+        auto client            = std::make_shared<HandoffClient>();
+        context->client_stream = client;
+        TestPrefillRpcServer server;
+        server.setEngineForTest(false);
+        server.setProcessIdForTest("prefill");
+        // A later environment change must not alter the startup-owned flag.
+        setenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "1" : "0", 1);
+        server.remoteGenerateForTest(*context);
+        ASSERT_EQ(client->writes.size(), 1u);
+        const auto& handoff = client->writes.front();
+        EXPECT_EQ(handoff.stage(), RemoteStage::GENERATE);
+        EXPECT_EQ(handoff.request_id(), 42);
+        EXPECT_EQ(handoff.client_id(), "prefill");
+        EXPECT_EQ(handoff.first_generate_token_id(), 7);
+        EXPECT_EQ(handoff.has_prefill_kv_handoff(), mode == "enabled");
+        if (handoff.has_prefill_kv_handoff()) {
+            EXPECT_EQ(handoff.prefill_kv_handoff().computed_kv_end(), 3);
+        }
+    }
+}
 
 TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLocalFinish) {
     class CompletionClient final: public PrefillGenerateContext::ClientStream {

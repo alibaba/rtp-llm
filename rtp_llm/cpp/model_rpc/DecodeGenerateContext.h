@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -73,6 +75,10 @@ public:
     int32_t                    prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
     // Guards meta_->finishTask() early-failure reporting: at most once per request.
     bool early_finish_reported = false;
+
+    // Validation bound only: populated after every Decode rank loaded its KV.
+    // Source attribution still requires the explicit Prefill GENERATE message.
+    std::optional<int64_t> loaded_prefill_kv_end;
 
     // for debug, will delete in future
     TimeInfo time_info;

@@ -575,6 +575,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill", decode_context.request_key.c_str());
     AtomicGuard       request_guard(loading_cache_requests_);
+    decode_context.loaded_prefill_kv_end.reset();
     auto&             grpc_stream = decode_context.rpc_context.grpc_stream;
     GenerateRequestPB load_request;
     GRPC_RET_IF_ERROR(
@@ -628,6 +629,11 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, client_error);
         return;
     }
+    if (decode_publication_enabled_) {
+        // No sampled token has been appended on D yet. Successful all-rank
+        // loading establishes the bound against which P's assertion is checked.
+        decode_context.loaded_prefill_kv_end = decode_context.getStream()->seqLength();
+    }
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
 
@@ -677,6 +683,24 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         decode_context.error_status =
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
         return;
+    }
+    if (decode_publication_enabled_ && generate_request.has_prefill_kv_handoff()) {
+        GRPC_RET_IF_ERROR(decode_context,
+                          generate_request.request_id() == decode_context.request_id
+                              && generate_request.client_id() == decode_context.allocate_request.client_id(),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "prefill KV handoff request identity mismatch");
+        const auto computed_end = generate_request.prefill_kv_handoff().computed_kv_end();
+        GRPC_RET_IF_ERROR(decode_context,
+                          computed_end >= 0 && decode_context.loaded_prefill_kv_end
+                              && computed_end == *decode_context.loaded_prefill_kv_end
+                              && computed_end == generate_stream->seqLength(),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "prefill KV handoff does not match successfully loaded KV");
+        GRPC_RET_IF_ERROR(decode_context,
+                          generate_stream->kvCache().decodeCompletionLifecycle().recordPrefillComputedEnd(computed_end),
+                          grpc::StatusCode::INVALID_ARGUMENT,
+                          "prefill KV handoff changes an established boundary");
     }
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);

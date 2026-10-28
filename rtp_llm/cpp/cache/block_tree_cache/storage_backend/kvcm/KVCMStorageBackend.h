@@ -40,12 +40,20 @@ public:
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
 
+    // Optional EOS publication; true means handled/skipped, not committed.
+    bool captureCompletedDecode(const BatchKVCacheResource& resource,
+                                size_t computed_end,
+                                bool finished = true) override;
+
 protected:
     bool               initImpl() override;
     StorageMatchResult matchImpl(const StorageRequest& request) override;
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override;
     void writeImpl(const StorageRequest& request) override;
     void shutdownImpl() noexcept override;
+    bool protectUnknownCompletion() const noexcept override;
+    std::shared_ptr<void> completionResourceOwner() const override;
+    bool hasUnresolvedExternalIo() const noexcept override;
     void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;
     void onQuarantineChanged(uint64_t                          generation,
                              size_t                            task_count,

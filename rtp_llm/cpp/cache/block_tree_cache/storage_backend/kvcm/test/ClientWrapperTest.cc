@@ -6,6 +6,8 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -814,6 +816,121 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_TRUE(routed);
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
+}
+
+class ClientWrapperCompletionTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        wrapper = initializeClient(false, "direct", span, observation, destroyed, &meta, nullptr, &transfer);
+        ASSERT_NE(wrapper, nullptr);
+        ASSERT_NE(transfer, nullptr);
+    }
+    void TearDown() override {
+        if (wrapper) {
+            wrapper->shutdown();
+        }
+    }
+
+    using Completion = ClientWrapper::TransferCompletion;
+    using Code = kv_cache_manager::ClientErrorCode;
+    std::array<char, 32> registration{};
+    kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
+    InitObservation observation;
+    std::shared_ptr<int> destroyed = std::make_shared<int>(0);
+    kv_cache_manager::MockMetaClient* meta = nullptr;
+    kv_cache_manager::MockTransferClient* transfer = nullptr;
+    std::shared_ptr<ClientWrapper> wrapper;
+    kv_cache_manager::UriStrVec uris{"pace://payload"};
+    kv_cache_manager::BlockBuffers buffers;
+};
+
+TEST_F(ClientWrapperCompletionTest, MissingTagAndClosedClientHaveNoSubmittedWork) {
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).Times(0);
+    auto completion = Completion::PAYLOAD_COMPLETE;
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion),
+              Code::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    EXPECT_EQ(wrapper->saveKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion).first,
+              Code::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    wrapper->shutdown();
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion),
+              Code::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+}
+
+TEST_F(ClientWrapperCompletionTest, SDKReturningMissingClientCodeDoesNotProveNoSubmission) {
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Return(Code::ER_CLIENT_NOT_EXISTS));
+    auto completion = Completion::NOT_SUBMITTED;
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion),
+              Code::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::UNKNOWN);
+}
+
+TEST_F(ClientWrapperCompletionTest, MarkUnknownBeforeEnteringSDKAndCompleteOnlyOnSuccess) {
+    auto completion = Completion::PAYLOAD_COMPLETE;
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto&, const auto&, const auto&) {
+        EXPECT_EQ(completion, Completion::UNKNOWN);
+        return Code::ER_OK;
+    }));
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion), Code::ER_OK);
+    EXPECT_EQ(completion, Completion::PAYLOAD_COMPLETE);
+}
+
+TEST_F(ClientWrapperCompletionTest, TimeoutErrorsAndUnnamedVendorCodesRemainUnknown) {
+    for (const auto code : {Code::ER_SDK_TIMEOUT, Code::ER_SDKREAD_ERROR,
+                            static_cast<Code>(119), static_cast<Code>(120)}) {
+        SCOPED_TRACE(static_cast<int>(code));
+        EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Return(code));
+        auto completion = Completion::PAYLOAD_COMPLETE;
+        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion), code);
+        EXPECT_EQ(completion, Completion::UNKNOWN);
+    }
+}
+
+TEST_F(ClientWrapperCompletionTest, LoadExceptionPreservesUnknownForTheOwner) {
+    auto completion = Completion::NOT_SUBMITTED;
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _))
+        .WillOnce(Invoke([&](const auto&, const auto&, const auto&) -> Code {
+            EXPECT_EQ(completion, Completion::UNKNOWN);
+            throw std::runtime_error("accepted operation failed");
+        }));
+    EXPECT_THROW(static_cast<void>(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion)),
+                 std::runtime_error);
+    EXPECT_EQ(completion, Completion::UNKNOWN);
+}
+
+TEST_F(ClientWrapperCompletionTest, SaveAllocationExceptionPreservesUnknownForTheOwner) {
+    auto completion = Completion::NOT_SUBMITTED;
+    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _))
+        .WillOnce(Invoke([&](const auto&, const auto&, const auto&)
+                             -> std::pair<Code, kv_cache_manager::UriStrVec> {
+            EXPECT_EQ(completion, Completion::UNKNOWN);
+            throw std::bad_alloc();
+        }));
+    EXPECT_THROW(wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion),
+                 std::bad_alloc);
+    EXPECT_EQ(completion, Completion::UNKNOWN);
+}
+
+TEST_F(ClientWrapperCompletionTest, ReturnedURIValidationIsSeparateFromPayloadCompletion) {
+    const kv_cache_manager::UriStrVec malformed{"pace://one", "pace://extra"};
+    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(Code::ER_OK, malformed)));
+    auto completion = Completion::NOT_SUBMITTED;
+    const auto result = wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion);
+    EXPECT_EQ(result.first, Code::ER_OK);
+    EXPECT_EQ(result.second, malformed);
+    EXPECT_EQ(completion, Completion::PAYLOAD_COMPLETE);
+}
+
+TEST_F(ClientWrapperCompletionTest, MetadataFailureDoesNotUndoCompletedPayload) {
+    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(Code::ER_OK, uris)));
+    EXPECT_CALL(*meta, FinishWrite("commit", "session", _, _)).WillOnce(Return(Code::ER_SERVICE_INTERNAL_ERROR));
+    auto completion = Completion::NOT_SUBMITTED;
+    ASSERT_EQ(wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion).first, Code::ER_OK);
+    EXPECT_FALSE(wrapper->finishWrite("", "commit", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    EXPECT_EQ(completion, Completion::PAYLOAD_COMPLETE);
 }
 
 }  // namespace

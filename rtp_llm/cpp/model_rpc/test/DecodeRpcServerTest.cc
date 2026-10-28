@@ -204,6 +204,15 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     const auto* generate_request = GenerateRequestPB::descriptor();
     ASSERT_NE(generate_request, nullptr);
     EXPECT_EQ(generate_request->FindFieldByName("multimodal_cache_spans")->number(), 12);
+    EXPECT_EQ(generate_request->FindFieldByName("prefill_kv_handoff")->number(), 13);
+    GenerateRequestPB legacy;
+    GenerateRequestPB parsed;
+    ASSERT_TRUE(parsed.ParseFromString(legacy.SerializeAsString()));
+    EXPECT_FALSE(parsed.has_prefill_kv_handoff());
+    legacy.mutable_prefill_kv_handoff()->set_computed_kv_end(0);
+    ASSERT_TRUE(parsed.ParseFromString(legacy.SerializeAsString()));
+    ASSERT_TRUE(parsed.has_prefill_kv_handoff());
+    EXPECT_EQ(parsed.prefill_kv_handoff().computed_kv_end(), 0);
     const auto* cache_span = MultimodalCacheSpanPB::descriptor();
     ASSERT_NE(cache_span, nullptr);
     EXPECT_EQ(cache_span->FindFieldByName("offset")->number(), 1);
@@ -634,6 +643,128 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 }
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
+
+TEST_F(PrefillCompletionRpcTest, HandoffRequiresMatchingIdentityAndSuccessfulAllRankLoad) {
+    class HandoffEngine final: public EngineBase {
+    public:
+        HandoffEngine(): EngineBase(EngineInitParams{}) {}
+        GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>&) override {
+            return nullptr;
+        }
+        void enqueue(GenerateStreamPtr& stream) override {
+            stream->generate_status_->status.store(StreamState::RUNNING);
+            stream->reportEvent(StreamEvents::GenerateDone);
+        }
+        absl::Status stop() override {
+            return absl::OkStatus();
+        }
+        absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+            return absl::UnimplementedError("unused in handoff test");
+        }
+        KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+            return {};
+        }
+    };
+    class HandoffService final: public RpcService::Service {
+    public:
+        grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* rpc_stream) override {
+            DecodeRpcContext             rpc_context{rpc_stream};
+            kmonitor::MetricsReporterPtr reporter;
+            DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, handler.meta_);
+            context.request_id = 42;
+            context.allocate_request.set_client_id("prefill");
+            if (loaded) {
+                context.loaded_prefill_kv_end = 3;
+            }
+            context.setStream(stream);
+            handler.localGenerate(context);
+            context.markRpcHandlingCompleted();
+            return context.error_status;
+        }
+        bool              loaded = true;
+        DecodeRpcServer   handler;
+        GenerateStreamPtr stream;
+    };
+
+    for (const std::string mode : {"valid",
+                                   "legacy",
+                                   "disabled",
+                                   "negative",
+                                   "short",
+                                   "sampled_included",
+                                   "wrong_request",
+                                   "wrong_client",
+                                   "load_failed",
+                                   "conflicting"}) {
+        SCOPED_TRACE(mode);
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "0" : "1");
+        HandoffService  service;
+        auto            input  = std::make_shared<GenerateInput>();
+        input->request_id      = 42;
+        input->begin_time_us   = currentTimeUs();
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+        ModelConfig config;
+        config.max_seq_len = 16;
+        config.vocab_size  = 128;
+        service.stream =
+            std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, ResourceContext{}, nullptr);
+        service.handler.engine_ = std::make_shared<HandoffEngine>();
+        service.handler.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+        service.loaded          = mode != "load_failed";
+        if (mode == "conflicting") {
+            ASSERT_TRUE(service.stream->kvCache().decodeCompletionLifecycle().recordPrefillComputedEnd(2));
+        }
+        int                 port = 0;
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        // The running server must use its startup flag, not per-request getenv.
+        setenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "1" : "0", 1);
+        auto stub = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto              rpc = stub->RemoteGenerate(&context);
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::GENERATE);
+        request.set_request_id(mode == "wrong_request" ? 43 : 42);
+        request.set_client_id(mode == "wrong_client" ? "another" : "prefill");
+        request.set_first_generate_token_id(7);
+        if (mode != "legacy") {
+            // Disabled mode deliberately carries invalid metadata: the switch
+            // must leave the upstream generation path and attribution untouched.
+            const auto end = mode == "negative" || mode == "disabled" ? -1 :
+                             mode == "short"                          ? 2 :
+                             mode == "sampled_included"               ? 4 :
+                                                                        3;
+            request.mutable_prefill_kv_handoff()->set_computed_kv_end(end);
+        }
+        EXPECT_TRUE(rpc->Write(request));
+        rpc->WritesDone();
+        GenerateOutputsPB response;
+        while (rpc->Read(&response)) {}
+        const auto status = rpc->Finish();
+        server->Shutdown();
+        server->Wait();
+        const bool accepted = mode == "valid" || mode == "legacy" || mode == "disabled";
+        EXPECT_EQ(status.ok(), accepted) << status.error_message();
+        EXPECT_EQ(service.stream->outputTokenLen(), accepted ? 1 : 0);
+        const auto& boundary = service.stream->kvCache().decodeCompletionLifecycle().prefillComputedEnd();
+        if (mode == "valid") {
+            EXPECT_EQ(boundary, 3);
+        } else if (mode == "conflicting") {
+            EXPECT_EQ(boundary, 2);
+        } else {
+            EXPECT_FALSE(boundary);
+        }
+        if (!accepted) {
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+        }
+    }
+}
 
 TEST_F(PrefillCompletionRpcTest, HandoffCommitsFirstTokenToLocalXGrammar) {
     class HandoffEngine final: public EngineBase {

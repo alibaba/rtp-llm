@@ -517,6 +517,12 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
     };
 }
 
+bool KVCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,
+                                           size_t computed_end,
+                                           bool finished) const {
+    return coordinator_manager_ && coordinator_manager_->captureCompletedDecode(resource, computed_end, finished);
+}
+
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();

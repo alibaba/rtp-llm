@@ -1,4 +1,5 @@
 #include "ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -559,14 +560,25 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
     const std::string&                                          tag,
     const kv_cache_manager::UriStrVec&                          uri_str_vec,
     kv_cache_manager::BlockBuffers&                             block_buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+    TransferCompletion*                                        completion) {
+    if (completion) {
+        *completion = TransferCompletion::NOT_SUBMITTED;
+    }
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
+    if (completion) {
+        // Mark before entering the SDK, so exceptions also preserve UNKNOWN.
+        *completion = TransferCompletion::UNKNOWN;
+    }
     auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+    if (completion && sdkCodeProvesBufferSafety(ec)) {
+        *completion = TransferCompletion::PAYLOAD_COMPLETE;
+    }
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
     }
@@ -590,14 +602,24 @@ ClientWrapper::saveKvCachesForTagWithStatus(
     const std::string&                                          tag,
     const kv_cache_manager::UriStrVec&                          uri_str_vec,
     const kv_cache_manager::BlockBuffers&                       block_buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+    TransferCompletion*                                        completion) {
+    if (completion) {
+        *completion = TransferCompletion::NOT_SUBMITTED;
+    }
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
+    if (completion) {
+        *completion = TransferCompletion::UNKNOWN;
+    }
     auto [ec, result] = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+    if (completion && sdkCodeProvesBufferSafety(ec)) {
+        *completion = TransferCompletion::PAYLOAD_COMPLETE;
+    }
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
     }

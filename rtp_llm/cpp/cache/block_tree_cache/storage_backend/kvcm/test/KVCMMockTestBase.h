@@ -185,23 +185,45 @@ public:
     loadKvCachesForTagWithStatus(const std::string&                                          tag,
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  kv_cache_manager::BlockBuffers&                             buffers,
-                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) override {
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                                 TransferCompletion* completion = nullptr) override {
+        if (completion) {
+            *completion = TransferCompletion::UNKNOWN;
+        }
         if (load_status.has_value()) {
+            if (completion && *load_status == kv_cache_manager::ClientErrorCode::ER_OK) {
+                *completion = TransferCompletion::PAYLOAD_COMPLETE;
+            }
             return *load_status;
         }
-        return loadKvCachesForTag(tag, uris, buffers, trace_info) ? kv_cache_manager::ClientErrorCode::ER_OK
-                                                                  : kv_cache_manager::ClientErrorCode::ER_SDKREAD_ERROR;
+        const auto ec = loadKvCachesForTag(tag, uris, buffers, trace_info)
+                            ? kv_cache_manager::ClientErrorCode::ER_OK
+                            : kv_cache_manager::ClientErrorCode::ER_SDKREAD_ERROR;
+        if (completion && ec == kv_cache_manager::ClientErrorCode::ER_OK) {
+            *completion = TransferCompletion::PAYLOAD_COMPLETE;
+        }
+        return ec;
     }
     std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
     saveKvCachesForTagWithStatus(
         const std::string&                                          tag,
         const kv_cache_manager::UriStrVec&                          uris,
         const kv_cache_manager::BlockBuffers&                       buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) override {
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+        TransferCompletion* completion = nullptr) override {
+        if (completion) {
+            *completion = TransferCompletion::UNKNOWN;
+        }
         if (save_status.has_value()) {
+            if (completion && *save_status == kv_cache_manager::ClientErrorCode::ER_OK) {
+                *completion = TransferCompletion::PAYLOAD_COMPLETE;
+            }
             return {*save_status, {}};
         }
         auto [success, result] = saveKvCachesForTag(tag, uris, buffers, trace_info);
+        if (completion && success) {
+            *completion = TransferCompletion::PAYLOAD_COMPLETE;
+        }
         return {success ? kv_cache_manager::ClientErrorCode::ER_OK
                         : kv_cache_manager::ClientErrorCode::ER_SDKWRITE_ERROR,
                 std::move(result)};

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -53,6 +54,12 @@ public:
     void incRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
+
+    // EOS publication only. Allocate the release closure and reserve free-list
+    // capacity before acquiring the connector reference. The caller must keep
+    // this pool alive and invoke the returned closure exactly once. Its release
+    // performs no allocation and isolates capacity-notification exceptions.
+    std::function<void()> pinForRemotePublication(BlockIdxType block);
 
     struct RequestReferenceUpdate {
         BlockIdxType block;
@@ -114,6 +121,7 @@ protected:
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
+    void releaseRemotePublicationPin(BlockIdxType block, const std::function<void()>& notify) noexcept;
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;
     // global_layer_id -> {layout_index, local_layer_id}

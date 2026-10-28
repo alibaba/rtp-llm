@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
+#include <exception>
 #include <limits>
 #include <thread>
 
@@ -121,6 +122,25 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
+            if (resource_context_.enable_decode_publication && resource_context_.role_type == RoleType::DECODE
+                && !stream_->hasNumBeams() && stream_->numReturnSequences() == 1
+                && batch_kv_cache_resource_->batchSize() == 1
+                && stream_->completeTokenIdsPtr()->seqLength() > 0) {
+                // The final sampled token has no computed target KV. Admission
+                // must pin the completed pages before the normal free below.
+                // Publication is optional: failed admission cannot break the
+                // original cache insertion and release path.
+                try {
+                    (void)resource_context_.cache_manager->captureCompletedDecode(
+                        *batch_kv_cache_resource_,
+                        static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength() - 1),
+                        true);
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("Decode publication admission failed: %s", error.what());
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("Decode publication admission failed with an unknown error");
+                }
+            }
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};

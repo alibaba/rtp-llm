@@ -13,12 +13,18 @@ config_setting(
 cc_library(
     name = "kvcm_storage_backend",
     srcs = ["KVCMStorageBackend.cc"],
-    hdrs = ["KVCMStorageBackend.h"],
+    hdrs = [
+        "KVCMStorageBackend.h",
+        "DtopCompletionBridge.inc",
+        "WorkerPayloadProof.h",
+    ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":client",
         ":group_policy",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
@@ -65,6 +71,7 @@ cc_library(
         "ClientFactory.h",
         "ClientWrapper.h",
         "KVCMConfig.h",
+        "SdkBufferSafety.h",
     ],
     copts = copts(),
     visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],

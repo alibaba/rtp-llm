@@ -35,17 +35,28 @@ struct StorageTaskState {
     struct Pin {
         DeviceBlockPoolPtr pool;
         BlockIdxType       block;
+        std::function<void()> publication_release;
     };
 
     StorageRequest   request;
     std::vector<Pin> pins;
+    std::shared_ptr<void> completion_resources;
+    std::shared_ptr<StorageTaskState> quarantine_next;
+    bool completion_protected{false};
+    bool quarantined{false};
     std::once_flag   finish_once;
     void             finish() {
         std::call_once(finish_once, [this] {
             for (const Pin& pin : pins) {
-                pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
+                if (pin.publication_release) {
+                    pin.publication_release();
+                } else {
+                    pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
+                }
             }
             pins.clear();
+            request.completion_budget_lease.reset();
+            completion_resources.reset();
         });
     }
 
@@ -79,6 +90,28 @@ StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::Stora
     state_(std::move(state)) {}
 
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor> executor): executor_(std::move(executor)) {}
+
+StorageBackend::ExternalIoGuard::ExternalIoGuard(ExternalIoGuard&& other) noexcept:
+    backend_(std::exchange(other.backend_, nullptr)) {}
+
+StorageBackend::ExternalIoGuard& StorageBackend::ExternalIoGuard::operator=(ExternalIoGuard&& other) noexcept {
+    if (this != &other) {
+        if (backend_) { backend_->taskFinished(); }
+        backend_ = std::exchange(other.backend_, nullptr);
+    }
+    return *this;
+}
+
+StorageBackend::ExternalIoGuard::~ExternalIoGuard() {
+    if (backend_) { backend_->taskFinished(); }
+}
+
+StorageBackend::ExternalIoGuard StorageBackend::trackExternalIo() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (lifecycle_ != Lifecycle::ACCEPTING) { return {}; }
+    ++in_flight_;
+    return ExternalIoGuard(this);
+}
 
 StorageBackend::~StorageBackend() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -216,6 +249,21 @@ void StorageBackend::shutdown() {
         lifecycle_cv_.wait(lock, [this] { return in_flight_ == 0; });
         lifecycle_ = Lifecycle::FINALIZING;
     }
+    std::shared_ptr<storage_backend_detail::StorageTaskState> retired;
+    {
+        std::unique_lock<std::mutex> lock(quarantine_mutex_);
+        // No forced teardown: an unresolved operation keeps this complete
+        // backend session alive, including the actual SDK registration owner.
+        quarantine_cv_.wait(lock, [this] {
+            return (!protected_quarantine_ && !hasUnresolvedExternalIo()) || quiesceUnknownOperations();
+        });
+        retired = std::move(protected_quarantine_);
+    }
+    while (retired) {
+        auto next = std::move(retired->quarantine_next);
+        retired->finish();
+        retired = std::move(next);
+    }
     shutdownImpl();
     uint64_t quarantine_generation;
     {
@@ -241,10 +289,22 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
         return;
     }
     const size_t pinned_block_count = state->pins.size();
-    for (const auto& pin : state->pins) {
-        pin.pool->freezeBlock(pin.block);
+    if (state->completion_protected) {
+        // Anchor before any log, observer, allocation or cleanup. This link
+        // only copies/moves already-existing shared ownership and is acyclic.
+        std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        if (state->quarantined) {
+            return;
+        }
+        state->quarantine_next = std::move(protected_quarantine_);
+        protected_quarantine_ = state;
+        state->quarantined = true;
+    } else {
+        for (const auto& pin : state->pins) {
+            pin.pool->freezeBlock(pin.block);
+        }
+        state->finish();
     }
-    state->finish();
     size_t task_count;
     size_t block_count;
     uint64_t generation;
@@ -269,11 +329,42 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     onQuarantineChanged(generation, task_count, block_count, breakdown);
 }
 
-std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
-    validateRequest(request, /*allow_null_blocks=*/false);
+std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request, bool for_write) {
+    validateRequest(request, /*allow_null_blocks=*/false, for_write);
     auto state     = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request = std::move(request);
     RTP_LLM_CHECK(initialized_);
+
+    state->completion_protected = state->request.decode_completion || protectUnknownCompletion();
+    if (state->completion_protected) {
+        state->completion_resources = completionResourceOwner();
+        RTP_LLM_CHECK_WITH_INFO(state->completion_resources != nullptr,
+                                "protected storage I/O requires an actual transport resource owner");
+        // All metadata allocation and deduplication precedes pin acquisition.
+        // In particular, recording an acquired pin cannot allocate or lose it.
+        std::unordered_set<BlockKey, BlockKeyHash> seen;
+        std::vector<storage_backend_detail::StorageTaskState::Pin> sources;
+        for (const auto& row : state->request.handles) {
+            for (const auto& handle : row) {
+                const auto& pool = devicePool(handle.tag);
+                auto add = [&](BlockIdxType block) {
+                    if (seen.insert({pool.get(), block}).second) {
+                        sources.push_back({pool, block, {}});
+                    }
+                };
+                add(handle.block);
+                for (const auto block : handle.peer_blocks) {
+                    add(block);
+                }
+            }
+        }
+        state->pins.reserve(sources.size());
+        for (auto& pin : sources) {
+            pin.publication_release = pin.pool->pinForRemotePublication(pin.block);
+            state->pins.push_back(std::move(pin));
+        }
+        return state;
+    }
 
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
     for (const auto& key_handles : state->request.handles) {
@@ -289,12 +380,13 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
     return state;
 }
 
-void StorageBackend::validateRequest(const StorageRequest& request, bool allow_null_blocks) const {
+void StorageBackend::validateRequest(const StorageRequest& request, bool allow_null_blocks, bool for_write) const {
     RTP_LLM_CHECK_WITH_INFO(request.keys != nullptr, "storage request requires cache keys");
     RTP_LLM_CHECK_WITH_INFO(request.handles.size() == request.keys->size(),
                             "storage request key/handle count mismatch: keys=%zu handles=%zu",
                             request.keys->size(),
                             request.handles.size());
+    RTP_LLM_CHECK_WITH_INFO(!request.decode_completion || for_write, "Decode publication is write-only");
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         std::unordered_set<std::string> seen_tags;
         for (const auto& handle : request.handles[key_index]) {
@@ -308,6 +400,11 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                                     "storage request has null block for tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
+            RTP_LLM_CHECK_WITH_INFO(handle.peer_blocks.empty() || (for_write && request.decode_completion),
+                                    "peer source blocks require a completed Decode write");
+            for (const auto peer : handle.peer_blocks) {
+                RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null Decode peer source block");
+            }
         }
     }
 }
@@ -362,14 +459,32 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
             try {
                 readImpl(state->request, match_meta);
             } catch (const StorageOperationTimeout& exception) {
+                if (state->completion_protected) {
+                    quarantineTask(state, /*is_write=*/false, exception.reason());
+                }
                 error             = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                 quarantine_reason = exception.reason();
             } catch (const StorageOperationCompletionUnknown& exception) {
+                if (state->completion_protected) {
+                    quarantineTask(state, /*is_write=*/false, exception.reason());
+                }
                 error             = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                 quarantine_reason = exception.reason();
-            } catch (const std::exception& exception) {
+            } catch (const StorageOperationBufferSafeFailure& exception) {
                 error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
-            } catch (...) { error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown storage read failure"); }
+            } catch (const std::exception& exception) {
+                if (state->completion_protected) {
+                    quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
+                    quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                }
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
+            } catch (...) {
+                if (state->completion_protected) {
+                    quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
+                    quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                }
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown storage read failure");
+            }
         }
         if (quarantine_reason) {
             quarantineTask(state, /*is_write=*/false, *quarantine_reason);
@@ -387,7 +502,7 @@ StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
     if (request.empty()) {
         return {};
     }
-    return StorageWriteTask(prepare(std::move(request)));
+    return StorageWriteTask(prepare(std::move(request), /*for_write=*/true));
 }
 
 bool StorageBackend::write(StorageWriteTask task) {
@@ -401,14 +516,30 @@ bool StorageBackend::write(StorageWriteTask task) {
                 writeImpl(state->request);
             } catch (const StorageOperationTimeout& error) {
                 quarantine_reason = error.reason();
+                if (state->completion_protected) {
+                    quarantineTask(state, /*is_write=*/true, *quarantine_reason);
+                }
                 RTP_LLM_LOG_WARNING("StorageBackend write timed out; quarantining request pins: %s", error.what());
             } catch (const StorageOperationCompletionUnknown& error) {
                 quarantine_reason = error.reason();
+                if (state->completion_protected) {
+                    quarantineTask(state, /*is_write=*/true, *quarantine_reason);
+                }
                 RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown; quarantining request pins: %s",
                                     error.what());
+            } catch (const StorageOperationBufferSafeFailure& error) {
+                RTP_LLM_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());
             } catch (const std::exception& error) {
+                if (state->completion_protected) {
+                    quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                    quarantineTask(state, /*is_write=*/true, *quarantine_reason);
+                }
                 RTP_LLM_LOG_ERROR("StorageBackend write failed: %s", error.what());
             } catch (...) {
+                if (state->completion_protected) {
+                    quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                    quarantineTask(state, /*is_write=*/true, *quarantine_reason);
+                }
                 RTP_LLM_LOG_ERROR("StorageBackend write failed with an unknown exception");
             }
         }
