@@ -9,6 +9,7 @@ learned ``hc_head`` weights.
 from __future__ import annotations
 
 import importlib
+import logging
 import weakref
 from functools import lru_cache
 from typing import Optional
@@ -24,18 +25,34 @@ from rtp_llm.models_py.modules.dsv41.hc.tilelang_impl import TileLangHCUnit
 
 @lru_cache(maxsize=1)
 def _tile_ops():
-    # Set up libz3/TVM before importing the vendored TileLang kernels.
-    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
+    """Return the vendored TileLang HC ops, or None when they cannot load.
 
-    return importlib.import_module(
-        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"
-    )
+    The TileLang path dlopens ``libz3.so``.  Images built against a newer glibc
+    than the host (for example an aarch64 host on glibc 2.32 with a z3 wheel
+    that needs 2.34) cannot load it, and failing model initialization there is
+    worse than running the PyTorch reference implementation.
+    """
+    try:
+        # Set up libz3/TVM before importing the vendored TileLang kernels.
+        from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
+
+        return importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"
+        )
+    except Exception as exc:  # noqa: broad except - z3/tvm/tilelang import chain
+        logging.warning(
+            "TileLang HC kernels unavailable (%s: %s); using the PyTorch "
+            "reference implementation",
+            type(exc).__name__,
+            exc,
+        )
+        return None
 
 
 def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     """Read residual streams using FP32 coefficients and accumulation."""
-    if x.is_cuda and x.dtype == torch.bfloat16:
-        ops = _tile_ops()
+    ops = _tile_ops() if (x.is_cuda and x.dtype == torch.bfloat16) else None
+    if ops is not None:
         shape = x.shape
         return ops.mhc_pre_apply_mix(
             x.reshape(1, -1, shape[-2], shape[-1]),
@@ -71,10 +88,10 @@ class DelayedHCUnit(HCUnitBase):
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape = x.shape
-        if x.is_cuda and x.dtype == torch.bfloat16:
+        ops = _tile_ops() if (x.is_cuda and x.dtype == torch.bfloat16) else None
+        if ops is not None:
             from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prenorm
 
-            ops = _tile_ops()
             residual = x.reshape(1, -1, self.hc_mult, self.dim)
             mixes = prenorm(residual, self.fn, self.norm_eps)
             if mixes is None:
@@ -115,7 +132,11 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
-        if residual.is_cuda and residual.dtype == torch.bfloat16:
+        if (
+            residual.is_cuda
+            and residual.dtype == torch.bfloat16
+            and _tile_ops() is not None
+        ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
         return (
             post.float() * x.float().unsqueeze(-2)
