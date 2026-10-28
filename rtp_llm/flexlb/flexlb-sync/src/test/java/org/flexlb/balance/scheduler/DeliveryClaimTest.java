@@ -2281,13 +2281,23 @@ class DeliveryClaimTest {
             assertTrue(oldAttempt != newAttempt);
             assertSame(newAttempt, f.context.snapshot().preemption().identity());
 
-            var progress =
-                    f.owner.onCancelReply(
-                            oldAttempt,
-                            f.claim,
+            var event =
+                    AbstractRequestScheduler.PreemptionEvent.receipt(
+                            oldAttempt.reservation(),
                             f.decode,
                             EngineGrpcClient.CancelReply.REQUEST_CLEANED,
-                            "late reply from old attempt");
+                            "late reply from old attempt",
+                            f.claim);
+            var progress =
+                    f.owner.onDeliveryFact(
+                            new ContextResult.PreemptionFact(
+                                    oldAttempt,
+                                    event.phase(),
+                                    event.release(),
+                                    event.endpoint(),
+                                    event.reservation(),
+                                    event.detail(),
+                                    event.cleanup()));
 
             assertEquals(PreemptionRegistration.Reply.UNKNOWN, progress);
             SchedulerTestSupport.awaitRequestWork(f.owner.runtime);

@@ -1062,31 +1062,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /** Interpret one remote cancel reply at the scheduler boundary. */
-    PreemptionRegistration.Reply onCancelReply(
-            PreemptionRegistration attempt,
-            DeliveryClaim delivery,
-            DecodeEndpoint endpoint,
-            CancelReply reply,
-            String detail) {
-        if (attempt != null) {
-            var event = PreemptionEvent.receipt(attempt.reservation(), endpoint, reply, detail, delivery);
-            return onDeliveryFact(
-                    new ContextResult.PreemptionFact(
-                            attempt,
-                            event.phase(),
-                            event.release(),
-                            event.endpoint(),
-                            event.reservation(),
-                            event.detail(),
-                            event.cleanup()));
-        }
-        if (delivery != null) {
-            onDeliveryFact(PreemptionEvent.acknowledgement(delivery, reply));
-        }
-        return PreemptionRegistration.Reply.UNKNOWN;
-    }
-
     /** Select one effect owner after recording facts; that owner also handles its failures. */
     private void advanceRequest(RequestContext ctx, Snapshot state) {
         Throwable failure = null;
