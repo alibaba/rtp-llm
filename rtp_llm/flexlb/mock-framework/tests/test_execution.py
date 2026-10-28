@@ -258,3 +258,16 @@ def test_intentional_stop_retains_unreaped_process_for_final_cleanup(exit_code):
         assert bool(errors) == (exit_code is None)
         assert 'engine-prefill-0' in p.expected_stops
     asyncio.run(exercise())
+
+
+def test_master_ports_avoid_ephemeral_range_and_retry_busy_pair(monkeypatch):
+    import socket
+    from mock_framework.execution import processes
+    first = processes.master_port(1)
+    assert 10000 <= first < 30000
+    with socket.socket() as busy:
+        busy.bind(('127.0.0.1', first + 2))
+        second = processes.master_port(1)
+        choices = iter([first - 10000, second - 10000])
+        monkeypatch.setattr(processes.secrets, 'randbelow', lambda bound: next(choices))
+        assert processes.master_port(1) == second

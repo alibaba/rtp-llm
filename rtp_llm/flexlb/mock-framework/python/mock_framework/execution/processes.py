@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import secrets
 import socket
 import uuid
 
@@ -288,7 +289,8 @@ def master_port(count):
         raise ExecutionError('Too many local Masters for the loopback address allocation')
     for attempt in range(32):
         sockets = []
-        port = 0
+        # Avoid client connections taking the selected port during JVM startup.
+        port = 10000 + secrets.randbelow(20000)
         try:
             for index in range(count):
                 host = f'127.0.{index // 254}.{index % 254 + 1}'
@@ -296,10 +298,6 @@ def master_port(count):
                     sock = socket.socket()
                     sockets.append(sock)
                     sock.bind((host, port + offset))
-                    if index == 0 and offset == 0:
-                        port = sock.getsockname()[1]
-                        if port > 65533:
-                            raise OSError('Port pair exceeds valid range')
             return port
         except OSError as error:
             if error.errno == errno.EADDRNOTAVAIL:
