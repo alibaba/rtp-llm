@@ -102,9 +102,12 @@ class Prometheus:
             if endpoint.get('id') != node or address.scheme not in ('http', 'https') or not address.hostname \
                     or address.username or address.password or address.query or address.fragment:
                 raise ValueError('Invalid metrics endpoint')
+            rpc = endpoint['rpc']
+            if not isinstance(rpc, str) or not rpc or any(v['labels']['instance'] == rpc for k, v in self.targets.items() if k != node):
+                raise ValueError('Missing or duplicate instance address')
         except (OSError, ValueError, KeyError, TypeError) as error:
-            raise ExecutionError(f'{node}: managed collection requires endpoints.json with id and metrics URL') from error
-        self.targets[node] = {'targets': [address.netloc], 'labels': {'mock_node': node,
+            raise ExecutionError(f'{node}: managed collection requires endpoints.json with id, unique rpc and metrics URL') from error
+        self.targets[node] = {'targets': [address.netloc], 'labels': {'instance': rpc,
                               '__scheme__': address.scheme, '__metrics_path__': address.path or '/metrics'}}
         temporary = self.directory / 'targets.tmp'
         write_json(temporary, list(self.targets.values()))
@@ -116,8 +119,9 @@ class Prometheus:
         result = await asyncio.to_thread(_get, self.url + '/api/v1/targets?state=active')
         if result.get('status') != 'success':
             raise ExecutionError('Prometheus target query failed')
-        targets = {target['labels']['mock_node']: target for target in result['data']['activeTargets']
-                   if target.get('labels', {}).get('job') == self.JOB and 'mock_node' in target.get('labels', {})}
+        by_address = {value['labels']['instance']: node for node, value in self.targets.items()}
+        targets = {by_address[target['labels']['instance']]: target for target in result['data']['activeTargets']
+                   if target.get('labels', {}).get('job') == self.JOB and target['labels'].get('instance') in by_address}
         return targets
 
     async def baseline(self):

@@ -3,175 +3,117 @@ import re
 
 from .environment import compile_environment
 from .errors import ConfigError
-from .model import CallStep, CheckStep, CompiledCase, Expect, Phase, Reference
+from .model import Step, CompiledCase, Expect, Phase, Reference
 from .parser import load_yaml
 from .registry import Registry
+from .validation import validate
 from .values import duration, fields, number, text
 
-
 _ID = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_GLOBALS = {'type': 'object', 'properties': {
+    role: {'type': 'array', 'items': {'type': 'string'}}
+    for role in ('masters', 'prefill', 'decode', 'vit')}, 'required': []}
 
 
-def _compatible(source, expected):
-    if expected.get('type') == 'union':
-        return any(_compatible(source, variant) for variant in expected['variants'])
-    if source.get('type') != expected.get('type'):
-        return source.get('type') == 'integer' and expected.get('type') == 'number'
-    if expected.get('name'):
-        return source.get('name') == expected['name']
+def compatible(source, expected):
+    if source['type'] == 'union':
+        return all(compatible(v, expected) for v in source['variants'])
+    if expected['type'] == 'union':
+        return any(compatible(source, v) for v in expected['variants'])
+    if source['type'] != expected['type']:
+        return source['type'] == 'integer' and expected['type'] == 'number'
+    if source['type'] == 'array':
+        return compatible(source['items'], expected['items'])
+    if source['type'] == 'object':
+        if 'values' in expected:
+            return 'values' in source and compatible(source['values'], expected['values'])
+        return set(expected.get('required', ())) <= set(source.get('required', ())) and all(
+            k in expected['properties'] and compatible(v, expected['properties'][k])
+            for k, v in source.get('properties', {}).items())
     return True
 
 
-def _checks(value, schema, where):
-    def has_reference(item):
-        if isinstance(item, Reference):
-            return True
-        if isinstance(item, (list, tuple)):
-            return any(has_reference(child) for child in item)
-        return False
-
-    for check in schema.get('checks', ()):
-        if any(field not in value for field in check['fields']):
-            continue
-        values = [value[field] for field in check['fields']]
-        if any(has_reference(item) for item in values):
-            continue  # Actual resolved arguments must also be validated by the component.
-        rule = check['rule']
-        if rule == 'ordered':
-            valid = values[0] <= values[1]
-        else:
-            raise ConfigError(f'Unknown catalog constraint: {rule}')
-        if not valid:
-            raise ConfigError(f'{where}: constraint {rule} failed for {check["fields"]}')
-
-
-def _reference(value, schema, previous):
+def reference(value, expected, previous):
     fields(value, {'ref'}, {'ref'}, where='reference')
     parts = text(value['ref'], 'ref').split('.')
     if any(not _ID.fullmatch(part) for part in parts):
         raise ConfigError('Invalid reference path')
-    if parts[0] not in previous:
-        raise ConfigError(f'Reference must name an earlier step: {parts[0]}')
-    source = previous[parts[0]]
-    for part in parts[1:]:
-        if part not in source.get('properties', {}):
+    if parts[0] == 'steps' and len(parts) >= 2 and parts[1] in previous:
+        source, path, definition = parts[1], parts[2:], previous[parts[1]]
+    elif parts[0] == 'globals' and len(parts) >= 2:
+        source, path, definition = 'globals', parts[1:], _GLOBALS
+    else:
+        raise ConfigError('Reference must name an earlier steps.<id> or globals.<field>')
+    for part in path:
+        if part not in definition.get('properties', {}):
             raise ConfigError(f'Unknown result field in reference: {value["ref"]}')
-        source = source['properties'][part]
-    if not _compatible(source, schema):
+        definition = definition['properties'][part]
+    if not compatible(definition, expected):
         raise ConfigError(f'Reference type mismatch: {value["ref"]}')
-    return Reference(parts[0], tuple(parts[1:]))
+    return Reference(source, tuple(path))
 
 
-def _value(value, schema, previous, where):
+def argument(value, spec, previous, where):
     if isinstance(value, dict) and 'ref' in value:
-        return _reference(value, schema, previous)
-    kind = schema['type']
-    if kind == 'union':
-        errors = []
-        for variant in schema['variants']:
+        return reference(value, spec, previous)
+    if spec['type'] == 'union':
+        for variant in spec['variants']:
             try:
-                return _value(value, variant, previous, where)
-            except ConfigError as error:
-                errors.append(str(error))
-        raise ConfigError(f'{where}: no matching parameter variant: ' + '; '.join(errors))
-    if kind == 'object':
-        if 'values' in schema:
-            if not isinstance(value, dict):
-                raise ConfigError(f'{where}: expected mapping')
-            return {k: _value(v, schema['values'], previous, where + '.' + k) for k, v in value.items()}
-        props = schema.get('properties', {})
-        fields(value, props, schema.get('required', ()), where=where)
-        result = {k: _value(v, props[k], previous, where + '.' + k) for k, v in value.items()}
-        _checks(result, schema, where)
-        return result
-    if kind == 'array':
-        if not isinstance(value, list):
-            raise ConfigError(f'{where}: expected list')
-        return [_value(v, schema['items'], previous, where) for v in value]
-    if kind == 'range':
-        choices = schema.get('ranges', ())
-        if isinstance(value, str) and value in ('all', 'latest') and value in choices:
-            return value
-        if 'interval' not in choices or not isinstance(value, list) or len(value) != 2:
-            raise ConfigError(f'{where}: unsupported range {value!r}')
-        start, end = (duration(v, negative=True) for v in value)
-        if not start < end <= 0:
-            raise ConfigError(f'{where}: range must satisfy start < end <= 0')
-        return list(value)  # Deliberately not resolved to clock times at compile time.
-    if kind == 'duration':
-        duration(value)
-        return value
-    if kind == 'string':
-        text(value, where)
-        if 'enum' in schema and value not in schema['enum']:
-            raise ConfigError(f'{where}: expected one of {schema["enum"]}')
-        return value
-    if kind == 'integer':
-        if type(value) is not int:
-            raise ConfigError(f'{where}: expected integer')
-        bits = schema.get('bits', 64)
-        if not -(2 ** (bits - 1)) <= value < 2 ** (bits - 1):
-            raise ConfigError(f'{where}: integer overflow')
-    elif kind == 'number':
-        number(value)
-    elif kind == 'boolean':
-        if type(value) is not bool:
-            raise ConfigError(f'{where}: expected boolean')
-    else:
-        raise ConfigError(f'Unknown catalog type: {kind}')
-    if 'minimum' in schema and value < schema['minimum']:
-        raise ConfigError(f'{where}: below minimum {schema["minimum"]}')
-    if 'maximum' in schema and value > schema['maximum']:
-        raise ConfigError(f'{where}: above maximum {schema["maximum"]}')
-    return value
+                return argument(value, variant, previous, where)
+            except ConfigError:
+                pass
+        raise ConfigError(f'{where}: no matching parameter variant')
+    if spec['type'] == 'object' and isinstance(value, dict):
+        if any(type(k) is not str for k in value):
+            raise ConfigError(f'{where}: object keys must be strings')
+        if 'values' not in spec:
+            fields(value, spec['properties'], spec['required'], where=where)
+        return {k: argument(v, spec['values'] if 'values' in spec else spec['properties'][k], previous, where + '.' + k)
+                for k, v in value.items()}
+    if spec['type'] == 'array' and isinstance(value, list):
+        return [argument(v, spec['items'], previous, where + '[]') for v in value]
+    return validate(value, spec, where)
 
 
-def _expect(raw, spec, previous):
-    fields(raw, {'eq', 'gte', 'lte', 'count'}, where='expect')
+def has_reference(value):
+    if isinstance(value, Reference):
+        return True
+    if isinstance(value, dict):
+        return any(has_reference(v) for v in value.values())
+    if isinstance(value, list):
+        return any(has_reference(v) for v in value)
+    return False
+
+
+def expectation(raw, interface, previous):
+    fields(raw, {'eq', 'count', 'gte', 'lte'}, where='expect')
     if not raw or ('eq' in raw and len(raw) != 1) or ('count' in raw and len(raw) != 1):
-        raise ConfigError('expect needs eq, count, or numeric gte/lte bounds')
-    result = spec['returns']
-    name = result.get('name')
-    if name == 'MetricValue' or name == 'QueryResult':
-        target = {'type': 'number'}
-    elif name == 'PerMasterEngines':
-        target = result['properties']['instances']['values']
-    else:
-        target = result
-    comparisons = {}
-    for operator, value in raw.items():
-        if operator == 'count':
-            if name not in ('MasterSet', 'EngineSet') and result['type'] != 'array':
-                raise ConfigError('count requires a collection result')
-            comparisons[operator] = _value(value, {'type': 'integer', 'minimum': 0}, previous, 'expect.count')
-        elif isinstance(value, dict) and 'ref' in value:
-            comparisons[operator] = _reference(value, target, previous)
-        elif operator in ('gte', 'lte') or target['type'] == 'number':
-            if target['type'] not in ('number', 'integer'):
-                raise ConfigError(f'{operator} requires numeric output')
-            if isinstance(value, str):
-                if spec.get('unit') != 's':
-                    raise ConfigError('Duration expectations require an interface declaring seconds')
-                duration(value)
-                comparisons[operator] = value
-            else:
-                comparisons[operator] = number(value)
-        else:
-            comparisons[operator] = _value(value, target, previous, 'expect.' + operator)
-    if {'gte', 'lte'} <= comparisons.keys() and not any(isinstance(v, Reference) for v in comparisons.values()):
-        def bound(v):
-            return duration(v) if isinstance(v, str) else v
-        if bound(comparisons['gte']) > bound(comparisons['lte']):
-            raise ConfigError('expect lower bound exceeds upper bound')
-    return Expect(comparisons)
+        raise ConfigError('expect needs eq, count, or gte/lte')
+    result, output = {}, interface.returns
+    for op, value in raw.items():
+        expected = output
+        if op == 'count':
+            if output['type'] != 'array':
+                raise ConfigError('count requires a list result')
+            expected = {'type': 'integer', 'minimum': 0}
+        elif op in ('gte', 'lte'):
+            if output['type'] not in ('integer', 'number'):
+                raise ConfigError(f'{op} requires numeric output')
+        if isinstance(value, str) and interface.unit == 's' and op != 'count':
+            value = float(duration(value))
+        result[op] = argument(value, expected, previous, 'expect.' + op)
+    if {'gte', 'lte'} <= result.keys() and not has_reference(result) and result['gte'] > result['lte']:
+        raise ConfigError('expect lower bound exceeds upper bound')
+    return Expect(result)
 
 
-def compile_case(path: str | Path, registry: Registry, *, shared_root: str | Path | None = None) -> CompiledCase:
+def compile_case(path: str | Path, registry: Registry | None = None, *, shared_root=None) -> CompiledCase:
+    registry = registry or Registry.standard()
     path = Path(path).resolve()
     raw = load_yaml(path)
     fields(raw, {'id', 'name', 'describe', 'environment', 'phases', 'view'},
            {'id', 'describe', 'environment', 'phases'}, where='case')
-    ids, previous = set(), {}
+    ids, previous = {'globals', 'steps'}, {}
     def identity(value):
         text(value, 'id')
         if not _ID.fullmatch(value) or value in ids:
@@ -182,25 +124,16 @@ def compile_case(path: str | Path, registry: Registry, *, shared_root: str | Pat
     describe = text(raw['describe'], 'describe')
     name = text(raw['name'], 'name') if 'name' in raw else None
     environment = compile_environment(raw['environment'])
-    for role, group in environment.items():
-        config = group['config']
-        for model in ('compute', 'decode', 'generation'):
-            if model in config:
-                if model not in registry.configuration:
-                    raise ConfigError(f'Java catalog is missing {model} configuration schema; rebuild it')
-                config[model] = _value(config[model], registry.configuration[model], {}, f'environment.{role}.config.{model}')
     def asset(value):
         value = text(value, 'path')
         if '://' in value:
-            raise ConfigError('Only local/shared dataset and view paths are supported by this compiler')
+            raise ConfigError('Only local/shared paths are supported')
         candidate = Path(value)
-        if candidate.is_absolute():
-            return candidate.resolve()
-        base = Path(shared_root).resolve() if shared_root is not None and candidate.parts[0] in ('data', 'datasets', 'views') else path.parent
+        base = Path(shared_root).resolve() if shared_root and candidate.parts[0] in ('data', 'datasets', 'views') else path.parent
         return (base / candidate).resolve()
     if not isinstance(raw['phases'], list) or not raw['phases']:
         raise ConfigError('phases must be a nonempty list')
-    phases, traffic_started = [], False
+    phases = []
     for phase in raw['phases']:
         fields(phase, {'id', 'describe', 'timeout', 'steps'}, {'id', 'describe', 'timeout', 'steps'}, where='phase')
         phase_id = identity(phase['id'])
@@ -209,48 +142,21 @@ def compile_case(path: str | Path, registry: Registry, *, shared_root: str | Pat
         if not isinstance(phase['steps'], list) or not phase['steps']:
             raise ConfigError('steps must be a nonempty list')
         steps = []
-        for wrapper in phase['steps']:
-            if not isinstance(wrapper, dict) or len(wrapper) != 1 or next(iter(wrapper)) not in ('call', 'check'):
-                raise ConfigError('Each step needs exactly one call or check')
-            kind, step = next(iter(wrapper.items()))
-            allowed = {'id', 'describe', 'interface', 'args'} | ({'run', 'within'} if kind == 'call' else {'expect'})
-            fields(step, allowed, {'id', 'describe', 'interface'} | ({'expect'} if kind == 'check' else set()), where=kind)
+        for step in phase['steps']:
+            fields(step, {'id', 'describe', 'interface', 'args', 'expect', 'within'},
+                   {'id', 'describe', 'interface'}, where='step')
             step_id = identity(step['id'])
-            text(step['describe'], 'step.describe')
-            spec = registry.get(step['interface'])
-            if spec['kind'] != ('action' if kind == 'call' else 'read'):
-                raise ConfigError('call/check does not match interface category')
-            args = _value(step.get('args', {}), spec['args'], previous, step_id + '.args')
-            if step['interface'] in ('client/traffic/stop', 'client/traffic/drain') and not traffic_started:
-                raise ConfigError('traffic control requires a preceding traffic/run')
-            if 'range' in args and args['range'] == 'all' and not traffic_started:
-                raise ConfigError('range: all requires a preceding traffic/run')
-            if step['interface'] == 'client/traffic/run':
-                if traffic_started:
-                    raise ConfigError('Only one traffic/run is allowed per case')
-                if 'client' not in environment:
-                    raise ConfigError('traffic/run requires environment.client')
-                traffic_started = True
-                args['input']['trace'] = str(asset(args['input']['trace']))
-                arrival = args['playback'].get('arrival')
-                if arrival:
-                    if arrival['mode'] == 'uniform':
-                        if 'qps' not in arrival or 'speed' in arrival:
-                            raise ConfigError('uniform arrival requires qps and forbids speed')
-                    elif 'qps' in arrival or 'ramp' in arrival:
-                        raise ConfigError('trace arrival forbids qps and ramp')
-            if kind == 'call':
-                run = step.get('run', 'foreground')
-                if run not in ('foreground', 'background') or (run == 'background' and not spec['background']):
-                    raise ConfigError('Unsupported run mode')
-                within = step.get('within')
-                if within is not None:
-                    duration(within, positive=True)
-                compiled = CallStep(step_id, step['describe'], step['interface'], args, run, within)
-            else:
-                compiled = CheckStep(step_id, step['describe'], step['interface'], args, _expect(step['expect'], spec, previous))
-            previous[step_id] = spec['returns']
-            steps.append(compiled)
+            description = text(step['describe'], 'step.describe')
+            interface = registry.get(step['interface'])
+            args = argument(step.get('args', {}), interface.args, previous, step_id + '.args')
+            if not has_reference(args):
+                interface.arguments(args)
+            within = step.get('within')
+            if within is not None:
+                duration(within, positive=True)
+            expect = expectation(step['expect'], interface, previous) if 'expect' in step else None
+            steps.append(Step(step_id, description, interface.name, args, expect, within))
+            previous[step_id] = interface.returns
         phases.append(Phase(phase_id, phase['describe'], phase['timeout'], tuple(steps)))
-    view = asset(raw['view']) if 'view' in raw else None
-    return CompiledCase(case_id, describe, name, path.parent, environment, tuple(phases), view, path)
+    return CompiledCase(case_id, describe, name, path.parent, environment, tuple(phases),
+                        asset(raw['view']) if 'view' in raw else None, path)

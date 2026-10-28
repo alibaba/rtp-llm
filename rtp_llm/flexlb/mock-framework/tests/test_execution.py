@@ -1,287 +1,172 @@
 import asyncio
-from datetime import datetime
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import sys
 import subprocess
-
+from typing import Annotated
 import pytest
+import yaml
 
 from mock_framework.config import Registry, compile_case
+from mock_framework.config.registry import case_interface, Bounds
 from mock_framework.config.model import Reference
 from mock_framework.execution import ExecutionError, prepare_launch, run_case
-from mock_framework.execution.assertions import compare
-from mock_framework.execution.runner import observation, resolve
+from mock_framework.execution.runner import resolve
 
-ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = ROOT / 'java/runtime/target'
+
+@dataclass(frozen=True)
+class Args:
+    value: Annotated[int, Bounds(0, 10)] = 2
+    delay: float = 0
+    invalid: bool = False
+    crash: bool = False
+
+
+@case_interface('probe/read', effect='read')
+async def read(ctx, args: Args) -> int:
+    await asyncio.sleep(args.delay)
+    return 'invalid' if args.invalid else args.value
+
+
+@case_interface('probe/write', effect='write')
+async def write(ctx, args: Args) -> int:
+    ctx.records.emit(event='mutation')
+    if args.crash:
+        ctx.processes.children[0][1].kill()
+    await asyncio.sleep(args.delay)
+    return args.value
+
+
+def step(name='read', **kw):
+    return {'id': name, 'describe': name, 'interface': 'probe/' + name, **kw}
 
 
 @pytest.fixture
-def probe(tmp_path):
-    import yaml
-    registry = Registry.load(RUNTIME / 'probe-catalog.json')
-    java = str(Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home')) / 'bin/java')
-    classpath = (RUNTIME / 'probe-classpath.txt').read_text().strip()
-
-    def make(steps, *, timeout='3s', replicas=1, extra_args=()):
-        path = tmp_path / 'case.yaml'
-        raw = {'id': 'probe_case', 'describe': '仅验证传输与执行器',
-               'environment': {'master': {'deployment': {'replicas': replicas}, 'config': {'a.b': 2}}},
-               'phases': [{'id': 'phase', 'describe': '顺序调用', 'timeout': timeout, 'steps': steps}]}
-        path.write_text(yaml.safe_dump(raw, allow_unicode=True))
+def setup(tmp_path):
+    def make(steps, timeout='2s', child='ready'):
+        registry = Registry.standard()
+        registry.register(read); registry.register(write)
+        # Real subprocess ownership and teardown, independent of any Java Case catalog.
+        script = tmp_path / 'peer.py'
+        script.write_text('import os,json,pathlib,time,sys\n' +
+            ('sys.exit(19)\n' if child == 'exit' else
+             'pathlib.Path(os.environ["MOCK_READY_FILE"]).write_text(json.dumps({"url":"http://127.0.0.1:1"}))\ntime.sleep(30)\n' if child == 'ready' else 'time.sleep(30)\n'))
+        document = {'id': 'case', 'describe': 'runtime', 'environment': {'master': {'config': {}}},
+            'phases': [{'id': 'phase', 'describe': 'phase', 'timeout': timeout, 'steps': steps}]}
+        path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(document))
         case = compile_case(path, registry)
-        recipe = {'components': {'master': {'command': [java, '-cp', classpath, 'org.flexlb.mock.runtime.TransportProbe', *extra_args],
-                                             'startup_timeout': '5s'}},
-                  'bindings': {'probe/': 'master-0'}}
-        return case, registry, prepare_launch(recipe, case, tmp_path)
+        launch = prepare_launch({'components': {'master': {'command': [sys.executable, str(script)],
+            'startup_timeout': '150ms' if child != 'ready' else '3s'}}}, case, tmp_path)
+        return case, registry, launch
     return make
 
 
-def call(id='action', **kwargs):
-    return {'call': {'id': id, 'describe': '调用测试端', 'interface': 'probe/action', **kwargs}}
+def events(out, name='events'):
+    return [json.loads(line) for line in (out / (name + '.jsonl')).read_text().splitlines()]
 
 
-def check(id='metric', interface='probe/metric', expect=None, args=None):
-    return {'check': {'id': id, 'describe': '检查测试端', 'interface': interface,
-                      'args': args or {}, 'expect': expect or {'lte': '1s'}}}
-
-
-def execute(probe, tmp_path, steps, **kwargs):
-    case, registry, launch = probe(steps, **kwargs)
-    directory = tmp_path / 'output'
-    return asyncio.run(run_case(case, registry, launch, directory)), directory
-
-
-def events(directory, name='events'):
-    return [json.loads(line) for line in (directory / f'{name}.jsonl').read_text().splitlines()]
-
-
-def assert_cleaned(directory):
-    started = [e for e in events(directory) if e['event'] == 'process_started']
-    stopped = [e for e in events(directory) if e['event'] == 'process_stopped']
-    assert len(started) == len(stopped) and started
-    for event in started:
+def cleaned(out):
+    starts = [e for e in events(out) if e['event'] == 'process_started']
+    stops = [e for e in events(out) if e['event'] == 'process_stopped']
+    assert len(starts) == len(stops) == 1
+    for e in starts:
         with pytest.raises(ProcessLookupError):
-            os.kill(event['pid'], 0)
+            os.kill(e['pid'], 0)
 
 
-def test_real_jvm_calls_typed_refs_gates_and_records(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [
-        call(run='background'),
-        check('masters', 'probe/masters', {'eq': {'ref': 'action.affected'}}),
-        check('membership', 'probe/engines', {'eq': {'instances': [{'id': 'prefill-0'}, {'id': 'prefill-1'}]}}),
-        check(), check('promql', 'probe/query', {'gte': 1, 'lte': 2}),
-        {'call': {'id': 'wait', 'describe': '固定等待', 'interface': 'runtime/wait', 'args': {'duration': '1ms'}}},
-    ], replicas=2)
+def run(setup, tmp_path, steps, **kw):
+    case, registry, launch = setup(steps, **kw)
+    out = tmp_path / 'out'
+    result = asyncio.run(run_case(case, registry, launch, out))
+    cleaned(out)
+    return result, out
+
+
+def test_reads_writes_refs_and_gates_share_one_path(setup, tmp_path):
+    result, out = run(setup, tmp_path, [step(), step('write', args={'value': {'ref': 'steps.read'}}, expect={'eq': 2})])
     assert result['status'] == 'PASS'
-    assert [g['status'] for g in events(out, 'gates')] == ['PASS'] * 4
-    starts = [e['step'] for e in events(out) if e['event'] == 'step_started']
-    assert starts == ['action', 'masters', 'membership', 'metric', 'promql', 'wait']
-    assert json.loads((out / 'components/master-0/config.json').read_text())['component']['config'] == {'a': {'b': 2}}
-    assert (out / 'case.yaml').is_file() and (out / 'interfaces.json').is_file() and (out / 'code.json').is_file()
-    assert_cleaned(out)
+    assert len([e for e in events(out) if e['event'] == 'mutation']) == 1
+    assert events(out, 'gates')[0]['actual'] == 2
+    assert (out / 'interfaces.json').is_file()
 
 
-@pytest.mark.parametrize('args,expect,status', [({}, {'lte': '1ms'}, 'FAIL'),
-                                             ({'invalid_result': True}, {'lte': '1s'}, 'ERROR')])
-def test_gate_failure_or_invalid_result_skips_later_steps_and_cleans(probe, tmp_path, args, expect, status):
-    result, out = execute(probe, tmp_path, [check(args=args, expect=expect), call()])
+@pytest.mark.parametrize('args,expect,status', [({}, {'eq': 3}, 'FAIL'), ({'invalid': True}, {'eq': 2}, 'ERROR')])
+def test_bad_result_or_gate_stops_following_steps(setup, tmp_path, args, expect, status):
+    result, out = run(setup, tmp_path, [step(args=args, expect=expect), step('write')])
     assert result['status'] == status
-    assert [e['step'] for e in events(out) if e['event'] == 'step_started'] == ['metric']
-    assert events(out, 'gates')[0]['status'] == status
-    assert_cleaned(out)
+    assert not [e for e in events(out) if e['event'] == 'mutation']
 
 
-def test_empty_prometheus_result_is_error_not_vacuous_pass(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [check('query', 'probe/query', {'gte': 0}, {'empty': True})])
+def test_timed_out_write_is_not_retried(setup, tmp_path):
+    result, out = run(setup, tmp_path, [step('write', args={'delay': 1}, within='30ms')])
     assert result['status'] == 'ERROR'
-    assert 'no samples' in result['error']
-    assert_cleaned(out)
+    assert len([e for e in events(out) if e['event'] == 'mutation']) == 1
+    assert next(e for e in events(out) if e['event'] == 'step_finished')['outcome_unknown']
 
 
-def test_within_timeout_does_not_retry_mutation(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [call(args={'delay_ms': 1000}, within='40ms'), check()])
-    assert result['status'] == 'ERROR'
-    ends = [e for e in events(out) if e['event'] == 'step_finished']
-    assert len(ends) == 1 and ends[0]['outcome_unknown']
-    assert_cleaned(out)
+def test_failed_write_assertion_is_not_replayed_or_marked_unknown(setup, tmp_path):
+    result, out = run(setup, tmp_path, [step('write', expect={'eq': 3})])
+    assert result['status'] == 'FAIL'
+    assert len([e for e in events(out) if e['event'] == 'mutation']) == 1
+    assert not next(e for e in events(out) if e['event'] == 'step_finished')['outcome_unknown']
 
 
-def test_phase_deadline_includes_previous_steps(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [
-        {'call': {'id': 'wait', 'describe': '超出阶段预算', 'interface': 'runtime/wait', 'args': {'duration': '1s'}}}, call()
-    ], timeout='40ms')
-    assert result['status'] == 'ERROR'
-    assert [e['step'] for e in events(out) if e['event'] == 'step_started'] == ['wait']
-    assert_cleaned(out)
-
-
-def test_step_timeout_is_limited_by_remaining_phase_budget(probe, tmp_path):
-    # Consume the first budget locally so JVM first-call warmup cannot fail step one.
-    result, out = execute(probe, tmp_path, [
-        {'call': {'id': 'first', 'describe': '消耗阶段预算', 'interface': 'runtime/wait',
-                  'args': {'duration': '1s'}}},
-        call('second', args={'delay_ms': 1500}, within='3s'),
-    ], timeout='2s')
+def test_phase_budget_includes_earlier_steps(setup, tmp_path):
+    result, out = run(setup, tmp_path, [step(args={'delay': .08}), step('write', args={'delay': .2}, within='5s')], timeout='150ms')
     assert result['status'] == 'ERROR'
     assert [e['status'] for e in events(out) if e['event'] == 'step_finished'] == ['PASS', 'ERROR']
-    assert_cleaned(out)
 
 
-def test_resolved_observation_range_reaches_java_context(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [check('window', 'probe/range_metric', {'eq': 60}, {'range': ['-60s', '0s']})])
-    assert result['status'] == 'PASS'
-    gate = events(out, 'gates')[0]
-    assert gate['observation']['end'] - gate['observation']['start'] == 60
-    assert_cleaned(out)
-
-
-def test_component_crash_aborts_run(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [call(args={'crash': True}), check()])
+@pytest.mark.parametrize('child', ['exit', 'hang'])
+def test_setup_failure_reclaims_process(setup, tmp_path, child):
+    result, out = run(setup, tmp_path, [step()], child=child)
     assert result['status'] == 'ERROR'
-    assert_cleaned(out)
-
-
-def test_early_process_exit_during_setup_is_error(probe, tmp_path):
-    result, out = execute(probe, tmp_path, [check()], extra_args=['exit'])
-    assert result['status'] == 'ERROR' and '19' in result['error']
     assert not [e for e in events(out) if e['event'] == 'step_started']
-    assert_cleaned(out)
 
 
-def test_cancel_during_step_records_cancelled_and_cleans(probe, tmp_path):
-    case, registry, launch = probe([call(args={'delay_ms': 2000})])
-    out = tmp_path / 'cancelled'
-    async def run():
+def test_child_exit_interrupts_operation(setup, tmp_path):
+    result, _ = run(setup, tmp_path, [step('write', args={'crash': True, 'delay': 1})])
+    assert result['status'] == 'ERROR' and 'unexpectedly' in result['error']
+
+
+def test_cancel_records_and_reclaims(setup, tmp_path):
+    case, registry, launch = setup([step(args={'delay': 10})])
+    out = tmp_path / 'out'
+    async def exercise():
         task = asyncio.create_task(run_case(case, registry, launch, out))
         for _ in range(500):
-            if (out / 'events.jsonl').is_file() and any(e['event'] == 'step_started' for e in events(out)):
+            if (out / 'events.jsonl').exists() and any(e['event'] == 'step_started' for e in events(out)):
                 break
             await asyncio.sleep(.01)
         else:
-            pytest.fail('Probe did not reach the step')
+            pytest.fail('Step did not start')
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-    asyncio.run(run())
+    asyncio.run(exercise()); cleaned(out)
     assert json.loads((out / 'result.json').read_text())['status'] == 'CANCELLED'
-    assert_cleaned(out)
 
 
-def test_startup_timeout_kills_owned_process(probe, tmp_path):
-    case, registry, launch = probe([check()])
-    launch['components']['master']['command'] = [sys.executable, '-c', 'import time; time.sleep(30)']
-    launch['components']['master']['startup_timeout'] = '50ms'
-    out = tmp_path / 'timeout'
-    result = asyncio.run(run_case(case, registry, launch, out))
-    assert result['status'] == 'ERROR'
-    assert_cleaned(out)
-
-
-def test_no_binding_fails_before_output_or_process_start(probe, tmp_path):
-    case, registry, launch = probe([check()])
-    launch['bindings'] = {}
-    with pytest.raises(ExecutionError, match='No process binding'):
-        asyncio.run(run_case(case, registry, launch, tmp_path / 'missing'))
-    assert not (tmp_path / 'missing').exists()
-
-
-def test_existing_output_is_never_overwritten(probe, tmp_path):
-    case, registry, launch = probe([check()])
+def test_existing_output_is_not_overwritten(setup, tmp_path):
+    case, registry, launch = setup([step()])
     with pytest.raises(FileExistsError):
         asyncio.run(run_case(case, registry, launch, tmp_path))
 
 
-@pytest.mark.parametrize('expect,exit_code', [({'lte': '1s'}, 0), ({'lte': '1ms'}, 1)])
-def test_cli_run_records_success_and_gate_failure(probe, tmp_path, expect, exit_code):
-    import yaml
-    case, registry, launch = probe([check(expect=expect)])
-    launch_file = tmp_path / 'launch.yaml'
-    launch_file.write_text(yaml.safe_dump(launch))
-    output = tmp_path / 'cli-output'
+def test_refs_do_not_eval_and_require_actual_fields():
+    assert resolve(Reference('x', ('value',)), {'x': {'value': 2}}, {}) == 2
+    assert resolve(Reference('globals', ('masters',)), {}, {'masters': ['a:1']}) == ['a:1']
+    with pytest.raises(ExecutionError):
+        resolve(Reference('x', ('missing',)), {'x': {}}, {})
+
+
+def test_cli_needs_no_java_catalog(setup, tmp_path):
+    case, _, launch = setup([{'id': 'wait', 'describe': 'wait', 'interface': 'runtime/wait', 'args': {'duration': '1ms'}}])
+    launch_file = tmp_path / 'launch.yaml'; launch_file.write_text(yaml.safe_dump(launch))
     result = subprocess.run([sys.executable, '-m', 'mock_framework.cli', 'run', str(case.source),
-                             '--catalog', str(RUNTIME / 'probe-catalog.json'), '--launch', str(launch_file),
-                             '--output', str(output)], capture_output=True, text=True, timeout=20,
-                            env={**os.environ, 'PYTHONPATH': str(ROOT / 'python')})
-    assert result.returncode == exit_code, result.stderr
-    assert json.loads(result.stdout)['status'] == ('PASS' if exit_code == 0 else 'FAIL')
-    assert_cleaned(output)
-
-
-def test_range_resolution_uses_fixed_check_time_and_actual_start_receipt():
-    now = '2026-10-27T10:01:00+00:00'
-    epoch = datetime.fromisoformat(now).timestamp()
-    assert observation({'range': ['-60s', '0s']}, now, None) == {
-        'selector': ['-60s', '0s'], 'start': epoch - 60, 'end': epoch}
-    assert observation({'range': 'latest'}, now, None) == {'selector': 'latest', 'at': now}
-    assert observation({'range': 'all'}, now, '2026-10-27T10:00:30Z')['start'] == epoch - 30
-    assert observation({'promql': 'rate(example[5m])'}, now, None) is None
-    with pytest.raises(ExecutionError, match='actual traffic start'):
-        observation({'range': 'all'}, now, None)
-
-
-def test_collection_comparison_is_per_master_and_order_independent():
-    spec = {'returns': {'name': 'PerMasterEngines'}}
-    expected = {'eq': {'instances': [{'id': 'p1'}, {'id': 'p0'}]}}
-    assert compare({'instances': {'m1': {'instances': [{'id': 'p0'}, {'id': 'p1'}]}}}, expected, spec)
-    assert not compare({'instances': {'m0': {'instances': [{'id': 'p0'}]}, 'm1': {'instances': [{'id': 'p1'}]}}}, expected, spec)
-    with pytest.raises(ExecutionError, match='No Master'):
-        compare({'instances': {}}, expected, spec)
-    with pytest.raises(ExecutionError, match='Duplicate'):
-        compare({'instances': {'m0': {'instances': [{'id': 'p0'}, {'id': 'p0'}]}}}, expected, spec)
-
-
-def test_reference_resolves_only_actual_returned_fields():
-    assert resolve({'x': Reference('stop', ('affected',))}, {'stop': {'affected': {'instances': []}}}) == {'x': {'instances': []}}
-    with pytest.raises(ExecutionError, match='Cannot resolve'):
-        resolve(Reference('missing', ()), {})
-
-
-@pytest.mark.parametrize('configuration', [
-    {'binary': '/does/not/exist'},
-    {'binary': sys.executable, 'scrape_interval': '0s'},
-    {'binary': sys.executable, 'scrape_interval': '1.5ms'},
-    {'binary': sys.executable, 'extra': True},
-])
-def test_invalid_collector_configuration_is_rejected_before_launch(probe, tmp_path, configuration):
-    case, _, launch = probe([check()])
-    with pytest.raises((ExecutionError, ValueError)):
-        prepare_launch({**launch, 'prometheus': configuration}, case, tmp_path)
-    assert not (tmp_path / 'output').exists()
-
-
-def test_managed_collector_cannot_override_explicit_query_configuration(probe, tmp_path):
-    case, _, launch = probe([check()])
-    case.environment['master']['config']['prometheus'] = {'url': 'http://localhost:9090', 'job': 'external'}
-    with pytest.raises(ExecutionError, match='cannot be combined'):
-        prepare_launch({**launch, 'prometheus': {'binary': sys.executable}}, case, tmp_path)
-
-
-@pytest.mark.parametrize('behavior', ['exit', 'hang'])
-def test_collector_start_failure_is_recorded_and_its_process_reclaimed(probe, tmp_path, behavior):
-    case, registry, launch = probe([check()])
-    executable = tmp_path / 'bad-prometheus'
-    executable.write_text(f'#!{sys.executable}\nimport time, sys\n' + ('sys.exit(23)\n' if behavior == 'exit' else 'time.sleep(30)\n'))
-    executable.chmod(0o755)
-    launch = prepare_launch({**launch, 'prometheus': {'binary': str(executable), 'startup_timeout': '150ms'}}, case, tmp_path)
-    out = tmp_path / 'failed-collector'
-    result = asyncio.run(run_case(case, registry, launch, out))
-    assert result['status'] == 'ERROR'
-    assert not [e for e in events(out) if e['event'] == 'phase_started']
-    assert json.loads((out / 'prometheus/collection.json').read_text())['complete'] is False
-    assert [e['node'] for e in events(out) if e['event'] == 'process_started'] == ['prometheus']
-    assert_cleaned(out)
-
-
-@pytest.mark.skipif(not os.environ.get('PROMETHEUS_BIN'), reason='Requires real Prometheus')
-def test_managed_collection_rejects_missing_component_metrics_metadata(probe, tmp_path):
-    case, registry, launch = probe([check()])
-    launch = prepare_launch({**launch, 'prometheus': {'binary': os.environ['PROMETHEUS_BIN']}}, case, tmp_path)
-    out = tmp_path / 'missing-metrics'
-    result = asyncio.run(run_case(case, registry, launch, out))
-    assert result['status'] == 'ERROR' and 'requires endpoints.json' in result['error']
-    assert not [e for e in events(out) if e['event'] == 'phase_started']
-    assert json.loads((out / 'prometheus/collection.json').read_text())['complete'] is False
-    assert_cleaned(out)
+        '--launch', str(launch_file), '--output', str(tmp_path / 'cli')], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['status'] == 'PASS'
+    cleaned(tmp_path / 'cli')

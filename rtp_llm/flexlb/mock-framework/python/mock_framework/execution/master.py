@@ -3,7 +3,7 @@ import copy
 import json
 
 from .records import write_json
-from .transport import ExecutionError, post
+from .transport import ExecutionError
 
 
 def master_environment(config, topology, directory):
@@ -57,27 +57,3 @@ def master_environment(config, topology, directory):
         raise ExecutionError(f'Cannot bind local MODEL_SERVICE_CONFIG: {error}') from error
     write_json(directory / 'native-environment.json', env)
     return env
-
-
-async def invoke_master(urls, endpoint, payload):
-    """Read each native Master separately; all other calls keep their normal binding."""
-    interface = payload['interface']
-    if interface not in ('master/leadership/get', 'master/engine/get'):
-        return await post(endpoint, payload)
-    masters = [url for node, url in urls.items() if node.startswith('master-')]
-    if not masters:
-        raise ExecutionError('No running Master endpoint')
-    instances = [] if interface == 'master/leadership/get' else {}
-    for url in masters:
-        value = (await post(url, payload))['instances']
-        if interface == 'master/leadership/get':
-            if not isinstance(value, list):
-                raise ExecutionError('Master leadership must return a list')
-            instances.extend(value)
-        else:
-            if not isinstance(value, dict):
-                raise ExecutionError('Master engines must return a per-Master mapping')
-            if set(instances) & set(value):
-                raise ExecutionError('Duplicate Master identity in read results')
-            instances.update(value)
-    return {'instances': instances}

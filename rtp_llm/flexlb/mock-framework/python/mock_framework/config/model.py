@@ -5,7 +5,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Reference:
-    step: str
+    source: str
     path: tuple[str, ...]
 
 
@@ -15,22 +15,13 @@ class Expect:
 
 
 @dataclass(frozen=True)
-class CallStep:
+class Step:
     id: str
     describe: str
     interface: str
     args: dict[str, Any]
-    run: str = 'foreground'
+    expect: Expect | None = None
     within: str | None = None
-
-
-@dataclass(frozen=True)
-class CheckStep:
-    id: str
-    describe: str
-    interface: str
-    args: dict[str, Any]
-    expect: Expect
 
 
 @dataclass(frozen=True)
@@ -38,7 +29,7 @@ class Phase:
     id: str
     describe: str
     timeout: str
-    steps: tuple[CallStep | CheckStep, ...]
+    steps: tuple[Step, ...]
 
 
 @dataclass(frozen=True)

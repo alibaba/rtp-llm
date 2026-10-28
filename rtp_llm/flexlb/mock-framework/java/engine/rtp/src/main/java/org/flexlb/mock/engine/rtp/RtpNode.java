@@ -11,23 +11,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 import org.flexlb.mock.runtime.ApiServer;
-import org.flexlb.mock.metrics.PrometheusQueries;
-import org.flexlb.mock.api.engine.EngineMetricsApi;
-import org.flexlb.mock.api.metrics.PrometheusApi;
 
 /** One owned RTP P/D node per JVM. Does not contain the case runner or a cluster controller. */
 public final class RtpNode implements AutoCloseable {
     private final RtpConfig config;
     private final DeviceCache cache;
     private final RtpRpcService service;
-    private final PrometheusQueries queries;
     private final AtomicBoolean closed = new AtomicBoolean();
     private Server rpc;
     private ApiServer api;
 
     private RtpNode(RtpConfig config) {
         this.config = config;
-        queries = PrometheusQueries.fromConfig(config.business().path("prometheus"), "rtp");
         cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
         service = new RtpRpcService(config, cache);
     }
@@ -41,7 +36,6 @@ public final class RtpNode implements AutoCloseable {
             node.rpc = builder.build().start();
             node.service.rpcAddress(node.rpcAddress());
             node.api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).metrics(node.service::scrapeMetrics);
-            if (node.queries != null) node.api.bind(EngineMetricsApi.class, node.queries).bind(PrometheusApi.class, node.queries);
             node.api.start();
             return node;
         } catch (IOException | RuntimeException error) { node.close(); throw error; }
@@ -72,7 +66,6 @@ public final class RtpNode implements AutoCloseable {
             catch (InterruptedException error) { Thread.currentThread().interrupt(); }
         }
         if (api != null) api.close();
-        if (queries != null) queries.close();
         cache.close();
     }
 

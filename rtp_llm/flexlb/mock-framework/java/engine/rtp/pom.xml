@@ -4,6 +4,7 @@
   <parent><groupId>org.flexlb.mock</groupId><artifactId>mock-framework</artifactId><version>1.0-SNAPSHOT</version><relativePath>../../../pom.xml</relativePath></parent>
   <artifactId>mock-rtp</artifactId>
   <dependencies>
+    <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-engine</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-cache</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>javax.annotation</groupId><artifactId>javax.annotation-api</artifactId><version>1.3.2</version></dependency>
     <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-metrics</artifactId><version>${project.version}</version></dependency>

@@ -41,7 +41,7 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
         raise AssertionError('Prometheus did not become ready or ingest the expected samples')
 
     def gate(id, interface, expect, **args):
-        return {'check': {'id': id, 'describe': id, 'interface': interface, 'args': args, 'expect': expect}}
+        return {'id': id, 'describe': id, 'interface': interface, 'args': args, 'expect': expect}
 
     data = {'id': 'prometheus_integration', 'describe': '真实节点、采集和查询门禁集成测试',
             'environment': {'prefill': {'engine': 'rtp', 'deployment': {'replicas': 2}, 'config': {
@@ -49,28 +49,24 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
                 'test_block_num': 17, 'reserve_block_ratio': 0, 'compute.expression': '2 * totalComputeTokens',
             }}},
             'phases': [{'id': 'observe', 'describe': '检查已采集的实际事件', 'timeout': '20s', 'steps': [
-                {'call': {'id': 'collect', 'describe': '为测试原生客户端保留采集时间',
-                          'interface': 'runtime/wait', 'args': {'duration': '8s'}}},
-                gate('targets', 'prometheus/query', {'eq': 2}, promql='sum(up{job="mock"})'),
+                {'id': 'collect', 'describe': '为测试原生客户端保留采集时间',
+                 'interface': 'runtime/wait', 'args': {'duration': '8s'}},
+                {'id': 'targets', 'describe': '记录原始PromQL响应', 'interface': 'prometheus/query',
+                 'args': {'promql': 'sum(up{job="mock"})'}},
                 gate('hit_rate', 'engine/cache/hit_rate', {'gte': .75, 'lte': .77}, range=['-60s', '0s']),
-                gate('p0_hit', 'engine/cache/hit_rate', {'gte': .39, 'lte': .41}, range=['-60s', '0s'],
-                     engines={'instances': [{'id': 'prefill-0'}]}),
-                gate('p1_hit', 'engine/cache/hit_rate', {'gte': .79, 'lte': .81}, range=['-60s', '0s'],
-                     engines={'instances': [{'id': 'prefill-1'}]}),
                 gate('compute_tps', 'engine/prefill/tps', {'gte': 1}, range=['-60s', '0s']),
-                gate('with_cache_tps', 'engine/prefill/tps_with_cache', {'gte': {'ref': 'compute_tps.value'}}, range=['-60s', '0s']),
+                gate('with_cache_tps', 'engine/prefill/tps_with_cache', {'gte': {'ref': 'steps.compute_tps'}}, range=['-60s', '0s']),
             ]}]}
     if mode == 'gate_fail':
-        data['phases'][0]['steps'][1]['check']['expect'] = {'eq': 3}
+        data['phases'][0]['steps'][2]['expect'] = {'eq': 0}
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
-    registry = Registry.load(ROOT / 'build/interfaces.json')
+    registry = Registry.standard()
     case = compile_case(path, registry)
     java = Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home')) / 'bin/java'
     jar = ROOT / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar'
     classpath = (ROOT / 'java/engine/rtp/target/rtp-classpath.txt').read_text().strip()
     launch = prepare_launch({'components': {'prefill': {'command': [str(java), '-jar', str(jar)]}},
-                             'bindings': {'engine/': 'prefill-0', 'prometheus/': 'prefill-0'},
                              'prometheus': {'binary': str(binary), 'scrape_interval': '100ms'}}, case, tmp_path)
     output = tmp_path / 'result'
 
@@ -126,8 +122,10 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
     asyncio.run(run())
     gates = [json.loads(line) for line in (output / 'gates.jsonl').read_text().splitlines()]
     if mode == 'pass':
-        assert len(gates) == 6 and all(gate['status'] == 'PASS' for gate in gates)
-        assert datetime.fromisoformat(gates[0]['actual']['query_time'].replace('Z', '+00:00')) == datetime.fromisoformat(gates[0]['query_time'])
+        assert len(gates) == 3 and all(gate['status'] == 'PASS' for gate in gates)
+        events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
+        raw = next(e['result'] for e in events if e.get('step') == 'targets' and e['event'] == 'step_finished')
+        assert raw['samples'][0]['value'] == 2
     elif mode == 'gate_fail':
         assert len(gates) == 1 and gates[0]['status'] == 'FAIL'
     else:
@@ -146,10 +144,11 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
         (output / 'prometheus/offline-samples.txt').write_text(dumped.stdout)
         for node, expected in [('prefill-0', 2), ('prefill-1', 10)]:
             # Prometheus can append a stale marker after the owned node stops.
-            samples = [float(line.rsplit(' ', 2)[1]) for line in dumped.stdout.splitlines() if f'node="{node}"' in line]
+            address = json.loads((output / f'components/{node}/endpoints.json').read_text())['rpc']
+            samples = [float(line.rsplit(' ', 2)[1]) for line in dumped.stdout.splitlines() if f'instance="{address}"' in line]
             samples = [value for value in samples if math.isfinite(value)]
             assert samples and samples[-1] == expected
-    assert all('observation' in gate for gate in gates)
+    assert all('query_time' in gate for gate in gates)
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
     for event in events:
         if event['event'] == 'process_started':

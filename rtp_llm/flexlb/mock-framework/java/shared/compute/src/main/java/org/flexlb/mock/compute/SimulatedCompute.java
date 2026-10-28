@@ -33,10 +33,10 @@ public final class SimulatedCompute implements AutoCloseable {
                 if (this.terminal) return false;
                 this.terminal = true;
                 if (scheduled != null) scheduled.cancel(false);
-                var outcome = new Outcome(terminal, sample, Math.max(0, System.nanoTime() - started));
                 // Never invoke business callbacks on the timer or close caller thread.
                 active.remove(this);
-                notifications.execute(() -> completion.complete(outcome));
+                notifications.execute(() -> completion.complete(
+                    new Outcome(terminal, sample, Math.max(0, System.nanoTime() - started))));
                 if (closed && active.isEmpty()) notifications.shutdown();
                 return true;
             }

@@ -17,9 +17,9 @@ from .master import master_environment
 
 def prepare_launch(raw, case, base):
     """Launch recipes are developer bindings, separate from case business configuration."""
-    fields(raw, {'components', 'bindings', 'prometheus', 'zookeeper'}, {'components', 'bindings'}, where='launch')
-    if not isinstance(raw['components'], dict) or not isinstance(raw['bindings'], dict):
-        raise ExecutionError('launch components/bindings must be mappings')
+    fields(raw, {'components', 'prometheus', 'zookeeper'}, {'components'}, where='launch')
+    if not isinstance(raw['components'], dict):
+        raise ExecutionError('launch components must be a mapping')
     if 'zookeeper' in raw['components']:
         raise ExecutionError('ZooKeeper belongs in the launch.zookeeper recipe, not components')
     components = {}
@@ -55,13 +55,7 @@ def prepare_launch(raw, case, base):
     missing = set(case.environment) - set(components)
     if missing:
         raise ExecutionError(f'Missing component launch recipes: {sorted(missing)}')
-    ids = {f'{role}-{n}' for role in components for n in range(case.environment[role]['deployment']['replicas'])}
-    for prefix, node in raw['bindings'].items():
-        text(prefix, 'binding prefix')
-        text(node, 'binding process id')
-        if not prefix.endswith('/') or node not in ids:
-            raise ExecutionError('Bindings need a route prefix ending in / and an existing process id')
-    result = {'components': components, 'bindings': dict(raw['bindings'])}
+    result = {'components': components}
     if zookeeper is not None:
         result['zookeeper'] = zookeeper
     if 'prometheus' in raw:
@@ -77,13 +71,8 @@ class Processes:
         self.children, self.monitors, self.urls = [], [], {}
         self.failure = asyncio.get_running_loop().create_future()
         self.closing = False
+        self.topology = []
         self.prometheus = Prometheus(self, records, launch['prometheus']) if 'prometheus' in launch else None
-
-    def endpoint(self, interface):
-        prefixes = [p for p in self.launch['bindings'] if interface.startswith(p)]
-        if not prefixes:
-            raise ExecutionError(f'No process binding for {interface}')
-        return self.urls[self.launch['bindings'][max(prefixes, key=len)]]
 
     async def _monitor(self, node, child):
         code = await child.wait()
@@ -145,7 +134,7 @@ class Processes:
                           'FLEXLB_SYNC_CONSISTENCY_CONFIG': json.dumps({'needConsistency': True,
                               'zookeeperConfig': {'zkHost': connect, 'zkTimeoutMs': 6000}})}
             self.records.emit(event='process_ready', node='zookeeper', connect=connect)
-        topology = []
+        topology = self.topology
         order = {'prefill': 0, 'decode': 0, 'vit': 0, 'master': 1, 'client': 2}
         for role, recipe in sorted(self.launch['components'].items(), key=lambda item: order[item[0]]):
             for index in range(self.case.environment[role]['deployment']['replicas']):
@@ -155,8 +144,6 @@ class Processes:
                 config = directory / 'config.json'
                 ready = directory / 'ready.json'
                 component = copy.deepcopy(self.case.environment[role])
-                if self.prometheus:
-                    component['config']['prometheus'] = {'url': self.prometheus.url, 'job': self.prometheus.JOB}
                 write_json(config, {'component_role': role, 'component': component,
                                     'environment': self.case.environment, 'index': index, 'id': node})
                 native_env = master_environment(component['config'], topology, directory) if role == 'master' else {}

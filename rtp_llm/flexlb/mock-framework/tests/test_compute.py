@@ -20,10 +20,17 @@ ROOT = Path(__file__).resolve().parents[1]
     {'prefill': {'expression': '1'}},
     {'expression': '1', 'noise': None},
 ])
-def test_compiler_uses_java_compute_configuration_schema(case_data, compile_data, compute):
+def test_java_loader_rejects_invalid_compute_configuration(case_data, compile_data, compute, tmp_path):
     case_data['environment']['prefill']['config']['compute'] = compute
-    with pytest.raises(ConfigError):
-        compile_data(case_data)
+    compiled = compile_data(case_data)
+    config = tmp_path / 'component.json'
+    write_json(config, {'component': compiled.environment['prefill'], 'environment': compiled.environment})
+    classpath = (ROOT / 'java/shared/compute/target/compute-classpath.txt').read_text().strip()
+    java = Path(os.environ['JAVA_HOME']) / 'bin/java'
+    result = subprocess.run([str(java), '-cp', classpath, 'org.flexlb.mock.compute.ComputeProbe', str(config), str(tmp_path / 'result')],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert not (tmp_path / 'result').exists()
 
 
 def test_top_level_compute_is_rejected(case_data, compile_data):
@@ -58,7 +65,16 @@ def test_python_compile_to_java_formula_noise_and_timer(case_data, compile_data,
     ('decode', {'seed': 1.5}), ('generation', {'eos_probability': -0.1}),
     ('generation', {'eos_probability': 1.1}), ('generation', {'unknown': 1}),
 ])
-def test_group_model_types_and_probability_bounds_use_java_catalog(case_data, compile_data, key, value):
-    case_data['environment']['prefill']['config'][key] = value
-    with pytest.raises(ConfigError):
-        compile_data(case_data)
+def test_java_loader_rejects_invalid_generation_models(case_data, compile_data, key, value, tmp_path):
+    role = 'decode' if key == 'decode' else 'prefill'
+    case_data['environment'][role] = {'engine': 'rtp', 'config': {
+        'seq_size_per_block': 16, 'test_block_num': 9, 'max_seq_len': 4096, 'compute': {'expression': '1'}, key: value}}
+    compiled = compile_data(case_data)
+    config = tmp_path / 'component.json'
+    write_json(config, {'id': role + '-0', 'component_role': role, 'component': compiled.environment[role]})
+    java = Path(os.environ['JAVA_HOME']) / 'bin/java'
+    env = dict(os.environ, MOCK_CONFIG_FILE=str(config), MOCK_OUTPUT_DIR=str(tmp_path), MOCK_READY_FILE=str(tmp_path / 'ready.json'))
+    result = subprocess.run([str(java), '-jar', str(ROOT / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')],
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert not (tmp_path / 'ready.json').exists()

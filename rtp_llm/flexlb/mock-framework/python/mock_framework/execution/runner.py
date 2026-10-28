@@ -1,68 +1,56 @@
 import asyncio
-from datetime import datetime
+from dataclasses import dataclass
 import time
 from pathlib import Path
 
-from ..config.compiler import _value
-from ..config.model import CallStep, CheckStep, Reference
+from ..config.model import Reference
+from ..config.validation import validate
 from ..config.values import duration
 from .assertions import compare
 from .processes import Processes
-from .master import invoke_master
 from .records import Records, timestamp, write_json
-from .transport import ExecutionError, post
+from .transport import ExecutionError
 
 
-def resolve(value, results):
+def resolve(value, results, globals):
     if isinstance(value, Reference):
         try:
-            result = results[value.step]
+            result = globals if value.source == 'globals' else results[value.source]
             for part in value.path:
                 result = result[part]
             return result
         except (KeyError, TypeError) as error:
-            raise ExecutionError(f'Cannot resolve {value.step}.{value.path}') from error
+            raise ExecutionError(f'Cannot resolve {value.source}.{value.path}') from error
     if isinstance(value, dict):
-        return {key: resolve(item, results) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [resolve(item, results) for item in value]
+        return {k: resolve(v, results, globals) for k, v in value.items()}
+    if isinstance(value, list):
+        return [resolve(v, results, globals) for v in value]
     return value
 
 
-def _epoch(value):
-    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-    if parsed.tzinfo is None:
-        raise ExecutionError('Component timestamps must include a timezone')
-    return parsed.timestamp()
+@dataclass(frozen=True)
+class CaseContext:
+    processes: Processes
+    records: Records
+    query_time: str
+    deadline: float
 
+    @property
+    def timeout(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Step deadline exceeded')
+        return remaining
 
-def observation(args, query_time, traffic_start):
-    if 'range' not in args:
-        return None
-    selected = args['range']
-    end = _epoch(query_time)
-    if selected == 'latest':
-        return {'selector': 'latest', 'at': query_time}
-    if selected == 'all':
-        if traffic_start is None:
-            raise ExecutionError('range: all requires an actual traffic start receipt')
-        start, stop = _epoch(traffic_start), end
-    else:
-        start, stop = (end + float(duration(item, negative=True)) for item in selected)
-    if start > stop:
-        raise ExecutionError('Observation range starts after its end')
-    return {'selector': selected, 'start': start, 'end': stop}
+    def globals(self):
+        return {name: sorted(item['rpc'] for item in self.processes.topology if item['role'] == role)
+                for name, role in [('masters', 'master'), ('prefill', 'prefill'), ('decode', 'decode'), ('vit', 'vit')]}
 
 
 async def run_case(case, registry, launch, directory):
-    # Resolve every binding before starting a process or creating an experiment.
-    for phase in case.phases:
-        for step in phase.steps:
-            if step.interface != 'runtime/wait' and not any(step.interface.startswith(p) for p in launch['bindings']):
-                raise ExecutionError(f'No process binding for {step.interface}')
     records = Records(directory, case, launch)
     processes = Processes(case, launch, records)
-    results, traffic_start = {}, None
+    results = {}
     result = {'status': 'ERROR', 'started_at': timestamp()}
     cancelled = False
     try:
@@ -78,62 +66,40 @@ async def run_case(case, registry, launch, directory):
             phase_status = 'ERROR'
             try:
                 for step in phase.steps:
-                    args = resolve(step.args, results)
-                    spec = registry.get(step.interface)
-                    # Revalidate references using the same generated schema before any side effect.
-                    args = _value(args, spec['args'], {}, step.id + '.args')
-                    query_time = timestamp()
-                    observed = observation(args, query_time, traffic_start)
-                    budget = phase_deadline - time.monotonic()
-                    if isinstance(step, CallStep) and step.within:
-                        budget = min(budget, float(duration(step.within)))
-                    records.emit(event='step_started', phase=phase.id, step=step.id, describe=step.describe,
-                                 interface=step.interface, args=args, query_time=query_time, observation=observed)
-                    gate = None
+                    interface = registry.get(step.interface)
+                    deadline = min(phase_deadline, time.monotonic() + float(duration(step.within))) if step.within else phase_deadline
+                    context = CaseContext(processes, records, timestamp(), deadline)
+                    gate, invoked = None, False
+                    records.emit(event='step_started', phase=phase.id, step=step.id, interface=step.interface,
+                                 describe=step.describe, query_time=context.query_time)
                     try:
-                        if budget <= 0:
-                            raise TimeoutError('Phase deadline exceeded')
-                        if isinstance(step, CheckStep):
+                        args = resolve(step.args, results, context.globals())
+                        interface.arguments(args)
+                        expected = resolve(step.expect.comparisons, results, context.globals()) if step.expect else None
+                        if expected is not None:
+                            for op, value in expected.items():
+                                validate(value, {'type': 'integer', 'minimum': 0} if op == 'count' else interface.returns, 'expect.' + op)
                             gate = {'step': step.id, 'interface': step.interface, 'args': args,
-                                    'query_time': query_time, 'observation': observed,
-                                    'expect': resolve(step.expect.comparisons, results)}
-                        if step.interface == 'runtime/wait':
-                            await processes.guard(asyncio.sleep(float(duration(args['duration']))), budget)
-                            actual = {}
-                        else:
-                            payload = {'interface': step.interface, 'args': args,
-                                       'context': {'run': step.run if isinstance(step, CallStep) else 'foreground',
-                                                   'query_time': query_time, 'observation': observed,
-                                                   'timeout_ms': max(1, int(budget * 1000))}}
-                            endpoint = processes.endpoint(step.interface)
-                            native_master = 'MODEL_SERVICE_CONFIG' in case.environment.get('master', {}).get('config', {})
-                            request = (invoke_master(processes.urls, endpoint, payload)
-                                       if native_master and step.interface.startswith('master/') else post(endpoint, payload))
-                            actual = await processes.guard(request, budget)
-                        actual = _value(actual, spec['returns'], {}, step.id + '.result')
-                        if spec['returns'].get('name') == 'QueryResult' and _epoch(actual['query_time']) != _epoch(query_time):
-                            raise ExecutionError('Query response does not match the fixed invocation time')
+                                    'query_time': context.query_time, 'expect': expected}
+                        budget = context.timeout
+                        invoked = True
+                        actual = await processes.guard(interface.invoke(context, args), budget)
                         results[step.id] = actual
-                        if step.interface == 'client/traffic/run':
-                            _epoch(actual['started_at'])
-                            traffic_start = actual['started_at']
                         if gate is not None:
-                            gate['actual'] = actual
-                            gate['status'] = 'PASS' if compare(actual, gate['expect'], spec) else 'FAIL'
+                            gate.update(actual=actual, status='PASS' if compare(actual, expected) else 'FAIL')
                             records.emit('gates', **gate)
                             if gate['status'] == 'FAIL':
                                 raise GateFailure(f'Gate {step.id} failed')
-                        records.emit(event='step_finished', step=step.id, status='PASS', result=actual)
+                        records.emit(event='step_finished', step=step.id, status='PASS', args=args, result=actual)
                     except BaseException as error:
-                        failure_status = ('CANCELLED' if isinstance(error, asyncio.CancelledError) else
-                                          'FAIL' if isinstance(error, GateFailure) else 'ERROR')
+                        status = ('CANCELLED' if isinstance(error, asyncio.CancelledError) else
+                                  'FAIL' if isinstance(error, GateFailure) else 'ERROR')
                         if gate is not None and 'status' not in gate:
-                            gate.update(status=failure_status, error=str(error) or type(error).__name__)
+                            gate.update(status=status, error=str(error) or type(error).__name__)
                             records.emit('gates', **gate)
-                        records.emit(event='step_finished', step=step.id,
-                                     status=failure_status,
+                        records.emit(event='step_finished', step=step.id, status=status,
                                      error=str(error) or type(error).__name__,
-                                     outcome_unknown=isinstance(step, CallStep) and step.interface != 'runtime/wait')
+                                     outcome_unknown=invoked and interface.effect == 'write' and status != 'FAIL')
                         raise
                 phase_status = 'PASS'
             except GateFailure:

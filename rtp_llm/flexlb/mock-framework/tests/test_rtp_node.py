@@ -22,13 +22,13 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
         group['config']['compute.expression'] = '1 + batchSize'
     data = {'id': 'native_node_probe', 'describe': '仅验证节点启动及原生状态协议', 'environment': environment,
             'phases': [{'id': 'observe', 'describe': '测试客户端在此期间读取原生状态', 'timeout': '15s',
-                        'steps': [{'call': {'id': 'wait', 'describe': '保留节点供测试客户端读取', 'interface': 'runtime/wait',
-                                            'args': {'duration': '8s'}}}]}]}
+                        'steps': [{'id': 'wait', 'describe': '保留节点供测试客户端读取', 'interface': 'runtime/wait',
+                                            'args': {'duration': '8s'}}]}]}
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data, allow_unicode=True))
-    registry = Registry.load(ROOT / 'build/interfaces.json')
+    registry = Registry.standard()
     case = compile_case(path, registry)
     launch = prepare_launch({'components': {role: {'command': [str(java), '-jar', str(jar)], 'startup_timeout': '10s'}
-                                            for role in ('prefill', 'decode')}, 'bindings': {}}, case, tmp_path)
+                                            for role in ('prefill', 'decode')}}, case, tmp_path)
     output = tmp_path / 'result'
 
     async def run():

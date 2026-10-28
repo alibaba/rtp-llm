@@ -3,10 +3,8 @@ package org.flexlb.mock.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 import java.net.*;
 import java.net.http.*;
-import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
-import org.flexlb.mock.api.InterfaceRegistry;
 import org.junit.jupiter.api.*;
 
 class ApiServerTest {
@@ -88,12 +86,4 @@ class ApiServerTest {
         assertEquals(500, call("probe/metric", Map.of("invalid_result", true), "foreground", 1000).statusCode());
     }
 
-    @Test void exportsProbeCatalogAndClasspathForCrossProcessTests() throws Exception {
-        Path target = Path.of("target"); Files.createDirectories(target);
-        var catalog = new TreeMap<>(InterfaceRegistry.standard());
-        catalog.putAll(InterfaceRegistry.describe(TransportProbe.Api.class));
-        Files.write(target.resolve("probe-catalog.json"), JsonWire.JSON.writeValueAsBytes(Map.of("interfaces", catalog,
-                "configuration", InterfaceRegistry.configuration())));
-        Files.writeString(target.resolve("probe-classpath.txt"), System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));
-    }
 }

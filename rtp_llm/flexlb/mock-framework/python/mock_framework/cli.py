@@ -14,13 +14,12 @@ def main():
     parser = argparse.ArgumentParser(description='Compile or execute a Mock case')
     parser.add_argument('command', choices=['compile', 'run'])
     parser.add_argument('case', type=Path)
-    parser.add_argument('--catalog', type=Path, required=True, help='Java-generated interface catalog')
     parser.add_argument('--shared-root', type=Path)
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--launch', type=Path, help='Developer component launch recipes and API process bindings')
+    parser.add_argument('--launch', type=Path, help='Developer component launch recipes')
     args = parser.parse_args()
     try:
-        registry = Registry.load(args.catalog)
+        registry = Registry.standard()
         case = compile_case(args.case, registry, shared_root=args.shared_root)
         if args.command == 'run':
             if args.output is None or args.launch is None:

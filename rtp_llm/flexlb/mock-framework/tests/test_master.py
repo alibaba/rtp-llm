@@ -91,22 +91,19 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
                         'prefill': {'engine': 'rtp', 'config': engine_config},
                         'decode': {'engine': 'rtp', 'config': engine_config}},
         'phases': [{'id': 'probe', 'describe': '逐Master读取并由外部Client发请求', 'timeout': '30s', 'steps': [
-            {'check': {'id': 'prefills', 'describe': '实际登记P集合', 'interface': 'master/engine/get',
-                       'args': {'role': 'prefill'}, 'expect': {'eq': {'instances': [{'id': 'prefill-0'}]}}}},
-            {'check': {'id': 'decodes', 'describe': '实际登记D集合', 'interface': 'master/engine/get',
-                       'args': {'role': 'decode'}, 'expect': {'eq': {'instances': [{'id': 'decode-0'}]}}}},
-            {'check': {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/leadership/get', 'expect': {'count': 1}}},
-            {'call': {'id': 'wait', 'describe': '供外部Client取流', 'interface': 'runtime/wait', 'args': {'duration': '20s' if replicas == 2 else '12s'}}}]}]}
+            {'id': 'prefills', 'describe': '实际登记P集合', 'interface': 'master/engine/get', 'args': {'role': 'prefill'}},
+            {'id': 'decodes', 'describe': '实际登记D集合', 'interface': 'master/engine/get', 'args': {'role': 'decode'}},
+            {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/leadership/get', 'expect': {'count': 1}},
+            {'id': 'wait', 'describe': '供外部Client取流', 'interface': 'runtime/wait', 'args': {'duration': '20s' if replicas == 2 else '12s'}}]}]}
     if history_overflow:
-        document['phases'][0]['steps'].append({'check': {'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
-            'interface': 'master/engine/get', 'args': {'role': 'prefill'},
-            'expect': {'eq': {'instances': [{'id': 'prefill-0'}]}}}})
+        document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
+            'interface': 'master/engine/get', 'args': {'role': 'prefill'}})
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
-    registry = Registry.load(root / 'build/interfaces.json'); case = compile_case(case_file, registry)
+    registry = Registry.standard(); case = compile_case(case_file, registry)
     components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
     for role in ('prefill', 'decode'):
         components[role] = {'command': [str(java), '-jar', str(root / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')]}
-    launch = prepare_launch({'components': components, 'bindings': {'master/': 'master-0'},
+    launch = prepare_launch({'components': components,
         'zookeeper': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath,
                                   'org.flexlb.mock.master.ZookeeperNode']}}, case, tmp_path)
     output = tmp_path / 'result'
@@ -175,7 +172,13 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     election = effective['FLEXLB_SYNC_CONSISTENCY_CONFIG']
     assert election['needConsistency'] is True
     gates = [json.loads(row) for row in (output / 'gates.jsonl').read_text().splitlines()]
-    assert set(gates[0]['actual']['instances']) == {f'master-{i}' for i in range(replicas)}
+    addresses = {name: json.loads((output / f'components/{name}/endpoints.json').read_text())['rpc']
+                 for name in ['prefill-0', 'decode-0'] + [f'master-{i}' for i in range(replicas)]}
+    observations = {event['step']: event['result'] for event in events
+                    if event['event'] == 'step_finished' and event['status'] == 'PASS'}
+    for step, engine in [('prefills', 'prefill-0'), ('decodes', 'decode-0')] + ([('still_healthy', 'prefill-0')] if history_overflow else []):
+        assert observations[step] == {addresses[f'master-{i}']: [addresses[engine]] for i in range(replicas)}
+    assert len(gates) == 1 and gates[0]['status'] == 'PASS'
     if replicas == 2:
         other = json.loads((output / 'components/master-1/effective-config.json').read_text())
         assert other['advertised_ip'] == '127.0.0.2' and effective['advertised_ip'] == '127.0.0.1'
@@ -189,61 +192,61 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             os.kill(event['pid'], 0)
 
 
-@pytest.mark.parametrize('interface,responses,expected', [
-    ('master/leadership/get', [{'instances': [{'id': 'master-0'}]}, {'instances': []}],
-     {'instances': [{'id': 'master-0'}]}),
-    ('master/engine/get', [{'instances': {'master-0': [{'id': 'p0'}]}}, {'instances': {'master-1': []}}],
-     {'instances': {'master-0': [{'id': 'p0'}], 'master-1': []}}),
-])
-def test_master_adapter_reads_every_master_without_unioning_engine_views(monkeypatch, interface, responses, expected):
-    import asyncio
-    from mock_framework.execution import master
-    calls = []
-    payload = {'interface': interface, 'args': {}}
+def adapter_context():
+    from types import SimpleNamespace
+    return SimpleNamespace(processes=SimpleNamespace(topology=[
+        {'id': 'master-0', 'rpc': 'm0:1', 'control': 'http://m0', 'role': 'master'},
+        {'id': 'master-1', 'rpc': 'm1:1', 'control': 'http://m1', 'role': 'master'},
+        {'id': 'p0', 'rpc': 'p0:1', 'role': 'prefill'}]), query_time='2026-10-28T00:00:00Z', timeout=2)
 
-    async def post(url, request):
-        assert request is payload
+
+@pytest.mark.parametrize('operation,responses,expected', [
+    ('leadership', [{'instances': [{'id': 'master-0'}]}, {'instances': []}], ['m0:1']),
+    ('engines', [{'instances': {'master-0': {'instances': [{'id': 'p0'}]}}},
+                 {'instances': {'master-1': {'instances': []}}}], {'m0:1': ['p0:1'], 'm1:1': []}),
+])
+def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses, expected):
+    import asyncio
+    from mock_framework.interfaces import master
+    calls = []
+    async def post(url, payload):
         calls.append(url)
         return responses[len(calls) - 1]
-
     monkeypatch.setattr(master, 'post', post)
-    actual = asyncio.run(master.invoke_master({'master-0': 'http://m0', 'prefill-0': 'http://p0',
-                                               'master-1': 'http://m1'}, 'http://m0', payload))
-    assert actual == expected
+    args = master.Targets() if operation == 'leadership' else master.EngineSelection()
+    assert asyncio.run(getattr(master, operation)(adapter_context(), args)) == expected
     assert calls == ['http://m0', 'http://m1']
 
 
-@pytest.mark.parametrize('interface,responses,error', [
-    ('master/engine/get', [{'instances': {'same': []}}, {'instances': {'same': []}}], 'Duplicate Master'),
-    ('master/engine/get', [{'instances': []}], 'per-Master mapping'),
-    ('master/leadership/get', [{'instances': {}}], 'must return a list'),
+@pytest.mark.parametrize('operation,response', [
+    ('leadership', {'instances': [{'id': 'master-1'}]}),
+    ('engines', {'instances': {'master-1': {'instances': []}}}),
+    ('engines', {'instances': {'master-0': {'instances': [{'id': 'unknown'}]}}}),
+    ('engines', {'instances': {'master-0': {'instances': [{'id': 'p0'}, {'id': 'p0'}]}}}),
 ])
-def test_master_adapter_rejects_ambiguous_or_malformed_read_results(monkeypatch, interface, responses, error):
+def test_adapter_rejects_wrong_identity_and_unknown_or_duplicate_engine(monkeypatch, operation, response):
     import asyncio
-    from mock_framework.execution import master
-    values = iter(responses)
-
+    from mock_framework.interfaces import master
     async def post(url, payload):
-        return next(values)
-
+        return response
     monkeypatch.setattr(master, 'post', post)
-    with pytest.raises(ExecutionError, match=error):
-        asyncio.run(master.invoke_master({f'master-{n}': f'http://m{n}' for n in range(len(responses))},
-                                         'http://m0', {'interface': interface}))
+    args = master.Targets(['m0:1']) if operation == 'leadership' else master.EngineSelection(['m0:1'])
+    with pytest.raises(ExecutionError):
+        asyncio.run(getattr(master, operation)(adapter_context(), args))
 
 
-def test_master_adapter_requires_a_real_master_and_other_calls_keep_their_binding(monkeypatch):
+def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypatch):
     import asyncio
-    from mock_framework.execution import master
-    with pytest.raises(ExecutionError, match='No running Master'):
-        asyncio.run(master.invoke_master({}, 'http://m0', {'interface': 'master/leadership/get'}))
+    from mock_framework.interfaces import master
     calls = []
-
     async def post(url, payload):
-        calls.append((url, payload))
-        return {'result': 'normal binding'}
-
+        calls.append(url)
+        return {'instances': []}
     monkeypatch.setattr(master, 'post', post)
-    payload = {'interface': 'master/config/get'}
-    assert asyncio.run(master.invoke_master({'master-0': 'http://m0'}, 'http://bound', payload)) == {'result': 'normal binding'}
-    assert calls == [('http://bound', payload)]
+    assert asyncio.run(master.leadership(adapter_context(), master.Targets(['m1:1']))) == []
+    assert calls == ['http://m1']
+    with pytest.raises(ValueError):
+        master.Targets([])
+    with pytest.raises(ExecutionError):
+        asyncio.run(master.leadership(adapter_context(), master.Targets(['missing:1'])))
+    assert calls == ['http://m1']

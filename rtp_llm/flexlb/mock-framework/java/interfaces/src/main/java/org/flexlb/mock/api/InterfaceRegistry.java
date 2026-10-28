@@ -2,26 +2,11 @@ package org.flexlb.mock.api;
 
 import java.lang.reflect.*;
 import java.util.*;
-import org.flexlb.mock.api.master.MasterApi;
-import org.flexlb.mock.api.engine.EngineApi;
-import org.flexlb.mock.api.client.ClientApi;
-import org.flexlb.mock.api.metrics.PrometheusApi;
 import org.flexlb.mock.api.model.Types;
-import org.flexlb.mock.api.model.ComputeSpec;
-import org.flexlb.mock.api.model.DecodeSpec;
-import org.flexlb.mock.api.model.StoppingSpec;
 
 /** Metadata comes from method signatures, not a parallel handwritten catalog. */
 public final class InterfaceRegistry {
     private InterfaceRegistry() {}
-
-    public static Map<String, Object> standard() {
-        return describe(MasterApi.class, EngineApi.class, ClientApi.class, PrometheusApi.class);
-    }
-
-    public static Map<String, Object> configuration() {
-        return Map.of("compute", schema(ComputeSpec.class), "decode", schema(DecodeSpec.class), "generation", schema(StoppingSpec.class));
-    }
 
     public static Map<String, Object> describe(Class<?>... interfaces) {
         Map<String, Object> result = new TreeMap<>();
