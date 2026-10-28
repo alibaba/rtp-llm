@@ -16,6 +16,9 @@ public final class AdmissionHandle implements AutoCloseable {
     final ContextResult.PlacementToken token;
     private final AbstractRequestScheduler scheduler;
     private final AtomicBoolean resolved = new AtomicBoolean();
+    private final Object placementFailureLock = new Object();
+    private Runnable placementFailureAction;
+    private boolean placementFailureNotified;
 
     AdmissionHandle(ContextResult.PlacementToken token, AbstractRequestScheduler scheduler) {
         this.token = Objects.requireNonNull(token);
@@ -68,6 +71,34 @@ public final class AdmissionHandle implements AutoCloseable {
         checkArgument(!failure.isSuccess(), "admission termination requires a failure");
         if (resolved.compareAndSet(false, true)) {
             scheduler.completePlacement(this, ContextResult.PublicationResult.FAILED, failure);
+        }
+    }
+
+    /** Registers the resource cleanup required if this placement cannot be completed. */
+    public void onPlacementFailure(Runnable action) {
+        Objects.requireNonNull(action, "action");
+        synchronized (placementFailureLock) {
+            checkState(!resolved.get(), "admission already resolved");
+            checkState(!placementFailureNotified, "placement failure notification already started");
+            checkState(
+                    placementFailureAction == null, "placement failure action already registered");
+            placementFailureAction = action;
+        }
+    }
+
+    /** Runs the registered resource cleanup at most once. */
+    void notifyPlacementFailure() {
+        Runnable action;
+        synchronized (placementFailureLock) {
+            if (placementFailureNotified) {
+                return;
+            }
+            placementFailureNotified = true;
+            action = placementFailureAction;
+            placementFailureAction = null;
+        }
+        if (action != null) {
+            action.run();
         }
     }
 

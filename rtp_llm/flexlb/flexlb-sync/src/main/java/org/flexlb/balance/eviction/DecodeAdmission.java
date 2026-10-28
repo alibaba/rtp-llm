@@ -41,6 +41,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
@@ -1010,6 +1011,7 @@ public class DecodeAdmission {
             AdmissionCapacity capacity) {
         List<AdmissionHandle> claimed = new ArrayList<>(victims.size());
         DecodeResources.ReservationHandle incoming = null;
+        Runnable releaseOnPlacementFailure = null;
         try {
             for (DecodeResources.ReservationHandle victim : victims) {
                 var owner = requests.ownerOf(victim.requestId());
@@ -1022,7 +1024,7 @@ public class DecodeAdmission {
                 }
                 claimed.add(withdrawal);
             }
-            incoming =
+            final var reserved =
                     endpoint.replaceQueuedRequests(
                             victims,
                             request.getRequestId(),
@@ -1030,6 +1032,29 @@ public class DecodeAdmission {
                             request.getExpectedKvTokens(),
                             priority,
                             capacity);
+            incoming = reserved;
+            if (reserved != null) {
+                AtomicBoolean released = new AtomicBoolean();
+                releaseOnPlacementFailure =
+                        () -> {
+                            if (!released.compareAndSet(false, true)) {
+                                return;
+                            }
+                            var status =
+                                    endpoint.release(
+                                                    reserved,
+                                                    DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
+                                            .status();
+                            if (status != DecodeResources.ReservationReleaseResult.RELEASED
+                                    && status != DecodeResources.ReservationReleaseResult.STALE) {
+                                throw new IllegalStateException(
+                                        "failed placement retained Decode resources");
+                            }
+                        };
+                for (AdmissionHandle withdrawal : claimed) {
+                    withdrawal.onPlacementFailure(releaseOnPlacementFailure);
+                }
+            }
             return incoming;
         } finally {
             Throwable failure = null;
@@ -1047,9 +1072,8 @@ public class DecodeAdmission {
                                                                 .PublicationResult.RESTORED));
             }
             if (failure != null) {
-                if (incoming != null) {
-                    endpoint.release(incoming, DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
-                            .status();
+                if (releaseOnPlacementFailure != null) {
+                    failure = Failures.run(failure, releaseOnPlacementFailure);
                 }
                 Failures.rethrow(failure, "request cleanup failed");
             }

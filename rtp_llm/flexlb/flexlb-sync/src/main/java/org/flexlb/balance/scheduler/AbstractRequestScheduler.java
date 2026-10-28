@@ -785,6 +785,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
             }
             var update = ctx.completePlacement(handle.token, result, System.currentTimeMillis());
             if (update.kind() == UpdateKind.STALE) {
+                handle.notifyPlacementFailure();
                 return;
             }
             var after = update.after();
@@ -844,8 +845,16 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 problem = Failures.run(problem, () -> advanceRequest(ctx, ctx.snapshot()));
             }
             if (problem != null) {
+                problem = Failures.run(problem, handle::notifyPlacementFailure);
                 runtime.recordFailure(problem);
             }
+        } catch (Throwable completionFailure) {
+            try {
+                handle.notifyPlacementFailure();
+            } catch (Throwable cleanupFailure) {
+                completionFailure.addSuppressed(cleanupFailure);
+            }
+            throw completionFailure;
         } finally {
             runtime.finishAdmission();
         }
