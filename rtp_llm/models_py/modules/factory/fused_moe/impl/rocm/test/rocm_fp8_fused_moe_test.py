@@ -7,12 +7,13 @@ weights) and asserts shape, finiteness and approximate numerical agreement.
 """
 
 import unittest
+from dataclasses import replace
 from unittest import SkipTest
 
 import torch
 
 try:
-    from aiter.ops.shuffle import shuffle_weight  # noqa: F401
+    from aiter.ops.shuffle import shuffle_weight
 
     from rtp_llm.config.model_config import ModelConfig
     from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -180,13 +181,21 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
         # paths see the same numerical content (modulo fp8 rounding).
         w1_deq = _dequant_per_channel(w1q, s1)
         w2_deq = _dequant_per_channel(w2q, s2)
+        reference_payload = payload
+        if apply_router_weight_on_input:
+            reference_payload = replace(
+                payload,
+                expert_x=payload.expert_x
+                * payload.expert_topk_weights.to(payload.expert_x.dtype),
+                expert_topk_weights=torch.ones_like(payload.expert_topk_weights),
+            )
         ref_out = torch_moe_ref(
-            payload=payload,
+            payload=reference_payload,
             activation="silu",
             global_num_experts=self.E,
             expert_map=None,
             a2_scale=None,
-            apply_router_weight_on_input=apply_router_weight_on_input,
+            apply_router_weight_on_input=False,
             extra_expert_args=None,
             w1=w1_deq,
             w2=w2_deq,
@@ -195,8 +204,8 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
         # Build the executor.
         config_adapter = _make_config_adapter(self.E, self.TOP_K, 2 * self.N)
         weights = {
-            W.moe_w1: w1q,
-            W.moe_w2: w2q,
+            W.moe_w1: shuffle_weight(w1q, (16, 16)),
+            W.moe_w2: shuffle_weight(w2q, (16, 16)),
             W.moe_s1: s1,
             W.moe_s2: s2,
         }
@@ -224,6 +233,128 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
     def test_apply_router_weight_on_input(self):
         # PR #882 review #7 specifically called out this newly-enabled path.
         self._run(apply_router_weight_on_input=True)
+
+
+class RocmExpertsFp8PerChannelReferenceTest(_Fp8MoeBaseTest):
+    """Real gfx942 kernels: independent numerical reference and graph replay."""
+
+    def setUp(self):
+        super().setUp()
+        arch = torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName
+        if arch.split(":")[0] != "gfx942":
+            raise SkipTest("BF16 top-k accumulation regression is gfx942-specific")
+
+    def _case(self, tokens, topk, input_weight=False, padded=False, graph=False):
+        experts, width, inter = 16, 256, (512 if padded else 256)
+        payload = self._build_payload(tokens, width, experts, topk)
+        payload.expert_x.mul_(4)
+        # A nonzero scale makes a zero-output implementation fail the L2 gate.
+        w1 = (
+            torch.randn(
+                experts, 2 * inter, width, device=self.device, dtype=torch.bfloat16
+            )
+            * 0.15
+        )
+        w2 = (
+            torch.randn(experts, width, inter, device=self.device, dtype=torch.bfloat16)
+            * 0.15
+        )
+        if padded:
+            w1[:, 384:inter].zero_()
+            w1[:, inter + 384 :].zero_()
+            w2[:, :, 384:].zero_()
+        q1, s1 = _per_channel_quant_fp8(w1, self.fp8_dtype)
+        q2, s2 = _per_channel_quant_fp8(w2, self.fp8_dtype)
+        executor = RocmExpertsFp8PerChannel(
+            _make_config_adapter(experts, topk, 2 * inter),
+            FusedMoEQuantConfig(),
+            {
+                # Match device_impl.shuffle_moe_weight's physical layout.
+                # q1 already has logical [gate, up] order for the reference.
+                W.moe_w1: shuffle_weight(q1, (16, 16)),
+                W.moe_w2: shuffle_weight(q2, (16, 16)),
+                W.moe_s1: s1,
+                W.moe_s2: s2,
+            },
+        )
+        if topk == 1 and tokens:
+            payload.expert_topk_weights.copy_(
+                torch.linspace(0.25, 0.75, tokens, device=self.device)[:, None]
+            )
+        if tokens > 1:
+            payload.expert_topk_weights[-1].zero_()
+
+        def run():
+            return executor.execute(
+                payload, "silu", None, None, input_weight, None
+            ).fused_expert_output
+
+        hidden = payload.expert_x
+        route = payload.expert_topk_weights
+        if input_weight:
+            hidden = hidden * route.to(hidden.dtype)
+            route = torch.ones_like(route)
+        hidden = hidden.float()
+        reference = torch.zeros(tokens, width, dtype=torch.float32, device=self.device)
+        # No AITER helper or expanded-token implementation in the reference.
+        for expert in range(experts):
+            gate, up = torch.nn.functional.linear(
+                hidden, q1[expert].float() * s1[expert, :, None]
+            ).chunk(2, dim=-1)
+            contribution = torch.nn.functional.linear(
+                torch.nn.functional.silu(gate) * up,
+                q2[expert].float() * s2[expert, :, None],
+            )
+            weight = (route * (payload.expert_topk_ids == expert)).sum(dim=1)
+            reference.add_(contribution * weight[:, None])
+        run()
+        actual = run().clone()
+        self.assertEqual(actual.shape, (tokens, width))
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(actual).all().item())
+        norm = torch.linalg.vector_norm(reference)
+        self.assertGreater(norm.item(), 0.1)
+        error = torch.linalg.vector_norm(actual.float() - reference) / norm
+        self.assertLess(error.item(), 0.05, "FP8 error exceeds 5% relative L2")
+        if tokens > 1:
+            self.assertEqual(torch.count_nonzero(actual[-1]).item(), 0)
+        if graph:
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    run()
+            torch.cuda.current_stream().wait_stream(stream)
+            captured = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(captured):
+                replay_output = run()
+            for _ in range(3):
+                captured.replay()
+                replay_error = (
+                    torch.linalg.vector_norm(replay_output.float() - reference) / norm
+                )
+                self.assertLess(replay_error.item(), 0.05)
+
+    def test_one_token(self):
+        self._case(1, 2)
+
+    def test_unaligned_prefill(self):
+        self._case(33, 8)
+
+    def test_large_decode_batch(self):
+        self._case(512, 8)
+
+    def test_padded_intermediate(self):
+        self._case(33, 8, padded=True)
+
+    def test_graph_replay(self):
+        self._case(33, 8, graph=True)
+
+    def test_single_expert(self):
+        self._case(17, 1)
+
+    def test_input_router_weight(self):
+        self._case(17, 1, input_weight=True)
 
 
 class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
