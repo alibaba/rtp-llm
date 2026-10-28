@@ -4,6 +4,213 @@
 namespace rtp_llm {
 namespace {
 
+TEST(KVCMMockFullLinearTest, PaceReadAndWriteForwardAllGroupsAndIovsInOneCall) {
+    for (bool split_iovs : {false, true}) {
+        for (auto operation : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
+            SCOPED_TRACE(::testing::Message() << "split_iovs=" << split_iovs << " operation=" << operation);
+            auto environment = makeMultiGroupBackendEnvironment("kvcm_pace_direct", 2, 1);
+            auto resolver    = [&](int layer, const std::string& tag, int block) {
+                const auto original = environmentBuffers(environment, layer, tag, block);
+                if (!split_iovs) {
+                    return original;
+                }
+                std::vector<BlockInfo> pieces;
+                const size_t           count = tag == "full0" ? 1 : tag == "full1" ? 2 : 3;
+                for (const auto& info : original) {
+                    size_t offset = 0;
+                    for (size_t part = 0; part < count; ++part) {
+                        auto piece       = info;
+                        piece.addr       = static_cast<char*>(info.addr) + offset;
+                        piece.size_bytes = (info.size_bytes - offset) / (count - part);
+                        pieces.push_back(piece);
+                        offset += piece.size_bytes;
+                    }
+                }
+                return pieces;
+            };
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            auto backend = makeBackend(environment, ParallelismConfig{}, client);
+            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag, resolver));
+            // Interleave tags and repeat groups. The split case also leaves the
+            // aggregate client's own pool absent from the request.
+            const std::vector<std::string> tags =
+                split_iovs ? std::vector<std::string>{"linear0", "full1", "linear0", "full1"} :
+                             std::vector<std::string>{"linear0", "full1", "full0", "linear0", "full0", "full1"};
+            RemoteOperationRequestPB request;
+            request.set_op(operation);
+            kv_cache_manager::UriStrVec expected_uris, actual_uris;
+            for (size_t index = 0; index < tags.size(); ++index) {
+                request.add_group_tags(tags[index]);
+                request.add_block_ids(environment.block_id);
+                expected_uris.push_back("pace://store/" + std::to_string(index));
+                request.add_uris(expected_uris.back());
+                actual_uris.push_back("actual_" + std::to_string(index));
+            }
+            auto check_buffers = [&](const auto& buffers) {
+                ASSERT_EQ(buffers.size(), tags.size());
+                for (size_t i = 0; i < buffers.size(); ++i) {
+                    const auto& tag = tags[i];
+                    const auto  expected =
+                        resolver(environment.cache_config.layerIdsForGroup(tag).front(), tag, environment.block_id);
+                    ASSERT_EQ(buffers[i].iovs.size(), expected.size());
+                    for (size_t j = 0; j < expected.size(); ++j) {
+                        EXPECT_EQ(buffers[i].iovs[j].base, expected[j].addr);
+                        EXPECT_EQ(buffers[i].iovs[j].size, expected[j].size_bytes);
+                        EXPECT_EQ(buffers[i].iovs[j].type, kv_cache_manager::MemoryType::GPU);
+                    }
+                }
+            };
+            if (operation == REMOTE_OPERATION_READ) {
+                EXPECT_CALL(*client, loadKvCachesForTag("full0", expected_uris, _, _))
+                    .WillOnce(Invoke([&](const auto&, const auto&, auto& buffers, const auto&) {
+                        check_buffers(buffers);
+                        return true;
+                    }));
+                EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+            } else {
+                EXPECT_CALL(*client, saveKvCachesForTag("full0", expected_uris, _, _))
+                    .WillOnce(Invoke([&](const auto&, const auto&, const auto& buffers, const auto&) {
+                        check_buffers(buffers);
+                        return std::make_pair(true, actual_uris);
+                    }));
+                EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
+            }
+            RemoteOperationResponsePB response;
+            ASSERT_TRUE(backend->execute(request, response));
+            EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_SUCCESS);
+            if (operation == REMOTE_OPERATION_WRITE) {
+                EXPECT_EQ(kv_cache_manager::UriStrVec(response.actual_uris().begin(), response.actual_uris().end()),
+                          actual_uris);
+            } else {
+                EXPECT_EQ(response.actual_uris_size(), 0);
+            }
+        }
+    }
+}
+
+TEST(KVCMMockFullLinearTest, PaceTransferPreservesFailureTimeoutAndWriteResponseSemantics) {
+    for (auto operation : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
+        for (int scenario = 0; scenario < (operation == REMOTE_OPERATION_READ ? 2 : 5); ++scenario) {
+            SCOPED_TRACE(::testing::Message() << "operation=" << operation << " scenario=" << scenario);
+            auto environment = makeMultiGroupBackendEnvironment("kvcm_pace_direct_failure", 2, 1);
+            auto client      = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            auto backend = makeBackend(environment, ParallelismConfig{}, client);
+            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                                      environment.pools_by_tag,
+                                      [&](int layer, const std::string& tag, int block) {
+                                          return environmentBuffers(environment, layer, tag, block);
+                                      }));
+            RemoteOperationRequestPB request;
+            request.set_op(operation);
+            const kv_cache_manager::UriStrVec uris{"pace://store/full1", "pace://store/linear0", "pace://store/full0"};
+            size_t                            index = 0;
+            for (const auto& tag : {"full1", "linear0", "full0"}) {
+                request.add_group_tags(tag);
+                request.add_block_ids(environment.block_id);
+                request.add_uris(uris[index++]);
+            }
+            if (scenario == 1) {
+                client->load_status = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+                client->save_status = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+                EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
+                EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+            } else if (operation == REMOTE_OPERATION_READ) {
+                EXPECT_CALL(*client, loadKvCachesForTag("full0", uris, _, _)).WillOnce(Return(false));
+            } else {
+                const auto actual = scenario == 2 ? kv_cache_manager::UriStrVec{"partial"} :
+                                    scenario == 4 ? uris :
+                                                    kv_cache_manager::UriStrVec{};
+                EXPECT_CALL(*client, saveKvCachesForTag("full0", uris, _, _))
+                    .WillOnce(Return(std::make_pair(scenario != 0, actual)));
+            }
+            RemoteOperationResponsePB response;
+            const bool                success = scenario >= 3;
+            EXPECT_EQ(backend->execute(request, response), success);
+            EXPECT_EQ(response.transfer_status(),
+                      scenario == 1 ? REMOTE_TRANSFER_STATUS_TIMEOUT :
+                      success       ? REMOTE_TRANSFER_STATUS_SUCCESS :
+                                      REMOTE_TRANSFER_STATUS_FAILED);
+            EXPECT_EQ(response.actual_uris_size(), 0);
+        }
+    }
+}
+
+TEST(KVCMMockFullLinearTest, MooncakeKeepsTagRoutingAndPublishesUrisOnlyAfterAllTagsSucceed) {
+    for (auto operation : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
+        for (bool fail_last : {false, true}) {
+            auto environment = makeMultiGroupBackendEnvironment("kvcm_mooncake_tag_route", 2, 1);
+            auto client      = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            auto backend = makeBackend(environment, ParallelismConfig{}, client);
+            ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
+                                      environment.pools_by_tag,
+                                      [&](int layer, const std::string& tag, int block) {
+                                          return environmentBuffers(environment, layer, tag, block);
+                                      }));
+            RemoteOperationRequestPB request;
+            request.set_op(operation);
+            const std::vector<std::string> tags{"linear0", "full1", "full0", "linear0", "full0", "full1"};
+            for (size_t index = 0; index < tags.size(); ++index) {
+                request.add_group_tags(tags[index]);
+                request.add_block_ids(environment.block_id);
+                request.add_uris("mooncake://store/" + std::to_string(index));
+            }
+            ::testing::InSequence sequence;
+            for (const auto& tag : {"full0", "full1", "linear0"}) {
+                kv_cache_manager::UriStrVec uris, actual;
+                for (size_t index = 0; index < tags.size(); ++index) {
+                    if (tags[index] == tag) {
+                        uris.push_back(request.uris(static_cast<int>(index)));
+                        actual.push_back("actual_" + std::to_string(index));
+                    }
+                }
+                const bool success       = !fail_last || std::string(tag) != "linear0";
+                auto       check_buffers = [&, tag = std::string(tag)](const auto& buffers) {
+                    ASSERT_EQ(buffers.size(), 2u);
+                    const auto expected = environmentBuffers(
+                        environment, environment.cache_config.layerIdsForGroup(tag).front(), tag, environment.block_id);
+                    for (const auto& buffer : buffers) {
+                        ASSERT_EQ(buffer.iovs.size(), expected.size());
+                        EXPECT_EQ(buffer.iovs.front().base, expected.front().addr);
+                    }
+                };
+                if (operation == REMOTE_OPERATION_READ) {
+                    EXPECT_CALL(*client, loadKvCachesForTag(tag, uris, _, _))
+                        .WillOnce(
+                            Invoke([check_buffers, success](const auto&, const auto&, auto& buffers, const auto&) {
+                                check_buffers(buffers);
+                                return success;
+                            }));
+                } else {
+                    EXPECT_CALL(*client, saveKvCachesForTag(tag, uris, _, _))
+                        .WillOnce(Invoke([check_buffers, success, actual](
+                                             const auto&, const auto&, const auto& buffers, const auto&) {
+                            check_buffers(buffers);
+                            return std::make_pair(success, actual);
+                        }));
+                }
+            }
+            RemoteOperationResponsePB response;
+            EXPECT_EQ(backend->execute(request, response), !fail_last);
+            EXPECT_EQ(response.transfer_status(),
+                      fail_last ? REMOTE_TRANSFER_STATUS_FAILED : REMOTE_TRANSFER_STATUS_SUCCESS);
+            if (operation == REMOTE_OPERATION_WRITE && !fail_last) {
+                ASSERT_EQ(response.actual_uris_size(), static_cast<int>(tags.size()));
+                for (size_t index = 0; index < tags.size(); ++index) {
+                    EXPECT_EQ(response.actual_uris(static_cast<int>(index)), "actual_" + std::to_string(index));
+                }
+            } else {
+                EXPECT_EQ(response.actual_uris_size(), 0);
+            }
+        }
+    }
+}
+
 TEST(KVCMMockFullLinearTest, RegistersFullLinearWriteShapeBeforeSwaBecomesComplete) {
     auto environment = makeMultiGroupBackendEnvironment("kvcm_hybrid_write_mask", 1, 2);
     auto groups = environment.cache_config.topology().groups();
