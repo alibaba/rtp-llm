@@ -405,7 +405,7 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
                 cancel_result = tp_broadcast_client->cancel(unique_key,
                                                             P2PConnectorBroadcastType::CANCEL_READ,
                                                             request_deadline_ms_,
-                                                            tp_sync_result_->requestId().value_or(0),
+                                                            read_call ? read_call->requestId().value_or(0) : 0,
                                                             0);
             } catch (...) {
                 // This invocation owns the CAS; allow a retry without releasing
@@ -982,9 +982,9 @@ void P2PConnectorAsyncWriteContext::checkDone() {
         return;
     checkPeerResultLocked();
     if (peer_result_) {
-        const auto first = peer_result_->firstError();
-        if (first.error.hasError())
-            failLocked(first.error);
+        const auto peer_error = peer_result_->errorInfo();
+        if (peer_error.hasError())
+            failLocked(peer_error);
     }
     if (peer_pending_)
         tryFinishLocked(error_);
@@ -1237,12 +1237,12 @@ void P2PConnectorAsyncWriteContext::failLocked(const ErrorInfo& error) {
 void P2PConnectorAsyncWriteContext::checkPeerResultLocked() {
     if (!peer_pending_ || peer_stopped_ || !peer_result_ || !peer_result_->done())
         return;
-    const auto first = peer_result_->firstError();
+    const auto peer_error = peer_result_->errorInfo();
     if (peer_result_->rpcSuccess() && peer_result_->responses().size() == 1) {
         const auto response = peer_result_->responses().front();
         peer_stopped_       = response.stopped();
         if (response.error_code() != ErrorCodePB::NONE_ERROR) {
-            failLocked(first.error.hasError() ? first.error :
+            failLocked(peer_error.hasError() ? peer_error :
                        ErrorInfo(transRPCErrorCode(static_cast<ErrorCodePB>(response.error_code())), response.error_message()));
         } else if (!peer_stopped_) {
             failLocked(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
@@ -1254,7 +1254,7 @@ void P2PConnectorAsyncWriteContext::checkPeerResultLocked() {
     } else {
         if (peer_result_->rpcStatusCode(0) == grpc::StatusCode::UNIMPLEMENTED)
             peer_stopped_ = true;
-        failLocked(first.error.hasError() ? first.error :
+        failLocked(peer_error.hasError() ? peer_error :
                    ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWriteBack RPC failed"));
     }
     peer_result_.reset();

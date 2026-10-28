@@ -308,7 +308,7 @@ protected:
         for (size_t i = 0; i < host.size(); ++i) {
             copies.push_back({warmup.data_ptr<uint8_t>() + i * 1024, 1024, host[i].data(), warmup.get_device()});
         }
-        ASSERT_TRUE(sender_->sender_->tryStagedGatherCopyToHost(copies, warmup.get_device()));
+        ASSERT_TRUE(sender_->sender_->cuda_copy_util_->batchCopyToHost(copies));
 
         for (auto role : {RoleType::DECODE, RoleType::PREFILL}) {
             auto               manager   = role == RoleType::DECODE ? decode_ : prefill_;

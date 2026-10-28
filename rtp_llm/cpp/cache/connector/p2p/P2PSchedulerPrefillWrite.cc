@@ -500,9 +500,9 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                                       "writeback receive broadcast failed: " + failure));
         }
         if (receive_result) {
-            const auto first = receive_result->firstError();
-            if (first.error.hasError())
-                state->fail(first.error);
+            const auto receive_error = receive_result->errorInfo();
+            if (receive_error.hasError())
+                state->fail(receive_error);
             if (receive_result->done()) {
                 if (receive_result->success()) {
                     receive_stopped = true;
@@ -522,9 +522,9 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                                       "writeback sender broadcast failed: " + failure));
         }
         if (send_result) {
-            const auto first = send_result->firstError();
-            if (first.error.hasError())
-                state->fail(first.error);
+            const auto send_error = send_result->errorInfo();
+            if (send_error.hasError())
+                state->fail(send_error);
             if (send_result->done() && !send_result->success())
                 state->fail(ErrorInfo(send_result->errorCode(), send_result->errorMessage()));
         }

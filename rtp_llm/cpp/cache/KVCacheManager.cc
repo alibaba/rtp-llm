@@ -1307,8 +1307,8 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             return skip("invalid_snapshot");
         }
         const auto& source = resource->cacheResource(0);
-        if (!tokens->imageCacheIdentity(0, input_length).empty()) {
-            return skip("unsupported_image_cache_identity");
+        if (!tokens->multimodalCacheIdentity(0, input_length).empty()) {
+            return skip("unsupported_multimodal_cache_identity");
         }
         const size_t blocks = kv_ready_token_count / config_.seq_size_per_block;
         if (blocks <= static_cast<size_t>(input_length / config_.seq_size_per_block)) {

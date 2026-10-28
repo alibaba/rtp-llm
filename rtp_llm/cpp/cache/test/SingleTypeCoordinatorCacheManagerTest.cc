@@ -450,10 +450,16 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalInsertRejectsInvalidTailWi
     const auto prefix = owner->blocks("default")[0];
     EXPECT_EQ(allocator_->blockTreeCacheOwner()->evictForGroup("default", 1), 0);
     EXPECT_TRUE(allocator_->groupBlockPools().front()->isAllocated(prefix));
+    const auto prefix_path = allocator_->blockTreeCacheOwner()->tree()->findNode({11});
+    ASSERT_EQ(prefix_path.size(), 1u);
+    auto& prefix_resource = prefix_path.front()->group_set_resources.front();
+    ASSERT_FALSE(prefix_resource.transfer_detached);
+    prefix_resource.transfer_detached = true;
     const auto lost = allocator_->commitWriteBackDecodeCache(*owner, 1, currentTimeMs() + 5000);
+    prefix_resource.transfer_detached = false;
     EXPECT_TRUE(lost.hasError());
     EXPECT_EQ(lost.ToString(), "prefix_evicted_or_demoted");
-    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).empty());
+    EXPECT_EQ(allocator_->blockTreeCacheOwner()->tree()->findNode({11, 22, 33}).size(), 1u);
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ExternalInsertDoesNotOverwriteHostSuffixCreatedAfterAllocation) {

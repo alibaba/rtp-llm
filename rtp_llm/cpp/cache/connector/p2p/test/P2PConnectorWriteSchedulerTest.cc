@@ -2139,7 +2139,7 @@ TEST(P2PConnectorAsyncWriteContextTest, RpcFailureKeepsOriginalError) {
             std::vector<std::shared_ptr<DecodeWriteHelper::Result::WorkerRpcContext>>{call});
         context->setPeerCallResult(result);
         result->finishRank(0, true);
-        const auto expected = result->firstError().error;
+        const auto expected = result->errorInfo();
         ASSERT_TRUE(expected.hasError());
         context->checkDone();
         EXPECT_EQ(context->errorInfo().code(), expected.code());
