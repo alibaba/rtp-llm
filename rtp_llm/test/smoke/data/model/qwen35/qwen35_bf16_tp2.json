@@ -22,15 +22,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** The questions should be thought-prov",
+                            "content": "关于“英语听力方法”这一主题，为了帮助你深入探讨或进行自我评估，我设计了以下几个不同维度的问题。你可以根据你的具体需求（如：备考、日常提升、教学研讨等）选择使用：\n\n### 1. 基础诊断与策略选择类\n*   **针对初学者：** 在听力基础薄弱时，是应该优先进行“精听”（逐字听写、分析语法）还是“泛听”（大量磨耳朵、抓",
                             "partial": false
                         },
                         "finish_reason": "length"
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 18,
-                    "total_tokens": 118,
+                    "prompt_tokens": 20,
+                    "total_tokens": 120,
                     "completion_tokens": 100
                 }
             }
