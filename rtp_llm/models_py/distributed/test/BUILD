@@ -83,6 +83,16 @@ py_test(
     timeout = "short",
 )
 
+py_test(
+    name = "cpu_tp_broadcaster_unit_test",
+    srcs = ["cpu_tp_broadcaster_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
 # Kept on H20: this one needs 4 devices that can address each other, not just 4
 # visible devices. allocate_shared_buffer/open_ipc_handle go through
 # cudaIpcGetMemHandle + cudaIpcOpenMemHandle(cudaIpcMemLazyEnablePeerAccess)
