@@ -58,6 +58,11 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 assert actual['block_size'] == 16 and actual['cache_keys'] == 0
                 if role == 'prefill':
                     assert actual['local_output_tokens'] == 1
+                else:
+                    assert actual['decode_reserved_tokens'] == 16
+                    assert actual['decode_available_after_cancel'] == 128
+                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE']
+                    assert endpoints['remote_generation']['load'] is False
                 with urllib.request.urlopen(endpoints['metrics'], timeout=2) as response:
                     assert response.status == 200
                     assert response.headers.get_content_type() == 'text/plain'

@@ -39,6 +39,12 @@ public final class DeviceCache implements AutoCloseable {
         ensureOpen(); validate(cacheKeys); return pool.peekPrefixHitBlocks(cacheKeys);
     }
 
+    /** Never hold the owner monitor while sleeping; releases must be able to wake the allocator. */
+    public long allocationGeneration() { return pool.allocationGeneration(); }
+    public void awaitCapacityChange(long observed, long waitMs) throws InterruptedException {
+        pool.awaitCapacityChange(observed, waitMs);
+    }
+
     /** Version is about published keys, not occupancy; capacity is always returned fresh. */
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
         return new Snapshot(pool.totalBlocks(), pool.availableBlocks(), pool.freeBlocks(), pool.heldBlocks(),

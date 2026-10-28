@@ -19,7 +19,7 @@ import org.flexlb.mock.api.metrics.PrometheusApi;
 public final class RtpNode implements AutoCloseable {
     private final RtpConfig config;
     private final DeviceCache cache;
-    private final RtpStatusService service;
+    private final RtpRpcService service;
     private final PrometheusQueries queries;
     private final AtomicBoolean closed = new AtomicBoolean();
     private Server rpc;
@@ -29,7 +29,7 @@ public final class RtpNode implements AutoCloseable {
         this.config = config;
         queries = PrometheusQueries.fromConfig(config.business().path("prometheus"), "rtp");
         cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), true);
-        service = new RtpStatusService(config, cache);
+        service = new RtpRpcService(config, cache);
     }
 
     public static RtpNode start(RtpConfig config) throws IOException {
@@ -49,9 +49,11 @@ public final class RtpNode implements AutoCloseable {
         return Map.of("id", config.id(), "role", config.role().name(), "engine", "rtp", "rpc", rpcAddress(),
             "control", api.url(), "metrics", api.url() + "/metrics", "supported_rpc", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
                 ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall")
-                : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus"),
+                : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"),
             "local_generation", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
-                ? Map.of("max_new_tokens", 1, "text_only", true) : Map.of());
+                ? Map.of("max_new_tokens", 1, "text_only", true) : Map.of(),
+            "remote_generation", config.role() == org.flexlb.mock.api.model.Types.Role.decode
+                ? Map.of("stages", List.of("ALLOCATE"), "text_only", true, "load", false) : Map.of());
     }
 
     @Override public void close() {

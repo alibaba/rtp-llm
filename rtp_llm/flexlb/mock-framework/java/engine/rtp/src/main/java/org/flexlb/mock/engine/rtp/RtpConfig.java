@@ -11,7 +11,7 @@ import org.flexlb.mock.compute.ComputeModels;
 
 /** Native RTP names/units stay native; only simulated capacity is added by this loader. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks,
-                        boolean reuseCache, boolean deviceCache, int maxSeqLen, int maxBatchTokens,
+                        boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int tpSize, JsonNode business, ComputeModels compute) {
     private static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -57,6 +57,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         return new RtpConfig(root.path("id").textValue(), role,
             nativeInt(config, "seq_size_per_block", null, 1, Integer.MAX_VALUE), blocks, reserve,
             nativeBool(config, "reuse_cache", false), nativeBool(config, "enable_device_cache", true),
+            nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE), config, compute);
@@ -67,6 +68,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         result.put("id", id).put("role", role.name()).put("seq_size_per_block", blockSize)
             .put("device_blocks", deviceBlocks).put("reserve_blocks", reserveBlocks)
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
+            .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("dp_size", 1).put("dp_rank", 0).put("tp_size", tpSize);
         result.put("max_context_batch_size", 1).put("local_request_limit", LocalPrefill.LIMIT);

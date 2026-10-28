@@ -9,21 +9,29 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 
-/** Native RPC adapter; request state and KV ownership are delegated to LocalPrefill. */
-public final class RtpStatusService extends RpcServiceGrpc.RpcServiceImplBase {
+/** Native RPC adapter; P and D owners manage request state and KV independently. */
+public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final RtpConfig config;
     private final DeviceCache cache;
     private final LocalPrefill requests;
+    private final DecodeAdmission decode;
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
-    public RtpStatusService(RtpConfig config, DeviceCache cache) {
-        this.config = config; this.cache = cache; requests = new LocalPrefill(config, cache);
+    public RtpRpcService(RtpConfig config, DeviceCache cache) {
+        this.config = config; this.cache = cache;
+        requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache) : null;
+        decode = requests == null ? new DecodeAdmission(config, cache) : null;
     }
-    public void close() { closed = true; requests.close(); }
-    String scrapeMetrics() { return requests.scrapeMetrics(); }
+    public void close() { closed = true; if (requests != null) requests.close(); if (decode != null) decode.close(); }
+    String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
+
+    @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
+        return decode == null ? super.remoteGenerate(observer) : decode.open(observer);
+    }
 
     @Override public void generateStreamCall(GenerateInputPB request, StreamObserver<GenerateOutputsPB> observer) {
+        if (requests == null) { super.generateStreamCall(request, observer); return; }
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
         // Cancellation can happen before submit returns; capture the exact session, never just its reusable id.
         var session = new java.util.concurrent.atomic.AtomicReference<LocalPrefill.Session>();
@@ -49,7 +57,7 @@ public final class RtpStatusService extends RpcServiceGrpc.RpcServiceImplBase {
         if (response.isCancelled()) cancel.run();
         accepted.completion().thenAccept(result -> {
             if (response.isCancelled()) return;
-            if (!result.status().isOk()) { response.onError(LocalPrefill.failure(result.status(), result.engineCode())); return; }
+            if (!result.status().isOk()) { response.onError(RtpErrors.failure(result.status(), result.engineCode())); return; }
             try { response.onNext(result.output()); response.onCompleted(); }
             catch (RuntimeException error) { accepted.cancel(); }
         });
@@ -65,7 +73,7 @@ public final class RtpStatusService extends RpcServiceGrpc.RpcServiceImplBase {
             String role = config.role().name().toUpperCase(java.util.Locale.ROOT);
             long micros = Math.multiplyExact(System.currentTimeMillis(), 1000);
             long version = statusVersion.updateAndGet(previous -> Math.max(previous + 1, micros));
-            var tasks = requests.snapshot(request.getLatestFinishedVersion());
+            var tasks = requests == null ? decode.snapshot(request.getLatestFinishedVersion()) : requests.snapshot(request.getLatestFinishedVersion());
             return WorkerStatusPB.newBuilder().setRole("RoleType." + role)
                 .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true)
                 .setDpSize(1).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")

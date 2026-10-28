@@ -1,6 +1,6 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。P/D链路、多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求、D资源准备、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。完整P/D链路、多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
@@ -182,15 +182,15 @@ environment:
       expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
 ```
 
-原生字段支持server_args的小写名称或Whale环境变量的大写名称；同一字段两种写法同时存在时报错，不做静默优先级覆盖。整数/布尔字段接受对应原生env文本，保留原始业务配置，不展开其中的JSON文本。当前读取seq_size_per_block、max_seq_len、max_batch_tokens_size、reuse_cache、enable_device_cache、reserve_block_ratio、tp_size、dp_size、dp_rank；其他原生内容保留但不宣称已实现其业务效果。block size和max seq length必须显式配置，不从虚拟GPU型号或真实模型结构猜测；当前仅支持dp_size=1、dp_rank=0。
+原生字段支持server_args的小写名称或Whale环境变量的大写名称；同一字段两种写法同时存在时报错，不做静默优先级覆盖。整数/布尔字段接受对应原生env文本，保留原始业务配置，不展开其中的JSON文本。当前读取seq_size_per_block、max_seq_len、max_batch_tokens_size、reuse_cache、enable_device_cache、disable_decode_first_malloc_device_reuse、reserve_block_ratio、tp_size、dp_size、dp_rank；其他原生内容保留但不宣称已实现其业务效果。block size和max seq length必须显式配置，不从虚拟GPU型号或真实模型结构猜测；当前仅支持dp_size=1、dp_rank=0。
 
 Mock容量通过点分键capacity.device_blocks配置，单位为本实例的物理块；capacity.reserve_blocks可提供观测到的绝对预留块数。未提供绝对预留值时，按原生reserve_block_ratio计算，默认5%，向上取整。总token容量=物理块数×原生block size，不把部署内存作为模拟KV容量。默认参数和实际解析值写入组件目录的effective-config.json，原始业务配置仍保留；复制配置不表示忽略的原生功能已完成对齐。
 
-节点在原生gRPC提供CheckHealth、GetWorkerStatus和GetCacheStatus，P节点额外支持下述本地GenerateStreamCall子集。健康返回OK；WorkerStatus使用RoleType.PREFILL/DECODE和对应类型枚举，available_concurrency保持生产默认0，KV容量使用token单位；CacheStatus另外提供block size。缓存键版本只随已发布键集合变化，同版本省略键列表，但每次仍返回当前可用容量。precision暂为FP16的Mock状态标记，不模拟量化或真实模型布局。
+节点在原生gRPC提供CheckHealth、GetWorkerStatus和GetCacheStatus，P支持下述本地GenerateStreamCall子集，D支持RemoteGenerate的ALLOCATE子集。健康返回OK；WorkerStatus使用RoleType.PREFILL/DECODE和对应类型枚举，available_concurrency保持生产默认0，KV容量使用token单位；CacheStatus另外提供block size。缓存键版本只随已发布键集合变化，同版本省略键列表，但每次仍返回当前可用容量。precision暂为FP16的Mock状态标记，不模拟量化或真实模型布局。
 
 设备块池按引用管理共享前缀：可用容量包含空闲块和未被引用的LRU块，物理free不包含LRU数据。分配先引用命中、再检查净新增需求与reserve，失败回滚引用；需要空闲物理块时才淘汰LRU。增长失败保留已增长的部分，最终由原owner释放。DeviceCache封装原始池租约，完成、取消和关闭只有一次所有权转换；publish可保留已计算P数据供连接器使用，但不会自动推进P/D协议。取消后不能再次发布，关闭清除缓存并拒绝新分配。
 
-组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和本地生成范围。HTTP /health仅报告已绑定的公共业务接口清单；未配置Prometheus查询时清单为空，配置后绑定下述5个只读接口，不把健康探测扩充为case业务接口。Enqueue、Fetch、原生Cancel、RemoteGenerate和P/D接续尚未绑定，调用返回gRPC UNIMPLEMENTED；EngineApi动作适配尚未提供。节点启动通过不表示压测或完整RTP行为通过。
+组件目录同时保存endpoints.json，记录本实例原生RPC地址、控制地址、支持的RPC和具体阶段范围。HTTP /health仅报告已绑定的公共业务接口清单；未配置Prometheus查询时清单为空，配置后绑定下述5个只读接口，不把健康探测扩充为case业务接口。Enqueue、Fetch、原生Cancel、P到D的LOAD及生成接续尚未实现。节点启动或ALLOCATE通过不表示完整P/D或压力验收。
 
 ### 本地单token请求
 
@@ -202,7 +202,17 @@ LocalPrefill管理请求与状态，PrefixKeys计算原生文本前缀，LocalRe
 
 请求timeout_ms从接收开始独立计时，覆盖排队和执行，不随阶段重置；RPC deadline和流取消也会终止对应Session。回调持有Session身份，延迟取消不能作用于后来复用相同request_id的请求。完成、取消、超时和关闭在同一所有权边界处理一次，释放后不能再次提交cache。602/603/605通过原生ErrorDetailsPB尾部元数据返回；不自动重试资源分配，也不因取消而发送成功帧。
 
-WorkerStatus返回实际waiting/running任务、队列数、finished任务与latest_finished_version。当前Mock入口固定最多1024个活动请求；完成历史也保留1024条，调用方请求的旧版本已丢失时返回OUT_OF_RANGE，避免把缺失历史当作完整结果。该上限是本地Mock保护，不宣称是real Engine的调度规则。此实现不含动态batch、P/D资源准备/接续、GPU、完整重试策略或压力能力验收。
+WorkerStatus返回实际waiting/running任务、队列数、finished任务与latest_finished_version。当前Mock入口固定最多1024个活动请求；完成历史也保留1024条，调用方请求的旧版本已丢失时返回OUT_OF_RANGE，避免把缺失历史当作完整结果。该上限是本地Mock保护，不宣称是real Engine的调度规则。此本地P路径不含动态batch、P/D接续、GPU、完整重试策略或压力能力验收。
+
+### D资源准备
+
+D通过原生双向RemoteGenerate接受文本单序列ALLOCATE。DecodeAdmission持有请求及租约，RtpRpcService只适配原生协议；TaskHistory与RtpErrors分别统一P/D的完成版本和原生错误编码。资源身份采用client_id和request_id组合，同一身份不能覆盖已有owner，不同client可以使用相同request_id。活动数量仍受1024的Mock保护上限约束。
+
+ACK只在实际分配成功且截止时间未到时发出。临时容量不足时等待资源变化，唤醒后只有allocation generation改变才再次申请；不使用旧的短重试次数/预算将健康等待提前判失败。永久需求超出可用物理容量时返回602。请求timeout_ms与RPC deadline取更早者，覆盖排队、等待确认及持有阶段；取消、半关闭、超时和节点关闭均释放一次，不发布尚未计算的数据。timeout_ms=0表示没有该项预算，仍受RPC取消/deadline及节点生命周期约束。
+
+首次分配的历史前缀复用遵守全局/单请求reuse、device cache及原生disable_decode_first_malloc_device_reuse；该开关默认false，与CacheConfig.h默认一致。命中只取完整块，排除最后prompt token；已由本请求传输的KV不能冒充历史命中。当前没有传输，所以取消不会生成新cache key。
+
+WorkerStatus区分TASK_PHASE_RECEIVED和TASK_PHASE_KV_ALLOCATED。两者均在等待LOAD，不报告为RUNNING，不计Forward、输出token或成功请求。endpoints.json明确remote_generation只有ALLOCATE、load=false；ACK不声明supports_prefill_completion。此后发送LOAD返回UNIMPLEMENTED并释放租约，越序GENERATE不会产生成功帧。此实现只证明D资源准备与回收，尚未完成P数据准备、实际KV交接、LOAD确认、Decode计算或客户端端到端请求。
 
 ### 共享Engine指标
 

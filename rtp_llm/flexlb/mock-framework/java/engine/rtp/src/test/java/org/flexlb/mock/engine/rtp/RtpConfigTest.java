@@ -18,9 +18,10 @@ class RtpConfigTest {
     @Test void acceptsCopiedNativeEnvValuesAndPreservesNativePayloadWithoutRenaming() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("seq_size_per_block"); config.put("SEQ_SIZE_PER_BLOCK", "32").put("REUSE_CACHE", "on")
-            .put("TP_SIZE", "2").put("MODEL_NATIVE_JSON", "{unmodified native payload}");
+            .put("TP_SIZE", "2").put("DISABLE_DECODE_FIRST_MALLOC_DEVICE_REUSE", "true").put("MODEL_NATIVE_JSON", "{unmodified native payload}");
         var parsed = load(root);
         assertEquals(32, parsed.blockSize()); assertTrue(parsed.reuseCache()); assertEquals(2, parsed.tpSize());
+        assertTrue(parsed.disableDecodeFirstReuse());
         assertEquals("{unmodified native payload}", parsed.business().path("MODEL_NATIVE_JSON").textValue());
         assertEquals(config, parsed.business());
         ((ObjectNode) parsed.business()).removeAll(); assertFalse(parsed.business().isEmpty());

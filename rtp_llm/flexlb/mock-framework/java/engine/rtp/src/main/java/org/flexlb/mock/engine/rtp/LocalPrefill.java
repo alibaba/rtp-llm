@@ -11,11 +11,8 @@ import org.flexlb.mock.metrics.EngineMetrics;
 
 /** Bounded FIFO for local, text-only, single-token prefill. Owns each request's timer and KV lease. */
 final class LocalPrefill implements AutoCloseable {
-    static final int LIMIT = 1024;
-    private static final Metadata.Key<byte[]> DETAILS = Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER);
+    static final int LIMIT = TaskHistory.LIMIT;
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
-    record Snapshot(List<TaskInfoPB> tasks, List<TaskInfoPB> finished, long finishedVersion, int waiting, int running) {}
-    private record Finished(long version, TaskInfoPB task) {}
     private final RtpConfig config;
     private final DeviceCache cache;
     private final EngineMetrics metrics;
@@ -25,8 +22,7 @@ final class LocalPrefill implements AutoCloseable {
     private final ExecutorService replies = Executors.newVirtualThreadPerTaskExecutor();
     private final Map<Long, Session> active = new HashMap<>();
     private final ArrayDeque<Session> waiting = new ArrayDeque<>();
-    private final ArrayDeque<Finished> history = new ArrayDeque<>();
-    private long finishedVersion, droppedThrough;
+    private final TaskHistory history = new TaskHistory();
     private Session running;
     private boolean closed;
 
@@ -91,7 +87,7 @@ final class LocalPrefill implements AutoCloseable {
                 || config.maxBatchTokens() > 0 && input.getTokenIdsCount() > config.maxBatchTokens()
                 || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > 1
                 || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
-            throw failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
+            throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
     }
 
     /** All callers hold this monitor. Allocation is delayed until FIFO selection, not enqueue. */
@@ -166,18 +162,15 @@ final class LocalPrefill implements AutoCloseable {
         if (running == session) running = null;
         var task = task(session).setEndTimeMs(System.currentTimeMillis()).setIterateCount(status.isOk() ? 1 : 0);
         if (!status.isOk()) task.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(code == 0 ? status.getCode().value() : code).setErrorMessage(status.getDescription()));
-        history.add(new Finished(++finishedVersion, task.build()));
-        if (history.size() > LIMIT) droppedThrough = history.removeFirst().version();
+        history.add(task.build());
         var output = status.isOk() ? LocalResponse.oneToken(session.input, session.reused, System.nanoTime() - session.started) : null;
         var result = new Result(output, status, code);
         replies.execute(() -> session.result.complete(result));
     }
 
-    synchronized Snapshot snapshot(long latestFinished) {
-        if (droppedThrough > 0 && latestFinished < droppedThrough) throw Status.OUT_OF_RANGE.withDescription("Finished task history no longer covers requested version").asRuntimeException();
-        return new Snapshot(active.values().stream().map(s -> task(s).build()).toList(),
-            history.stream().filter(f -> f.version() > latestFinished).map(Finished::task).toList(), finishedVersion,
-            waiting.size(), running == null ? 0 : 1);
+    synchronized TaskHistory.Snapshot snapshot(long latestFinished) {
+        return history.snapshot(latestFinished, active.values().stream().map(s -> task(s).build()).toList(),
+                                waiting.size(), running == null ? 0 : 1);
     }
 
     String scrapeMetrics() { return metrics.scrape(); }
@@ -203,11 +196,5 @@ final class LocalPrefill implements AutoCloseable {
         closed = true;
         for (var session : List.copyOf(active.values())) end(session, Status.UNAVAILABLE.withDescription("RTP node closed"), 0);
         compute.close(); deadlines.shutdownNow(); replies.shutdown();
-    }
-    static StatusRuntimeException failure(Status status, long code) {
-        if (code == 0) return status.asRuntimeException();
-        var trailers = new Metadata();
-        trailers.put(DETAILS, ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(status.getDescription()).build().toByteArray());
-        return status.asRuntimeException(trailers);
     }
 }
