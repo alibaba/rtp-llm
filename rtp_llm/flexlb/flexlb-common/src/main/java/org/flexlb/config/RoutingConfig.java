@@ -89,7 +89,7 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class DecodeCostEstimatorConfig {
-        private volatile String expression = "kvcache_used_ratio";
+        private volatile String expression = "running_size";
 
         @JsonIgnore
         @Getter(AccessLevel.NONE)

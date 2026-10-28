@@ -370,9 +370,50 @@ class DecodeSelectorTest {
     }
 
     @Test
-    void defaultCostUsesKvUsageRatioAcrossDifferentWorkerCapacities() {
-        var estimator = configService.loadBalanceConfig().getRouter().getRoles().getDecode().getCostEstimator();
-        Assertions.assertEquals("kvcache_used_ratio", estimator.getExpression());
+    void defaultCostPrefersFewerStreamsDespiteHigherKvUsage() {
+        var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
+        Assertions.assertEquals("running_size", decode.getCostEstimator().getExpression());
+        Assertions.assertNull(decode.getAvailability().getMaxEngineRequests());
+        registerWorker("127.0.0.1", 10_000L, 9_500L);
+        registerWorker("127.0.0.2", 10_000L, 5_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+            ServerStatus selected = selectStatus(availableStrategy(registry), request(100L, 1_001L), null);
+            Assertions.assertEquals("127.0.0.2", selected.getServerIp());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void defaultCostBalancesStreamsIncludingLocalReservations() {
+        for (int i = 1; i <= 3; i++) {
+            registerWorker("127.0.0." + i, 100_000L, 100_000L - i * 10_000L);
+        }
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            DecodeSelector selector = availableStrategy(registry);
+            for (long id = 1_000L; id < 1_030L; id++) {
+                ServerStatus selected = selectStatus(selector, request(100L, id), null);
+                reserveQueued(decodeEndpoint(registry, selected.getServerIp() + ":8080"), id, 100L, 100L, 50);
+                int min = Integer.MAX_VALUE;
+                int max = 0;
+                for (int i = 1; i <= 3; i++) {
+                    int load = decodeEndpoint(registry, "127.0.0." + i + ":8080").routingView().totalLoad();
+                    min = Math.min(min, load);
+                    max = Math.max(max, load);
+                }
+                Assertions.assertTrue(max - min <= 1, "each placement must account for local reservations");
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void explicitCacheCostUsesKvUsageRatioAcrossDifferentWorkerCapacities() {
+        configureCost("kvcache_used_ratio");
         registerWorker("127.0.0.1", 1_000L, 500L);
         registerWorker("127.0.0.2", 10_000L, 9_000L);
 
@@ -384,6 +425,7 @@ class DecodeSelectorTest {
 
     @Test
     void cacheCostIncludesExpectedLocalReservationsBeyondTheHardPromptReservation() {
+        configureCost("kvcache_used_ratio");
         registerWorker("127.0.0.1", 10_000L, 9_500L);
         registerWorker("127.0.0.2", 10_000L, 8_500L);
         EndpointRegistry registry = decodeRegistry();
@@ -399,6 +441,7 @@ class DecodeSelectorTest {
 
     @Test
     void cacheCostKeepsUsageRatiosAboveOneDistinctForBusyWorkers() {
+        configureCost("kvcache_used_ratio");
         registerWorker("127.0.0.1", 1_000L, 100L);
         registerWorker("127.0.0.2", 1_000L, 100L);
         EndpointRegistry registry = decodeRegistry();
@@ -733,6 +776,7 @@ class DecodeSelectorTest {
 
     @Test
     void cacheCostKeepsZeroKvReservationsTiedAcrossWorkers() {
+        configureCost("kvcache_used_ratio");
         registerWorker("127.0.0.1", 1_000, 1_000);
         registerWorker("127.0.0.2", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();
