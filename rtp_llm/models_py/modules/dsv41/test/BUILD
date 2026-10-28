@@ -41,6 +41,8 @@ _ENGRAM_SM100_TESTS = [
     "test_engram_cuda",
     "test_engram_packed",
     "test_engram_prefetch",
+    "test_engram_decode_schedule",
+    "test_engram_quantized_slice",
 ]
 
 _TESTS = [
