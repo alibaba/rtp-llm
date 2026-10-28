@@ -1,11 +1,13 @@
 import functools
 import math
+import os
 from typing import Optional, Tuple
 
 import flashinfer
 import torch
 from torch import nn
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.base.common.norm import (
     BaseAddBiasResLayerNorm,
     BaseNorm,
@@ -21,7 +23,7 @@ def _qk_vec8_device_supported(device_index: int) -> bool:
     return torch.cuda.get_device_capability(device_index) == (12, 0)
 
 
-def _qk_vec8_tensor_contract(input, q_weight, k_weight, eps) -> bool:
+def _qk_packed_bf16_tensor_contract(input, q_weight, k_weight, eps) -> bool:
     if (
         not input.is_cuda
         or input.dtype != torch.bfloat16
@@ -52,7 +54,13 @@ def _qk_vec8_tensor_contract(input, q_weight, k_weight, eps) -> bool:
             or (weight.data_ptr() < end and begin < weight.data_ptr() + 256)
         ):
             return False
-    return _qk_vec8_device_supported(input.device.index)
+    return True
+
+
+def _qk_vec8_tensor_contract(input, q_weight, k_weight, eps) -> bool:
+    return _qk_packed_bf16_tensor_contract(
+        input, q_weight, k_weight, eps
+    ) and _qk_vec8_device_supported(input.device.index)
 
 
 class RMSNorm(BaseNorm):
@@ -144,8 +152,38 @@ class FusedQKRMSNorm(nn.Module):
         self.q_size = self.head_num * self.size_per_head
         self.kv_size = self.kv_head_num * self.size_per_head
         self.enable_pdl = enable_pdl
+        # Resolve the explicit A/B switch before warmup / graph capture. PPU uses
+        # the existing portable fused kernel; CUDA/ROCm keep their current route.
+        self._use_ppu_fused_qk = (
+            os.environ.get("RTP_LLM_PPU_FUSED_QK_RMSNORM", "0") == "1"
+            and get_device_type() == DeviceType.Ppu
+        )
 
     def forward(self, hidden_states: torch.Tensor):
+        if (
+            self._use_ppu_fused_qk
+            and self.enable_pdl is False
+            and self.head_num == 16
+            and self.kv_head_num == 8
+            and self.size_per_head == 128
+            and hasattr(rtp_llm_ops, "fused_qk_rmsnorm")
+            and _qk_packed_bf16_tensor_contract(
+                hidden_states, self.q_weight, self.k_weight, self.eps
+            )
+        ):
+            rtp_llm_ops.fused_qk_rmsnorm(
+                hidden_states,
+                self.q_weight,
+                self.k_weight,
+                self.eps,
+                self.head_num,
+                self.kv_head_num,
+                hidden_states.shape[0],
+                hidden_states.shape[1],
+                self.size_per_head,
+            )
+            return hidden_states
+
         if (
             self.enable_pdl is False
             and self.head_num == 16

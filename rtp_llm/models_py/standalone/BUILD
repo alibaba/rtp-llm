@@ -82,6 +82,7 @@ py_library(
         ],
         "@//:using_ppu": [
             "//rtp_llm:deep_gemm",
+            "//rtp_llm:triton",
         ],
         "//conditions:default": [],
     }) + select({

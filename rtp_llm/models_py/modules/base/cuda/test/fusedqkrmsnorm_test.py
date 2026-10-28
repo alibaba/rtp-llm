@@ -1,5 +1,6 @@
 import hashlib
 import itertools
+import os
 from pathlib import Path
 from unittest import SkipTest, TestCase, main, mock
 
@@ -470,6 +471,183 @@ class FusedQKRMSNormCudaVec8ExactTest(TestCase):
             self.assertEqual(invoked.call_count, 1)
             self.assertEqual(returned.data_ptr(), x.data_ptr())
         _assert_bytes(self, x, expected, "real module -> CUDA binding")
+
+
+class FusedQKRMSNormPpuTest(TestCase):
+    """Opt-in portable kernel on PPU, with an independent FP32 CPU formula.
+
+    These operator tolerances do not establish full-model output equivalence.
+    Each comparison emits error measurements for the PPU validation artifact.
+    """
+
+    SWITCH = "RTP_LLM_PPU_FUSED_QK_RMSNORM"
+
+    @classmethod
+    def setUpClass(cls):
+        from rtp_llm.device.device_type import DeviceType, get_device_type
+        from rtp_llm.models_py.modules.base.cuda import norm as norm_module
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("PPU QK validation requires an available accelerator")
+        if get_device_type() != DeviceType.Ppu:
+            raise SkipTest("The opt-in portable QK route is PPU only")
+        if not hasattr(norm_module.rtp_llm_ops, "fused_qk_rmsnorm"):
+            raise AssertionError(
+                "The existing portable fused_qk_rmsnorm binding is missing"
+            )
+        cls.norm_module = norm_module
+
+    def make_module(self, qw, kw, enabled=True, **kwargs):
+        with mock.patch.dict(os.environ, {self.SWITCH: "1" if enabled else "0"}):
+            return self.norm_module.FusedQKRMSNorm(
+                qw,
+                kw,
+                **{
+                    "head_num": 16,
+                    "kv_head_num": 8,
+                    "size_per_head": 128,
+                    **kwargs,
+                },
+            )
+
+    @staticmethod
+    def torch_reference(x, qw, kw, eps=1e-6):
+        # No FlashInfer / RTP norm kernel is used by this oracle. Preserve the
+        # exact BF16 inputs, then accumulate and multiply in FP32 on the CPU.
+        source = x.detach().cpu()
+        result = source.clone().reshape(source.shape[0], 32, 128)
+        for begin, end, weight in ((0, 16, qw), (16, 24, kw)):
+            values = result[:, begin:end, :].float()
+            inverse_rms = torch.rsqrt(values.square().mean(dim=-1, keepdim=True) + eps)
+            result[:, begin:end, :] = (
+                values * inverse_rms * weight.detach().cpu().float()
+            ).to(source.dtype)
+        return result.reshape_as(source)
+
+    def assert_formula(self, actual, source, qw, kw, label):
+        expected = self.torch_reference(source, qw, kw)
+        a = actual.detach().cpu()[:, :3072].float()
+        b = expected[:, :3072].float()
+        error = a - b
+        max_abs = float(error.abs().max())
+        normalized_rmse = float(
+            error.square().mean().sqrt() / b.square().mean().sqrt().clamp_min(1e-12)
+        )
+        max_relative = float((error.abs() / b.abs().clamp_min(1e-6)).max())
+        print(
+            f"PPU_QK_ERROR {label} max_abs={max_abs:.9g} "
+            f"max_relative={max_relative:.9g} normalized_rmse={normalized_rmse:.9g}"
+        )
+        torch.testing.assert_close(a, b, atol=1e-3, rtol=1e-2)
+        _assert_bytes(
+            self, actual[:, 3072:].cpu(), source[:, 3072:].cpu(), "PPU V unchanged"
+        )
+
+    def test_actual_shapes_formula_and_explicit_switch(self):
+        for m in (1, 127, 500, 512, 1024, 2048):
+            with self.subTest(m=m):
+                x, qw, kw = _fixture(m, 171 + m)
+                saved_q, saved_k = qw.clone(), kw.clone()
+                actual, baseline = x.clone(), x.clone()
+                norm = self.make_module(qw, kw)
+                old_norm = self.make_module(qw, kw, enabled=False)
+                self.assertTrue(norm._use_ppu_fused_qk)
+                self.assertFalse(old_norm._use_ppu_fused_qk)
+                original = self.norm_module.rtp_llm_ops.fused_qk_rmsnorm
+                with mock.patch.object(
+                    self.norm_module.rtp_llm_ops, "fused_qk_rmsnorm", wraps=original
+                ) as invoked:
+                    returned = norm(actual)
+                    self.assertEqual(invoked.call_count, 1)
+                    self.assertEqual(returned.data_ptr(), actual.data_ptr())
+                    old_norm(baseline)
+                    self.assertEqual(invoked.call_count, 1)
+                self.assert_formula(actual, x, qw, kw, f"fused M={m}")
+                self.assert_formula(baseline, x, qw, kw, f"baseline M={m}")
+                torch.testing.assert_close(
+                    actual.float(), baseline.float(), atol=1e-3, rtol=1e-2
+                )
+                _assert_bytes(self, qw, saved_q, "PPU Q weight unchanged")
+                _assert_bytes(self, kw, saved_k, "PPU K weight unchanged")
+
+    def test_graph_changes_input_and_both_weights(self):
+        for m in (1, 500, 512, 2048):
+            with self.subTest(m=m):
+                x, qw, kw = _fixture(m, 330 + m)
+                static_x = x.clone()
+                norm = self.make_module(qw, kw)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        static_x.copy_(x)
+                        norm(static_x)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    norm(static_x)
+                pointers = [value.data_ptr() for value in (static_x, qw, kw)]
+                for repeat in range(3):
+                    fresh, fresh_q, fresh_k = _fixture(m, 700 + repeat)
+                    static_x.copy_(fresh)
+                    qw.copy_(fresh_q)
+                    kw.copy_(fresh_k)
+                    graph.replay()
+                    eager = fresh.clone()
+                    norm(eager)
+                    _assert_bytes(
+                        self, static_x, eager, "PPU changed-input graph vs eager"
+                    )
+                    self.assert_formula(
+                        static_x,
+                        fresh,
+                        fresh_q,
+                        fresh_k,
+                        f"graph M={m} repeat={repeat}",
+                    )
+                    _assert_bytes(self, qw, fresh_q, "PPU graph Q weight unchanged")
+                    _assert_bytes(self, kw, fresh_k, "PPU graph K weight unchanged")
+                    self.assertEqual(
+                        pointers, [value.data_ptr() for value in (static_x, qw, kw)]
+                    )
+
+    def test_contract_fallbacks_do_not_call_portable_kernel(self):
+        import flashinfer
+
+        from rtp_llm.device.device_type import DeviceType
+
+        x, qw, kw = _fixture(7, 507)
+        strided = torch.empty(7, 8192, device="cuda", dtype=x.dtype)[:, ::2]
+        strided.copy_(x)
+        scenarios = [
+            (x, qw, kw, {"enable_pdl": True}),
+            (x.half(), qw.half(), kw.half(), {}),
+            (x[:, :3072].contiguous(), qw, kw, {"head_num": 8}),
+            (torch.zeros(2049, 4096, device="cuda", dtype=x.dtype), qw, kw, {}),
+            (strided, qw, kw, {}),
+            (x, qw.repeat(2)[::2], kw, {}),
+            (x, x[0, :128], kw, {}),
+            (x, qw, kw, {"eps": 0.0}),
+        ]
+        for index, (value, q, k, kwargs) in enumerate(scenarios):
+            with self.subTest(index=index), mock.patch.object(
+                self.norm_module.rtp_llm_ops, "fused_qk_rmsnorm"
+            ) as portable, mock.patch.object(
+                self.norm_module, "_qk_vec8_tensor_contract", return_value=False
+            ), mock.patch.object(
+                flashinfer.norm, "rmsnorm"
+            ) as fallback:
+                saved = value.clone()
+                self.make_module(q, k, **kwargs)(value)
+                portable.assert_not_called()
+                self.assertEqual(fallback.call_count, 2)
+                _assert_bytes(self, value, saved, "PPU fallback control flow")
+        # Even an explicitly enabled environment must not change CUDA/ROCm.
+        for device in (DeviceType.Cuda, DeviceType.ROCm):
+            with self.subTest(device=device), mock.patch.object(
+                self.norm_module, "get_device_type", return_value=device
+            ):
+                self.assertFalse(self.make_module(qw, kw)._use_ppu_fused_qk)
 
 
 if __name__ == "__main__":
