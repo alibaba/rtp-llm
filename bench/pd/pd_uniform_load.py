@@ -235,6 +235,13 @@ async def main():
         prompts = prompts["prompts"]
     url = "http://%s/v1/chat/completions" % args.endpoint
     n = int(round(args.qps * args.duration))
+    if args.nonce_pos == "suffix" and n + args.warmup > len(prompts):
+        print(
+            "WARNING: %d requests over %d prompts with --nonce-pos suffix: repeated prompts "
+            "hit the whole prompt in the prefill cache, not just the shared prefix"
+            % (n + args.warmup, len(prompts)),
+            flush=True,
+        )
 
     def tagged(tag, text):
         if args.nonce_pos == "suffix":
