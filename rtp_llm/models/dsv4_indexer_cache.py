@@ -37,10 +37,19 @@ def validate_fp4_indexer_config(
     supported_speculation = supported_speculation or (
         speculative_type == SpeculativeType.MTP and generation_slots in (1, 3)
     )
+    # DSV4_FP4_INDEXER_ALLOW_MTP2=1 admits MTP with two generation slots (to
+    # match a decode peer running MTP depth 2); FP4 indexer numerics with two
+    # slots are not qualified.
+    supported_speculation = supported_speculation or (
+        speculative_type == SpeculativeType.MTP
+        and generation_slots == 2
+        and os.environ.get("DSV4_FP4_INDEXER_ALLOW_MTP2", "0") == "1"
+    )
     if not supported_speculation:
         raise ValueError(
             "FP4 indexer supports SP0, DSpark with three generation slots, "
-            "or MTP with one generation slot"
+            "or MTP with one or three generation slots "
+            "(two with DSV4_FP4_INDEXER_ALLOW_MTP2=1)"
         )
     # DSV4_FP4_INDEXER_ALLOW_PREFIX_REUSE=1 admits prefix reuse for the
     # experimental FP4 indexer; reused-block numerics are not qualified.

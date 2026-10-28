@@ -5,7 +5,6 @@ import unittest
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models.dsv4_indexer_cache import (
     indexer_entry_bytes,
     validate_fp4_indexer_config,
@@ -137,22 +136,35 @@ class Fp4ConfigTest(unittest.TestCase):
         )
         with patch.dict(os.environ, {"DSV4_INDEXER_CACHE_MODE": "fp4"}, clear=True):
             validate_fp4_indexer_config(**valid)
-            for mode in (
-                SpeculativeType.NONE,
-                SpeculativeType.DSPARK,
-                SpeculativeType.MTP,
-            ):
-                for slots in (0, 1, 2, 3, 4):
-                    config = dict(valid, speculative_type=mode, generation_slots=slots)
-                    with self.subTest(mode=mode, slots=slots):
-                        if (mode, slots) in (
-                            (SpeculativeType.NONE, 0),
-                            (SpeculativeType.DSPARK, 3),
-                        ):
-                            validate_fp4_indexer_config(**config)
-                        else:
-                            with self.assertRaises(ValueError):
-                                validate_fp4_indexer_config(**config)
+            for allow_mtp2 in ("0", "1"):
+                accepted = {
+                    (SpeculativeType.NONE, 0),
+                    (SpeculativeType.DSPARK, 3),
+                    (SpeculativeType.MTP, 1),
+                    (SpeculativeType.MTP, 3),
+                }
+                if allow_mtp2 == "1":
+                    accepted.add((SpeculativeType.MTP, 2))
+                with patch.dict(
+                    os.environ, {"DSV4_FP4_INDEXER_ALLOW_MTP2": allow_mtp2}
+                ):
+                    for mode in (
+                        SpeculativeType.NONE,
+                        SpeculativeType.DSPARK,
+                        SpeculativeType.MTP,
+                    ):
+                        for slots in (0, 1, 2, 3, 4):
+                            config = dict(
+                                valid, speculative_type=mode, generation_slots=slots
+                            )
+                            with self.subTest(
+                                allow_mtp2=allow_mtp2, mode=mode, slots=slots
+                            ):
+                                if (mode, slots) in accepted:
+                                    validate_fp4_indexer_config(**config)
+                                else:
+                                    with self.assertRaises(ValueError):
+                                        validate_fp4_indexer_config(**config)
             for key, value in (
                 ("reuse_cache", True),
                 ("tokens_per_block", 128),
