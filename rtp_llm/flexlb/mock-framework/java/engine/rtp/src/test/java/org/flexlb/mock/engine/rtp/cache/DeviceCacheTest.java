@@ -7,18 +7,18 @@ import org.junit.jupiter.api.Test;
 
 class DeviceCacheTest {
     @Test void releaseIsIdempotentAndCannotPublishAfterCancellation() {
-        try (var cache = new DeviceCache(8, 0, true)) {
+        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU)) {
             var lease = cache.acquire(2, List.of()).lease();
             assertEquals(6, cache.snapshot(-1, false).availableBlocks());
             lease.close(); lease.close();
-            assertFalse(lease.complete(List.of(1L, 2L))); assertFalse(lease.publish(List.of(1L, 2L)));
+            assertFalse(lease.complete(List.of(1L, 2L)));
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
             assertTrue(cache.snapshot(-1, true).keys().isEmpty());
         }
     }
 
     @Test void completionKeepsLruAvailableAndSharingChargesEachPhysicalBlockOnce() {
-        try (var cache = new DeviceCache(8, 0, true)) {
+        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU)) {
             var first = cache.acquire(2, List.of()).lease(); first.complete(List.of(1L, 2L));
             var snapshot = cache.snapshot(-1, true);
             assertEquals(8, snapshot.availableBlocks()); assertEquals(6, snapshot.freeBlocks());
@@ -32,7 +32,7 @@ class DeviceCacheTest {
     }
 
     @Test void failedAdmissionRollsBackPinsAndClassifiesHugeDemandWithoutIntegerOverflow() {
-        try (var cache = new DeviceCache(8, 1, true)) {
+        try (var cache = new DeviceCache(8, 1, DeviceCache.EvictionPolicy.LRU)) {
             var seed = cache.acquire(2, List.of()).lease(); seed.complete(List.of(1L, 2L));
             var owner = cache.acquire(5, List.of()).lease();
             assertNotNull(owner);
@@ -44,7 +44,7 @@ class DeviceCacheTest {
     }
 
     @Test void growthFailureRetainsPartialLeaseUntilOwnerReleasesIt() {
-        try (var cache = new DeviceCache(4, 0, true)) {
+        try (var cache = new DeviceCache(4, 0, DeviceCache.EvictionPolicy.LRU)) {
             var lease = cache.acquire(1, List.of()).lease();
             assertEquals(DeviceCache.Failure.PERMANENT, lease.growTo(6));
             assertEquals(4, lease.blocks()); assertEquals(0, cache.snapshot(-1, false).availableBlocks());
@@ -52,20 +52,8 @@ class DeviceCacheTest {
         }
     }
 
-    @Test void publishedPrefillDataStaysPinnedUntilConnectorOwnerReleasesIt() {
-        try (var cache = new DeviceCache(4, 0, true)) {
-            var lease = cache.acquire(2, List.of()).lease();
-            assertTrue(lease.publish(List.of(1L, 2L))); assertFalse(lease.publish(List.of(1L, 2L)));
-            var snapshot = cache.snapshot(-1, true);
-            assertEquals(2, snapshot.referencedBlocks()); assertEquals(0, snapshot.heldBlocks());
-            lease.close();
-            assertEquals(4, cache.snapshot(-1, false).availableBlocks());
-            assertEquals(Set.of(1L, 2L), cache.snapshot(-1, true).keys());
-        }
-    }
-
     @Test void completionCancellationRaceHasOneOwnershipTransition() throws Exception {
-        try (var cache = new DeviceCache(8, 0, true); var callers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU); var callers = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < 100; i++) {
                 var lease = cache.acquire(2, List.of()).lease();
                 var ready = new CountDownLatch(1);
@@ -79,7 +67,7 @@ class DeviceCacheTest {
     }
 
     @Test void closeInvalidatesAllLeasesAndPublicationCannotResurrectCache() {
-        var cache = new DeviceCache(4, 0, true);
+        var cache = new DeviceCache(4, 0, DeviceCache.EvictionPolicy.LRU);
         var lease = cache.acquire(2, List.of()).lease(); cache.close(); cache.close();
         lease.close(); assertFalse(lease.complete(List.of(1L, 2L)));
         assertThrows(IllegalStateException.class, () -> cache.acquire(1, List.of()));

@@ -7,7 +7,7 @@
     <module>../flexlb-common</module>
     <module>../flexlb-grpc</module>
     <module>../flexlb-cache</module><module>../flexlb-sync</module><module>../flexlb-api</module>
-    <module>java/interfaces</module><module>java/runtime</module><module>java/shared/compute</module><module>java/shared/metrics</module>
+    <module>java/interfaces</module><module>java/runtime</module><module>java/shared/compute</module><module>java/shared/metrics</module><module>java/shared/cache</module>
     <module>java/engine/rtp</module><module>java/client</module><module>java/master</module>
   </modules>
   <properties>

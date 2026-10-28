@@ -8,11 +8,12 @@ import java.nio.file.Path;
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
+import org.flexlb.mock.engine.rtp.cache.DeviceCache.EvictionPolicy;
 import org.flexlb.mock.api.model.DecodeSpec;
 import org.flexlb.mock.api.model.StoppingSpec;
 
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
-public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks,
+public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int tpSize, int loadTimeoutMs, JsonNode business, ComputeModel compute, DecodeStepModel decodeModel, StoppingModel stoppingModel) {
     private static final ObjectMapper JSON = new ObjectMapper()
@@ -28,7 +29,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                 || maxSeqLen < 1 || maxBatchTokens < 0 || tpSize < 1 || loadTimeoutMs < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
-        Objects.requireNonNull(compute); Objects.requireNonNull(decodeModel); Objects.requireNonNull(stoppingModel);
+        Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(compute); Objects.requireNonNull(decodeModel); Objects.requireNonNull(stoppingModel);
     }
 
     @Override public JsonNode business() { return business.deepCopy(); }
@@ -48,6 +49,14 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int blocks = nativeInt(config, "test_block_num", null, 2, Integer.MAX_VALUE) - 1;
         int ratio = nativeInt(config, "reserve_block_ratio", 5, 0, 100);
         int reserve = (int) ((long) blocks * ratio / 100);
+        for (String tier : List.of("enable_memory_cache", "enable_disk_cache", "enable_remote_cache"))
+            if (nativeBool(config, tier, false)) throw new IllegalArgumentException(tier + " is not connected in the RTP Mock yet");
+        var policyValue = nativeValue(config, "device_eviction_policy");
+        EvictionPolicy policy;
+        try {
+            if (policyValue != null && !policyValue.isTextual()) throw new IllegalArgumentException("Expected a string");
+            policy = EvictionPolicy.valueOf(policyValue == null ? "LRU" : policyValue.textValue().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException error) { throw new IllegalArgumentException("Invalid device_eviction_policy: expected lru, lfu, or fifo", error); }
         if (nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE) != 1 || nativeInt(config, "dp_rank", 0, 0, Integer.MAX_VALUE) != 0)
             throw new IllegalArgumentException("RTP node currently supports dp_size=1, dp_rank=0 only");
         if (nativeInt(config, "max_context_batch_size", 1, 1, Integer.MAX_VALUE) != 1)
@@ -60,7 +69,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         var stopping = new StoppingModel(model(config.path("generation"), StoppingSpec.class));
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
         return new RtpConfig(root.path("id").textValue(), role,
-            nativeInt(config, "seq_size_per_block", null, 1, Integer.MAX_VALUE), blocks, reserve,
+            nativeInt(config, "seq_size_per_block", null, 1, Integer.MAX_VALUE), blocks, reserve, policy,
             nativeBool(config, "reuse_cache", false), nativeBool(config, "enable_device_cache", true),
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
@@ -74,6 +83,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         result.put("id", id).put("role", role.name()).put("seq_size_per_block", blockSize)
             .put("reserve_block_ratio", nativeInt(business, "reserve_block_ratio", 5, 0, 100))
             .put("test_block_num", deviceBlocks + 1).put("device_blocks", deviceBlocks).put("reserve_blocks", reserveBlocks)
+            .put("device_eviction_policy", evictionPolicy.name().toLowerCase(Locale.ROOT))
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("load_cache_timeout_ms", loadTimeoutMs).put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)

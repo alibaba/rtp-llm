@@ -12,6 +12,7 @@ Python负责case配置编译和执行组织，Java负责组件共享接口与实
 - `java/shared/metrics/`：共享Engine指标定义、独立注册表、Prometheus导出与查询实现。
 - `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
 - `java/client/`：Client原生调度、取流、客户端计时及请求取消；播放器和多JVM协调待接入。
+- `java/shared/cache/`：跨Engine复用的物理block容量与独立引用管理；每个实例、每个存储层独立建池。
 - `java/master/`：真实生产Master的启动入口和共享读取接口适配，不重新实现调度。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
 - `scripts/`：构建和验证入口。
@@ -104,6 +105,19 @@ Master依次使用127.0.0.1、127.0.0.2等回环IPv4地址，HTTP端口相同、
 Master发布ready前必须从实际ZK选举取得Leader地址，不能将进程启动视为选举成功。任一组件或ZK意外退出都使实验失败；收尾先停止组件，再停止ZK，最后停止Prometheus，保留ZK数据及日志供排查。ZooKeeper启动配方属于Runner运行配置，不放进Case的业务组件配置。
 
 真实接线测试另外启动生产Master JVM、新P/D JVM和Client探针JVM，覆盖DIRECT/NON_BATCH的Generate与QUEUE/FIXED_WINDOW/BATCH的Enqueue→Fetch；与前一节保留的调度协议夹具测试区分记录。这些是小流量本地接线验证，不作为远程开发机/CI大规模稳定性或压力能力验收。现阶段保留每个Engine一个JVM及跨实例gRPC，是否长期保留以这些后续测量为准。
+
+## Block容量与RTP前缀树
+
+[共享层设计与RTP实现边界](https://alidocs.dingtalk.com/i/nodes/XPwkYGxZV347LdvpHrkaYkzrJAgozOKL)记录当前约定和main对齐范围。
+
+Block管理从零重写，删除旧812行RTP BlockPool；共享指RTP和后续vLLM复用代码，不是跨实例共享资源。
+
+- `java/shared/cache/BlockPool`只管理容量和引用。每个所有者持有独立的Reference；close幂等，不能释放其他所有者的份额，也不能把一个池的引用交给另一个池。REQUEST、CACHE、LOAD、STORE、EVICTION分开计数；只有CACHE引用的block算可回收容量，active和free分别统计。分配不足不部分扣账，释放会唤醒容量等待者。
+- RTP `cache/BlockTree`管理前缀和叶子候选；`cache/DeviceCache`管理RTP准入、复用、增长、完成和取消。它们依赖共享BlockPool，旧Pool不作兼容入口。移除旧的flat-LRU模式、测试专用retention、直接插入、无调用publish及回调。
+- 对齐2026-10-28 fetch的main `7cdc40370e5129c5f3d70a40d7cdc54633a7955`：real统一创建BlockTreeCache。tree与LRU不属于同一维度；仅有树结构，原生device_eviction_policy可取lru（默认）、lfu、fifo，分别改变树内候选排序。Full设备池只驱逐未引用叶子，逐个回收所需数量，保留仍可匹配的父节点；match刷新热度，release和重叠insert不刷新。不是整段无分叉链强制回收。
+- RTP适配器负责扣除test_block_num中的保留block 0、按reserve_block_ratio计算门槛；这些规则不进入共享容量类。失败准入回滚本次复用引用；增长失败保留已取得的部分，最后由所属请求释放。
+
+当前接通的是既有单池Full-attention device模拟范围，不代表完整复刻real的混合attention或多层级缓存。最新real含DEVICE/HOST/DISK，本地层级之外还有远端backend。host等层可以直接复用同一个容量类，但各自建池；候选、下沉/丢弃和搬运提交/失败由Engine实现。RTP Mock的host/disk/remote链路尚未接通，显式开启enable_memory_cache、enable_disk_cache或enable_remote_cache会拒绝启动，避免忽略配置。
 
 ## 共享Compute
 

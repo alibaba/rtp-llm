@@ -28,7 +28,7 @@ public final class RtpNode implements AutoCloseable {
     private RtpNode(RtpConfig config) {
         this.config = config;
         queries = PrometheusQueries.fromConfig(config.business().path("prometheus"), "rtp");
-        cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), true);
+        cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
         service = new RtpRpcService(config, cache);
     }
 

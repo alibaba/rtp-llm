@@ -72,4 +72,18 @@ class RtpConfigTest {
         config.put("seq_size_per_block", 16); config.remove("compute");
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
+    @Test void nativeEvictionOrderingUsesOnlyTreeAndRejectsUnimplementedTiers() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        assertEquals("lru", load(root).effective().path("device_eviction_policy").asText());
+        for (String policy : java.util.List.of("lru", "lfu", "fifo")) {
+            config.put("device_eviction_policy", policy);
+            assertEquals(policy, load(root).evictionPolicy().name().toLowerCase(java.util.Locale.ROOT));
+        }
+        config.put("device_eviction_policy", "tree"); assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.remove("device_eviction_policy"); config.put("DEVICE_EVICTION_POLICY", "LFU");
+        assertEquals("lfu", load(root).effective().path("device_eviction_policy").asText());
+        for (String tier : java.util.List.of("enable_memory_cache", "enable_disk_cache", "enable_remote_cache")) {
+            config.put(tier, true); assertThrows(IllegalArgumentException.class, () -> load(root)); config.remove(tier);
+        }
+    }
 }
