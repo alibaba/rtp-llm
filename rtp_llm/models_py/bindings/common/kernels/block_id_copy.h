@@ -2,7 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#else
 #include <cuda_runtime.h>
+#endif
 
 namespace rtp_llm::kernels {
 
@@ -22,6 +26,10 @@ void invokeBlockIdCopy(const BlockCopyPlane* planes,
                        int                   plane_count,
                        const int32_t*        mappings,
                        int                   count,
-                       cudaStream_t          stream);
+#if USING_ROCM
+                       hipStream_t stream);
+#else
+                       cudaStream_t stream);
+#endif
 
 }  // namespace rtp_llm::kernels

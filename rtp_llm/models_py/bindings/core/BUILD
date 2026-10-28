@@ -11,6 +11,11 @@ cc_library(
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
         ],
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/common/kernels:block_id_copy",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
         "//conditions:default": [],
     }),
     copts = copts(),

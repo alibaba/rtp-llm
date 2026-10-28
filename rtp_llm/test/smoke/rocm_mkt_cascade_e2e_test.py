@@ -75,6 +75,7 @@ async def _phase(
     qps=0,
     duration=20,
     aux=False,
+    profile=False,
 ):
     directory = output / name
     directory.mkdir(mode=0o700)
@@ -100,6 +101,8 @@ async def _phase(
                 ):
                     config.pop(key, None)
                 config.update(aux_info=aux, timeout_ms=60000)
+                if profile:
+                    config["gen_timeline"] = True
                 status, error, obj, raw = 0, None, {}, b""
                 try:
                     async with session.post(
@@ -178,6 +181,7 @@ async def _phase(
     successful = [row for row in rows if row["ok"]]
     summary = dict(
         name=name,
+        profiled=profile,
         concurrency=concurrency,
         offered_qps=qps,
         duration_s=duration if qps else None,
@@ -242,6 +246,8 @@ class RocmMktCascadeE2ETest(unittest.TestCase):
                 "SHUTDOWN_TIMEOUT": "10",
             }
         )
+        profile_count = int(os.getenv("MKT_E2E_PROFILE_COUNT", "0"))
+        self.assertGreaterEqual(profile_count, 0)
         server_cpus = {int(x) for x in os.environ["MKT_E2E_SERVER_CPUS"].split(",")}
         client_cpus = {int(x) for x in os.environ["MKT_E2E_CLIENT_CPUS"].split(",")}
         original_cpus = os.sched_getaffinity(0)
@@ -353,6 +359,21 @@ class RocmMktCascadeE2ETest(unittest.TestCase):
                             self.assertTrue(
                                 set(result["errors"]) <= {"admission"},
                                 "unexpected service errors under load",
+                            )
+                        # Capture after clean timing. These requests are explicitly
+                        # marked and must not be included in RT/QPS comparisons.
+                        if profile_count:
+                            result = await _phase(
+                                manager.port,
+                                samples,
+                                output,
+                                "profile",
+                                count=profile_count,
+                                profile=True,
+                            )
+                            summaries.append(result)
+                            self.assertEqual(
+                                result["fail"], 0, "profile request failed"
                             )
 
                     asyncio.run(run())
