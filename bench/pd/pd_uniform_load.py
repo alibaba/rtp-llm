@@ -12,8 +12,10 @@ dispatcher coroutine sleeps until each slot and then starts that request, so
 sends cannot reorder or bunch; request bodies are JSON-encoded before the run
 starts so encoding a 32K prompt never delays a later slot.
 
-Each request takes the next prompt from the file (cycling, with a per-request
-nonce prepended so no two requests share a cache prefix) and decodes exactly
+Each request takes the next prompt from the file (cycling) with a per-request
+nonce: at the start by default, so no two requests share a cache prefix, or at
+the end with --nonce-pos suffix, so a shared-prefix prompt set keeps its
+prefix-cache hit. Every request decodes exactly
 --max-tokens tokens (ignore_eos). --warmup N first sends N requests one at a
 time (not counted) so first-request JIT compilation does not land in the run.
 
@@ -203,8 +205,13 @@ async def main():
     ap.add_argument("--duration", type=float, default=120, help="seconds of arrivals")
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--offset", type=int, default=0)
+    ap.add_argument("--nonce", default="u", help="per-run tag added to every prompt")
     ap.add_argument(
-        "--nonce", default="u", help="per-run tag prepended to every prompt"
+        "--nonce-pos",
+        choices=("prefix", "suffix"),
+        default="prefix",
+        help="prefix: tag at the start, no two requests share a cached prefix (cold prefill); "
+        "suffix: tag at the end, so shared-prefix prompt sets keep their prefix-cache hit",
     )
     ap.add_argument(
         "--warmup",
@@ -228,10 +235,18 @@ async def main():
         prompts = prompts["prompts"]
     url = "http://%s/v1/chat/completions" % args.endpoint
     n = int(round(args.qps * args.duration))
+
+    def tagged(tag, text):
+        if args.nonce_pos == "suffix":
+            return "%s [%s]" % (text, tag)
+        return "[%s] %s" % (tag, text)
+
     bodies = [
         build_body(
             args,
-            "[%s-%d] %s" % (args.nonce, i, prompts[(args.offset + i) % len(prompts)]),
+            tagged(
+                "%s-%d" % (args.nonce, i), prompts[(args.offset + i) % len(prompts)]
+            ),
             i,
         )
         for i in range(n)
@@ -242,8 +257,10 @@ async def main():
         for w in range(args.warmup):
             body = build_body(
                 args,
-                "[%s-warm%d] %s"
-                % (args.nonce, w, prompts[(args.offset + n + w) % len(prompts)]),
+                tagged(
+                    "%s-warm%d" % (args.nonce, w),
+                    prompts[(args.offset + n + w) % len(prompts)],
+                ),
                 w,
             )
             r = await one(session, url, body, -1 - w, time.time())
