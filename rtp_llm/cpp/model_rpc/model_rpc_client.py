@@ -1548,7 +1548,7 @@ class ModelRpcClient(object):
                         _read_rpc_response(response_stream)
                     )
                     terminal_read_task.add_done_callback(_consume_settlement_task)
-                if _engine_reported_finished(output_py):
+                if client_span is not None and _engine_reported_finished(output_py):
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
                     # while the server is still settling the RPC. The application
@@ -1894,6 +1894,7 @@ class ModelRpcClient(object):
                         f"received {len(response.results)} results for {len(inputs)} requests",
                     )
 
+                results = []
                 for i, result_pb in enumerate(response.results):
                     error = (
                         result_pb.error_info
@@ -1911,8 +1912,6 @@ class ModelRpcClient(object):
                             exception_type,
                             f"batch item {i} failed: {error_message}",
                         )
-                results = []
-                for i, result_pb in enumerate(response.results):
                     conversion_index = i
                     stream_state = StreamState()
                     output = trans_output(

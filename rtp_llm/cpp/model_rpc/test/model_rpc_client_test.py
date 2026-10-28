@@ -2372,11 +2372,13 @@ class BatchTraceRpcTest(TestCase):
             ]
             conversions = []
 
-            def convert(inp, output_pb, state):
+            def convert(inp, output_pb, state, response_role_addrs=None):
                 conversions.append(inp.request_id)
                 if mode == "conversion_error" and inp.request_id == 802:
                     raise ValueError("injected conversion failure")
-                return trans_output(inp, output_pb, state)
+                return trans_output(
+                    inp, output_pb, state, response_role_addrs=response_role_addrs
+                )
 
             try:
                 with patch(
