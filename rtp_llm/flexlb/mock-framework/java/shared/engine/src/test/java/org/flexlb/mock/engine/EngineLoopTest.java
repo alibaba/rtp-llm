@@ -9,112 +9,105 @@ import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 
 class EngineLoopTest {
-    static ForwardBatch batch(String id) {
-        return new ForwardBatch(id, List.of(new ForwardBatch.Partition(0, List.of(
-            new ForwardBatch.Request(id, 4, 0, 8, 0, 4, 0, List.of())))));
-    }
-    static class Domain implements Scheduler<Object> {
-        final Queue<Work<Object>> waiting = new ArrayDeque<>();
-        final BlockingQueue<SimulatedCompute.Outcome> results = new LinkedBlockingQueue<>();
-        final List<Object> owners = new ArrayList<>();
-        final List<RuntimeException> failures = new ArrayList<>();
-        public Work<Object> schedule() { return waiting.poll(); }
-        public void completed(Object owner, SimulatedCompute.Outcome result) { owners.add(owner); results.add(result); }
-        public void failed(Object owner, RuntimeException error) { failures.add(error); }
-    }
-    static EngineLoop<Object> loop(Object lock, Domain domain, String expression) {
-        return new EngineLoop<>(lock, domain, new ComputeModel(new ComputeSpec(expression, null)), Role.prefill, "p");
+    private static Scheduler.Work work(String id) {
+        var item = new ForwardBatch.Request(id, 4, 0, 8, 0, 4, 0, List.of());
+        return new Scheduler.Work(new Object(), new ForwardBatch(id, List.of(new ForwardBatch.Partition(0, List.of(item)))));
     }
 
-    @Test void queuePolicyAndRequeueRemainOwnedByScheduler() throws Exception {
-        Object lock = new Object(); Object owner = new Object();
-        var domain = new Domain() {
-            @Override public void completed(Object current, SimulatedCompute.Outcome outcome) {
-                if (owners.isEmpty()) waiting.add(new Work<>(current, batch("next")));
-                super.completed(current, outcome);
+    /** Two policies with different queue order exercise the same execution loop. */
+    private static class Policy implements Scheduler {
+        final Deque<Work> queue = new ArrayDeque<>();
+        final BlockingQueue<String> finished = new LinkedBlockingQueue<>();
+        final List<Work> failures = new ArrayList<>();
+        final List<Runnable> notices = new ArrayList<>();
+        final boolean newestFirst;
+        Work cancelled;
+        Policy(boolean newestFirst) { this.newestFirst = newestFirst; }
+        public Work schedule() { return newestFirst ? queue.pollLast() : queue.pollFirst(); }
+        public void completed(Work work, SimulatedCompute.Outcome result) { finished.add(work.batch().id()); }
+        public void failed(Work work, RuntimeException error) { failures.add(work); }
+        public boolean cancelled(Work work) { return cancelled == work; }
+        public void maintain() {}
+        public List<Runnable> takeNotifications() { var result = List.copyOf(notices); notices.clear(); return result; }
+        public void close() { queue.clear(); }
+        public List<Request> requests() { return List.of(); }
+        public QueueSnapshot queues() { return new QueueSnapshot(queue.size(), 0, 0, 0); }
+        public String scrapeMetrics() { return ""; }
+        public Request submit(Input input, Listener listener) { throw new UnsupportedOperationException(); }
+        public void dependencyCompleted(Request request, Dependency dependency) { throw new UnsupportedOperationException(); }
+        public void finish(Request request, RequestFailure failure) { throw new UnsupportedOperationException(); }
+        public RequestState.Use readReady(Request request) { throw new UnsupportedOperationException(); }
+    }
+    private EngineLoop engine(Object lock, Policy policy, String expression) {
+        return new EngineLoop(lock, policy, new ComputeModel(new ComputeSpec(expression, null)), Role.prefill, "test");
+    }
+
+    @Test void replacingQueuePolicyDoesNotChangeComputeOrLoop() throws Exception {
+        for (boolean newest : List.of(false, true)) {
+            var policy = new Policy(newest);
+            policy.queue.add(work("first")); policy.queue.add(work("second"));
+            try (var loop = engine(policy, policy, "1")) {
+                loop.wake(); loop.wake();
+                assertEquals(newest ? "second" : "first", policy.finished.poll(2, TimeUnit.SECONDS));
+                assertEquals(newest ? "first" : "second", policy.finished.poll(2, TimeUnit.SECONDS));
+                synchronized (policy) { assertTrue(policy.failures.isEmpty()); }
+            }
+        }
+    }
+
+    @Test void schedulerCanScheduleAnotherRoundAfterResultCommit() throws Exception {
+        var policy = new Policy(false) {
+            @Override public void completed(Work work, SimulatedCompute.Outcome result) {
+                if (work.batch().id().equals("first")) queue.add(work("next"));
+                super.completed(work, result);
             }
         };
-        domain.waiting.add(new Scheduler.Work<>(owner, batch("first")));
-        try (var engine = loop(lock, domain, "1")) {
-            engine.wake(); engine.wake();
-            assertEquals(SimulatedCompute.State.COMPLETED, domain.results.poll(2, TimeUnit.SECONDS).state());
-            assertEquals(SimulatedCompute.State.COMPLETED, domain.results.poll(2, TimeUnit.SECONDS).state());
-            synchronized (lock) { assertEquals(List.of(owner, owner), domain.owners); assertTrue(domain.failures.isEmpty()); }
+        policy.queue.add(work("first"));
+        try (var loop = engine(policy, policy, "1")) {
+            loop.wake();
+            assertEquals("first", policy.finished.poll(2, TimeUnit.SECONDS));
+            assertEquals("next", policy.finished.poll(2, TimeUnit.SECONDS));
         }
     }
 
-    @Test void cancellationUsesObjectIdentityAndDoesNotCancelNextOwnerWithSameId() throws Exception {
-        Object lock = new Object(); Object first = new String("same"), second = new String("same");
-        var domain = new Domain();
-        domain.waiting.add(new Scheduler.Work<>(first, batch("same")));
-        domain.waiting.add(new Scheduler.Work<>(second, batch("same")));
-        try (var engine = loop(lock, domain, "3600000")) {
-            engine.wake(); engine.cancel(first);
-            assertEquals(SimulatedCompute.State.CANCELLED, domain.results.poll(2, TimeUnit.SECONDS).state());
-            synchronized (lock) { engine.cancel(first); assertEquals(1, domain.owners.size()); engine.cancel(second); }
-            assertEquals(SimulatedCompute.State.CANCELLED, domain.results.poll(2, TimeUnit.SECONDS).state());
-            synchronized (lock) { assertSame(second, domain.owners.get(1)); }
+    @Test void cancelledExecutionCallbackCannotCompleteItsReplacement() throws Exception {
+        var policy = new Policy(false);
+        var first = work("same"); var second = work("same");
+        policy.queue.add(first); policy.queue.add(second);
+        try (var loop = engine(policy, policy, "100")) {
+            synchronized (policy) {
+                loop.wake(); policy.cancelled = first; loop.wake();
+                assertEquals(List.of(first), policy.failures);
+                loop.wake();
+            }
+            assertEquals("same", policy.finished.poll(2, TimeUnit.SECONDS));
+            assertNull(policy.finished.poll(150, TimeUnit.MILLISECONDS));
+            synchronized (policy) { assertEquals(List.of(first), policy.failures); }
         }
     }
 
-    @Test void modelFailureReleasesThroughOwnerAndDoesNotStrandQueuedWork() {
-        var domain = new Domain();
-        domain.waiting.add(new Scheduler.Work<>(new Object(), batch("a")));
-        domain.waiting.add(new Scheduler.Work<>(new Object(), batch("b")));
-        try (var engine = loop(domain, domain, "-1")) {
-            engine.wake();
-            assertEquals(2, domain.failures.size()); assertTrue(domain.waiting.isEmpty());
-            assertTrue(domain.results.isEmpty());
+    @Test void planningFailuresReleaseEveryWorkAndDoNotStrandQueue() {
+        var policy = new Policy(false);
+        policy.queue.add(work("a")); policy.queue.add(work("b"));
+        try (var loop = engine(policy, policy, "-1")) {
+            loop.wake();
+            synchronized (policy) { assertEquals(2, policy.failures.size()); assertTrue(policy.queue.isEmpty()); }
         }
     }
 
-    @Test void oneCancelledMemberDoesNotCancelItsBatchOrReleaseResourcesEarly() throws Exception {
-        Object lock = new Object(); var ended = new ArrayList<RequestFailure>();
-        int[] closed = new int[2], published = new int[2];
-        var members = List.of(new RequestState(Long.MAX_VALUE, ended::add), new RequestState(Long.MAX_VALUE, ended::add));
-        var uses = new ArrayList<RequestState.Use>();
-        for (int i = 0; i < members.size(); i++) {
-            final int index = i;
-            members.get(i).attach(() -> closed[index]++, () -> published[index]++);
-        }
-        var domain = new Domain() {
-            @Override public Work<Object> schedule() {
-                var work = super.schedule();
-                if (work != null) members.forEach(member -> uses.add(member.forward()));
-                return work;
-            }
-            @Override public void completed(Object owner, SimulatedCompute.Outcome outcome) {
-                for (int i = 0; i < members.size(); i++) {
-                    var member = members.get(i);
-                    if (!member.terminating()) { member.commit(1, outcome.elapsedNanos()); member.finish(null); }
-                    uses.get(i).close();
-                }
-                super.completed(owner, outcome);
-            }
-        };
-        var items = List.of(batch("a").dps().getFirst().requests().getFirst(), batch("b").dps().getFirst().requests().getFirst());
-        domain.waiting.add(new Scheduler.Work<>(new Object(), new ForwardBatch("shared", List.of(new ForwardBatch.Partition(0, items)))));
-        try (var engine = loop(lock, domain, "10")) {
-            synchronized (lock) {
-                engine.wake(); members.getFirst().finish(new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel one"));
-                assertArrayEquals(new int[]{0, 0}, closed); assertTrue(ended.isEmpty());
-            }
-            assertEquals(SimulatedCompute.State.COMPLETED, domain.results.poll(2, TimeUnit.SECONDS).state());
-            synchronized (lock) {
-                assertArrayEquals(new int[]{1, 1}, closed); assertArrayEquals(new int[]{0, 1}, published);
-                assertEquals(2, ended.size()); assertNull(ended.getLast()); assertTrue(domain.failures.isEmpty());
-            }
-        }
-    }
-
-    @Test void actualForwardIncludesWaitingToReenterEngineDomain() throws Exception {
-        var domain = new Domain(); Object lock = new Object();
-        domain.waiting.add(new Scheduler.Work<>(new Object(), batch("a")));
-        try (var engine = loop(lock, domain, "1")) {
-            synchronized (lock) { engine.wake(); Thread.sleep(40); }
-            var result = domain.results.poll(2, TimeUnit.SECONDS);
-            assertNotNull(result); assertTrue(result.elapsedNanos() >= 40_000_000);
-            assertEquals(1_000_000, result.sample().planned().toNanos());
-        }
+    @Test void callbacksRunOutsideDomainLockAndCannotBlockCompute() throws Exception {
+        var policy = new Policy(false);
+        var entered = new CompletableFuture<Boolean>(); var release = new CountDownLatch(1);
+        policy.notices.add(() -> {
+            entered.complete(Thread.holdsLock(policy));
+            try { assertTrue(release.await(3, TimeUnit.SECONDS)); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new RuntimeException(error); }
+        });
+        policy.queue.add(work("forward"));
+        try (var loop = engine(policy, policy, "1")) {
+            loop.wake();
+            assertFalse(entered.get(2, TimeUnit.SECONDS));
+            assertEquals("forward", policy.finished.poll(2, TimeUnit.SECONDS));
+        } finally { release.countDown(); }
     }
 }

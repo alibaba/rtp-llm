@@ -207,6 +207,7 @@ final class PrefillGeneration implements AutoCloseable {
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
+                source.acknowledged();
                 if (source.stopAfter() == 1) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
                 else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(input.getTokenIds(input.getTokenIdsCount() - 1)).build());
                 stream.onCompleted();

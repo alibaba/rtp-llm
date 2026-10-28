@@ -41,48 +41,65 @@ Python async 只表达非阻塞等待，不代表任意 step 可以脱离 Runner
 
 ### 公共 Engine 与独立调度域
 
-RTP 和 vLLM 共用一个 Mock Engine 执行框架。复用请求数据、缓存机制、Forward 模型、输出、生命周期工具和指标；各自实现队列模型和调度策略。原生协议、配置及错误码确有差异时，在接入边界适配，不塞进 Scheduler。这个划分是 Mock 的实现目标，不宣称两个真实后端只有调度差异。
+RTP 和 vLLM 复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 Scheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
 
 ```text
-协议接入、校验、公共 Request
-            ↓
-RTP Scheduler / vLLM Scheduler
-队列、接纳、资源申请时机、抢占/恢复、组批
-            ↓
-公共 Forward：计算模型 → 模拟执行 → 本轮结果
-            ↓
-Scheduler 更新进度，决定下一轮或结束
-            ↓
-公共输出、终态记录和资源释放
+网络/控制线程 → submit / dependencyCompleted / finish
+                           ↓
+EngineLoop：维护到期与依赖 → Scheduler.schedule → Compute.forward
+                           ↑                         ↓
+                      下一轮调度 ← Scheduler.completed
+                                      ↓
+                         锁外发送输出/就绪/终态通知
 ```
 
-Forward 完成后回到 Scheduler。后续可能继续 Decode、执行下一块 Prefill、等待资源或结束请求，不能做成只向前走一次的流水线。
+每个 Engine 同时至多一个 Forward。初次和空闲后先调度；每轮计算结束后，结果交回 Scheduler 提交进度、检查有效性并决定继续或结束。公共 RequestState 保证终态与资源清理只发生一次，但不替调度器决定队列迁移。Scheduler 不持有执行器、计时线程或 EngineLoop，也不发送网络响应。
 
-| 公共机制 | Scheduler 决定的内容 |
+| 边界 | 职责 |
 | --- | --- |
-| Request 输入、进度和资源记录 | 内部队列种类、成员、顺序及状态转换 |
-| BlockPool、缓存匹配、租约、增长和释放 | 分配时机、容量不足处理、缓存发布及保留策略 |
-| ForwardBatch、计算公式、噪声和执行器 | 本轮请求、阶段、token 数和 batch 预算 |
-| 输出、停止模型、终态与清理工具 | 何时提交进度、重新入队、抢占或结束 |
-| 指标记录与快照结构 | 内部调度状态如何映射到公共观察语义 |
+| `submit(Input, Listener)` | 校验身份、接纳并登记请求，返回只读请求句柄。外部不能取得可变队列或修改请求进度。 |
+| `schedule()` | 检查预算与资源，调整内部队列，返回本轮 Work/ForwardBatch；没有可执行工作时返回空。 |
+| `completed(work, outcome)` / `failed(work, error)` | 提交本轮有效结果，决定后续队列和阶段完成，清理本轮资源引用。 |
+| `dependencyCompleted(request, result)` | 接收 KV 加载、生成许可、输出就绪、传输确认等明确事实，不把传输成功当作自动获准生成。 |
+| `finish` / `readReady` | 终止请求，或为已经就绪的数据取得短期读取引用；读取结束不等于收到远端传输确认。 |
+| `requests` / `queues` | 返回请求快照及调度器定义的统计，不暴露容器。 |
 
-调度域负责提交、取消、生成下一轮 batch、处理本轮完成、读取快照和关闭。公共 EngineLoop 只依赖 `schedule/completed/failed`，串行推进本轮执行；协议适配器不操纵内部队列。当前 RtpScheduler 集中持有请求、期限和容量等待任务，内部 P/D 策略只决定排队、资源申请时机与重新入队，不各建 RPC 服务或执行器。D 只在容量版本变化后重新申请；定时唤醒用于检查中断/期限。输出背压通过就绪回调唤醒。
+ForwardBatch 是本轮执行输入，不是 running 容器本身。它固定请求成员、本轮 token 数和执行身份；请求的持续状态由 Scheduler 保留。P 通常只执行一轮，D 在 running 中跨轮保留，不每轮回到 waiting。外部线程可在 Forward 期间经公共入口提交请求或依赖事实，但不能修改已经提交的 batch。
 
-公共 Request 保存一份事实状态，调度期间由 Scheduler 修改；公共执行器只接收本轮不可变描述并返回结果，不维护另一套队列状态。请求要区分输入总量、历史缓存命中、已完成 Prefill、已生成输出和本轮工作量。分块 Prefill 不能每轮都用 `inputTokens - hitCacheTokens` 作为本轮计算量，也不能把之前已算过的分块算成历史缓存命中。
+Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络发送。公共 EngineLoop 每 50ms 维护一次期限与外部容量变化，入队、依赖完成和执行完成也会立即唤醒；容量版本未变化时不反复尝试初始分配。没有可执行 batch 也必须处理取消、期限和传输结果，不能依赖下一次 Forward 才收尾。
 
-调度与本轮资源预留在同一串行边界完成。容量不足由策略决定等待、跳过、拒绝或抢占；没有入选的尝试不得泄漏新增预留。意外异常释放本轮新增资源，不能误释放请求原来持有的资源。执行中的 batch 拥有相应资源使用权，取消或抢占不能提前释放仍被该 batch 使用的块。
+通知按请求顺序、锁外执行。每个请求最多一个尚未处理完的输出；慢消费者只暂停自己的下一轮，不堵住其他请求的计算。接纳上限同时覆盖等待通知完成的请求，不能把它们搬到另一条无界队列。通知失败进入该请求的失败清理；终态通知等基础设施异常使 Engine 的后续状态读取明确报错。
 
-一个 batch 包含多个请求时，取消其中一个不应直接取消其他请求的 Forward。完成回调检查具体请求及本轮执行是否仍有效，取消请求不再提交输出；旧回调不能推进后来复用身份的请求。请求终态和资源释放使用公共机制保证只执行一次。
+批次取消按成员处理：取消成员不再提交结果，但资源引用保留到该 Forward 结束。只有全部成员终止或 Engine 关闭时才取消整个模拟执行。旧回调按执行对象和请求句柄核验，不能用复用的请求 ID 找到新请求继续推进。一次完成的 Forward 只记录一次耗时，计算量包含这轮实际执行的全部成员，输出量只计有效提交。
 
-### 队列观察与注入
+### 队列模型、观察与注入
 
-共享 Scheduler 的操作和观察契约，不向外暴露可变队列。一个实现可保存 batch/group，另一个可展开请求；不能用容器 `size()` 直接报告请求数。例如两个 batch 含 10 和 5 个请求，应报告 15 个等待请求。
+队列模型属于 Scheduler，不另建强制共享的 QueueModel 层。一个实现可以有独立 loading 队列，另一个可以把 loading 作为 waiting 成员的状态；抢占也可能回到 waiting 重新计算，而不是进入 swap。外部只通过操作和快照契约交互。公共请求事实需要逐步覆盖输入、缓存命中、已完成 Prefill、生成进度和本轮工作量；尚未实现分块 Prefill，不能把重复执行当作分块支持。
 
-公共入口表达提交请求、提交一组请求、取消请求和读取状态。外部不能直接对 waiting/running 容器执行 add/remove，也不能绕过 KV、传输和进度前置条件把请求塞进 running。注入通过正式提交入口完成校验、去重、登记和调度唤醒。容器可以在内部复用，但不强制两个策略采用同一容器或元素类型。
+当前 RTP 使用 FIFO waiting、持续 running 和请求上的容量/加载/输出/传输就绪状态。`max_context_batch_size`、`max_generate_batch_size` 控制 P/D 每批请求数，默认均为 1；`max_batch_tokens_size` 限制本轮 token 预算，0 表示当前 Mock 不额外限制；P 按完整输入长度准入，Compute 使用扣除命中后的长度，D 按本轮 verify token 数准入。P 初始分配遇到临时容量不足等待变化；D 初始分配也等待容量，已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP `GenerateStateMachine::handleRunning` 的行为。不是 vLLM 抢占/重算策略。
 
-统一按请求计数：`running` 是正在执行当前 Forward 的请求；`waiting` 是其余已接纳、尚未终止的请求，包括等待 KV、传输、下一轮、输出就绪，以及 P 计算完成后等待消费的请求。已请求终止、仍等待 Forward 释放资源的成员不计入这两个数，资源占用仍如实保留。公共 QueueSnapshot 从不可变请求快照统计，原生状态和指标使用同一口径，不按队列容器数量计数。
+按请求计数，不能直接使用 group/batch 容器的 size：
 
-批量提交与必须一起调度的 group 也要区分。前者可以逐项接纳，后者不能任意拆散；支持范围和部分失败规则在协议中明确。不先引入描述任意队列或组策略的配置语言。
+- `waiting`：等待计算准入或初始 KV 容量的请求。
+- `running`：已进入持续计算集合的请求，包含轮次之间等待本请求输出完成的 D；不等于此刻 Forward 的成员数。
+- `loading`：资源已预留，等待 KV 加载或生成许可的请求。
+- `ready`：P 计算阶段已完成，仍持有传输数据的请求。
+
+上述四类互斥，由 Scheduler 统计；终止但仍被执行引用的成员不计入四类，KV 占用继续保留。公共 QueueSnapshot 不再根据“不是 FORWARD 就是 waiting”推导。Mock 指标保留四类；原生状态接口只有 waiting/running，因此将 waiting、loading、ready 合并为原生 waiting，与任务列表的 is_waiting 一致，避免 Master 漏算已预留资源的请求。
+
+普通批量提交和不可拆分的 group 是不同契约。本批实现多个独立请求合并 Forward。现有原生 EnqueueBatch/EnqueueGroup 接口仍按成员独立准入并保留 group 元数据，不保证组内同轮计算；不可拆分 group 的调度语义尚未实现，不能据接口名宣称已经支持。注入只能走正式提交与依赖入口，不能跳过资源和传输前置条件。暂停、换出、释放 KV 后重算也不能混为一个 swap 队列；本批不实现这些尚未对齐的策略。
+
+### PD 数据就绪与资源生命周期
+
+PD 通过“数据就绪”和“传输完成”衔接。Scheduler 判断阶段是否完成、发布就绪通知并管理依赖；协议/传输组件负责 ALLOCATE、LOAD、GENERATE、网络读写和 ACK；公共引用机制保证资源不会提前释放。Compute 不在每轮完成后自动传输，分块 Prefill、加载命中和提前发起 LOAD 都不能依赖这一假设。
+
+P 完成 Forward 后退出计算集合，保留 KV 和请求期限。Read 期间额外取得读取引用，Read 返回仅表示本地交付结束；P 收到 D 的 LOAD ACK 后才提交传输完成并释放阶段资源。没有确认、传输失败或超时仍走失败清理，不发布成功缓存。释放 P KV 后，端到端 P RPC 仍可继续转发 D 输出。
+
+D 只有 KV 加载成功和生成许可均满足后才进入 Decode；Prefill-only 完成走独立通知，不伪造 D Forward。加载或输出失败通过同一请求句柄返回调度域。所有通知在没有计算工作的情况下也能推进；过期请求的晚到通知不能复活请求。
+
+不设公共 finished 调度队列。需要通知执行端清理状态的后端可维护完成 ID 集合；这不等于所有完成请求都进入一个额外流水线。
+
+对齐参考：本仓 `NormalEngine::step`、`FIFOScheduler`、`GenerateStateMachine`、P/D RPC；vLLM 设计参考固定的 [v0.10.1 V1 SchedulerInterface](https://github.com/vllm-project/vllm/blob/v0.10.1/vllm/v1/core/sched/interface.py) 和 [KVConnector](https://github.com/vllm-project/vllm/blob/v0.10.1/vllm/distributed/kv_transfer/kv_connector/v1/base.py)。vLLM 实际对齐版本、KV connector 和能力范围尚未选定，不能把接口边界验证当作 vLLM 行为验收。首版不模拟多批异步流水或逐层 KV 传输。
 
 ### JVM 放置、配置和生命周期
 
@@ -140,11 +157,11 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 ### 落地顺序与待定边界
 
 1. 从 LocalPrefill/DecodeAdmission 分离协议、调度域和公共执行组件，保留现有超时、取消、P/D 交接及清理行为；先让 RTP 使用公共 Engine。
-2. 把队列、容量等待、选批和完成后的重新入队一起移入 Scheduler，不能只抽 `advance()`。用第二种明确的调度行为验证边界，再按选定版本实现 vLLM 策略；当前单请求 FIFO 不等于完整 RTP/vLLM 调度。
+2. 把队列、容量等待、选批和完成后的重新入队一起移入 Scheduler，不能只抽 `advance()`。用第二种明确的调度行为验证边界，再按选定版本实现 vLLM 策略；当前 RTP 有界合批不等于完整 RTP/vLLM 调度。
 3. 将 Case 级接口与 Prometheus 查询迁移到 Python，保留实例协议、Java 指标产生及既有校验。迁移完成后删除旧查询服务和重复定义，不长期维护两条调用链。
 4. 接通 Engine 两种放置方式和发现更新；Client 等设计确定后单独实施。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
 
-waiting/running 的统一含义已落实。批量提交/group 约束、vLLM 对齐版本和能力范围，以及完整批处理策略仍需确定；本节不把示意方法固化为完整接口。
+本批落实公共 Scheduler 操作、私有队列、持续 running、有界多请求 Forward、部分批次取消和 PD 确认后释放。强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本及 connector 范围仍待确定。
 
 验收关注可观察行为：两种 JVM 放置下缩容数量和流量总量一致；共 JVM 停单实例不影响其他实例；不同队列容器报告相同请求数；batch 内取消不损伤其他请求；取消/抢占无 KV 泄漏或提前复用；每批 Forward 只记一次；退役实例的历史仍可查询；任一基础设施失败不产生虚假的整体 PASS。共享宿主的实际延迟可以不同，不承诺两种放置方式性能相同。
 
@@ -169,13 +186,13 @@ waiting/running 的统一含义已落实。批量提交/group 约束、vLLM 对�
 | `tests/`、各模块 `src/test/` | Python/跨语言集成与 Java 测试；探针不作为正式业务入口。 |
 | `scripts/` | 构建和检查入口。 |
 
-共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码；RtpTasks/RtpErrors 在边界转换输入、状态和错误码。RtpScheduler 不依赖 gRPC、protobuf 或 StreamObserver，内部 Prefill 策略在 FIFO 入选时分配 KV，Decode 策略在 ALLOCATE 时申请 KV、等待传输、逐轮轮转并按需增长。容量/输出等待都不占用 Forward。
+共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RtpTasks/RtpErrors 在边界转换输入、状态和错误码。RtpScheduler 无 gRPC/protobuf/执行器依赖，拥有 FIFO、持续 running、资源准入和执行结果提交。
 
-RequestState 是共享的请求进度、终态和资源清理机制。调度器决定何时申请和成功发布缓存；公共机制确保终态只通知一次、发布失败也尝试释放、取消请求不能再提交进度。Forward 持有资源使用权，终止请求不会提前释放仍被使用的块；EngineLoop 对执行对象做身份校验，晚到回调不能影响下一次执行。当前模拟 Forward 只有可取消计时，取消确认后同步回收使用权，不等待异步通知线程再回调。
+RequestState 是共享的请求进度、终态和资源清理机制。调度器决定何时申请和成功发布缓存；公共机制确保终态只通知一次、发布失败也尝试释放、取消请求不能再提交进度。Forward 持有资源使用权，终止请求不会提前释放仍被使用的块；EngineLoop 对执行对象做身份校验，晚到回调不能影响下一次执行。当前模拟 Forward 使用可取消计时；单成员取消保留整批执行，全部成员终止或关闭 Engine 时才取消计时并释放使用权。
 
-P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保留 KV，直到传输消费、取消或期限到达。D 的接入/传输与计算进度分开保存，完成后的 token/迭代数只由调度域推进。所有请求终态先清理资源、记录历史和指标，再通知协议适配器。
+P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保留 KV，直到 LOAD ACK、取消或期限到达；读取期间另持资源引用。D 的接入/传输与计算进度分开保存，完成后的 token/迭代数只由调度域推进。请求终态先清理资源、记录指标，再通知协议适配器记录原生历史和完成响应。历史通知异步，资源释放与历史可见之间可能有短暂间隔。
 
-当前仍是每轮一个请求，P FIFO 与 D 轮转均有不经过 RPC 的调度测试；原生 P/D 测试继续验证端到端行为。共享资源使用权测试覆盖同批成员的独立终止，但生产路径尚无多请求 Forward batch，不能据此宣称已经实现完整组批、部分批次取消、分块 Prefill 或 vLLM。公共状态目前只落实现有 P/D 所需的生成进度；这些能力接入时再增加实际需要的状态。
+当前生产路径支持多个独立请求合批，P/D 使用相同调度循环。测试覆盖持续 Decode、批内独立取消、临时容量等待、输出阻塞和 PD 确认边界；完整 group、分块 Prefill 和 vLLM 未实现。
 
 ## 构建与检查
 
@@ -325,7 +342,7 @@ environment:
       compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
 ```
 
-原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`、`max_context_batch_size=1`。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
+原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`；P/D 批量上限取 1–1024，默认 1。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
 
 RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：多模态、adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
 
@@ -333,9 +350,9 @@ RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token�
 
 - P 的 `GenerateStreamCall(max_new_tokens=1)` 走 LocalPrefill，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
 - 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillGeneration 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
-- D 的 DecodeAdmission 管理资源和状态，只有 GENERATE 后进入计算队列；一轮一个执行槽、轮转请求，尚不合并动态 batch。每轮增长 KV、执行公式等待后才提交输出；临时容量不足等待 allocation generation 变化，永久不足返回 602。
+- D 的 DecodeAdmission 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
 
-P 的内部 `PrefillTransfer.start()` 注册活跃来源并复用 LocalPrefill 计算。Forward 完成后 KV 仍由请求持有；只有网络 `Read` 成功交付后才完成 P 并释放。正式服务**只保留 Read RPC，没有外部 Prepare RPC**；测试从包内 start 建立来源或调用正式生成链路，不为探针注册额外协议。
+P 的内部 `PrefillTransfer.start()` 注册活跃来源并复用 LocalPrefill 计算。Forward 完成后 KV 仍由请求持有；网络 `Read` 交付结束后仍保留来源，P 收到 D 的 LOAD ACK 后才完成计算阶段并释放。正式服务**只保留 Read RPC，没有外部 Prepare RPC**；测试从包内 start 建立来源或调用正式生成链路，不为探针注册额外协议。
 
 D 的 LOAD 从 peer_addrs 对应 P 发起真实网络 Read，校验 client/request 身份、完整 prompt、block size 和单 Reader 所有权；不能用缓存中存在的 key 冒充活跃来源。返回元数据为 block size、输入长度、完整块 cache keys 和 stop_after；不复制 KV 张量，不模拟 RDMA/TCP cache-store 或带宽。D 验证成功且预算有效后才能确认 LOAD，传入 KV 不算 D 历史命中，也不提前提交为缓存。
 
@@ -419,11 +436,11 @@ EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册�
 | mock_engine_requests_started_total | Counter | 校验并接纳后加一，入口拒绝不计。 |
 | mock_engine_requests_finished_total | Counter，outcome=success/cancelled/timeout/error | 每个已接纳请求唯一终态，节点关闭计 error，不代替 Client 成功率。 |
 | mock_engine_cache_lookup_tokens_total / mock_engine_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
-| mock_engine_forward_tokens_total | Counter，kind=input/compute/output | 成功完成 Forward 的 token；P 为输入、输入减命中、1；D 的 input/compute 为验证数，output 为实际提交数。取消的 Forward 不补成功计算。 |
-| rtp_llm_model_forward_us | Gauge | 最近一个完成 Forward 的实际耗时，微秒；公共执行层收到通知并取得调度域锁后停止计时。 |
+| mock_engine_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
+| rtp_llm_model_forward_us | Gauge | 最近一个完成 Forward 的实际耗时，微秒；计时到执行完成通知，不包含等待调度域锁和结果提交。 |
 | mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式、scale 和噪声。 |
 | mock_engine_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
-| mock_engine_requests | Gauge，state=waiting/running | 当前等待/执行数。 |
+| mock_engine_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
 | mock_engine_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 含可驱逐缓存，不等于 free。 |
 
 累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `interfaces/metrics.py` 实现，直接调用本次托管 Prometheus：

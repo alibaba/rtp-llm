@@ -1,55 +1,60 @@
 package org.flexlb.mock.engine.rtp;
 
-import io.grpc.*;
-import java.util.concurrent.*;
+import io.grpc.Status;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.api.model.Types.Role;
-import org.flexlb.mock.engine.RequestFailure;
+import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 
-/** LocalGenerate adapter; the scheduler owns request progress and KV through completion or transfer. */
+/** Native LocalGenerate boundary. Scheduling and network delivery use separate execution contexts. */
 final class LocalPrefill implements AutoCloseable {
     static final int LIMIT = RtpScheduler.LIMIT;
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
     private final RtpConfig config;
-    private final RtpScheduler scheduler;
-    private final ExecutorService replies = Executors.newVirtualThreadPerTaskExecutor();
+    private final EngineLoop engine;
     private final TaskHistory history = new TaskHistory();
 
     LocalPrefill(RtpConfig config, DeviceCache cache) {
-        this.config = config; scheduler = new RtpScheduler(this, config, cache);
+        this.config = config;
+        engine = new EngineLoop(this, new RtpScheduler(this, config, cache), config.compute(), config.role(), config.id());
     }
-    final class Session implements RtpScheduler.Listener {
+
+    final class Session implements Scheduler.Listener {
         final GenerateInputPB input;
         final boolean retained;
         final CompletableFuture<Result> result = new CompletableFuture<>();
         final CompletableFuture<Result> termination = new CompletableFuture<>();
-        RtpScheduler.Request request;
+        Scheduler.Request request;
+
         Session(GenerateInputPB input, boolean retained) { this.input = input; this.retained = retained; }
         CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
         void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled local generation"), 0); }
         void preempt() { finish(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429); }
         void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
-        private void finish(Status status, long code) { scheduler.finish(request, RtpErrors.scheduling(status, code)); }
-        private Result success(RtpScheduler.Request request) {
-            return new Result(LocalResponse.oneToken(input, request.reused, System.nanoTime() - request.input.started()), Status.OK, 0);
+        private void finish(Status status, long code) { engine.finish(request, RtpErrors.scheduling(status, code)); }
+        private Result success(Scheduler.Request request) {
+            return new Result(LocalResponse.oneToken(input, request.reused(), System.nanoTime() - request.input().started()), Status.OK, 0);
         }
-        @Override public void output(RtpScheduler.Request request, int committed, boolean finished) {
-            if (retained) { var ready = success(request); replies.execute(() -> result.complete(ready)); }
+        @Override public void output(Scheduler.Request request, Scheduler.Output output) {
+            if (retained) result.complete(success(request));
         }
-        @Override public void terminal(RtpScheduler.Request request, RequestFailure failure) {
+        @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
             history.add(RtpTasks.finished(request, failure));
             var ended = failure == null ? success(request) : new Result(null, RtpErrors.status(failure), RtpErrors.code(failure));
-            replies.execute(() -> { result.complete(ended); termination.complete(ended); });
+            result.complete(ended);
+            termination.complete(ended);
         }
     }
+
     Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
-    synchronized Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
+    Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
     synchronized Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
         validate(input, retained);
         var session = new Session(input, retained);
         try {
-            session.request = scheduler.submit(RtpTasks.input(input, Long.toString(input.getRequestId()), System.nanoTime(),
+            session.request = engine.submit(RtpTasks.input(input, Long.toString(input.getRequestId()), System.nanoTime(),
                 rpcDeadline, retained, config.blockSize()), session);
         } catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
         return session;
@@ -67,19 +72,19 @@ final class LocalPrefill implements AutoCloseable {
             throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
     }
 
-    synchronized void requireReady(Session session) {
-        try { scheduler.requireReady(session.request); }
+    RequestState.Use readReady(Session session) {
+        try { return engine.readReady(session.request); }
         catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
     }
-    synchronized void consume(Session session, Runnable deliver) {
-        try { scheduler.consume(session.request, deliver); }
+    void transferred(Session session) {
+        try { engine.dependencyCompleted(session.request, Scheduler.Signal.TRANSFER_ACKNOWLEDGED); }
         catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
     }
     synchronized TaskHistory.Snapshot snapshot(long latestFinished) {
-        var counts = scheduler.queues();
-        return history.snapshot(latestFinished, scheduler.requests().stream().map(r -> RtpTasks.task(r).build()).toList(),
-            counts.waiting(), counts.running());
+        var counts = engine.queues();
+        return history.snapshot(latestFinished, engine.requests().stream().map(r -> RtpTasks.task(r).build()).toList(),
+            counts.waiting() + counts.loading() + counts.ready(), counts.running());
     }
-    String scrapeMetrics() { return scheduler.scrapeMetrics(); }
-    @Override public synchronized void close() { scheduler.close(); replies.shutdown(); }
+    String scrapeMetrics() { return engine.scrapeMetrics(); }
+    @Override public void close() { engine.close(); }
 }

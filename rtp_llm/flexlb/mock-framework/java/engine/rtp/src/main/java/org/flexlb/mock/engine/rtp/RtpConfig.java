@@ -15,7 +15,7 @@ import org.flexlb.mock.api.model.StoppingSpec;
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
-                        int tpSize, int loadTimeoutMs, JsonNode business, ComputeModel compute, DecodeStepModel decodeModel, StoppingModel stoppingModel) {
+                        int maxContextBatchSize, int maxGenerateBatchSize, int tpSize, int loadTimeoutMs, JsonNode business, ComputeModel compute, DecodeStepModel decodeModel, StoppingModel stoppingModel) {
     private static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -26,7 +26,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || blockSize < 1 || deviceBlocks < 1 || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || maxSeqLen < 1 || maxBatchTokens < 0 || tpSize < 1 || loadTimeoutMs < 1)
+                || maxSeqLen < 1 || maxBatchTokens < 0 || maxContextBatchSize < 1 || maxGenerateBatchSize < 1 || tpSize < 1 || loadTimeoutMs < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
         Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(compute); Objects.requireNonNull(decodeModel); Objects.requireNonNull(stoppingModel);
@@ -59,8 +59,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         } catch (IllegalArgumentException error) { throw new IllegalArgumentException("Invalid device_eviction_policy: expected lru, lfu, or fifo", error); }
         if (nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE) != 1 || nativeInt(config, "dp_rank", 0, 0, Integer.MAX_VALUE) != 0)
             throw new IllegalArgumentException("RTP node currently supports dp_size=1, dp_rank=0 only");
-        if (nativeInt(config, "max_context_batch_size", 1, 1, Integer.MAX_VALUE) != 1)
-            throw new IllegalArgumentException("Local prefill currently supports max_context_batch_size=1 only");
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
         var compute = ComputeModel.fromJson(config.path("compute"));
         if (role == Role.prefill && config.has("decode")) throw new IllegalArgumentException("decode model belongs in Decode config");
@@ -74,6 +72,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
+            nativeInt(config, "max_context_batch_size", 1, 1, RtpScheduler.LIMIT),
+            nativeInt(config, "max_generate_batch_size", 1, 1, RtpScheduler.LIMIT),
             nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE),
             loadTimeout(config), config, compute, decode, stopping);
     }
@@ -88,7 +88,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("load_cache_timeout_ms", loadTimeoutMs).put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("dp_size", 1).put("dp_rank", 0).put("tp_size", tpSize);
-        result.put("max_context_batch_size", 1).put("local_request_limit", LocalPrefill.LIMIT);
+        result.put("max_context_batch_size", maxContextBatchSize).put("max_generate_batch_size", maxGenerateBatchSize).put("local_request_limit", LocalPrefill.LIMIT);
         result.set("config", business()); result.set("compute", compute.effectiveConfiguration());
         if (role == Role.prefill) result.set("generation", MODELS_JSON.valueToTree(stoppingModel.configuration()));
         else result.set("decode", MODELS_JSON.valueToTree(decodeModel.configuration()));

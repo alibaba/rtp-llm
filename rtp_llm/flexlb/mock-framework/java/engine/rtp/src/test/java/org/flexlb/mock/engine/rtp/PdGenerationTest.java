@@ -402,13 +402,16 @@ class PdGenerationTest {
         }
     }
 
-    @Test void temporaryGrowthPressureWaitsAndResumesOnRelease() throws Exception {
+    @Test void growthPressureFailsLikeRtpAndCannotResumeAfterRelease() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = d.node.cache().acquire(2, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 2500, true))) {
             call.output(1, false, 1); call.output(2, false, 1);
-            assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS)); holder.close();
-            for (int i = 3; i <= 6; i++) call.output(i, i == 6, 1);
-            assertEquals("completed", call.next()); assertEquals(8, d.status().getAvailableKvCache());
+            assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            assertEquals(4, d.status().getAvailableKvCache()); holder.close();
+            assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS));
+            assertEquals(8, d.status().getAvailableKvCache());
+            assertTrue(d.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertEquals(1, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
         }
     }
 
@@ -421,11 +424,15 @@ class PdGenerationTest {
     }
 
     @Test void deadlineDuringCapacityWaitReleasesRequestAndDoesNotWakeIntoGeneration() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cache().acquire(2, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cache().acquire(3, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 300, true))) {
-            call.output(1, false, 1); call.output(2, false, 1); call.error(Status.Code.DEADLINE_EXCEEDED);
-            await(() -> d.status().getAvailableKvCache() == 4); holder.close();
-            await(() -> d.status().getAvailableKvCache() == 8); assertEquals(1, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            await(() -> d.status().getWaitingQueryLen() == 1);
+            call.error(Status.Code.DEADLINE_EXCEEDED);
+            await(() -> d.status().getWaitingQueryLen() == 0); holder.close();
+            await(() -> d.status().getAvailableKvCache() == 8);
+            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(0, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS));
         }
     }
 

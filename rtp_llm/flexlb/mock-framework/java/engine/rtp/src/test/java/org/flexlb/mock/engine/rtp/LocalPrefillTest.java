@@ -93,9 +93,12 @@ class LocalPrefillTest {
         try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config, cache)) {
             assertEquals(Status.Code.INTERNAL, engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
-            var owner = cache.acquire(6, List.of()).lease();
-            var rejected = engine.submit(input(2, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
-            assertEquals(602, rejected.engineCode()); owner.close();
+            try (var owner = cache.acquire(6, List.of()).lease()) {
+                var waiting = engine.submit(input(2, 0, true)).completion().toCompletableFuture();
+                assertFalse(waiting.isDone()); assertEquals(1, engine.snapshot(0).waiting());
+                owner.close();
+                assertEquals(Status.Code.INTERNAL, waiting.get(2, TimeUnit.SECONDS).status().getCode());
+            }
             assertEquals(Status.Code.INTERNAL, engine.submit(input(3, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
         }

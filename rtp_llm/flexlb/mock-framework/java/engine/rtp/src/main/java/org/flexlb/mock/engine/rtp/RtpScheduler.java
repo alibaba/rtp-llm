@@ -1,7 +1,6 @@
 package org.flexlb.mock.engine.rtp;
 
 import java.util.*;
-import java.util.concurrent.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.*;
@@ -10,276 +9,370 @@ import org.flexlb.mock.metrics.EngineMetrics;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.RequestState.Phase.*;
 
-/** RTP scheduling domains. Native frames, RPC observers and transfer clients stay in adapters. */
-final class RtpScheduler implements Scheduler<RtpScheduler.Request>, AutoCloseable {
+/** RTP queue policy. No RPC objects, executors or compute loop live here. */
+final class RtpScheduler implements Scheduler {
     static final int LIMIT = 1024;
-    record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
-                 long started, long deadline, List<Long> keys, boolean reuse, boolean retained) {
-        Input {
-            if (identity == null || identity.isBlank() || tokens < 1 || maxNewTokens < 1)
-                throw new IllegalArgumentException("Invalid scheduling input");
-            keys = List.copyOf(keys);
-        }
-    }
-    interface Listener {
-        default boolean writable() { return true; }
-        default boolean cancelled() { return false; }
-        default void allocated(Request request) {}
-        void output(Request request, int committed, boolean finished);
-        void terminal(Request request, RequestFailure failure);
-    }
-    final class Request {
-        final Input input;
-        final Listener listener;
-        final RequestState state;
-        DeviceCache.Lease lease;
-        RequestState.Use use;
-        ScheduledFuture<?> timeout;
-        Future<?> capacity;
-        int reused, stopAfter;
-        long stepStarted;
-        DecodeStepModel.Step step;
-        boolean generating;
-        Request(Input input, Listener listener) {
-            this.input = input; this.listener = listener;
-            state = new RequestState(input.deadline(), failure -> finished(this, failure));
-        }
-        RequestState.Snapshot snapshot() { return state.snapshot(); }
-    }
-    private interface Policy {
-        void submit(Request request);
-        Work<Request> next();
-        void completed(Request request, SimulatedCompute.Outcome outcome);
-        void remove(Request request);
-    }
     private final Object lock;
     private final RtpConfig config;
     private final DeviceCache cache;
-    private final Map<String, Request> active = new LinkedHashMap<>();
-    private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
-        Thread.ofPlatform().daemon().name("mock-request-deadline").factory());
-    private final ExecutorService capacity = Executors.newVirtualThreadPerTaskExecutor();
-    private final EngineLoop<Request> loop;
     private final EngineMetrics metrics;
-    private final Policy policy;
+    private final Map<String, Entry> active = new LinkedHashMap<>();
+    private final Set<Entry> owned = new LinkedHashSet<>();
+    private final ArrayDeque<Entry> waiting = new ArrayDeque<>();
+    private final Set<Entry> running = new LinkedHashSet<>();
+    private final Set<Entry> notifications = new LinkedHashSet<>();
+    private Work executing;
+    private long batchSequence;
     private boolean closed;
 
+    private final class Entry implements Request {
+        final Input input;
+        final Listener listener;
+        final RequestState state;
+        final ArrayDeque<Notice> notices = new ArrayDeque<>();
+        DeviceCache.Lease lease;
+        int reused, stopAfter;
+        long stepStarted, attemptedGeneration = Long.MIN_VALUE;
+        boolean loaded, generating, outputPending, delivering, readStarted;
+        DecodeStepModel.Step nextStep;
+
+        Entry(Input input, Listener listener) {
+            this.input = input;
+            this.listener = listener;
+            this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
+        }
+        RtpScheduler owner() { return RtpScheduler.this; }
+        @Override public Input input() { return input; }
+        @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
+        @Override public int reused() { synchronized (lock) { return reused; } }
+        @Override public long stepStarted() { synchronized (lock) { return stepStarted; } }
+        @Override public boolean running() { synchronized (lock) { return !state.terminating() && running.contains(this); } }
+        @Override public boolean allocated() { synchronized (lock) { return lease != null; } }
+    }
+    private record Member(Entry request, RequestState.Use use, DecodeStepModel.Step step) {}
+    private record Batch(List<Member> members) {}
+    private record Notice(Runnable action, boolean terminal) {}
+
     RtpScheduler(Object lock, RtpConfig config, DeviceCache cache) {
-        this.lock = lock; this.config = config; this.cache = cache;
-        policy = config.role() == Role.prefill ? new Prefill() : new Decode();
-        loop = new EngineLoop<>(lock, this, config.compute(), config.role(), config.id());
-        metrics = new EngineMetrics(config.role().name(), this::metricState);
-        deadlines.setRemoveOnCancelPolicy(true);
+        this.lock = Objects.requireNonNull(lock);
+        this.config = Objects.requireNonNull(config);
+        this.cache = Objects.requireNonNull(cache);
+        this.metrics = new EngineMetrics(config.role().name(), this::metricState);
     }
-    Request submit(Input input, Listener listener) {
-        synchronized (lock) {
-            if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
-            if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
-            if (active.size() >= LIMIT) throw new RequestFailure(OVERLOADED, "Mock request limit reached");
-            var request = new Request(input, Objects.requireNonNull(listener));
-            active.put(input.identity(), request); metrics.started();
-            if (input.deadline() != Long.MAX_VALUE)
-                request.timeout = deadlines.schedule(() -> finish(request, new RequestFailure(TIMEOUT, "Request budget expired")),
-                    Math.max(0, input.deadline() - System.nanoTime()), TimeUnit.NANOSECONDS);
-            policy.submit(request); loop.wake();
-            return request;
+
+    @Override public Request submit(Input input, Listener listener) {
+        if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
+        if ((long) input.tokens() + (prefill() ? 1 : input.maxNewTokens()) > config.maxSeqLen()
+                || prefill() && config.maxBatchTokens() > 0 && input.tokens() > config.maxBatchTokens())
+            throw new RequestFailure(INVALID, "Request exceeds scheduling limits");
+        if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
+        if (owned.size() >= LIMIT) throw new RequestFailure(OVERLOADED, "Request/delivery limit reached");
+        var entry = new Entry(input, Objects.requireNonNull(listener));
+        active.put(input.identity(), entry);
+        owned.add(entry);
+        metrics.started();
+        if (prefill()) waiting.addLast(entry);
+        else entry.state.phase(RequestState.Phase.CAPACITY);
+        return entry;
+    }
+
+    @Override public void dependencyCompleted(Request handle, Dependency dependency) {
+        var entry = entry(handle);
+        if (entry.state.terminating()) return;
+        if (entry.state.expired()) { finish(entry, new RequestFailure(TIMEOUT, "Dependency arrived after deadline")); return; }
+        if (dependency instanceof Loaded loaded) {
+            if (prefill() || entry.lease == null || entry.loaded || entry.generating || loaded.stopAfter() > entry.input.maxNewTokens())
+                throw new RequestFailure(INVALID, "Unexpected KV load completion");
+            entry.loaded = true;
+            entry.stopAfter = loaded.stopAfter();
+            entry.state.phase(TRANSFER);
+            return;
+        }
+        switch ((Signal) dependency) {
+            case GENERATE -> {
+                if (prefill() || !entry.loaded || entry.generating)
+                    throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
+                entry.generating = true;
+                entry.state.transferred(1);
+                if (entry.stopAfter == 1) emit(entry, 1, true);
+                else { entry.state.phase(QUEUED); waiting.addLast(entry); }
+            }
+            case PREFILL_COMPLETE -> {
+                if (prefill() || !entry.loaded || entry.generating || entry.stopAfter != 1)
+                    throw new RequestFailure(INVALID, "Unexpected Prefill-only completion");
+                entry.state.transferred(1);
+                finish(entry, null);
+            }
+            case TRANSFER_ACKNOWLEDGED -> {
+                if (!prefill() || !entry.input.retained() || !entry.readStarted || entry.state.snapshot().phase() != READY)
+                    throw new RequestFailure(INVALID, "Transfer acknowledgement without a readable Prefill source");
+                finish(entry, null);
+            }
+            case OUTPUT_WRITABLE -> { /* The next scheduling pass reads the consumer's readiness. */ }
         }
     }
-    void generate(Request request, int stopAfter) {
-        synchronized (lock) {
-            if (!(policy instanceof Decode decode) || request.state.terminating() || request.lease == null || request.generating
-                    || stopAfter < 1 || stopAfter > request.input.maxNewTokens())
-                throw new RequestFailure(INVALID, "Decode cannot start before resource and transfer readiness");
-            if (request.listener.cancelled()) { finish(request, new RequestFailure(CANCELLED, "Output consumer closed")); return; }
-            request.generating = true; request.stopAfter = stopAfter; request.state.transferred(1);
-            if (stopAfter == 1) {
-                try { request.listener.output(request, 1, true); finish(request, null); }
-                catch (RuntimeException error) { finish(request, new RequestFailure(CANCELLED, "Output consumer closed", error)); }
-            } else { request.state.phase(QUEUED); decode.ready.addLast(request); loop.wake(); }
-        }
-    }
-    void resume(Request request) {
-        synchronized (lock) {
-            if (policy instanceof Decode decode && !request.state.terminating() && request.snapshot().phase() == OUTPUT) {
-                request.state.phase(QUEUED); decode.ready.addLast(request); loop.wake();
+
+    @Override public void maintain() {
+        for (var entry : List.copyOf(active.values())) {
+            if (!live(entry)) continue;
+            if (!prefill() && entry.lease == null) {
+                var failure = acquire(entry);
+                if (failure == null) {
+                    entry.state.phase(LOADING);
+                    enqueue(entry, () -> { if (liveForDelivery(entry)) entry.listener.allocated(entry); }, false);
+                } else if (failure == DeviceCache.Failure.PERMANENT) {
+                    finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode allocation exceeds capacity"));
+                }
             }
         }
     }
-    void consume(Request request, Runnable deliver) {
-        synchronized (lock) {
-            requireReady(request); deliver.run(); finish(request, null);
+
+    @Override public Work schedule() {
+        if (closed) return null;
+        if (executing != null) throw new IllegalStateException("Forward already in flight");
+        int limit = prefill() ? config.maxContextBatchSize() : config.maxGenerateBatchSize();
+        long budget = config.maxBatchTokens() > 0 ? config.maxBatchTokens() : Long.MAX_VALUE;
+        var selected = new ArrayList<Entry>();
+        if (!prefill()) {
+            for (var entry : List.copyOf(running)) {
+                if (selected.size() >= limit) break;
+                int tokens = workTokens(entry);
+                if (tokens > 0 && tokens <= budget && reserve(entry)) { selected.add(entry); budget -= tokens; }
+            }
         }
-    }
-    void requireReady(Request request) {
-        synchronized (lock) {
-            if (request.state.terminating() || request.snapshot().phase() != READY || request.state.expired())
-                throw new RequestFailure(INVALID, "Prefill transfer data is no longer owned");
+        int queued = waiting.size();
+        while (queued-- > 0 && selected.size() < limit && (prefill() || running.size() < limit)) {
+            var entry = waiting.removeFirst();
+            if (!live(entry)) continue;
+            int tokens = workTokens(entry);
+            if (tokens <= 0 || tokens > budget || !reserve(entry)) {
+                if (!entry.state.terminating()) waiting.addLast(entry);
+                continue;
+            }
+            running.add(entry);
+            selected.add(entry);
+            budget -= tokens;
         }
-    }
-    void finish(Request request, RequestFailure failure) {
-        synchronized (lock) {
-            if (request.state.terminating()) return;
-            request.state.finish(failure);
-            policy.remove(request);
-            loop.cancel(request); // shortcut: RTP Work owns one request; a shared-batch policy must cancel the batch only when all members stop.
-            loop.wake();
+        if (selected.isEmpty()) return null;
+        var members = new ArrayList<Member>();
+        var items = new ArrayList<ForwardBatch.Request>();
+        for (var entry : selected) {
+            var progress = entry.state.snapshot();
+            int tokens = prefill() ? entry.input.tokens() - entry.reused : entry.nextStep.verifyTokens();
+            items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
+                prefill() ? 1 : entry.input.maxNewTokens(), progress.generated(), tokens, entry.input.priority(), List.of()));
+            members.add(new Member(entry, entry.state.forward(), entry.nextStep));
+            entry.stepStarted = System.nanoTime();
         }
+        var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
+        executing = new Work(new Batch(List.copyOf(members)), batch);
+        return executing;
     }
-    private void finished(Request request, RequestFailure failure) {
-        if (request.timeout != null) request.timeout.cancel(false);
-        if (request.capacity != null) request.capacity.cancel(true);
-        active.remove(request.input.identity(), request);
-        policy.remove(request);
+
+    private int workTokens(Entry entry) {
+        if (!live(entry) || entry.outputPending) return 0;
+        if (!entry.listener.writable()) { entry.state.phase(OUTPUT); return 0; }
+        if (prefill()) return entry.input.tokens();
+        var progress = entry.state.snapshot();
+        if (entry.nextStep == null)
+            entry.nextStep = config.decodeModel().sample(Long.toString(entry.input.requestId()), progress.iterations(), entry.stopAfter - progress.generated());
+        if (config.maxBatchTokens() > 0 && entry.nextStep.verifyTokens() > config.maxBatchTokens()) {
+            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode step exceeds batch token budget"));
+            return 0;
+        }
+        return entry.nextStep.verifyTokens();
+    }
+
+    private boolean reserve(Entry entry) {
+        if (prefill()) {
+            var failure = acquire(entry);
+            if (failure == DeviceCache.Failure.PERMANENT)
+                finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Prefill allocation exceeds capacity"));
+            return failure == null;
+        }
+        int demand = blocks(Math.addExact(Math.addExact(entry.input.tokens(), entry.state.snapshot().generated()), entry.nextStep.proposedTokens()));
+        var failure = entry.lease.growTo(Math.max(demand, entry.lease.blocks()));
+        if (failure != null) {
+            // RTP running streams fail KV growth; only admission waits for capacity.
+            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode KV growth failed: " + failure));
+            return false;
+        }
+        entry.state.phase(RUNNING);
+        return true;
+    }
+
+    @Override public void completed(Work work, SimulatedCompute.Outcome outcome) {
+        var batch = completedBatch(work);
+        long input = 0, computed = 0, output = 0;
+        try {
+            for (var member : batch.members()) {
+                var entry = member.request();
+                input += prefill() ? entry.input.tokens() : member.step().verifyTokens();
+                computed += prefill() ? entry.input.tokens() - entry.reused : member.step().verifyTokens();
+                if (!live(entry)) continue;
+                if (outcome.state() != SimulatedCompute.State.COMPLETED) {
+                    finish(entry, new RequestFailure(CANCELLED, "Forward cancelled"));
+                    continue;
+                }
+                int committed = prefill() ? 1 : Math.min(member.step().committedTokens(), entry.stopAfter - entry.state.snapshot().generated());
+                entry.state.commit(committed, outcome.elapsedNanos());
+                entry.nextStep = null;
+                output += committed;
+                boolean done = prefill() || entry.state.snapshot().generated() >= entry.stopAfter;
+                if (prefill()) { running.remove(entry); entry.state.phase(READY); }
+                emit(entry, committed, done);
+            }
+            if (outcome.state() == SimulatedCompute.State.COMPLETED)
+                metrics.forwardCompleted(outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output);
+        } finally { batch.members().forEach(member -> member.use().close()); }
+    }
+
+    @Override public void failed(Work work, RuntimeException error) {
+        var batch = completedBatch(work);
+        var failure = error instanceof RequestFailure known ? known : new RequestFailure(INTERNAL, "Forward failed", error);
+        try { batch.members().forEach(member -> finish(member.request(), failure)); }
+        finally { batch.members().forEach(member -> member.use().close()); }
+    }
+    @Override public boolean cancelled(Work work) {
+        return work == executing && ((Batch) work.owner()).members().stream().allMatch(member -> member.request().state.terminating());
+    }
+    private Batch completedBatch(Work work) {
+        if (work != executing) throw new IllegalStateException("Stale/foreign Forward completion");
+        executing = null;
+        return (Batch) work.owner();
+    }
+
+    private void emit(Entry entry, int committed, boolean done) {
+        var snapshot = entry.state.snapshot();
+        var output = new Output(snapshot.generated(), snapshot.iterations(), committed, done);
+        entry.outputPending = true;
+        if (!prefill()) entry.state.phase(OUTPUT);
+        enqueue(entry, () -> {
+            if (!liveForDelivery(entry)) return;
+            entry.listener.output(entry, output);
+            synchronized (lock) {
+                entry.outputPending = false;
+                if (!live(entry)) return;
+                if (done && !entry.input.retained()) finish(entry, null);
+                else if (!prefill()) entry.state.phase(RUNNING);
+            }
+        }, false);
+    }
+
+    @Override public RequestState.Use readReady(Request request) {
+        var entry = entry(request);
+        if (!prefill() || entry.state.terminating() || entry.state.expired() || entry.state.snapshot().phase() != READY)
+            throw new RequestFailure(INVALID, "Prefill transfer data is not ready or no longer owned");
+        entry.readStarted = true;
+        return entry.state.pin();
+    }
+    @Override public void finish(Request request, RequestFailure failure) {
+        var entry = entry(request);
+        if (entry.state.terminating()) return;
+        waiting.remove(entry);
+        running.remove(entry);
+        entry.state.finish(failure);
+    }
+    private void terminal(Entry entry, RequestFailure failure) {
+        active.remove(entry.input.identity(), entry);
         metrics.finished(failure == null ? EngineMetrics.Outcome.success : switch (failure.reason()) {
             case CANCELLED -> EngineMetrics.Outcome.cancelled;
             case TIMEOUT -> EngineMetrics.Outcome.timeout;
             default -> EngineMetrics.Outcome.error;
         });
-        request.listener.terminal(request, failure);
+        enqueue(entry, () -> {
+            try { entry.listener.terminal(entry, failure); }
+            finally { synchronized (lock) { owned.remove(entry); } }
+        }, true);
     }
-    List<Request> requests() { synchronized (lock) { return List.copyOf(active.values()); } }
-    QueueSnapshot queues() { synchronized (lock) { return QueueSnapshot.of(active.values().stream().map(Request::snapshot).toList()); } }
-    String scrapeMetrics() { return metrics.scrape(); }
-    private EngineMetrics.State metricState() {
-        synchronized (lock) {
-            var counts = queues(); var kv = cache.snapshot(0, false); long size = config.blockSize();
-            return new EngineMetrics.State(counts.waiting(), counts.running(), kv.totalBlocks() * size,
-                kv.availableBlocks() * size, kv.freeBlocks() * size, kv.heldBlocks() * size);
+    private void enqueue(Entry entry, Runnable notification, boolean terminal) {
+        // At most admission, one output, and terminal can be pending for a request.
+        if (entry.notices.size() >= 3) throw new IllegalStateException("Request notification overflow");
+        entry.notices.addLast(new Notice(notification, terminal));
+        notifications.add(entry);
+    }
+    @Override public List<Runnable> takeNotifications() {
+        var result = new ArrayList<Runnable>();
+        for (var entry : List.copyOf(notifications)) {
+            if (entry.delivering) continue;
+            notifications.remove(entry);
+            var notification = entry.notices.removeFirst();
+            entry.delivering = true;
+            result.add(() -> {
+                try { notification.action().run(); }
+                catch (RuntimeException error) {
+                    synchronized (lock) {
+                        if (notification.terminal()) throw error;
+                        finish(entry, new RequestFailure(CANCELLED, "Request consumer failed", error));
+                    }
+                } finally {
+                    synchronized (lock) {
+                        entry.delivering = false;
+                        if (!entry.notices.isEmpty()) notifications.add(entry);
+                    }
+                }
+            });
         }
+        return result;
     }
+
+    private boolean liveForDelivery(Entry entry) { synchronized (lock) { return live(entry); } }
+    private boolean live(Entry entry) {
+        if (entry.state.terminating()) return false;
+        if (entry.state.expired()) finish(entry, new RequestFailure(TIMEOUT, "Request budget expired"));
+        else if (entry.listener.cancelled()) finish(entry, new RequestFailure(CANCELLED, "Output consumer closed"));
+        return !entry.state.terminating();
+    }
+    private Entry entry(Request request) {
+        if (!(request instanceof RtpScheduler.Entry entry) || entry.owner() != this)
+            throw new IllegalArgumentException("Foreign request handle");
+        return entry;
+    }
+    private boolean prefill() { return config.role() == Role.prefill; }
     private int blocks(int tokens) { return (int) (((long) tokens + config.blockSize() - 1) / config.blockSize()); }
-    private DeviceCache.Failure acquire(Request request, boolean reuse) {
-        int matched = Math.min(request.input.keys().size(), (request.input.tokens() - 1) / config.blockSize());
-        var admission = cache.acquire(blocks(request.input.tokens()), reuse ? request.input.keys().subList(0, matched) : List.of());
+    private DeviceCache.Failure acquire(Entry entry) {
+        if (entry.lease != null) return null;
+        long generation = cache.allocationGeneration();
+        if (entry.attemptedGeneration == generation) return DeviceCache.Failure.RETRYABLE;
+        entry.attemptedGeneration = generation;
+        boolean reuse = config.reuseCache() && config.deviceCache() && entry.input.reuse()
+            && (prefill() || !config.disableDecodeFirstReuse());
+        int matched = Math.min(entry.input.keys().size(), (entry.input.tokens() - 1) / config.blockSize());
+        var admission = cache.acquire(blocks(entry.input.tokens()), reuse ? entry.input.keys().subList(0, matched) : List.of());
         if (admission.lease() == null) return admission.failure();
-        request.lease = admission.lease(); request.reused = request.lease.reusedBlocks() * config.blockSize();
-        request.state.attach(request.lease, () -> request.lease.complete(request.input.reuse() && config.reuseCache() && config.deviceCache()
-            ? request.input.keys() : List.of()));
-        metrics.cacheLookup(request.input.tokens(), request.reused);
+        entry.lease = admission.lease();
+        entry.reused = admission.lease().reusedBlocks() * config.blockSize();
+        entry.state.attach(entry.lease, () -> entry.lease.complete(
+            config.reuseCache() && config.deviceCache() && entry.input.reuse() ? entry.input.keys() : List.of()));
+        metrics.cacheLookup(entry.input.tokens(), entry.reused);
         return null;
     }
-    private Work<Request> work(Request request, int target, int generated, int tokens, String batchId) {
-        var input = request.input;
-        var item = new ForwardBatch.Request(input.identity(), input.tokens(), request.reused, target,
-            generated, tokens, input.priority(), List.of());
-        var batch = new ForwardBatch(batchId, List.of(new ForwardBatch.Partition(0, List.of(item))));
-        request.use = request.state.forward(); request.stepStarted = System.nanoTime();
-        return new Work<>(request, batch);
+    @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
+    @Override public QueueSnapshot queues() {
+        int queued = 0, executing = 0, loading = 0, ready = 0;
+        var waitingMembers = Set.copyOf(waiting);
+        for (var entry : active.values()) {
+            if (entry.state.terminating()) continue;
+            if (running.contains(entry)) executing++;
+            else if (waitingMembers.contains(entry) || entry.state.snapshot().phase() == RequestState.Phase.CAPACITY) queued++;
+            else if (entry.state.snapshot().phase() == READY) ready++;
+            else loading++;
+        }
+        return new QueueSnapshot(queued, executing, loading, ready);
     }
-    @Override public Work<Request> schedule() { synchronized (lock) { return closed ? null : policy.next(); } }
-    @Override public void completed(Request request, SimulatedCompute.Outcome outcome) {
+    private EngineMetrics.State metricState() {
         synchronized (lock) {
-            try {
-                if (request.state.terminating()) return;
-                if (outcome.state() != SimulatedCompute.State.COMPLETED || request.listener.cancelled()) finish(request, new RequestFailure(CANCELLED, "Forward cancelled"));
-                else if (request.state.expired()) finish(request, new RequestFailure(TIMEOUT, "Request expired during Forward"));
-                else policy.completed(request, outcome);
-            } finally { releaseUse(request); }
+            var counts = queues();
+            var kv = cache.snapshot(0, false);
+            long block = config.blockSize();
+            return new EngineMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block);
         }
     }
-    @Override public void failed(Request request, RuntimeException error) {
-        synchronized (lock) {
-            try { finish(request, new RequestFailure(INTERNAL, "Forward failed: " + error.getMessage(), error)); }
-            finally { releaseUse(request); }
-        }
-    }
-    private void releaseUse(Request request) {
-        var use = request.use; request.use = null;
-        if (use != null) use.close();
-    }
-    private final class Prefill implements Policy {
-        private final ArrayDeque<Request> waiting = new ArrayDeque<>();
-        public void submit(Request request) { waiting.addLast(request); }
-        public Work<Request> next() {
-            while (!waiting.isEmpty()) {
-                var request = waiting.removeFirst();
-                if (request.state.terminating()) continue;
-                if (request.state.expired()) { finish(request, new RequestFailure(TIMEOUT, "Prefill expired in queue")); continue; }
-                try {
-                    var failure = acquire(request, config.reuseCache() && config.deviceCache() && request.input.reuse());
-                    if (failure != null) { finish(request, new RequestFailure(RequestFailure.Reason.CAPACITY, "KV allocation failed: " + failure)); continue; }
-                    return work(request, 1, 0, request.input.tokens() - request.reused, "local/" + request.input.requestId());
-                } catch (RuntimeException error) { failed(request, error); }
-            }
-            return null;
-        }
-        public void completed(Request request, SimulatedCompute.Outcome outcome) {
-            request.state.commit(1, outcome.elapsedNanos());
-            metrics.forwardCompleted(outcome.elapsedNanos(), outcome.sample().planned().toNanos(), request.input.tokens(), request.input.tokens() - request.reused, 1);
-            request.state.phase(READY);
-            request.listener.output(request, 1, true);
-            if (!request.input.retained()) finish(request, null);
-        }
-        public void remove(Request request) { waiting.remove(request); }
-    }
-    private final class Decode implements Policy {
-        private final ArrayDeque<Request> ready = new ArrayDeque<>();
-        public void submit(Request request) { request.state.phase(RequestState.Phase.CAPACITY); request.capacity = capacity.submit(() -> awaitCapacity(request, 0)); }
-        public Work<Request> next() {
-            while (!ready.isEmpty()) {
-                var request = ready.removeFirst();
-                if (request.state.terminating()) continue;
-                if (request.state.expired()) { finish(request, new RequestFailure(TIMEOUT, "Decode expired in queue")); continue; }
-                if (request.listener.cancelled()) { finish(request, new RequestFailure(CANCELLED, "Output consumer closed")); continue; }
-                if (!request.listener.writable()) { request.state.phase(OUTPUT); continue; }
-                try {
-                    var progress = request.snapshot();
-                    if (request.step == null) request.step = config.decodeModel().sample(Long.toString(request.input.requestId()), progress.iterations(), request.input.maxNewTokens() - progress.generated());
-                    int demand = blocks(Math.addExact(Math.addExact(request.input.tokens(), progress.generated()), request.step.proposedTokens()));
-                    var failure = request.lease.growTo(demand);
-                    if (failure == DeviceCache.Failure.PERMANENT) { finish(request, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode growth exceeds capacity")); continue; }
-                    if (failure != null) {
-                        request.state.phase(RequestState.Phase.CAPACITY); request.capacity = capacity.submit(() -> awaitCapacity(request, demand)); continue;
-                    }
-                    return work(request, request.input.maxNewTokens(), progress.generated(), request.step.verifyTokens(), request.input.identity() + "/" + progress.generated());
-                } catch (RuntimeException error) { failed(request, error); }
-            }
-            return null;
-        }
-        public void completed(Request request, SimulatedCompute.Outcome outcome) {
-            int committed = Math.min(request.step.committedTokens(), request.stopAfter - request.snapshot().generated());
-            request.state.commit(committed, outcome.elapsedNanos());
-            metrics.forwardCompleted(outcome.elapsedNanos(), outcome.sample().planned().toNanos(), request.step.verifyTokens(), request.step.verifyTokens(), committed);
-            request.step = null;
-            boolean done = request.snapshot().generated() >= request.stopAfter;
-            try { request.listener.output(request, committed, done); }
-            catch (RuntimeException error) { finish(request, new RequestFailure(CANCELLED, "Output consumer closed", error)); return; }
-            if (done) finish(request, null);
-            else { request.state.phase(QUEUED); ready.addLast(request); }
-        }
-        public void remove(Request request) { ready.remove(request); }
-        private void awaitCapacity(Request request, int growth) {
-            long observed = Long.MIN_VALUE;
-            try {
-                while (true) {
-                    synchronized (lock) {
-                        if (request.state.terminating()) return;
-                        if (request.state.expired()) { finish(request, new RequestFailure(TIMEOUT, "Decode expired waiting for capacity")); return; }
-                        long generation = cache.allocationGeneration();
-                        if (observed != generation) {
-                            var failure = growth > 0 ? request.lease.growTo(growth) : acquire(request,
-                                config.reuseCache() && config.deviceCache() && !config.disableDecodeFirstReuse() && request.input.reuse());
-                            observed = cache.allocationGeneration();
-                            if (failure == null) {
-                                if (growth > 0) { request.state.phase(QUEUED); ready.addLast(request); loop.wake(); }
-                                else { request.state.phase(TRANSFER); request.listener.allocated(request); }
-                                return;
-                            }
-                            if (failure == DeviceCache.Failure.PERMANENT) { finish(request, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode demand exceeds capacity")); return; }
-                        }
-                    }
-                    cache.awaitCapacityChange(observed, 50);
-                }
-            } catch (InterruptedException error) { Thread.currentThread().interrupt(); finish(request, new RequestFailure(CANCELLED, "Capacity wait interrupted", error)); }
-            catch (RuntimeException error) { finish(request, new RequestFailure(INTERNAL, "Capacity wait failed", error)); }
-        }
-    }
+    @Override public String scrapeMetrics() { return metrics.scrape(); }
     @Override public void close() {
-        synchronized (lock) {
-            if (closed) return;
-            closed = true;
-            for (var request : List.copyOf(active.values())) finish(request, new RequestFailure(CLOSED, "Engine closed"));
-            loop.close(); deadlines.shutdownNow(); capacity.shutdownNow();
-        }
+        if (closed) return;
+        closed = true;
+        for (var entry : List.copyOf(active.values())) finish(entry, new RequestFailure(CLOSED, "Engine closed"));
     }
 }

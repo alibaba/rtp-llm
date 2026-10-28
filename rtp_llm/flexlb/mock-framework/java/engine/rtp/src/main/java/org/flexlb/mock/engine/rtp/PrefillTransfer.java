@@ -25,6 +25,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         CompletionStage<LocalPrefill.Result> ready() { return entry.ready.minimalCompletionStage(); }
         void preempt() { entry.session.preempt(); }
         void expire() { entry.session.expire(); }
+        void acknowledged() { requests.transferred(entry.session); }
         @Override public void close() { entry.session.cancel(); }
     }
     private final RtpConfig config;
@@ -49,8 +50,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                 session.completion().thenAccept(result -> {
                     synchronized (entry) {
                         if (!result.status().isOk()) return; // Termination callback owns failure delivery.
-                        try { requests.requireReady(session); entry.ready.complete(result); }
-                        catch (RuntimeException error) { session.cancel(); }
+                        if (!session.request.snapshot().terminating()) entry.ready.complete(result);
                     }
                 });
                 return new Source(entry);
@@ -75,11 +75,9 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         entry.ready.thenAccept(result -> {
             if (response.isCancelled()) { entry.session.cancel(); return; }
             if (!result.status().isOk()) { response.onError(RtpErrors.failure(result.status(), result.engineCode())); return; }
-            try {
-                requests.consume(entry.session, () -> {
-                    if (response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-                    response.onNext(entry.metadata); response.onCompleted();
-                });
+            try (var use = requests.readReady(entry.session)) {
+                if (response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
+                response.onNext(entry.metadata); response.onCompleted();
             } catch (RuntimeException error) { entry.session.cancel(); response.onError(error); }
         });
     }

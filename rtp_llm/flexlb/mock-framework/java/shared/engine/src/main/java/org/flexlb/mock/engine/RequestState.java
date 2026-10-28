@@ -6,7 +6,7 @@ import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 
 /** Mutated under the owning scheduling domain's lock; snapshots are immutable. */
 public final class RequestState {
-    public enum Phase { QUEUED, CAPACITY, TRANSFER, OUTPUT, FORWARD, READY, TERMINAL }
+    public enum Phase { QUEUED, CAPACITY, LOADING, TRANSFER, RUNNING, OUTPUT, FORWARD, READY, TERMINAL }
     public record Snapshot(Phase phase, boolean terminating, int generated, int iterations,
                            long executionNanos) {}
     public interface Use extends AutoCloseable { @Override void close(); }
@@ -37,7 +37,12 @@ public final class RequestState {
     }
     public Use forward() {
         if (terminating) throw new IllegalStateException("Terminating request cannot enter Forward");
-        phase = Phase.FORWARD; uses++;
+        phase = Phase.FORWARD;
+        return pin();
+    }
+    public Use pin() {
+        if (terminating) throw new IllegalStateException("Terminating request cannot acquire a resource use");
+        uses++;
         return new Use() {
             private boolean closed;
             @Override public void close() {

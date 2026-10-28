@@ -13,10 +13,10 @@ public final class EngineMetrics {
     public static final String FORWARD_TOKENS = "mock_engine_forward_tokens_total";
     public static final String FORWARD_SECONDS = "mock_engine_forward_seconds";
     public enum Outcome { success, cancelled, timeout, error }
-    public record State(long waiting, long running, long totalTokens, long availableTokens,
+    public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens) {
         public State {
-            if (waiting < 0 || running < 0 || totalTokens < 0 || availableTokens < 0 || freeTokens < 0
+            if (waiting < 0 || running < 0 || loading < 0 || ready < 0 || totalTokens < 0 || availableTokens < 0 || freeTokens < 0
                     || heldTokens < 0 || availableTokens > totalTokens || freeTokens > availableTokens || heldTokens > totalTokens)
                 throw new IllegalArgumentException("Invalid engine state");
         }
@@ -55,6 +55,8 @@ public final class EngineMetrics {
                 var tasks = new GaugeMetricFamily("mock_engine_requests", "Current accepted requests.", List.of("role", "state"));
                 tasks.addMetric(List.of(role, "waiting"), value.waiting());
                 tasks.addMetric(List.of(role, "running"), value.running());
+                tasks.addMetric(List.of(role, "loading"), value.loading());
+                tasks.addMetric(List.of(role, "ready"), value.ready());
                 var kv = new GaugeMetricFamily("mock_engine_kv_tokens", "KV capacity in tokens; available includes evictable unreferenced cache.", List.of("role", "state"));
                 kv.addMetric(List.of(role, "total"), value.totalTokens());
                 kv.addMetric(List.of(role, "available"), value.availableTokens());

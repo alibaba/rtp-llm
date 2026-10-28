@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class EngineMetricsTest {
-    private static final EngineMetrics.State IDLE = new EngineMetrics.State(0, 0, 100, 100, 100, 0);
+    private static final EngineMetrics.State IDLE = new EngineMetrics.State(0, 0, 0, 0, 100, 100, 100, 0);
 
     static double sample(String text, String name, String label) {
         return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
@@ -17,10 +17,12 @@ class EngineMetricsTest {
         var state = new AtomicReference<>(IDLE);
         var metrics = new EngineMetrics("prefill", state::get);
         assertEquals(0, sample(metrics.scrape(), "mock_engine_requests_started_total", ""));
-        state.set(new EngineMetrics.State(2, 1, 100, 70, 50, 30));
+        state.set(new EngineMetrics.State(2, 1, 3, 4, 100, 70, 50, 30));
         var before = metrics.scrape();
         assertEquals(2, sample(before, "mock_engine_requests", "state=\"waiting\""));
         assertEquals(70, sample(before, "mock_engine_kv_tokens", "state=\"available\""));
+        assertEquals(3, sample(before, "mock_engine_requests", "state=\"loading\""));
+        assertEquals(4, sample(before, "mock_engine_requests", "state=\"ready\""));
         assertEquals(before, metrics.scrape());
         state.set(IDLE);
         assertEquals(100, sample(metrics.scrape(), "mock_engine_kv_tokens", "state=\"available\""));
@@ -61,7 +63,7 @@ class EngineMetricsTest {
         assertThrows(IllegalArgumentException.class, () -> metrics.cacheLookup(1, 2));
         assertThrows(IllegalArgumentException.class, () -> metrics.forwardCompleted(-1, 1000, 1, 1, 1));
         assertThrows(IllegalArgumentException.class, () -> metrics.forwardCompleted(1, 1000, 1, 2, 1));
-        assertThrows(IllegalArgumentException.class, () -> new EngineMetrics.State(0, 0, 10, 11, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new EngineMetrics.State(0, 0, 0, 0, 10, 11, 0, 0));
         assertEquals(0, sample(metrics.scrape(), "mock_engine_cache_lookup_tokens_total", ""));
         assertEquals(0, sample(metrics.scrape(), "mock_engine_forward_seconds_count", ""));
     }

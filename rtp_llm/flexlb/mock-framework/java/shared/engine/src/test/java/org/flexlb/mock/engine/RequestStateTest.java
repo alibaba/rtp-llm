@@ -42,14 +42,16 @@ class RequestStateTest {
         assertEquals(RequestFailure.Reason.TIMEOUT, ended.getFirst().reason());
     }
 
-    @Test void queueCountsRequestsAcrossAllWaitingPhasesAndExcludeTerminalMembers() {
-        var requests = new ArrayList<RequestState.Snapshot>();
-        for (var phase : RequestState.Phase.values()) {
-            var state = new RequestState(Long.MAX_VALUE, failure -> {});
-            if (phase == RequestState.Phase.TERMINAL) state.finish(null);
-            else state.phase(phase);
-            requests.add(state.snapshot());
-        }
-        assertEquals(new QueueSnapshot(5, 1), QueueSnapshot.of(requests));
+    @Test void transferPinKeepsReadyStateAndDelaysCleanupUntilReaderExits() {
+        var closed = new AtomicInteger(); var ended = new ArrayList<RequestFailure>();
+        var state = new RequestState(Long.MAX_VALUE, ended::add);
+        state.attach(closed::incrementAndGet, () -> {});
+        state.phase(RequestState.Phase.READY);
+        var reader = state.pin();
+        assertEquals(RequestState.Phase.READY, state.snapshot().phase());
+        state.finish(null);
+        assertEquals(0, closed.get()); assertTrue(ended.isEmpty());
+        reader.close(); reader.close();
+        assertEquals(1, closed.get()); assertEquals(1, ended.size());
     }
 }

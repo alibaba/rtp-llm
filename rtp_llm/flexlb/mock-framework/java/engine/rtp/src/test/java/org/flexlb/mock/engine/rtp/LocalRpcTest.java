@@ -126,12 +126,12 @@ class LocalRpcTest {
                 var probabilities = input.toBuilder().setGenerateConfig(input.getGenerateConfig().toBuilder().setReturnSoftmaxProbs(true)).build();
                 assertEquals(Status.Code.UNIMPLEMENTED, assertThrows(StatusRuntimeException.class,
                     () -> rpc.generateStreamCall(probabilities).hasNext()).getStatus().getCode());
-                try (var owner = node.cache().acquire(6, List.of()).lease()) {
-                    var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(input).hasNext());
-                    assertEquals(Status.Code.RESOURCE_EXHAUSTED, error.getStatus().getCode());
-                    var bytes = error.getTrailers().get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
-                    assertEquals(602, ErrorDetailsPB.parseFrom(bytes).getErrorCode());
-                }
+                var oversized = input.toBuilder().clearTokenIds()
+                    .addAllTokenIds(java.util.Collections.nCopies(19, 1)).build();
+                var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(oversized).hasNext());
+                assertEquals(Status.Code.RESOURCE_EXHAUSTED, error.getStatus().getCode());
+                var bytes = error.getTrailers().get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
+                assertEquals(602, ErrorDetailsPB.parseFrom(bytes).getErrorCode());
                 var text = metrics(node);
                 assertEquals(1, sample(text, "mock_engine_requests_started_total", ""));
                 assertEquals(1, sample(text, "mock_engine_requests_finished_total", "outcome=\"error\""));

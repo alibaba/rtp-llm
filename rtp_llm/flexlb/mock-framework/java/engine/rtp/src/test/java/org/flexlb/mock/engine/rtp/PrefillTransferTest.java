@@ -90,13 +90,17 @@ class PrefillTransferTest {
     }
     private static GenerateRequestPB load(long id) { return GenerateRequestPB.newBuilder().setStage(RemoteStage.LOAD).setRequestId(id).build(); }
 
-    @Test void loadWaitsForRealForwardThenReleasesPButKeepsDReservation() throws Exception {
+    @Test void loadWaitsForForwardAndPRemainsPinnedUntilAcknowledgement() throws Exception {
         try (var p = node("prefill", 2, 300); var d = node("decode", 2, 1); var source = prepare(p, input(1, 5, 2000)); var replies = new Replies<GenerateOutputsPB>()) {
             var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1));
             assertNull(replies.values.poll(80, TimeUnit.MILLISECONDS));
             assertEquals(10, p.status().getAvailableKvCache()); assertEquals(10, d.status().getAvailableKvCache());
             ready(source);
             var ack = (GenerateOutputsPB) replies.next(); assertTrue(ack.hasErrorInfo()); assertEquals(0, ack.getErrorInfo().getErrorCodeValue());
+            assertEquals(10, p.status().getAvailableKvCache());
+            assertEquals(1, p.status().getWaitingQueryLen());
+            assertEquals(0, p.status().getRunningQueryLen());
+            source.acknowledged();
             await(() -> p.status().getRunningTaskInfoCount() == 0); await(() -> p.status().getAvailableKvCache() == 16);
             assertEquals(10, d.status().getAvailableKvCache()); assertEquals(0, d.status().getRunningTaskInfo(0).getPrefixLength());
             assertEquals(0, d.status().getRunningQueryLen()); assertTrue(d.cache.snapshot(-1, true).keys().isEmpty());
@@ -195,7 +199,7 @@ class PrefillTransferTest {
     @Test void aSecondLoadDoesNotProduceAnotherAcknowledgementOrRetainDResources() throws Exception {
         try (var p = node("prefill", 2, 1); var d = node("decode", 2, 1); var source = prepare(p, input(1, 5, 2000)); var replies = new Replies<GenerateOutputsPB>()) {
             ready(source); var request = allocate(p, d, input(1, 5, 2000), replies); request.onNext(load(1));
-            assertInstanceOf(GenerateOutputsPB.class, replies.next()); await(() -> p.status().getRunningTaskInfoCount() == 0);
+            assertInstanceOf(GenerateOutputsPB.class, replies.next()); source.acknowledged(); await(() -> p.status().getRunningTaskInfoCount() == 0);
             request.onNext(load(1)); replies.error(Status.Code.FAILED_PRECONDITION);
             assertEquals(16, d.status().getAvailableKvCache()); assertEquals(1, d.status().getFinishedTaskListCount());
         }
