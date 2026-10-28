@@ -721,6 +721,50 @@ class ModelFactory:
             raise ValueError("DFlash V1 does not support a quantized draft quant_algo")
         if not bool(getattr(propose_model_config, "qk_norm", False)):
             raise ValueError("DFlash V1 requires Qwen3 Q/K RMSNorm and RoPE")
+        # The draft reuses the target's full-attention cache pool through
+        # CacheConfig::mergeMTPModule's default-group alias, which requires a
+        # byte-identical target group (dtype, KV geometry, block token span).
+        # DFlash writer/attention kernels are BF16-only, so an FP8 target
+        # cache can never back the draft, and a geometry/span mismatch would
+        # likewise leave mergeMTPModule without a compatible target group.
+        # Both cases otherwise only fail deep inside engine construction
+        # (RTP_LLM_FAIL in CacheConfig::mergeMTPModule); fail here instead
+        # with an actionable message.
+        if model_config.attn_config.kv_cache_dtype != KvCacheDataType.BASE:
+            raise ValueError(
+                "DFlash V1 requires the target KV cache dtype to be BASE (BF16); "
+                f"got {model_config.attn_config.kv_cache_dtype}. FP8_KV_CACHE on "
+                "the target cannot back a BF16-only DFlash draft"
+            )
+        for geometry_field in ("kv_head_num", "size_per_head"):
+            draft_value = int(
+                getattr(propose_model_config.attn_config, geometry_field)
+            )
+            target_value = int(getattr(model_config.attn_config, geometry_field))
+            if draft_value != target_value:
+                raise ValueError(
+                    f"DFlash draft/target attention geometry mismatch on "
+                    f"{geometry_field}: draft={draft_value}, target={target_value}; "
+                    "the draft's default cache group must alias a byte-identical "
+                    "target group"
+                )
+        draft_tokens_per_block = int(
+            getattr(propose_model_config.attn_config, "tokens_per_block", 0) or 0
+        )
+        target_tokens_per_block = int(
+            getattr(model_config.attn_config, "tokens_per_block", 0) or 0
+        )
+        if (
+            draft_tokens_per_block > 0
+            and target_tokens_per_block > 0
+            and draft_tokens_per_block != target_tokens_per_block
+        ):
+            raise ValueError(
+                "DFlash draft/target tokens_per_block mismatch: "
+                f"draft={draft_tokens_per_block}, target={target_tokens_per_block}; "
+                "the draft's default cache group must alias a byte-identical "
+                "target group"
+            )
         # The draft has its own cache allocation.  Never inherit the target's
         # FP8 cache request into the BF16-only DFlash writer/attention kernels.
         propose_model_config.attn_config.kv_cache_dtype = KvCacheDataType.BASE

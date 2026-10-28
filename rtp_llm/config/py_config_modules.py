@@ -830,3 +830,27 @@ class PyEnvConfigs:
             + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )
+
+
+def resolve_max_generate_batch_size(py_env_configs: PyEnvConfigs) -> int:
+    """Resolve the scheduler-side decode running-batch cap from PyEnvConfigs.
+
+    Shared by EngineConfig.create (runtime_config.max_generate_batch_size)
+    and setup_and_configure_server (the DeepEP ll_num_max_token basis):
+    DeepEPWrapper's init derives ll_num_max_token from
+    runtime_config.max_generate_batch_size while the low-latency router
+    derives it from moe_config.ll_num_max_token configured from this value,
+    and DeepepWrapperConfig.equal compares both chains, so the two
+    derivations must share one resolution — including the positive-value
+    check, which has to run inside setup_and_configure_server because it
+    executes before EngineConfig.create validates the override.
+    """
+    cap = py_env_configs.concurrency_config.concurrency_limit
+    if py_env_configs.max_generate_batch_size_override is not None:
+        if py_env_configs.max_generate_batch_size_override <= 0:
+            raise ValueError(
+                "--max_generate_batch_size must be positive, got "
+                f"{py_env_configs.max_generate_batch_size_override}"
+            )
+        cap = py_env_configs.max_generate_batch_size_override
+    return cap

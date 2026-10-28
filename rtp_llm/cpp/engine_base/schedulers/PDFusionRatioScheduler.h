@@ -72,6 +72,12 @@ private:
     int64_t                             decode_prefill_step_  = 1;
     int64_t                             decode_since_prefill_ = 0;
     int64_t                             prefill_since_decode_ = 0;
+    // Only the explicit force_single_prefill flag gates this scheduler. The
+    // FIFO path additionally gates on prefill-CP's cp_force_single_prefill
+    // (default true), but main's PDFusion path had no such gate; inheriting
+    // it through FIFOSchedulerBase would silently change PDFUSION+prefill-CP
+    // batching, so the CP component is intentionally left out here.
+    bool explicit_force_single_prefill_ = false;
 };
 
 }  // namespace rtp_llm

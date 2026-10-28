@@ -723,7 +723,17 @@ class ModelLoader:
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
+                # .to(device) returns a new tensor object and silently drops
+                # python tensor attributes (e.g. AITER's is_shuffled marker
+                # on preshuffled MoE kernels, which the deterministic FP8 MoE
+                # executor dispatches on); carry the marker across the move.
+                was_shuffled = getattr(tensor, "is_shuffled", None)
                 tensor = tensor.to(device)
+                if (
+                    was_shuffled is not None
+                    and getattr(tensor, "is_shuffled", None) is None
+                ):
+                    tensor.is_shuffled = was_shuffled
             if layer_id is not None:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
