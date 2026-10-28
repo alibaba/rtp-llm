@@ -107,3 +107,25 @@ def test_typed_records_inside_result_collections_remain_referenceable_values():
         return {'records': [args]}
     registry = Registry((records,))
     assert asyncio.run(registry.get('extension/records').invoke(None, {'threshold': 4})) == {'records': [{'threshold': 4}]}
+
+
+@pytest.mark.parametrize('wait', ['0s', '20ms', '1.5s'])
+def test_wait_after_is_a_step_duration(case_data, compile_data, wait):
+    assert compile_data(case_data).phases[0].steps[0].wait_after == '0s'
+    case_data['phases'][0]['steps'][0]['wait_after'] = wait
+    assert compile_data(case_data).phases[0].steps[0].wait_after == wait
+
+
+@pytest.mark.parametrize('wait', ['-1s', '1', 1, True, None, {'ref': 'steps.leader'}])
+def test_invalid_wait_after_rejected_before_execution(case_data, compile_data, wait):
+    case_data['phases'][0]['steps'][0]['wait_after'] = wait
+    with pytest.raises(ConfigError):
+        compile_data(case_data)
+
+
+def test_wait_interface_is_removed(case_data, compile_data):
+    assert 'runtime/wait' not in Registry.standard().interfaces
+    case_data['phases'][0]['steps'][0] = {'id': 'wait', 'describe': 'old wait',
+        'interface': 'runtime/wait', 'args': {'duration': '1s'}}
+    with pytest.raises(ConfigError, match='Unknown or unimplemented'):
+        compile_data(case_data)

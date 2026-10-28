@@ -49,16 +49,14 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
                 'test_block_num': 17, 'reserve_block_ratio': 0, 'compute.expression': '2 * totalComputeTokens',
             }}},
             'phases': [{'id': 'observe', 'describe': '检查已采集的实际事件', 'timeout': '20s', 'steps': [
-                {'id': 'collect', 'describe': '为测试原生客户端保留采集时间',
-                 'interface': 'runtime/wait', 'args': {'duration': '8s'}},
                 {'id': 'targets', 'describe': '记录原始PromQL响应', 'interface': 'prometheus/query',
-                 'args': {'promql': 'sum(up{job="mock"})'}},
+                 'args': {'promql': 'sum(up{job="mock"})'}, 'wait_after': '8s'},
                 gate('hit_rate', 'engine/cache/hit_rate', {'gte': .75, 'lte': .77}, range=['-60s', '0s']),
                 gate('compute_tps', 'engine/prefill/tps', {'gte': 1}, range=['-60s', '0s']),
                 gate('with_cache_tps', 'engine/prefill/tps_with_cache', {'gte': {'ref': 'steps.compute_tps'}}, range=['-60s', '0s']),
             ]}]}
     if mode == 'gate_fail':
-        data['phases'][0]['steps'][2]['expect'] = {'eq': 0}
+        data['phases'][0]['steps'][1]['expect'] = {'eq': 0}
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
     registry = Registry.standard()

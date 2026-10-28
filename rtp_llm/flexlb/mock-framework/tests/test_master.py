@@ -93,8 +93,8 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
         'phases': [{'id': 'probe', 'describe': '逐Master读取并由外部Client发请求', 'timeout': '30s', 'steps': [
             {'id': 'prefills', 'describe': '实际登记P集合', 'interface': 'master/engine/get', 'args': {'role': 'prefill'}},
             {'id': 'decodes', 'describe': '实际登记D集合', 'interface': 'master/engine/get', 'args': {'role': 'decode'}},
-            {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/leadership/get', 'expect': {'count': 1}},
-            {'id': 'wait', 'describe': '供外部Client取流', 'interface': 'runtime/wait', 'args': {'duration': '20s' if replicas == 2 else '12s'}}]}]}
+            {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/leadership/get', 'expect': {'count': 1},
+             'wait_after': '20s' if replicas == 2 else '12s'}]}]}
     if history_overflow:
         document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
             'interface': 'master/engine/get', 'args': {'role': 'prefill'}})

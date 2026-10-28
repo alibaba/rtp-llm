@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -6,9 +7,20 @@ import subprocess
 import urllib.request
 
 from mock_framework.config import Registry, compile_case
+from mock_framework.config.registry import case_interface
 from mock_framework.execution import prepare_launch, run_case
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class ProbeArgs:
+    pass
+
+
+@case_interface('probe/addresses', effect='read')
+async def addresses(ctx, args: ProbeArgs) -> list[str]:
+    return ctx.globals()['prefill']
 
 
 def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(tmp_path):
@@ -22,10 +34,10 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
         group['config']['compute.expression'] = '1 + batchSize'
     data = {'id': 'native_node_probe', 'describe': '仅验证节点启动及原生状态协议', 'environment': environment,
             'phases': [{'id': 'observe', 'describe': '测试客户端在此期间读取原生状态', 'timeout': '15s',
-                        'steps': [{'id': 'wait', 'describe': '保留节点供测试客户端读取', 'interface': 'runtime/wait',
-                                            'args': {'duration': '8s'}}]}]}
+                        'steps': [{'id': 'addresses', 'describe': '检查发现地址后保留节点供测试客户端读取',
+                                   'interface': 'probe/addresses', 'expect': {'count': 1}, 'wait_after': '8s'}]}]}
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data, allow_unicode=True))
-    registry = Registry.standard()
+    registry = Registry.standard(); registry.register(addresses)
     case = compile_case(path, registry)
     launch = prepare_launch({'components': {role: {'command': [str(java), '-jar', str(jar)], 'startup_timeout': '10s'}
                                             for role in ('prefill', 'decode')}}, case, tmp_path)

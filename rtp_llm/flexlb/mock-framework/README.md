@@ -156,7 +156,7 @@ waiting/running 的统一含义已落实。批量提交/group 约束、vLLM 对�
 | --- | --- |
 | `python/mock_framework/config/` | YAML 解析、检查、点分配置展开、引用和可执行步骤编译。 |
 | `python/mock_framework/execution/` | 初始化、统一 Step 执行、HTTP 传输、断言、记录和清理；`master.py` 负责 Master 原生配置接线，`processes.py` 管理进程和端点。 |
-| `python/mock_framework/interfaces/` | 已接通的 Case 函数：等待、逐 Master 状态、公共指标与原始 PromQL。 |
+| `python/mock_framework/interfaces/` | 已接通的 Case 函数：逐 Master 状态、公共指标与原始 PromQL。 |
 | `java/interfaces/` | Java 内部端点的类型/校验及共享模型定义；不再定义或导出 Case API。 |
 | `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文。 |
 | `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
@@ -201,7 +201,11 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。最新数据格式由 Java Client 读取；播放器和数据读取尚待实现，不提供旧格式兼容、转换器或生成器。
 
-顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect` 和 `within`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
+顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect`、`within` 和 `wait_after`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
+
+固定等待写成 step 的 `wait_after: 5s`，默认 `0s`，必须是非负的带单位时长。执行顺序为“调用接口 → 检查 expect → wait_after → 下一步”；最后一个 step 也执行等待。等待计入该 step 的 within 和 phase 的 timeout，期间继续监视组件退出并响应取消；调用或断言失败不执行等待。返回值和 ref 仍是原调用结果，等待不会刷新结果或查询时间；等待后的检查需要下一次接口调用。
+
+不再登记 `runtime/wait`，旧 Case 的等待步骤应迁到前一个业务 step 的 `wait_after`，不保留兼容入口或只等待的空 step。接口成功后等待超时/中断，记录保留其 result 和 `error_stage: wait_after`，不能把已知成功的写操作标成 outcome_unknown，也不会重试动作。
 
 组件配置分为 `deployment` 和 `config`。原生业务配置原样保留；Mock 点分键在本层展开成对象，不展开原生 JSON 文本。重复键、YAML merge、循环引用、点分路径冲突均报错。`FLEXLB_CONFIG` 保留 JSON 字符串，编译器只检查它是对象且无重复键，业务字段由 Master 加载器检查。
 
@@ -219,6 +223,7 @@ phases:
         describe: 检查唯一主 Master
         interface: master/leadership/get
         expect: {count: 1}
+        wait_after: 1s
       - id: leader_engines
         describe: 记录主 Master 的 Prefill 发现结果
         interface: master/engine/get

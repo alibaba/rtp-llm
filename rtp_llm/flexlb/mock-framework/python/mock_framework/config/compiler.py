@@ -143,7 +143,7 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
             raise ConfigError('steps must be a nonempty list')
         steps = []
         for step in phase['steps']:
-            fields(step, {'id', 'describe', 'interface', 'args', 'expect', 'within'},
+            fields(step, {'id', 'describe', 'interface', 'args', 'expect', 'within', 'wait_after'},
                    {'id', 'describe', 'interface'}, where='step')
             step_id = identity(step['id'])
             description = text(step['describe'], 'step.describe')
@@ -154,8 +154,10 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
             within = step.get('within')
             if within is not None:
                 duration(within, positive=True)
+            wait_after = step.get('wait_after', '0s')
+            duration(wait_after)
             expect = expectation(step['expect'], interface, previous) if 'expect' in step else None
-            steps.append(Step(step_id, description, interface.name, args, expect, within))
+            steps.append(Step(step_id, description, interface.name, args, expect, within, wait_after))
             previous[step_id] = interface.returns
         phases.append(Phase(phase_id, phase['describe'], phase['timeout'], tuple(steps)))
     return CompiledCase(case_id, describe, name, path.parent, environment, tuple(phases),

@@ -162,11 +162,67 @@ def test_refs_do_not_eval_and_require_actual_fields():
         resolve(Reference('x', ('missing',)), {'x': {}}, {})
 
 
-def test_cli_needs_no_java_catalog(setup, tmp_path):
-    case, _, launch = setup([{'id': 'wait', 'describe': 'wait', 'interface': 'runtime/wait', 'args': {'duration': '1ms'}}])
-    launch_file = tmp_path / 'launch.yaml'; launch_file.write_text(yaml.safe_dump(launch))
-    result = subprocess.run([sys.executable, '-m', 'mock_framework.cli', 'run', str(case.source),
-        '--launch', str(launch_file), '--output', str(tmp_path / 'cli')], capture_output=True, text=True, timeout=10)
+def test_cli_compiles_without_java_catalog(setup, tmp_path):
+    case, _, _ = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/leadership/get', 'wait_after': '1ms'}])
+    output = tmp_path / 'compiled.json'
+    result = subprocess.run([sys.executable, '-m', 'mock_framework.cli', 'compile', str(case.source),
+        '--output', str(output)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)['status'] == 'PASS'
-    cleaned(tmp_path / 'cli')
+    assert json.loads(output.read_text())['phases'][0]['steps'][0]['wait_after'] == '1ms'
+
+
+def test_wait_after_preserves_refs_and_also_runs_on_last_step(setup, tmp_path):
+    from datetime import datetime
+    result, out = run(setup, tmp_path, [step(wait_after='40ms', expect={'eq': 2}),
+        step('write', args={'value': {'ref': 'steps.read'}}, wait_after='40ms')])
+    assert result['status'] == 'PASS'
+    log = events(out)
+    for name in ('read', 'write'):
+        waiting = next(e for e in log if e['event'] == 'wait_started' and e['step'] == name)
+        finished = next(e for e in log if e['event'] == 'step_finished' and e['step'] == name)
+        assert finished['result'] == 2
+        assert (datetime.fromisoformat(finished['recorded_at']) - datetime.fromisoformat(waiting['recorded_at'])).total_seconds() >= .035
+    assert [e['event'] for e in log if e.get('step') == 'read'] == ['step_started', 'wait_started', 'step_finished']
+
+
+@pytest.mark.parametrize('args,expect,status', [({}, {'eq': 3}, 'FAIL'), ({'invalid': True}, None, 'ERROR')])
+def test_failed_call_or_assertion_does_not_wait(setup, tmp_path, args, expect, status):
+    options = {'expect': expect} if expect else {}
+    result, out = run(setup, tmp_path, [step(args=args, wait_after='10s', **options)], timeout='1s')
+    assert result['status'] == status
+    assert not any(e['event'] == 'wait_started' for e in events(out))
+
+
+@pytest.mark.parametrize('within,timeout', [('150ms', '2s'), (None, '150ms')])
+def test_wait_timeout_preserves_successful_write_and_stops_next_step(setup, tmp_path, within, timeout):
+    result, out = run(setup, tmp_path, [step('write', args={'delay': .1}, wait_after='100ms', within=within), step()], timeout=timeout)
+    assert result['status'] == 'ERROR'
+    finished = [e for e in events(out) if e['event'] == 'step_finished']
+    assert len(finished) == 1 and finished[0]['error_stage'] == 'wait_after'
+    assert finished[0]['result'] == 2 and not finished[0]['outcome_unknown']
+    assert len([e for e in events(out) if e['event'] == 'mutation']) == 1
+
+
+@pytest.mark.parametrize('interrupt', ['cancel', 'process_exit'])
+def test_wait_is_interruptible_without_losing_completed_action(setup, tmp_path, interrupt):
+    case, registry, launch = setup([step('write', wait_after='10s'), step()], timeout='20s')
+    out = tmp_path / 'out'
+    async def exercise():
+        task = asyncio.create_task(run_case(case, registry, launch, out))
+        async with asyncio.timeout(5):
+            while not (out / 'events.jsonl').exists() or not any(e['event'] == 'wait_started' for e in events(out)):
+                await asyncio.sleep(.01)
+            if interrupt == 'cancel':
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                import signal
+                pid = next(e['pid'] for e in events(out) if e['event'] == 'process_started')
+                os.kill(pid, signal.SIGTERM)
+                result = await task
+                assert result['status'] == 'ERROR' and 'unexpectedly' in result['error']
+    asyncio.run(exercise()); cleaned(out)
+    finished = [e for e in events(out) if e['event'] == 'step_finished']
+    assert len(finished) == 1 and finished[0]['error_stage'] == 'wait_after'
+    assert finished[0]['result'] == 2 and not finished[0]['outcome_unknown']

@@ -69,7 +69,8 @@ async def run_case(case, registry, launch, directory):
                     interface = registry.get(step.interface)
                     deadline = min(phase_deadline, time.monotonic() + float(duration(step.within))) if step.within else phase_deadline
                     context = CaseContext(processes, records, timestamp(), deadline)
-                    gate, invoked = None, False
+                    gate, invoked, returned = None, False, False
+                    stage = 'arguments'
                     records.emit(event='step_started', phase=phase.id, step=step.id, interface=step.interface,
                                  describe=step.describe, query_time=context.query_time)
                     try:
@@ -82,14 +83,23 @@ async def run_case(case, registry, launch, directory):
                             gate = {'step': step.id, 'interface': step.interface, 'args': args,
                                     'query_time': context.query_time, 'expect': expected}
                         budget = context.timeout
+                        stage = 'invoke'
                         invoked = True
                         actual = await processes.guard(interface.invoke(context, args), budget)
+                        returned = True
                         results[step.id] = actual
+                        stage = 'expect'
                         if gate is not None:
                             gate.update(actual=actual, status='PASS' if compare(actual, expected) else 'FAIL')
                             records.emit('gates', **gate)
                             if gate['status'] == 'FAIL':
                                 raise GateFailure(f'Gate {step.id} failed')
+                        wait = float(duration(step.wait_after))
+                        if wait > 0:
+                            stage = 'wait_after'
+                            records.emit(event='wait_started', step=step.id, duration=step.wait_after)
+                            budget = context.timeout
+                            await processes.guard(asyncio.sleep(wait), budget)
                         records.emit(event='step_finished', step=step.id, status='PASS', args=args, result=actual)
                     except BaseException as error:
                         status = ('CANCELLED' if isinstance(error, asyncio.CancelledError) else
@@ -99,7 +109,9 @@ async def run_case(case, registry, launch, directory):
                             records.emit('gates', **gate)
                         records.emit(event='step_finished', step=step.id, status=status,
                                      error=str(error) or type(error).__name__,
-                                     outcome_unknown=invoked and interface.effect == 'write' and status != 'FAIL')
+                                     error_stage=stage,
+                                     outcome_unknown=invoked and not returned and interface.effect == 'write',
+                                     **({'result': actual} if returned else {}))
                         raise
                 phase_status = 'PASS'
             except GateFailure:

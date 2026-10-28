@@ -22,6 +22,7 @@ class Step:
     args: dict[str, Any]
     expect: Expect | None = None
     within: str | None = None
+    wait_after: str = '0s'
 
 
 @dataclass(frozen=True)
