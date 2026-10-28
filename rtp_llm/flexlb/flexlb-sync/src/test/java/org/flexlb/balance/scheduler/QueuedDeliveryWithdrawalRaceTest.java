@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
@@ -124,7 +124,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                         fixture.decode.resourceSnapshot().activeDispatchPermits(),
                         "pause after the real delivery lease is acquired and before queue commit");
                 withdrawal =
-                        fixture.owner.claimQueuedRoute(fixture.decode, fixture.reservation, 100);
+                        fixture.owner.claimWithdrawal(fixture.decode, fixture.reservation, 100);
                 assertNull(
                         withdrawal,
                         "a prepared sender must exclude a concurrent queued withdrawal");
@@ -149,7 +149,7 @@ class QueuedDeliveryWithdrawalRaceTest {
     void queuedWithdrawalExcludesPreparationAndItsRollbackRestoresDelivery() throws Exception {
         try (var fixture = new Fixture()) {
             var withdrawal =
-                    fixture.owner.claimQueuedRoute(fixture.decode, fixture.reservation, 100);
+                    fixture.owner.claimWithdrawal(fixture.decode, fixture.reservation, 100);
             assertNotNull(
                     withdrawal,
                     "an exact queued reservation without a dispatch lease remains withdrawable");
@@ -259,7 +259,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                             config,
                             mock(RequestWorkerSelector.class),
                             reporter,
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             runtime,
                             availability,
                             new DecodeResources.AdmissionCapacity(64L, 90),

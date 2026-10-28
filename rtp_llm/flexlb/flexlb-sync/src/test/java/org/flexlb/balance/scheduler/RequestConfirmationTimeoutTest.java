@@ -295,7 +295,7 @@ class RequestConfirmationTimeoutTest {
                     decode.close();
                 }
             } finally {
-                runtime.shutdown();
+                SchedulerTestSupport.shutdown(runtime);
             }
         }
     }

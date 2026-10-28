@@ -45,15 +45,15 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Admission and preemption contracts for {@link DecodeAdmission#tryReclaim}.
+ * Admission and preemption contracts for {@link DecodePreemption#tryReclaim}.
  *
  * <p>Requirement: every early decline is side-effect free (returns null
  * without reserving a permit, touching any port, or emitting telemetry).
  * Corner cases are derived from the domain requirements, not by echoing
  * if-branches.
  */
-@DisplayName("DecodeAdmission.tryReclaim contracts")
-class DecodeAdmissionTest {
+@DisplayName("DecodePreemption.tryReclaim contracts")
+class DecodePreemptionTest {
 
     private RequestSchedulerReporter reporter;
 
@@ -63,7 +63,7 @@ class DecodeAdmissionTest {
 
     private DecodeEndpoint blockedEndpoint;
 
-    private DecodeAdmission acquirer;
+    private DecodePreemption acquirer;
 
     @BeforeEach
     void setUp() {
@@ -80,7 +80,7 @@ class DecodeAdmissionTest {
     private void configureAdmission(FlexlbConfig config) {
         acquirer =
                 org.mockito.Mockito.spy(
-                        new DecodeAdmission(
+                        new DecodePreemption(
                                 dispatcher,
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                         requests),
@@ -147,7 +147,7 @@ class DecodeAdmissionTest {
         when(routing.placementUsage())
                 .thenReturn(new DecodeResources.CapacityUsage(1L, 20_000L, 10_000L, 0L, 10_000L));
 
-        var completion = new CompletableFuture<DecodeAdmission.PreemptionResult>();
+        var completion = new CompletableFuture<DecodePreemption.PreemptionResult>();
         var incoming = Request.builder().requestId(902L).seqLen(128L).rawPriority(70).build();
         var context = new RequestContext(config);
         context.data().setRequest(incoming);
@@ -181,7 +181,7 @@ class DecodeAdmissionTest {
         }
         assertNotNull(outcome);
 
-        var command = ArgumentCaptor.forClass(DecodeAdmission.PreemptionCommand.class);
+        var command = ArgumentCaptor.forClass(DecodePreemption.PreemptionCommand.class);
         verify(acquirer).preempt(org.mockito.ArgumentMatchers.same(context), command.capture());
         assertEquals(completionTimeoutMs, command.getValue().preemptionTimeoutMs());
         assertEquals(50L, command.getValue().cancelAckTimeoutMs());
@@ -190,7 +190,7 @@ class DecodeAdmissionTest {
         assertEquals(List.of(victim), command.getValue().victims());
 
         var exact = new DecodeResources.ReservationHandle(7L, 902L, 31L);
-        completion.complete(new DecodeAdmission.PreemptionResult(exact, false, "committed"));
+        completion.complete(new DecodePreemption.PreemptionResult(exact, false, "committed"));
         assertSame(exact, outcome.join().reservation());
         assertNull(
                 context.data().getResponse(),
@@ -274,7 +274,7 @@ class DecodeAdmissionTest {
         verifyNoInteractions(reporter);
     }
 
-    private CompletableFuture<DecodeAdmission.PreemptionResult> tryReclaim(
+    private CompletableFuture<DecodePreemption.PreemptionResult> tryReclaim(
             RequestContext context, CompletableFuture<Response> future) {
         when(context.data().getFuture()).thenReturn(future);
         return acquirer.tryReclaim(context, blockedEndpoint);
@@ -284,7 +284,7 @@ class DecodeAdmissionTest {
     @Test
     @DisplayName("A shut-down acquirer declines without side effects")
     void shutdownDeclines() {
-        acquirer.shutdown();
+        acquirer.freezeAdmission();
         assertNull(tryReclaim(ctx(70), new CompletableFuture<>()));
         assertZeroSideEffect();
     }

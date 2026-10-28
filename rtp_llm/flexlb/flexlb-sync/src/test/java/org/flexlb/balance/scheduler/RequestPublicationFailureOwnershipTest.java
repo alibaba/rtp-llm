@@ -589,7 +589,7 @@ class RequestPublicationFailureOwnershipTest {
             for (var registration : registrations(runtime).toArray(ResponsePublication[]::new)) {
                 registration.close();
             }
-            org.flexlb.util.Failures.run(null, runtime::shutdown);
+            org.flexlb.util.Failures.run(null, () -> SchedulerTestSupport.shutdown(runtime));
         }
     }
 }

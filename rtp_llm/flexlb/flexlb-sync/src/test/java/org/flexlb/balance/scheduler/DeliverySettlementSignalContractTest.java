@@ -351,9 +351,9 @@ class DeliverySettlementSignalContractTest {
             }
             try {
                 if (expectsFailure) {
-                    assertThrows(IllegalStateException.class, runtime::shutdown);
+                    assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
                 } else {
-                    runtime.shutdown();
+                    SchedulerTestSupport.shutdown(runtime);
                 }
             } finally {
                 prefill.close();

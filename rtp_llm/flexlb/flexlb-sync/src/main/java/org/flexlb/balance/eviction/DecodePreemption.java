@@ -11,7 +11,6 @@ import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.AdmissionHandle;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestTaskScheduler;
@@ -40,6 +39,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 
@@ -49,13 +49,13 @@ import static com.google.common.base.Preconditions.checkState;
 /**
  * Obtains capacity at one selected Decode generation through local withdrawal or Engine cancellation.
  *
- * <p>The scheduler supplies the blocked endpoint and a Plan. This class owns the
- * two-phase protocol, token fencing and reservation transfer or release.
+ * <p>The scheduler supplies the incoming request context and blocked endpoint. This class owns the
+ * two-phase protocol and token fencing, then returns the reservation to the caller.
  * Engine acknowledgement is only control evidence; the canonical victim
  * resolution transaction may complete before or after that acknowledgement.</p>
  */
 @Component
-public class DecodeAdmission {
+public class DecodePreemption {
     private static final AbstractRequestScheduler.PreemptionEvent START_CANCEL =
             new AbstractRequestScheduler.PreemptionEvent(
                     PreemptionCancelPhase.CANCEL_IN_FLIGHT, false, null, null, null);
@@ -119,7 +119,7 @@ public class DecodeAdmission {
     private final PreemptionConfig preemption;
 
     @Autowired
-    public DecodeAdmission(
+    public DecodePreemption(
             DeliveryDispatcher dispatcher,
             RequestRepository requests,
             RequestTaskScheduler runtime,
@@ -148,7 +148,8 @@ public class DecodeAdmission {
         }
     }
 
-    CompletableFuture<PreemptionResult> preempt(RequestContext context, PreemptionCommand command) {
+    CompletableFuture<PreemptionResult> preempt(
+            RequestContext context, PreemptionCommand command) {
         Objects.requireNonNull(context, "context");
         long token = nextToken();
         List<DecodeResources.ReservationHandle> victimReservations =
@@ -472,7 +473,10 @@ public class DecodeAdmission {
 
         private PreemptionResult finish(boolean hasNotFound, boolean victimsResolved) {
             DecodeResources.ReservationHandle incoming =
-                    victimsResolved && !closed && command.admissionOpen().getAsBoolean()
+                    victimsResolved
+                                    && !closed
+                                    && !shutdown
+                                    && command.admissionOpen().getAsBoolean()
                             ? command.endpoint().commitPreemption(token)
                             : null;
             if (incoming != null) {
@@ -554,70 +558,15 @@ public class DecodeAdmission {
     }
 
     @PreDestroy
-    public void shutdown() {
+    public void freezeAdmission() {
         shutdown = true;
     }
 
     /**
-     * Completes only after the Plan accepts acquired capacity or that capacity is released.
-     * Null means no takeover occurred, including a local victim conflict. The returned
-     * future observes the operation; cancelling it cannot interrupt ownership transfer.
+     * Starts one Decode preemption transaction. The caller owns the returned reservation and must
+     * either attach it to its placement attempt or release it.
      */
-    public CompletableFuture<PreemptionResult> admit(
-            QueuedRequestScheduler.Plan plan, WorkerEndpoint endpoint) {
-        var attempt = tryReclaim(plan.context(), endpoint);
-        if (attempt == null) {
-            return null;
-        }
-        return attempt.thenApply(
-                        result -> {
-                            if (result == null || !result.committed()) {
-                                return result;
-                            }
-                            var decode = (DecodeEndpoint) endpoint;
-                            boolean accepted = false;
-                            Throwable failure = null;
-                            try {
-                                accepted = plan.accept(decode, result.reservation());
-                                return accepted
-                                        ? result
-                                        : new PreemptionResult(
-                                                null, false, "plan_no_longer_current");
-                            } catch (RuntimeException | Error failed) {
-                                failure = failed;
-                                throw failed;
-                            } finally {
-                                if (!accepted) {
-                                    try {
-                                        var released =
-                                                decode.release(
-                                                                result.reservation(),
-                                                                DecodeResources.ReleaseReason
-                                                                        .LOCAL_ROLLBACK)
-                                                        .status();
-                                        checkState(
-                                                released
-                                                                == DecodeResources
-                                                                        .ReservationReleaseResult
-                                                                        .RELEASED
-                                                        || released
-                                                                == DecodeResources
-                                                                        .ReservationReleaseResult
-                                                                        .STALE,
-                                                "unaccepted admission retained Decode resources");
-                                    } catch (RuntimeException | Error failed) {
-                                        if (failure == null) {
-                                            throw failed;
-                                        }
-                                        failure.addSuppressed(failed);
-                                    }
-                                }
-                            }
-                        })
-                .copy();
-    }
-
-    CompletableFuture<PreemptionResult> tryReclaim(
+    public CompletableFuture<PreemptionResult> tryReclaim(
             RequestContext ctx, WorkerEndpoint blockedEndpoint) {
         Request request = ctx.data().getRequest();
         SchedulingMetadata metadata = ctx.data().getSchedulingMetadata();
@@ -907,15 +856,13 @@ public class DecodeAdmission {
             for (DecodeResources.ReservationHandle victim : victims) {
                 var owner = requests.ownerOf(victim.requestId());
                 AdmissionHandle withdrawal =
-                        owner instanceof QueuedRequestScheduler queue
-                                ? queue.claimQueuedRoute(endpoint, victim, priority)
-                                : null;
+                        owner == null ? null : owner.claimWithdrawal(endpoint, victim, priority);
                 if (withdrawal == null) {
                     return null;
                 }
                 claimed.add(withdrawal);
             }
-            incoming =
+            final var reserved =
                     endpoint.replaceQueuedRequests(
                             victims,
                             request.getRequestId(),
@@ -923,6 +870,30 @@ public class DecodeAdmission {
                             request.getExpectedKvTokens(),
                             priority,
                             capacity);
+            incoming = reserved;
+            if (reserved != null) {
+                AtomicBoolean released = new AtomicBoolean();
+                Runnable releaseOnPlacementFailure =
+                        () -> {
+                            if (!released.compareAndSet(false, true)) {
+                                return;
+                            }
+                            var status =
+                                    endpoint.release(
+                                                    reserved,
+                                                    DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
+                                            .status();
+                            checkState(
+                                    status == DecodeResources.ReservationReleaseResult.RELEASED
+                                            || status
+                                                    == DecodeResources.ReservationReleaseResult
+                                                            .STALE,
+                                    "failed placement retained Decode resources");
+                        };
+                for (AdmissionHandle withdrawal : claimed) {
+                    withdrawal.onPlacementFailure(releaseOnPlacementFailure);
+                }
+            }
             return incoming;
         } finally {
             Throwable failure = null;
@@ -940,10 +911,6 @@ public class DecodeAdmission {
                                                                 .PublicationResult.RESTORED));
             }
             if (failure != null) {
-                if (incoming != null) {
-                    endpoint.release(incoming, DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
-                            .status();
-                }
                 Failures.rethrow(failure, "request cleanup failed");
             }
         }

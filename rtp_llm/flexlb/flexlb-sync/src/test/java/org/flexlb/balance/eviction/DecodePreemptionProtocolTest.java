@@ -27,6 +27,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -50,7 +51,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class DecodeAdmissionProtocolTest {
+class DecodePreemptionProtocolTest {
 
     private SchedulerRuntime runtime;
 
@@ -70,7 +71,8 @@ class DecodeAdmissionProtocolTest {
     @AfterEach
     void closeRuntime() {
         try {
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(runtime, "shutdown");
+            runtime.shutdown(
+                    org.flexlb.balance.scheduler.ShutdownMode.DRAIN, Duration.ofSeconds(30L));
         } finally {
             assertTrue(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.cleanupExecutor(runtime)
@@ -120,18 +122,18 @@ class DecodeAdmissionProtocolTest {
                         anyLong()))
                 .thenReturn(
                         CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
-        DecodeAdmission acquirer =
-                new DecodeAdmission(
+        DecodePreemption acquirer =
+                new DecodePreemption(
                         dispatcher(engineClient),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests),
                         runtime,
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(2L, 100L));
-        CompletableFuture<DecodeAdmission.PreemptionResult> result =
+        CompletableFuture<DecodePreemption.PreemptionResult> result =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 endpoint,
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -200,7 +202,7 @@ class DecodeAdmissionProtocolTest {
                 .thenReturn(
                         CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime,
@@ -211,7 +213,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -244,7 +246,7 @@ class DecodeAdmissionProtocolTest {
         when(fixture.endpoint().commitPreemption(anyLong())).thenReturn(null);
         var channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime,
@@ -255,7 +257,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -300,8 +302,8 @@ class DecodeAdmissionProtocolTest {
                                                 == REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED),
                         anyLong()))
                 .thenReturn(ack);
-        DecodeAdmission acquirer =
-                new DecodeAdmission(
+        DecodePreemption acquirer =
+                new DecodePreemption(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -309,10 +311,10 @@ class DecodeAdmissionProtocolTest {
                         mock(RequestSchedulerReporter.class),
                         SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
                         new DecodeResources.AdmissionCapacity(1L, 100L));
-        CompletableFuture<DecodeAdmission.PreemptionResult> outcome =
+        CompletableFuture<DecodePreemption.PreemptionResult> outcome =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -378,8 +380,8 @@ class DecodeAdmissionProtocolTest {
                                                         == 11L
                                                 ? EngineGrpcClient.CancelReply.ACCEPTED
                                                 : EngineGrpcClient.CancelReply.FAILED));
-        DecodeAdmission acquirer =
-                new DecodeAdmission(
+        DecodePreemption acquirer =
+                new DecodePreemption(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -393,7 +395,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -505,7 +507,7 @@ class DecodeAdmissionProtocolTest {
                                         ? firstAck
                                         : secondAck);
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -516,7 +518,7 @@ class DecodeAdmissionProtocolTest {
         var result =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -614,7 +616,7 @@ class DecodeAdmissionProtocolTest {
                         anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(reply));
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -625,7 +627,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -664,7 +666,7 @@ class DecodeAdmissionProtocolTest {
                 .thenReturn(Optional.of(first), Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -675,7 +677,7 @@ class DecodeAdmissionProtocolTest {
         var result =
                 preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -708,7 +710,7 @@ class DecodeAdmissionProtocolTest {
                         new IllegalStateException("Priority victim has no routable Cancel target"));
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -719,7 +721,7 @@ class DecodeAdmissionProtocolTest {
         var result =
                 preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -750,7 +752,7 @@ class DecodeAdmissionProtocolTest {
         when(fixture.requests().tryClaim(eq(stale), anyLong())).thenReturn(Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 fixture.requests()),
@@ -761,7 +763,7 @@ class DecodeAdmissionProtocolTest {
         var result =
                 preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -789,7 +791,7 @@ class DecodeAdmissionProtocolTest {
         var deadlineRan = new java.util.concurrent.CountDownLatch(1);
         var settlementThreads = new java.util.concurrent.CopyOnWriteArrayList<String>();
         var outcomes =
-                new java.util.ArrayList<CompletableFuture<DecodeAdmission.PreemptionResult>>();
+                new java.util.ArrayList<CompletableFuture<DecodePreemption.PreemptionResult>>();
         try {
             for (int i = 0; i < 2; i++) {
                 Fixture fixture = fixture();
@@ -821,7 +823,7 @@ class DecodeAdmissionProtocolTest {
                                 CompletableFuture.completedFuture(
                                         EngineGrpcClient.CancelReply.ACCEPTED));
                 var acquirer =
-                        new DecodeAdmission(
+                        new DecodePreemption(
                                 dispatcher(channel),
                                 SchedulerTestSupport.repository(fixture.requests()),
                                 runtime,
@@ -832,7 +834,7 @@ class DecodeAdmissionProtocolTest {
                 outcomes.add(
                         preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -896,7 +898,7 @@ class DecodeAdmissionProtocolTest {
                 .thenReturn(
                         CompletableFuture.completedFuture(EngineGrpcClient.CancelReply.ACCEPTED));
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         protocolRuntime,
@@ -907,7 +909,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -999,7 +1001,7 @@ class DecodeAdmissionProtocolTest {
                         }
                     };
             var acquirer =
-                    new DecodeAdmission(
+                    new DecodePreemption(
                             dispatcher(channel),
                             SchedulerTestSupport.repository(fixture.requests()),
                             tasks,
@@ -1009,7 +1011,7 @@ class DecodeAdmissionProtocolTest {
             var outcome =
                     acquirer.preempt(
                             context,
-                            new DecodeAdmission.PreemptionCommand(
+                            new DecodePreemption.PreemptionCommand(
                                     fixture.endpoint(),
                                     incoming(),
                                     org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1040,8 +1042,9 @@ class DecodeAdmissionProtocolTest {
                     new Thread(
                             () -> {
                                 try {
-                                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                                            runtime, "shutdown");
+                                    runtime.shutdown(
+                                            org.flexlb.balance.scheduler.ShutdownMode.DRAIN,
+                                            Duration.ofSeconds(30L));
                                     shutdown.complete(null);
                                 } catch (Throwable failure) {
                                     shutdown.completeExceptionally(failure);
@@ -1091,7 +1094,7 @@ class DecodeAdmissionProtocolTest {
         var ack = new CompletableFuture<EngineGrpcClient.CancelReply>();
         when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(ack);
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(fixture.requests()),
                         runtime,
@@ -1101,7 +1104,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 fixture.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1152,7 +1155,7 @@ class DecodeAdmissionProtocolTest {
                 var ack = new CompletableFuture<EngineGrpcClient.CancelReply>();
                 when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(ack);
                 var acquirer =
-                        new DecodeAdmission(
+                        new DecodePreemption(
                                 dispatcher(channel),
                                 SchedulerTestSupport.repository(fixture.requests()),
                                 runtime,
@@ -1163,7 +1166,7 @@ class DecodeAdmissionProtocolTest {
                 outcomes.add(
                         preempt(
                                 acquirer,
-                                new DecodeAdmission.PreemptionCommand(
+                                new DecodePreemption.PreemptionCommand(
                                         fixture.endpoint(),
                                         incoming(),
                                         org.flexlb.dao.SchedulingMetadata.explicit(
@@ -1207,8 +1210,8 @@ class DecodeAdmissionProtocolTest {
         }
     }
 
-    private CompletableFuture<DecodeAdmission.PreemptionResult> preempt(
-            DecodeAdmission acquirer, DecodeAdmission.PreemptionCommand command) {
+    private CompletableFuture<DecodePreemption.PreemptionResult> preempt(
+            DecodePreemption acquirer, DecodePreemption.PreemptionCommand command) {
         var context =
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
@@ -1373,7 +1376,7 @@ class DecodeAdmissionProtocolTest {
                     .when(runtime)
                     .executeRequestWork(any(), any());
             var acquirer =
-                    new DecodeAdmission(
+                    new DecodePreemption(
                             dispatcher(channel),
                             SchedulerTestSupport.repository(f.requests()),
                             runtime,
@@ -1383,7 +1386,7 @@ class DecodeAdmissionProtocolTest {
             var outcome =
                     acquirer.preempt(
                             context,
-                            new DecodeAdmission.PreemptionCommand(
+                            new DecodePreemption.PreemptionCommand(
                                     f.endpoint(),
                                     incoming(),
                                     org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1475,7 +1478,7 @@ class DecodeAdmissionProtocolTest {
                         });
             assertTrue(entered.await(2, TimeUnit.SECONDS));
             var acquirer =
-                    new DecodeAdmission(
+                    new DecodePreemption(
                             dispatcher(channel),
                             SchedulerTestSupport.repository(f.requests()),
                             timing,
@@ -1485,7 +1488,7 @@ class DecodeAdmissionProtocolTest {
             var outcome =
                     acquirer.preempt(
                             context,
-                            new DecodeAdmission.PreemptionCommand(
+                            new DecodePreemption.PreemptionCommand(
                                     f.endpoint(),
                                     incoming(),
                                     org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1550,7 +1553,7 @@ class DecodeAdmissionProtocolTest {
                                                 ? EngineGrpcClient.CancelReply.ACCEPTED
                                                 : EngineGrpcClient.CancelReply.NOT_FOUND));
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(f.requests()),
                         runtime,
@@ -1560,7 +1563,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 f.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1615,7 +1618,7 @@ class DecodeAdmissionProtocolTest {
                 .when(timing)
                 .scheduleTimeout(any(), anyLong());
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(f.requests()),
                         timing,
@@ -1625,7 +1628,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 f.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
@@ -1759,7 +1762,7 @@ class DecodeAdmissionProtocolTest {
                                                 ? EngineGrpcClient.CancelReply.ACCEPTED
                                                 : EngineGrpcClient.CancelReply.NOT_FOUND));
         var acquirer =
-                new DecodeAdmission(
+                new DecodePreemption(
                         dispatcher(channel),
                         SchedulerTestSupport.repository(f.requests()),
                         timing,
@@ -1779,7 +1782,7 @@ class DecodeAdmissionProtocolTest {
         var outcome =
                 preempt(
                         acquirer,
-                        new DecodeAdmission.PreemptionCommand(
+                        new DecodePreemption.PreemptionCommand(
                                 f.endpoint(),
                                 incoming(),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),

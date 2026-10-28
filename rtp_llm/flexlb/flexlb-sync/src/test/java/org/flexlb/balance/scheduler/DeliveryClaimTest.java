@@ -488,7 +488,7 @@ class DeliveryClaimTest {
                 SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
                 assertSame(
                         failure,
-                        assertThrows(IllegalStateException.class, f.owner.runtime::shutdown));
+                        assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(f.owner.runtime)));
             }
         }
     }
@@ -524,7 +524,7 @@ class DeliveryClaimTest {
                 finishOwnershipRequest(f);
                 assertSame(
                         failure,
-                        assertThrows(IllegalStateException.class, f.owner.runtime::shutdown));
+                        assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(f.owner.runtime)));
             }
         }
     }
@@ -654,7 +654,7 @@ class DeliveryClaimTest {
                     f.claim,
                     new ContextResult.TransportResult(
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
-            f.owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(f.owner.runtime);
 
             assertTrue(f.settlement().isDone());
             assertFalse(f.owner.requests.isCurrent(f.context));
@@ -788,7 +788,7 @@ class DeliveryClaimTest {
                     new Thread(
                             () -> {
                                 try {
-                                    f.owner.runtime.shutdown();
+                                    SchedulerTestSupport.shutdown(f.owner.runtime);
                                 } catch (Throwable failure) {
                                     shutdownFailure.set(failure);
                                 }
@@ -1000,7 +1000,7 @@ class DeliveryClaimTest {
             assertFalse(
                     f.context.data().getFuture().join().isSuccess(),
                     "late ACK cannot replace cancellation");
-            SchedulerTestSupport.runtime(f.owner).shutdown();
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.owner));
         }
     }
 
@@ -1451,6 +1451,38 @@ class DeliveryClaimTest {
                     f.claim,
                     new ContextResult.TransportResult(
                             f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void remoteCleanedStopResultDoesNotMeanDecodeLedgerReleased() throws Exception {
+        try (var f = new Fixture()) {
+            when(f.channel.cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+            assertTrue(f.owner.tryStartSend(f.claim));
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+
+            assertEquals(
+                    DeliveryDispatcher.StopResult.REMOTE_CLEANED,
+                    f.driver().get(2, TimeUnit.SECONDS));
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+
+            assertFalse(
+                    f.settlement().isDone(),
+                    "remote cleanup acknowledgement is not Decode ledger release");
+            assertTrue(f.owner.requests.isCurrent(f.context));
+            assertTrue(f.decodeOwned.get(), "Decode ownership still needs its ledger fact");
+            verify(f.prefill, never()).release(isNull(), any());
+            verify(f.decode, never()).release(any(), any());
+
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.applyDecodeTerminal();
             f.assertArchivedAfterCleanup();
         }
     }
@@ -1981,7 +2013,8 @@ class DeliveryClaimTest {
                             argThat(request -> request.getRequestId() == 41L),
                             anyLong());
             assertEquals(1, logs.count(ch.qos.logback.classic.Level.WARN));
-            assertDoesNotThrow(f.owner.runtime::shutdown);
+            assertDoesNotThrow(
+                    (org.junit.jupiter.api.function.Executable) () -> SchedulerTestSupport.shutdown(f.owner.runtime));
         }
     }
 
@@ -2289,6 +2322,55 @@ class DeliveryClaimTest {
             verify(f.owner, never())
                     .onDeliveryEvidence(
                             eq(f.claim), isA(ContextResult.CleanupAcknowledgement.class));
+            f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
+            f.owner.onDeliveryEvidence(
+                    f.claim,
+                    new ContextResult.TransportResult(
+                            f.claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            f.assertArchivedAfterCleanup();
+        }
+    }
+
+    @Test
+    void lateCleanedReplyFromOldAttemptCannotSettleNewAttempt() throws Exception {
+        try (var f = new Fixture()) {
+            assertTrue(f.owner.tryStartSend(f.claim));
+            var oldAttempt = f.preempt();
+
+            // The old cancellation is withdrawn before a new attempt is registered.
+            assertTrue(
+                    f.owner.onPreemption(
+                            oldAttempt,
+                            new AbstractRequestScheduler.PreemptionEvent(
+                                    null, true, null, null, null)));
+            var newAttempt = f.owner.tryClaim(f.reservation, 92L).orElseThrow();
+            assertTrue(oldAttempt != newAttempt);
+            assertSame(newAttempt, f.context.snapshot().preemption().identity());
+
+            var progress =
+                    f.owner.onCancelReply(
+                            oldAttempt,
+                            f.claim,
+                            f.decode,
+                            EngineGrpcClient.CancelReply.REQUEST_CLEANED,
+                            "late reply from old attempt");
+
+            assertEquals(PreemptionRegistration.Reply.UNKNOWN, progress);
+            SchedulerTestSupport.awaitRequestWork(f.owner.runtime);
+            assertSame(
+                    newAttempt,
+                    f.context.snapshot().preemption().identity(),
+                    "an old cleanup reply must not advance the new preemption");
+            assertTrue(f.context.snapshot().delivery().prefillProof());
+            assertTrue(f.context.snapshot().delivery().decodeProof());
+            verify(f.decode, never()).updatePreemption(anyLong(), any());
+            verify(f.decode, never()).release(any(), any());
+            assertFalse(f.settlement().isDone(), "remote cleanup is not sender completion");
+            assertTrue(
+                    f.owner.onPreemption(
+                            newAttempt,
+                            new AbstractRequestScheduler.PreemptionEvent(
+                                    null, true, null, null, null)));
             f.owner.cancel(41L, 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryEvidence(
                     f.claim,

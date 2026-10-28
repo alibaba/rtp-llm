@@ -9,11 +9,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-/** One caller's placement scope. Context retains only its immutable token. */
+/** One caller's placement admission. Context retains only its immutable token. */
 public final class AdmissionHandle implements AutoCloseable {
     final ContextResult.PlacementToken token;
     private final AbstractRequestScheduler scheduler;
     private final AtomicBoolean resolved = new AtomicBoolean();
+    private final Object placementFailureLock = new Object();
+    private Runnable placementFailureAction;
+    private boolean placementFailureNotified;
 
     AdmissionHandle(ContextResult.PlacementToken token, AbstractRequestScheduler scheduler) {
         this.token = Objects.requireNonNull(token);
@@ -66,6 +69,39 @@ public final class AdmissionHandle implements AutoCloseable {
         checkArgument(!failure.isSuccess(), "admission termination requires a failure");
         if (resolved.compareAndSet(false, true)) {
             scheduler.completePlacement(this, ContextResult.PublicationResult.FAILED, failure);
+        }
+    }
+
+    /**
+     * Registers the resource action which the scheduler must run if this placement fails.
+     * The action is deliberately owned by the resource admission component; this handle only
+     * provides the single failure notification point.
+     */
+    public void onPlacementFailure(Runnable action) {
+        Objects.requireNonNull(action, "action");
+        synchronized (placementFailureLock) {
+            checkState(!resolved.get(), "admission already resolved");
+            checkState(
+                    !placementFailureNotified, "placement failure notification already started");
+            checkState(
+                    placementFailureAction == null, "placement failure action already registered");
+            placementFailureAction = action;
+        }
+    }
+
+    /** Runs the registered resource action at most once. */
+    void notifyPlacementFailure() {
+        Runnable action;
+        synchronized (placementFailureLock) {
+            if (placementFailureNotified) {
+                return;
+            }
+            placementFailureNotified = true;
+            action = placementFailureAction;
+            placementFailureAction = null;
+        }
+        if (action != null) {
+            action.run();
         }
     }
 

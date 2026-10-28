@@ -71,7 +71,7 @@ class RequestSchedulerEntryTest {
                     result.get(3, TimeUnit.SECONDS).getCode());
             verify(span).setAttribute(FlexlbTrace.SCHEDULE_MODE, mode);
         } finally {
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
         }
     }
 
@@ -145,7 +145,7 @@ class RequestSchedulerEntryTest {
             assertTrue(context.data().getRequest().getCacheAffinityKeys().isEmpty());
             assertEquals(java.util.List.of(11L, 12L), original.getBlockCacheKeys());
         } finally {
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
         }
     }
 
@@ -182,7 +182,7 @@ class RequestSchedulerEntryTest {
                     owner.submit(context).join().getCode());
             assertFalse(owner.requests.retainsIdentity(701L));
         } finally {
-            owner.runtime.shutdown();
+            SchedulerTestSupport.shutdown(owner.runtime);
         }
     }
 
@@ -196,7 +196,7 @@ class RequestSchedulerEntryTest {
                 mock(RequestSchedulerReporter.class),
                 trace,
                 router,
-                mock(org.flexlb.balance.eviction.DecodeAdmission.class),
+                mock(org.flexlb.balance.eviction.DecodePreemption.class),
                 new PlacementAvailability());
     }
 

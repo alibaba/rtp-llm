@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -525,7 +525,7 @@ class DirectAdmissionContractTest {
                             config,
                             fixture.router,
                             mock(DeliveryMetricsReporter.class),
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             fixture.runtime,
                             new PlacementAvailability(),
                             SchedulingTestConfig.capacity(config),
@@ -616,7 +616,7 @@ class DirectAdmissionContractTest {
                                     config,
                                     fixture.router,
                                     mock(DeliveryMetricsReporter.class),
-                                    mock(DecodeAdmission.class),
+                                    mock(DecodePreemption.class),
                                     new PlacementAvailability(),
                                     SchedulingTestConfig.capacity(config),
                                     org.mockito.Mockito.mock(
@@ -721,7 +721,7 @@ class DirectAdmissionContractTest {
                             reporter,
                             mock(RecentCacheKeyTraceReporter.class),
                             router,
-                            mock(DecodeAdmission.class),
+                            mock(DecodePreemption.class),
                             placement);
             scheduler = (DirectRequestScheduler) requests;
             WorkerStatus worker = worker(RoleType.PREFILL, "127.0.0.1");
@@ -850,7 +850,7 @@ class DirectAdmissionContractTest {
             try {
                 decode.close();
             } finally {
-                runtime.shutdown();
+                SchedulerTestSupport.shutdown(runtime);
             }
         }
 

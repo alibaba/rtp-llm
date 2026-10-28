@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodeAdmission;
+import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -23,6 +23,7 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 
@@ -33,7 +34,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final PlacementAvailability placementAvailability = new PlacementAvailability();
     private final BindingRouter router;
     private final EndpointRegistry registry;
-    private final DecodeAdmission decodeCapacity;
+    private final DecodePreemption decodePreemption;
     private final AbstractRequestScheduler scheduler;
     private final SchedulerRuntime runtime;
     private volatile boolean deliveryPaused;
@@ -103,8 +104,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         })
                 .when(facilities)
                 .watchDeliveryCapacity(org.mockito.ArgumentMatchers.any());
-        this.decodeCapacity =
-                new DecodeAdmission(
+        this.decodePreemption =
+                new DecodePreemption(
                         delivery, requests, runtime, requestReporter, configService, capacity);
         this.scheduler =
                 PlacementConfiguration.create(
@@ -112,7 +113,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         configService.loadBalanceConfig(),
                         router,
                         deliveryReporter,
-                        decodeCapacity,
+                        decodePreemption,
                         placementAvailability,
                         capacity,
                         new org.flexlb.service.RecentCacheKeyTraceReporter());
@@ -227,8 +228,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     @Override
     public void close() {
-        decodeCapacity.shutdown();
-        runtime.shutdown();
+        decodePreemption.freezeAdmission();
+        runtime.shutdown(ShutdownMode.DRAIN, Duration.ofSeconds(30L));
     }
 
     private static final class BindingRouter extends RequestWorkerSelector {

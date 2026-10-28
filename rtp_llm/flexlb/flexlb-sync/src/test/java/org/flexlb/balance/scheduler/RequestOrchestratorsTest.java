@@ -64,7 +64,7 @@ class RequestOrchestratorsTest {
         org.springframework.test.util.ReflectionTestUtils.setField(
                 runtime, "deliveries", executions);
         doThrow(second).when(executions).awaitDeliveries();
-        assertSame(first, assertThrows(IllegalStateException.class, runtime::shutdown));
+        assertSame(first, assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime)));
         assertEquals(List.of(second), List.of(first.getSuppressed()));
         verify(endpoints).close();
         verify(owner).closeOutstandingAndTerminalize();
@@ -92,14 +92,14 @@ class RequestOrchestratorsTest {
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
         org.springframework.test.util.ReflectionTestUtils.setField(
                 runtime, "deliveries", executions);
-        runtime.shutdown();
+        SchedulerTestSupport.shutdown(runtime);
         InOrder order = inOrder(requests, owner, runtime, executions, endpoints);
         order.verify(requests).closeRegistration();
         order.verify(owner).closePlacement();
         order.verify(runtime).awaitAdmissions();
         order.verify(executions).awaitDeliveries();
         order.verify(endpoints).close();
-        runtime.shutdown();
+        SchedulerTestSupport.shutdown(runtime);
         verify(owner).closePlacement();
         verify(executions).awaitDeliveries();
     }
@@ -112,7 +112,7 @@ class RequestOrchestratorsTest {
         when(requests.closeRegistration()).thenThrow(failure);
         var runtime = runtime(requests, endpoints);
         try {
-            assertSame(failure, assertThrows(IllegalStateException.class, runtime::shutdown));
+            assertSame(failure, assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime)));
         } finally {
             SchedulerTestSupport.closeRequestExecutors(runtime);
             SchedulerTestSupport.timer(runtime).close();
@@ -126,7 +126,7 @@ class RequestOrchestratorsTest {
         when(requests.closeRegistration()).thenReturn(true);
         when(requests.liveRequestCount()).thenReturn(1);
         var runtime = runtime(requests, mock(EndpointRegistry.class));
-        var failure = assertThrows(IllegalStateException.class, runtime::shutdown);
+        var failure = assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
         assertEquals("Unsettled requests at shutdown: 1", failure.getMessage());
     }
 
@@ -151,7 +151,7 @@ class RequestOrchestratorsTest {
                         });
         start.countDown();
         CompletableFuture.allOf(one, two).get(3, TimeUnit.SECONDS);
-        var reported = assertThrows(IllegalStateException.class, runtime::shutdown);
+        var reported = assertThrows(IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
         assertTrue(reported == first || reported == second);
         assertEquals(
                 List.of(reported == first ? second : first), List.of(reported.getSuppressed()));
