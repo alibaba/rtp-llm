@@ -53,6 +53,30 @@ class MoeTopkTritonTest(unittest.TestCase):
             graph.replay()
             self.compare(logits, ids, weights)
 
+    def test_large_prefill_batches_use_fused_routing_and_match_native(self):
+        for rows in (8192, 12288, 16384):
+            for dtype in (torch.bfloat16, torch.float32):
+                with self.subTest(rows=rows, dtype=dtype):
+                    logits = torch.randn(rows, 512, device="cuda", dtype=dtype)
+                    logits[0] = 0
+                    ids = torch.empty(rows, 10, device="cuda", dtype=torch.int32)
+                    weights = torch.empty(rows, 10, device="cuda")
+                    with patch.object(
+                        self.native,
+                        "forward",
+                        side_effect=AssertionError("large prefill fell back to native"),
+                    ):
+                        self.fused(logits, ids, weights)
+                    self.compare(logits, ids, weights)
+
+    def test_batches_above_prefill_limit_delegate(self):
+        logits = torch.empty(16385, 512, device="cuda", dtype=torch.bfloat16)
+        ids = torch.empty(16385, 10, device="cuda", dtype=torch.int32)
+        weights = torch.empty(16385, 10, device="cuda")
+        with patch.object(self.native, "forward") as call:
+            self.fused(logits, ids, weights)
+        call.assert_called_once_with(logits, ids, weights)
+
     def test_nonfinite_logits_preserve_native_routing_and_bounded_ids(self):
         logits = torch.randn(7, 512, device="cuda")
         logits[0] = float("nan")
