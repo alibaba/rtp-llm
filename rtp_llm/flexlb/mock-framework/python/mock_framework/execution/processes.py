@@ -9,6 +9,7 @@ from ..config.values import duration, fields, text
 from .records import write_json
 from .transport import ExecutionError
 from .monitoring import Prometheus, prepare_prometheus
+from .master import master_environment
 
 
 def prepare_launch(raw, case, base):
@@ -108,7 +109,9 @@ class Processes:
     async def start(self):
         if self.prometheus:
             await self.guard(self.prometheus.start(), self.prometheus.startup_timeout)
-        for role, recipe in self.launch['components'].items():
+        topology = []
+        order = {'prefill': 0, 'decode': 0, 'vit': 0, 'master': 1, 'client': 2}
+        for role, recipe in sorted(self.launch['components'].items(), key=lambda item: order[item[0]]):
             for index in range(self.case.environment[role]['deployment']['replicas']):
                 node = f'{role}-{index}'
                 directory = self.records.directory / 'components' / node
@@ -120,7 +123,10 @@ class Processes:
                     component['config']['prometheus'] = {'url': self.prometheus.url, 'job': self.prometheus.JOB}
                 write_json(config, {'component_role': role, 'component': component,
                                     'environment': self.case.environment, 'index': index, 'id': node})
-                env = {**os.environ, **recipe['env'], 'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role,
+                native_env = master_environment(component['config'], topology, directory) if role == 'master' else {}
+                topology_file = self.records.directory / 'topology.json'
+                write_json(topology_file, topology)
+                env = {**os.environ, **recipe['env'], **native_env, 'MOCK_TOPOLOGY_FILE': str(topology_file), 'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role,
                        'MOCK_CONFIG_FILE': str(config), 'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}
                 await self.spawn(node, recipe['command'], recipe['cwd'], env, directory)
                 async def await_ready():
@@ -132,6 +138,11 @@ class Processes:
                     self.urls[node] = value['url']
                 await self.guard(await_ready(), float(duration(recipe['startup_timeout'])))
                 self.records.emit(event='process_ready', node=node, url=self.urls[node])
+                endpoints = directory / 'endpoints.json'
+                if endpoints.is_file():
+                    value = json.loads(endpoints.read_text(encoding='utf-8'))
+                    topology.append({**value, 'id': node, 'role': role})
+                    write_json(topology_file, topology)
                 if self.prometheus:
                     self.prometheus.discover(node, directory)
         if self.prometheus:

@@ -1,6 +1,6 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、文本P/D生成、共享Decode推进及停止模型、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。真实Master、多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、文本P/D生成、共享Decode推进及停止模型、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。真实Master已提供单实例本地接线，多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
@@ -12,6 +12,7 @@ Python负责case配置编译和执行组织，Java负责组件共享接口与实
 - `java/shared/metrics/`：共享Engine指标定义、独立注册表、Prometheus导出与查询实现。
 - `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
 - `java/client/`：Client原生调度、取流、客户端计时及请求取消；播放器和多JVM协调待接入。
+- `java/master/`：真实生产Master的启动入口和共享读取接口适配，不重新实现调度。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
 - `scripts/`：构建和验证入口。
 
@@ -23,6 +24,8 @@ export JAVA_HOME=<Java21目录>
 ```
 
 `build.sh`编译Java并运行测试，然后生成`build/interfaces.json`。Python没有另一份组件接口枚举；`runtime/wait`由Python定义为执行器内置动作，不制造Java端点。生成目录不入库；Python依赖锁定在`uv.lock`。Java构建直接构建生产`flexlb-common`和`flexlb-grpc`，复用实际公式与生成协议，不继承旧Mock或online_eval构建。新组件只保留所用依赖，不引入生产模块的Spring等传递运行依赖。
+
+Master模块另行构建生产cache/sync/api并沿用生产依赖管理，Spring只进入Master运行时，不进入RTP节点或Client收发核心。框架构建使用普通API JAR，跳过Boot重打包和Whale分发归档，保留proto生成和测试；生产独立构建的默认打包行为不变。
 
 ## 编译case
 
@@ -84,6 +87,18 @@ Java Client实现时应基于seed和稳定逻辑请求身份生成每个请求�
 
 测试覆盖真实网络协议及新RTP P/D节点；其中调度服务是测试夹具，不代表生产Master已接入。独立JVM测试让新Client进程分别执行Generate和Enqueue→Fetch，实际消费两端结果。播放器、数据集读取、多JVM分片/总QPS协调、Client指标与case业务入口仍待后续批次。
 
+## 真实Master本地接线
+
+`java/master`的入口为`org.flexlb.MasterNode`，与生产Application、同步器和调度器运行于同一JVM，不启动第二个Master子进程，也不引入Mock调度器。启动classpath为本模块`target/classes`加构建生成的`target/dependencies.txt`；启动配方可使用`java -cp <classpath> org.flexlb.MasterNode`，建议为生产Spring初始化预留60s的startup_timeout。
+
+Case的`environment.master.config`保存原生环境变量字符串：`FLEXLB_CONFIG`是原样JSON文本，`MODEL_SERVICE_CONFIG`是原生模型路由JSON。Runner先启动P/D/V，再启动Master，最后启动Client，与YAML中组件的书写顺序无关。它根据已启动Engine的endpoints.json维护topology.json，将MODEL_SERVICE_CONFIG中的hosts/discovery_file替换为本次运行的discovery.json；service_id、组和各角色发现域名仍来自原配置。FLEXLB_CONFIG不改写。单个本地组内各角色的实例集合由对应启动结果生成，不读取线上VIP。
+
+当前明确限制一个Master、一个模型endpoint组、独立角色和grpc协议。本批验证P/D；ViT Engine尚未实现，发现格式预留同样的角色映射但不宣称ViT链路已通过。发现文件使用实际Engine gRPC端口，由生产WorkerAddressService按grpc协议转换内部HTTP身份；不假设Engine控制HTTP端口与gRPC端口相邻。复制来的原始配置保留在config.json，实际环境和发现地址另存native-environment.json、effective-config.json和discovery.json；Master日志写入自己的运行目录。HTTP/gRPC使用本机空闲端口，/prometheus沿用生产Master指标，endpoints.json同时登记业务、控制与指标地址。
+
+只绑定MasterStateApi的两个读取接口：master/engine/get读取生产WorkerDirectory的当前角色集合并映射为Engine句柄，未知地址明确报错，不按部署数量伪造或悄悄忽略；结果以Master ID分别返回。master/leadership/get读取生产isMaster声明，关闭一致性选举的standalone模式返回空集合，不将唯一进程冒充当选leader。master/process/stop/start、多Master聚合和滚动重启尚未接入。
+
+真实接线测试另外启动生产Master JVM、新P/D JVM和Client探针JVM，覆盖DIRECT/NON_BATCH的Generate与QUEUE/FIXED_WINDOW/BATCH的Enqueue→Fetch；与前一节保留的调度协议夹具测试区分记录。这些是小流量本地接线验证，不作为远程开发机/CI大规模稳定性或压力能力验收。现阶段保留每个Engine一个JVM及跨实例gRPC，是否长期保留以这些后续测量为准。
+
 ## 共享Compute
 
 ```yaml
@@ -123,7 +138,7 @@ Compute已接入RTP Prefill和Decode链路；完成Forward时记录实际计时�
 
 ## 扩展接口
 
-在`MasterApi`、`EngineApi`或`ClientApi`添加方法，使用`@Endpoint`声明接口名、动作/读取类别和可选单位；使用Java record声明参数，`@Argument`说明可选性和范围。引用类型直接从record类型生成，不再维护另一份类型名称。实现放所属组件，不放Python。重新构建即生成包含新方法的清单。
+在所属Java API添加方法：Master读取放`MasterStateApi`（由`MasterApi`继承），动作放`MasterApi`；其他组件使用`EngineApi`或`ClientApi`。使用`@Endpoint`声明接口名、动作/读取类别和可选单位；使用Java record声明参数，`@Argument`说明可选性和范围。引用类型直接从record类型生成，不再维护另一份类型名称。实现放所属组件，不放Python。重新构建即生成包含新方法的清单。
 
 编译器根据清单校验参数和返回引用，不为新接口修改parser/compiler。Java方法必须有一个record参数，即使无参数也使用`Types.None`；同名接口和不支持的类型在生成清单时失败。完全新增一组Java API时在`InterfaceRegistry.standard()`登记其接口类。
 
@@ -138,7 +153,7 @@ uv run --locked mock-case run <case目录>/case.yaml \
   --output <新的运行目录>
 ```
 
-启动配方是开发接线配置，不放入case业务区域，也不新增一套业务接口定义。RTP节点使用下述独立JAR入口；Master/Client完整业务启动配方尚未提供。
+启动配方是开发接线配置，不放入case业务区域，也不新增一套业务接口定义。RTP节点使用下述独立JAR入口；Master启动入口见下一节，Client播放器尚未提供。
 
 ```yaml
 components:

@@ -15,6 +15,7 @@
         <maven.compiler.target>21</maven.compiler.target>
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <flexlb.package.skip>false</flexlb.package.skip>
     </properties>
 
     <dependencies>
@@ -104,6 +105,7 @@
                     <execution>
                         <phase>package</phase>
                         <configuration>
+                            <skip>${flexlb.package.skip}</skip>
                             <target>
                                 <unzip
                                     src="${project.build.directory}/${project.build.finalName}.${project.packaging}"
