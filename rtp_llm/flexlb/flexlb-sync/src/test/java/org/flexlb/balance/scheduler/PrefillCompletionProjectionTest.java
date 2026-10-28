@@ -172,8 +172,7 @@ class PrefillCompletionProjectionTest {
                 assertNotNull(claim);
                 long now = System.currentTimeMillis();
                 var work = new WorkSnapshot(now, java.util.List.of(), java.util.List.of(), 0L);
-                requests.onDeliveryEvidence(
-                        claim,
+                requests.onDeliveryFact(
                         new RouteDelivered(
                                 claim,
                                 PrefillPredictionBoundary.predictedVisibilityDeadlineMs(

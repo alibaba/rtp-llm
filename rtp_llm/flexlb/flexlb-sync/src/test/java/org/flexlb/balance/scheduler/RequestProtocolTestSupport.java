@@ -616,8 +616,7 @@ final class RequestProtocolTestSupport {
             AbstractRequestScheduler registry, RequestRoute item, BooleanSupplier handoff) {
         DeliveryClaim claim = claimRouteWithoutPrediction(registry, item, handoff);
         if (claim != null) {
-            registry.onDeliveryEvidence(
-                    claim,
+            registry.onDeliveryFact(
                     new Prediction(
                             claim,
                             System.currentTimeMillis() + 30_000L,
@@ -633,8 +632,7 @@ final class RequestProtocolTestSupport {
             BooleanSupplier handoff) {
         DeliveryClaim claim = claimBatchWithoutPrediction(registry, item, batchId, handoff);
         if (claim != null) {
-            registry.onDeliveryEvidence(
-                    claim,
+            registry.onDeliveryFact(
                     new Prediction(
                             claim,
                             System.currentTimeMillis() + 30_000L,
@@ -737,15 +735,13 @@ final class RequestProtocolTestSupport {
         var claim = snapshot.delivery().identity();
         return () -> {
             if (claim.kind() == DeliveryClaimKind.BATCH_ENQUEUE) {
-                scheduler.onDeliveryEvidence(
-                        claim,
+                scheduler.onDeliveryFact(
                         new TransportResult(
                                 claim,
                                 org.flexlb.balance.delivery.DeliveryResult.delivered(),
                                 System.currentTimeMillis()));
             } else {
-                scheduler.onDeliveryEvidence(
-                        claim,
+                scheduler.onDeliveryFact(
                         new RouteDelivered(
                                 claim,
                                 System.currentTimeMillis() + 30_000L,
@@ -834,8 +830,7 @@ final class RequestProtocolTestSupport {
             AbstractRequestScheduler scheduler,
             DeliveryClaim claim,
             org.flexlb.balance.delivery.DeliveryResult result) {
-        scheduler.onDeliveryEvidence(
-                claim, new TransportResult(claim, result, System.currentTimeMillis()));
+        scheduler.onDeliveryFact(new TransportResult(claim, result, System.currentTimeMillis()));
     }
 
     static void prediction(
@@ -856,7 +851,7 @@ final class RequestProtocolTestSupport {
                                         .getDecision()
                                         .getLifetime(),
                                 now);
-        scheduler.onDeliveryEvidence(claim, new Prediction(claim, deadline, now));
+        scheduler.onDeliveryFact(new Prediction(claim, deadline, now));
     }
 
     static void routeDelivered(
@@ -877,7 +872,7 @@ final class RequestProtocolTestSupport {
                                         .getDecision()
                                         .getLifetime(),
                                 now);
-        scheduler.onDeliveryEvidence(claim, new RouteDelivered(claim, deadline, now));
+        scheduler.onDeliveryFact(new RouteDelivered(claim, deadline, now));
     }
 
     static boolean preemptionPhase(

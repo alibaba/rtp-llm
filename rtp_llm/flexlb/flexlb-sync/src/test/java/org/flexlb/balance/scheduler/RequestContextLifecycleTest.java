@@ -143,8 +143,7 @@ class RequestContextLifecycleTest {
             assertEquals(
                     1, repository.liveRequestCount(), "sender handoff is not request completion");
         } finally {
-            lifecycle.onDeliveryEvidence(
-                    delivery,
+            lifecycle.onDeliveryFact(
                     new ContextResult.TransportResult(
                             delivery,
                             org.flexlb.balance.delivery.DeliveryResult.notSent(
@@ -904,8 +903,7 @@ class RequestContextLifecycleTest {
                                         throw new AssertionError(
                                                 "foreign scheduler transferred endpoint ownership");
                                     })));
-            other.onDeliveryEvidence(
-                    null,
+            other.onDeliveryFact(
                     new ContextResult.PreparationFailure(
                             null, item, "foreign failure", System.currentTimeMillis()));
             other.onQueueEvent(item, AbstractRequestScheduler.QueueKind.EXPIRED, null, null);
@@ -1600,8 +1598,7 @@ class RequestContextLifecycleTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        delivery,
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 delivery,
                                 org.flexlb.balance.delivery.DeliveryResult.notSent(
@@ -1719,8 +1716,7 @@ class RequestContextLifecycleTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        delivery,
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 delivery,
                                 org.flexlb.balance.delivery.DeliveryResult.delivered(),
@@ -1811,8 +1807,7 @@ class RequestContextLifecycleTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        delivery,
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 delivery,
                                 org.flexlb.balance.delivery.DeliveryResult.delivered(),
@@ -1854,8 +1849,7 @@ class RequestContextLifecycleTest {
                         true,
                         false),
                 System.currentTimeMillis());
-        lifecycle.onDeliveryEvidence(
-                delivery,
+        lifecycle.onDeliveryFact(
                 new ContextResult.PreparationFailure(
                         delivery,
                         registered.item(),
@@ -1913,8 +1907,7 @@ class RequestContextLifecycleTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        delivery,
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 delivery,
                                 org.flexlb.balance.delivery.DeliveryResult.delivered(),
@@ -2066,8 +2059,7 @@ class RequestContextLifecycleTest {
                                 .ctx()
                                 .data()
                                 .getScheduler()
-                                .onDeliveryEvidence(
-                                        claim,
+                                .onDeliveryFact(
                                         new ContextResult.TransportResult(
                                                 claim, null, System.currentTimeMillis())));
         assertEquals(
@@ -2079,8 +2071,7 @@ class RequestContextLifecycleTest {
                 .ctx()
                 .data()
                 .getScheduler()
-                .onDeliveryEvidence(
-                        claim,
+                .onDeliveryFact(
                         new ContextResult.TransportResult(
                                 claim,
                                 org.flexlb.balance.delivery.DeliveryResult.delivered(),
@@ -2093,8 +2084,7 @@ class RequestContextLifecycleTest {
                                 .ctx()
                                 .data()
                                 .getScheduler()
-                                .onDeliveryEvidence(
-                                        claim,
+                                .onDeliveryFact(
                                         new ContextResult.TransportResult(
                                                 claim,
                                                 org.flexlb.balance.delivery.DeliveryResult.notSent(

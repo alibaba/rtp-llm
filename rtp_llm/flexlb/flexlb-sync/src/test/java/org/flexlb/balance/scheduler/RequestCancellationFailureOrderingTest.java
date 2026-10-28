@@ -191,8 +191,7 @@ class RequestCancellationFailureOrderingTest {
                             owner.commitRoute(
                                     route, RequestProtocolTestSupport.publication(() -> true)));
                     owner.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
-                    owner.onDeliveryEvidence(
-                            null,
+                    owner.onDeliveryFact(
                             new PreparationFailure(
                                     null, route, "late failure", System.currentTimeMillis()));
                     assertEquals(

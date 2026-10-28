@@ -423,8 +423,7 @@ class RequestLifetimeTest {
             assertTrue(RequestState.from(context.snapshot()).detail().startsWith("SUSPECTED_LOST"));
             assertNull(context.snapshot().cancellation());
             if (ackBeforeEvidence) {
-                registry.onDeliveryEvidence(
-                        claim,
+                registry.onDeliveryFact(
                         new TransportResult(
                                 claim, DeliveryResult.delivered(), System.currentTimeMillis()));
                 assertTrue(
@@ -445,8 +444,7 @@ class RequestLifetimeTest {
                             System.currentTimeMillis()));
             if (!ackBeforeEvidence) {
                 assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");
-                registry.onDeliveryEvidence(
-                        claim,
+                registry.onDeliveryFact(
                         new TransportResult(
                                 claim, DeliveryResult.delivered(), System.currentTimeMillis()));
             }

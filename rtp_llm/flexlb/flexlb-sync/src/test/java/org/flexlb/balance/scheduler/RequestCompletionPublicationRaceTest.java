@@ -432,8 +432,7 @@ class RequestCompletionPublicationRaceTest {
                                     claim.owner()
                                             .data()
                                             .getScheduler()
-                                            .onDeliveryEvidence(
-                                                    claim,
+                                            .onDeliveryFact(
                                                     new ContextResult.TransportResult(
                                                             claim,
                                                             DeliveryResult.delivered(),
@@ -833,8 +832,7 @@ class RequestCompletionPublicationRaceTest {
                         () -> {
                             if (deliveryFailure) {
                                 fixture.scheduler()
-                                        .onDeliveryEvidence(
-                                                fixture.claim(),
+                                        .onDeliveryFact(
                                                 new ContextResult.TransportResult(
                                                         fixture.claim(),
                                                         DeliveryResult.prefillRejected(
