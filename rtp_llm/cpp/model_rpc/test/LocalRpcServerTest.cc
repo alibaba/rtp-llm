@@ -138,7 +138,6 @@ class FailingEngine: public EngineBase {
 public:
     explicit FailingEngine(EngineFailureMode mode): EngineBase(EngineInitParams()), mode_(mode) {}
 
-    MOCK_METHOD(bool, updateEplbConfig, (const EPLBConfig&), (override));
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
         if (mode_ == EngineFailureMode::THROW_STD_EXCEPTION) {
@@ -531,31 +530,6 @@ TEST(LocalRpcServerTest, AllocatorDumpAggregationRejectsMismatchedIds) {
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::DATA_LOSS);
     EXPECT_EQ(response.results_size(), 0);
-}
-
-TEST(LocalRpcServerTest, UpdateEplbConfigIsDisabledWithoutCallingEngine) {
-    for (const auto* mode : {"NONE", "STATS", "EPLB", "ALL", "invalid"}) {
-        for (const int interval : {-1, 0, 1000}) {
-            SCOPED_TRACE(mode);
-            SCOPED_TRACE(interval);
-            TestLocalRpcServer server;
-            auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
-            server.setEngineForTest(engine);
-            UpdateEplbConfigRequestPB request;
-            request.set_mode(mode);
-            if (interval >= 0) {
-                request.set_update_time(interval);
-            }
-            grpc::ServerContext context;
-            EmptyPB             response;
-            EXPECT_CALL(*engine, updateEplbConfig(_)).Times(0);
-
-            const auto status = server.UpdateEplbConfig(&context, &request, &response);
-
-            EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
-            EXPECT_THAT(status.error_message(), HasSubstr("disabled"));
-        }
-    }
 }
 
 TEST(LocalRpcServerTest, PrepareInputReturnsInvalidParamsMappedToInvalidArgument) {

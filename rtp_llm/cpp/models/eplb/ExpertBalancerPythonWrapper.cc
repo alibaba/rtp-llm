@@ -38,8 +38,4 @@ bool ExpertBalancerPythonWrapper::step(const torch::Tensor& counts, bool is_prom
     return runtime_.attr("step")(counts, is_prompt).cast<bool>();
 }
 
-void ExpertBalancerPythonWrapper::updateConfig(const EPLBConfig& config) {
-    py::gil_scoped_acquire gil;
-    runtime_.attr("update_config")(static_cast<int>(config.eplb_mode), config.eplb_update_time);
-}
 }  // namespace rtp_llm

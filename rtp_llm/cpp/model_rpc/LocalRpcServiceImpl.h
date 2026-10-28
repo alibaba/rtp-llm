@@ -126,12 +126,6 @@ public:
         return local_server_->CheckHealth(context, request, response);
     }
 
-    ::grpc::Status UpdateEplbConfig(::grpc::ServerContext*           context,
-                                    const UpdateEplbConfigRequestPB* request,
-                                    EmptyPB*                         response) override {
-        return local_server_->UpdateEplbConfig(context, request, response);
-    }
-
     ::grpc::Status SetPause(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
         return local_server_->SetPause(context, request, response);
     }

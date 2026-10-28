@@ -602,14 +602,6 @@ message CheckHealthResponsePB {
     string health = 1;
 }
 
-message UpdateEplbConfigRequestPB {
-    string mode = 1;
-    // Step interval: omitted keeps the current value; zero disables rearrangement.
-    oneof update_interval {
-        int32 update_time = 2;
-    }
-}
-
 enum TaskPhase {
     TASK_PHASE_PENDING = 0;
     TASK_PHASE_RECEIVED = 1;
@@ -1122,7 +1114,6 @@ service RpcService {
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
     rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
-    rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);

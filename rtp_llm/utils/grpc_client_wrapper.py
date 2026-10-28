@@ -260,26 +260,6 @@ class GrpcClientWrapper:
             "errors": errors,
         }
 
-    async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
-        """Update the mode and, when supplied, the rearrangement step interval."""
-        try:
-            await self._ensure_connection()
-            if isinstance(req, str):
-                req = json.loads(req)
-            epld_req = pb2.UpdateEplbConfigRequestPB(mode=req.get("mode", "NONE"))
-            if "update_time" in req:
-                interval = req["update_time"]
-                if type(interval) is not int or interval < 0:
-                    raise ValueError(
-                        "update_time must be a non-negative integer step interval"
-                    )
-                epld_req.update_time = interval
-            await self.stub.UpdateEplbConfig(epld_req)
-            return {"status": "ok"}
-        except Exception as e:
-            logging.error(f"Update EPLB config failed: {e}")
-            return {"error": f"Failed to update EPLB config: {str(e)}"}
-
     async def update_scheduler_info(self, req: Any) -> Dict[str, Any]:
         """Update scheduler info on all DP addresses"""
         try:
@@ -329,8 +309,6 @@ class GrpcClientWrapper:
                 return await self.start_profile(req)
             elif uri == "dump_torch_allocator":
                 return await self.dump_torch_allocator(req)
-            elif uri == "update_eplb_config":
-                return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":
                 return await self.update_scheduler_info(req)
             else:

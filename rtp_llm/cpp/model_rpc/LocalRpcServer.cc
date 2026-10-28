@@ -1153,13 +1153,6 @@ LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::UpdateEplbConfig(grpc::ServerContext*, const UpdateEplbConfigRequestPB*, EmptyPB*) {
-    // Frontends on non-root DP ranks cannot publish a controller update.
-    // Reject all online updates until the request has a consistent owner.
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
-                        "Runtime EPLB configuration updates are disabled; configure EPLB at startup");
-}
-
 void LocalRpcServer::reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_ws_time_us) {
     RpcWorkerStatusMetricsCollector collector;
     collector.qps         = true;

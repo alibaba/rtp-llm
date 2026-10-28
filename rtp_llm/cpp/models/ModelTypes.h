@@ -206,9 +206,6 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual bool            updateEplbConfig(const EPLBConfig&) {
-        return true;
-    }
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }

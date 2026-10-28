@@ -163,11 +163,8 @@ class _ExpertLayoutGroup:
         self.skip_prefill = is_normal_engine and not self.after_prefill
         self.p2p_groups = config.eplb_rearrange_p2p_groups
         self.updates = 0
-        self.reset(config.eplb_update_time)
-
-    def reset(self, interval):
-        self.window.zero_()
         self.window_index = 0
+        interval = config.eplb_update_time
         self.steps = max(0, interval - max(1, interval // 4))
 
     def initialize_shuffle(self):
@@ -223,7 +220,7 @@ class _ExpertLayoutGroup:
         if self.steps < interval:
             return False
         self.steps = 0
-        # STATS is RTP's online-control mode: collect without changing weights.
+        # STATS collects without changing weights.
         if mode == 1:
             return False
         return self.rearrange()
@@ -358,6 +355,12 @@ class RuntimeExpertBalancer:
             raise ValueError(
                 "EPLB requires a nonnegative window and positive P2P groups"
             )
+        self.mode = int(config.eplb_mode)
+        self.interval = config.eplb_update_time
+        if self.mode not in (0, 1, 2, 3) or self.interval < 0:
+            raise ValueError("EPLB mode must be 0..3 and update interval nonnegative")
+        if self.interval > 0 and not 0 < self.window_size <= self.interval:
+            raise ValueError("EPLB enabled interval requires 0 < window <= interval")
         grouped = {}
         for layer in self.layers:
             layout = (
@@ -382,8 +385,6 @@ class RuntimeExpertBalancer:
             )
             for group in grouped.values()
         )
-        self.mode = -1
-        self.interval = -1
         # RTP may combine prefill on one DP rank with decode on another.
         # DeepInfer's NORMAL engine supplies one global phase. The caller
         # enables coordination only where its scheduler does not guarantee it.
@@ -392,11 +393,9 @@ class RuntimeExpertBalancer:
             if sync_prompt_phase
             else None
         )
-        self.update_config(config.eplb_mode, config.eplb_update_time)
         if ep_size > 1:
-            # Prepare communication and planning kernels before serving requests,
-            # including STATS/paused runtimes that can be enabled online. Planning
-            # from the initial zero window does not publish maps or advance steps.
+            # Prepare communication and planning kernels before serving requests.
+            # The initial zero window does not publish maps or advance steps.
             started = time.perf_counter()
             for group in self.groups:
                 group.initialize_shuffle()
@@ -409,17 +408,6 @@ class RuntimeExpertBalancer:
                 ep_rank,
                 time.perf_counter() - started,
             )
-
-    def update_config(self, mode, update_time):
-        mode = int(mode)
-        if mode not in (0, 1, 2, 3) or update_time < 0:
-            raise ValueError("EPLB mode must be 0..3 and update interval nonnegative")
-        if update_time > 0 and not 0 < self.window_size <= update_time:
-            raise ValueError("EPLB enabled interval requires 0 < window <= interval")
-        if (mode, update_time) != (self.mode, self.interval):
-            self.mode, self.interval = mode, update_time
-            for group in self.groups:
-                group.reset(update_time)
 
     @torch.inference_mode()
     def step(self, counts: torch.Tensor, is_prompt=False):

@@ -365,16 +365,6 @@ public:
         return forward_count_;
     }
 
-    bool updateEplbConfig(const EPLBConfig& config) override {
-        last_eplb_config = config;
-        ++eplb_update_count;
-        return accept_eplb_update;
-    }
-
-    EPLBConfig last_eplb_config;
-    size_t     eplb_update_count  = 0;
-    bool       accept_eplb_update = true;
-
     std::string waitCacheStorePublication() override {
         recordEvent("wait_publication");
         if (publication_observer_) {
@@ -1451,7 +1441,6 @@ TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
                             EXPECT_EQ(draft->expert_balancer_.load_monitor_, nullptr);
                             draft->expert_balancer_.step(true);
                             draft->expert_balancer_.step();
-                            EXPECT_EQ(draft->updateEplbConfig(params.eplb_config), mode == EplbMode::NONE);
                         }
                     }
                     EXPECT_EQ(runtime_initializations, mode == EplbMode::ALL ? 1 : 0);
@@ -1460,33 +1449,6 @@ TEST_F(MtpExecutorTest, testRealModelWrappersOnlyEnableTargetEplb) {
         }
     }
     runtime_patch.attr("__exit__")(py::none(), py::none(), py::none());
-}
-
-TEST_F(MtpExecutorTest, testEplbUpdateOnlyReachesTarget) {
-    for (auto type : {SP_TYPE_MTP, SP_TYPE_DSPARK}) {
-        for (bool target_accepts : {false, true}) {
-            MtpExecutorTestConfig config;
-            config.sp_type              = type;
-            config.dspark_mask_token_id = 0;
-            auto  components            = createMtpExecutorComponents(config);
-            auto* target                = components.fake_target_model.get();
-            auto* draft                 = components.fake_draft_model.get();
-            auto* commit                = components.fake_draft_prefill_model.get();
-            target->accept_eplb_update  = target_accepts;
-            components.executor->setTargetModel(std::move(components.fake_target_model));
-            components.executor->setDraftModel(std::move(components.fake_draft_model));
-            components.executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
-            EPLBConfig update;
-            update.eplb_mode        = EplbMode::ALL;
-            update.eplb_update_time = 17;
-            EXPECT_EQ(components.executor->updateEplbConfig(update), target_accepts);
-            EXPECT_EQ(target->eplb_update_count, 1);
-            EXPECT_EQ(target->last_eplb_config.eplb_mode, EplbMode::ALL);
-            EXPECT_EQ(target->last_eplb_config.eplb_update_time, 17);
-            EXPECT_EQ(draft->eplb_update_count, 0);
-            EXPECT_EQ(commit->eplb_update_count, 0);
-        }
-    }
 }
 
 void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {

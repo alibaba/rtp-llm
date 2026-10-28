@@ -207,10 +207,6 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
-bool PyWrappedModel::updateEplbConfig(const EPLBConfig& config) {
-    return expert_balancer_.updateEplbConfig(config);
-}
-
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;

@@ -20,7 +20,6 @@ public:
                                             bool              sync_prompt_phase);
     // Borrows counts without clearing them; the C++ monitor owns the step reset.
     bool step(const torch::Tensor& counts, bool is_prompt);
-    void updateConfig(const EPLBConfig& config);
 
 private:
     py::object runtime_;

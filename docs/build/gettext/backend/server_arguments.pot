@@ -501,14 +501,6 @@ msgid "10"
 msgstr ""
 
 #: ../../backend/server_arguments.md:0
-msgid "`--eplb_control_step`"
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
-msgid "(DEBUG) EPLB synchronization control parameter cycle."
-msgstr ""
-
-#: ../../backend/server_arguments.md:0
 msgid "100"
 msgstr ""
 

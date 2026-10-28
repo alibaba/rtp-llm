@@ -3,50 +3,8 @@
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
-void EplbController::init(const EPLBConfig& config, size_t world_size) {
-    requested_  = config;
-    world_size_ = world_size;
-    interval_   = config.eplb_control_step;
-    if (world_size_ > 1) {
-        host_   = torch::empty({2}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
-        device_ = torch::empty({2}, torch::TensorOptions(torch::kInt64).device(torch::kCUDA));
-    }
-}
-
-void EplbController::setData(const EPLBConfig& config) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    requested_.eplb_mode = config.eplb_mode;
-    if (config.eplb_update_time >= 0) {
-        requested_.eplb_update_time = config.eplb_update_time;
-    }
-}
-
-std::optional<EPLBConfig> EplbController::step() {
-    if (++steps_ < interval_) {
-        return std::nullopt;
-    }
-    steps_ = 0;
-    EPLBConfig current;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        current = requested_;
-    }
-    if (world_size_ > 1) {
-        auto* data = host_.data_ptr<int64_t>();
-        data[0]    = static_cast<int64_t>(current.eplb_mode);
-        data[1]    = current.eplb_update_time;
-        device_.copy_(host_, true);
-        execBroadcast({{device_}, 0, ParallelMode::DP_AND_TP});
-        host_.copy_(device_);
-        current.eplb_mode        = static_cast<EplbMode>(data[0]);
-        current.eplb_update_time = data[1];
-    }
-    return current;
-}
-
 ExpertBalancer::ExpertBalancer(const std::optional<MoeConfigs>& moe, const GptModelInitParams& params):
     config_(params.eplb_config),
     runtime_requested_(config_.enable_eplb()),
@@ -72,15 +30,13 @@ ExpertBalancer::ExpertBalancer(const std::optional<MoeConfigs>& moe, const GptMo
         RTP_LLM_CHECK_WITH_INFO(parallel.ep_size == parallel.world_size && parallel.pp_size == 1
                                     && !parallel.ffn_disaggregate_config.enable_ffn_disaggregate,
                                 "EPLB requires complete experts with EP=WORLD, PP=1 and no FFN disaggregation");
-        RTP_LLM_CHECK_WITH_INFO(config_.eplb_update_time >= 0 && config_.eplb_control_step > 0,
-                                "EPLB update interval must be non-negative and control interval positive");
+        RTP_LLM_CHECK_WITH_INFO(config_.eplb_update_time >= 0, "EPLB update interval must be non-negative");
         RTP_LLM_CHECK_WITH_INFO(config_.eplb_stats_window_size >= 0
                                     && (config_.eplb_update_time == 0
                                         || (config_.eplb_stats_window_size > 0
                                             && config_.eplb_stats_window_size <= config_.eplb_update_time)),
                                 "EPLB stats window must be non-negative and between 1 and the enabled update interval");
         RTP_LLM_CHECK_WITH_INFO(config_.eplb_rearrange_p2p_groups > 0, "EPLB P2P group count must be positive");
-        controller_.init(config_, parallel.world_size);
     }
     if (config_.eplb_metrics_report_interval > 0) {
         load_monitor_ = ExpertLoadMonitor::create(layers,
@@ -117,13 +73,6 @@ void ExpertBalancer::step(bool warmup, bool is_prompt) {
     const auto start_us = autil::TimeUtility::currentTimeInMicroSeconds();
     bool       changed  = false;
     if (!warmup && runtime_requested_) {
-        if (auto current = controller_.step();
-            current
-            && (current->eplb_mode != config_.eplb_mode || current->eplb_update_time != config_.eplb_update_time)) {
-            config_.eplb_mode        = current->eplb_mode;
-            config_.eplb_update_time = current->eplb_update_time;
-            python_.updateConfig(config_);
-        }
         changed = python_.step(expert_token_counts_, is_prompt);
     }
     if (load_monitor_) {
@@ -148,16 +97,4 @@ void ExpertBalancer::step(bool warmup, bool is_prompt) {
     }
 }
 
-bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
-    if (!runtime_requested_) {
-        return config.eplb_mode == EplbMode::NONE;
-    }
-    if (config.eplb_update_time < -1 || config.eplb_mode < EplbMode::NONE || config.eplb_mode > EplbMode::ALL
-        || (config.eplb_update_time > 0
-            && (config_.eplb_stats_window_size == 0 || config_.eplb_stats_window_size > config.eplb_update_time))) {
-        return false;
-    }
-    controller_.setData(config);
-    return true;
-}
 }  // namespace rtp_llm

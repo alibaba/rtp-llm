@@ -954,13 +954,6 @@ absl::Status NormalEngine::step() try {
     throw;
 }
 
-bool NormalEngine::updateEplbConfig(const EPLBConfig& config) {
-    if (executor_) {
-        return executor_->updateEplbConfig(config);
-    }
-    return true;
-}
-
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
     step_profiler_.configure(true, trace_name, start_step, num_steps);
 }

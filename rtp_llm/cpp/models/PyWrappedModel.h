@@ -101,7 +101,6 @@ public:
                                                       const GptModelInputs* cache_store_host_inputs = nullptr,
                                                       bool                  defer_graph_prepare     = false);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    bool                       updateEplbConfig(const EPLBConfig& config) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;

@@ -63,11 +63,6 @@ class FakeRuntime:
         self.state.applied += int(changed)
         return changed
 
-    def update_config(self, mode, update_time):
-        self.state.calls.append(("update", mode, update_time))
-        self.mode = mode
-        self.interval = update_time
-
     def __del__(self):
         self.state.destroyed = bool(ctypes.pythonapi.PyGILState_Check())
 

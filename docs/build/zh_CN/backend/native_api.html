@@ -478,7 +478,6 @@ document.write(`
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Lora-Info">Update Lora Info</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Get-Model-Info">Get Model Info</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Log-Level">Update Log Level</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-EPLB-Config-for-MoE">Update EPLB Config for MoE</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Encode-(embedding-model)">Encode (embedding model)</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v1/rerank-(cross-encoder-rerank-model)">v1/rerank (cross encoder rerank model)</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Classify">Classify</a></li>
@@ -606,13 +605,6 @@ running service.</p></td>
 <td><p>❌</p></td>
 <td><p>Dynamically adjust the service
 log level.</p></td>
-</tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">/update_eplb_config</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">{&quot;model&quot;:</span> <span class="pre">&quot;EPLB&quot;,</span> <span class="pre">&quot;update_time&quot;:1000}</span></code></p></td>
-<td><p>✅</p></td>
-<td><p>❌</p></td>
-<td><p>Update the EPLB (Elastic Load
-Balancer) configuration.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">/v1/embeddings</span></code></p></td>
 <td><p><code class="docutils literal notranslate"><span class="pre">{&quot;input&quot;:</span> <span class="pre">&quot;who</span> <span class="pre">are</span> <span class="pre">u&quot;,</span> <span class="pre">&quot;model&quot;:</span> <span class="pre">&quot;text-embedding-ada-002&quot;}</span></code></p></td>
@@ -838,25 +830,6 @@ return the reordered results.</p></td>
 </div>
 <div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">url</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;http://localhost:</span><span class="si">{</span><span class="n">port</span><span class="si">}</span><span class="s2">/set_log_level&quot;</span>
 <span class="n">data</span> <span class="o">=</span> <span class="p">{</span> <span class="s2">&quot;log_level&quot;</span><span class="p">:</span> <span class="s2">&quot;INFO&quot;</span><span class="p">}</span>
-
-<span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
-<span class="n">response_json</span> <span class="o">=</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Update Result: </span><span class="si">{</span><span class="n">response_json</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
-</pre></div>
-</div>
-</div>
-</section>
-<section id="Update-EPLB-Config-for-MoE">
-<h2>Update EPLB Config for MoE<a class="headerlink" href="#Update-EPLB-Config-for-MoE" title="Link to this heading">#</a></h2>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">/update_eplb_config</span></code></p></li>
-</ul>
-<div class="nbinput nblast docutils container">
-<div class="prompt highlight-none notranslate"><div class="highlight"><pre><span></span>[ ]:
-</pre></div>
-</div>
-<div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre><span></span><span class="n">url</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;http://localhost:</span><span class="si">{</span><span class="n">port</span><span class="si">}</span><span class="s2">/update_eplb_config&quot;</span>
-<span class="n">data</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;EPLB&quot;</span><span class="p">,</span> <span class="s2">&quot;update_time&quot;</span><span class="p">:</span><span class="mi">1000</span><span class="p">}</span>
 
 <span class="n">response</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="n">url</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="n">data</span><span class="p">)</span>
 <span class="n">response_json</span> <span class="o">=</span> <span class="n">response</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
@@ -1132,7 +1105,6 @@ return the reordered results.</p></td>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Lora-Info">Update Lora Info</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Get-Model-Info">Get Model Info</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-Log-Level">Update Log Level</a></li>
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Update-EPLB-Config-for-MoE">Update EPLB Config for MoE</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Encode-(embedding-model)">Encode (embedding model)</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v1/rerank-(cross-encoder-rerank-model)">v1/rerank (cross encoder rerank model)</a></li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#Classify">Classify</a></li>

@@ -6,7 +6,7 @@ namespace rtp_llm {
 
 enum class EplbMode {
     NONE,
-    STATS,  // Sample only; allow online switching to EPLB or ALL.
+    STATS,  // Sample only; do not rearrange experts.
     EPLB,   // Sample and rearrange experts.
     ALL     // Same runtime behavior as EPLB.
 };
@@ -17,7 +17,6 @@ struct EPLBConfig {
     EplbMode eplb_mode                    = EplbMode::NONE;
     int64_t  redundant_expert             = 0;
     int64_t  eplb_stats_window_size       = 100;
-    int      eplb_control_step            = 100;
     bool     eplb_rearrange_after_prefill = false;
     int      eplb_rearrange_p2p_groups    = 1;
     // Independent of eplb_mode. Fixed before graph capture; 0 disables collection.
