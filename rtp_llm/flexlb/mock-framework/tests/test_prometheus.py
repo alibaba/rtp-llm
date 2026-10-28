@@ -46,8 +46,8 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
     data = {'id': 'prometheus_integration', 'describe': '真实节点、采集和查询门禁集成测试',
             'environment': {'prefill': {'engine': 'rtp', 'deployment': {'replicas': 2}, 'config': {
                 'seq_size_per_block': 2, 'max_seq_len': 64, 'reuse_cache': True,
-                'capacity.device_blocks': 16, 'capacity.reserve_blocks': 0,
-            }}, 'compute': {'prefill': {'expression': '2 * totalComputeTokens'}}},
+                'test_block_num': 17, 'reserve_block_ratio': 0, 'compute.expression': '2 * totalComputeTokens',
+            }}},
             'phases': [{'id': 'observe', 'describe': '检查已采集的实际事件', 'timeout': '20s', 'steps': [
                 {'call': {'id': 'collect', 'describe': '为测试原生客户端保留采集时间',
                           'interface': 'runtime/wait', 'args': {'duration': '8s'}}},

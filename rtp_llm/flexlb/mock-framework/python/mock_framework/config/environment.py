@@ -35,14 +35,9 @@ def expand_config(raw):
 
 
 def compile_environment(raw):
-    fields(raw, {'master', 'client', 'prefill', 'decode', 'vit', 'compute'}, where='environment')
+    fields(raw, {'master', 'client', 'prefill', 'decode', 'vit'}, where='environment')
     result = {}
     for role, config in raw.items():
-        if role == 'compute':
-            if not isinstance(config, dict):
-                raise ConfigError('compute: expected mapping')
-            result[role] = copy.deepcopy(config)
-            continue
         allowed = {'deployment', 'config'} | ({'engine'} if role in {'prefill', 'decode', 'vit'} else set())
         required = {'engine'} if 'engine' in allowed else set()
         fields(config, allowed, required, where=role)

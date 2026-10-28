@@ -34,7 +34,7 @@ public final class NoiseModel {
         return new Sample(base, spec.scale(), jitter, planned);
     }
 
-    private static long keyedSeed(long seed, String key) {
+    static long keyedSeed(long seed, String key) {
         if (key == null || key.isBlank()) throw new IllegalArgumentException("Invocation key is required");
         try {
             var hash = MessageDigest.getInstance("SHA-256");

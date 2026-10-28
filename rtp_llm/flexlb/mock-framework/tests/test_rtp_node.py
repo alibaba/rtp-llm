@@ -17,8 +17,9 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     jar = ROOT / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar'
     classpath = (ROOT / 'java/engine/rtp/target/rtp-classpath.txt').read_text().strip()
     environment = {role: {'engine': 'rtp', 'config': {'SEQ_SIZE_PER_BLOCK': '16', 'MAX_SEQ_LEN': '4096',
-                    'capacity.device_blocks': 8, 'capacity.reserve_blocks': 0}} for role in ('prefill', 'decode')}
-    environment['compute'] = {role: {'expression': '1 + batchSize'} for role in ('prefill', 'decode')}
+                    'TEST_BLOCK_NUM': '9', 'RESERVE_BLOCK_RATIO': '0'}} for role in ('prefill', 'decode')}
+    for group in environment.values():
+        group['config']['compute.expression'] = '1 + batchSize'
     data = {'id': 'native_node_probe', 'describe': '仅验证节点启动及原生状态协议', 'environment': environment,
             'phases': [{'id': 'observe', 'describe': '测试客户端在此期间读取原生状态', 'timeout': '10s',
                         'steps': [{'call': {'id': 'wait', 'describe': '保留节点供测试客户端读取', 'interface': 'runtime/wait',
@@ -69,7 +70,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                     assert actual['decode_available_after_load_cancel'] == 128
                     assert actual['decode_reserved_tokens'] == 16
                     assert actual['decode_available_after_cancel'] == 128
-                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE', 'LOAD', 'GENERATE']
+                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE', 'LOAD', 'GENERATE', 'PREFILL_COMPLETE']
                     assert endpoints['remote_generation']['load'] is True
                 with urllib.request.urlopen(endpoints['metrics'], timeout=2) as response:
                     assert response.status == 200
@@ -81,7 +82,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 3)
                 assert f'role="{role}"' in samples[0]
                 effective = json.loads((directory / 'effective-config.json').read_text())
-                assert effective['compute'][role]['noise']['scale'] == 1
+                assert effective['compute']['noise']['scale'] == 1
             assert (await task)['status'] == 'PASS'
         finally:
             if not task.done():

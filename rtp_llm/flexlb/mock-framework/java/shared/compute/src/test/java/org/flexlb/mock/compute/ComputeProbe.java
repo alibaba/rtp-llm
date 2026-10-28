@@ -9,7 +9,7 @@ import org.flexlb.mock.api.model.Types.Role;
 /** Cross-language component test only; not an Engine or production launcher. */
 public final class ComputeProbe {
     public static void main(String[] args) throws Exception {
-        var models = ComputeModels.fromComponentFile(Path.of(args[0]));
+        var models = ComputeModel.fromComponentFile(Path.of(args[0]));
         var request = new ForwardBatch.Request("request", 10, 2, 32, 0, 8, 0, List.of());
         var batch = new ForwardBatch("batch", List.of(new ForwardBatch.Partition(0, List.of(request))));
         var sample = models.plan(Role.prefill, "prefill-0", batch);

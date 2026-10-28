@@ -11,5 +11,6 @@ import java.lang.annotation.ElementType;
 public @interface Argument {
     boolean optional() default false;
     double minimum() default Double.NaN;
+    double maximum() default Double.NaN;
     String[] ranges() default {};
 }

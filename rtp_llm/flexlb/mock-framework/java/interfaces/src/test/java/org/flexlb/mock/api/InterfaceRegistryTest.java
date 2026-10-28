@@ -58,7 +58,9 @@ class InterfaceRegistryTest {
 
     @Test void computeConfigurationIsExportedWithoutInventingBusinessEndpoints() {
         String config = CatalogMain.json(InterfaceRegistry.configuration());
-        assertTrue(config.contains("\"prefill\""));
+        assertFalse(config.contains("\"prefill\""));
+        assertTrue(config.contains("\"acceptance_rate\""));
+        assertTrue(config.contains("\"maximum\":1.0"));
         assertTrue(config.contains("\"stddev_ratio\""));
         assertTrue(config.contains("\"max_deviation_ms\""));
         assertEquals(18, InterfaceRegistry.standard().size());

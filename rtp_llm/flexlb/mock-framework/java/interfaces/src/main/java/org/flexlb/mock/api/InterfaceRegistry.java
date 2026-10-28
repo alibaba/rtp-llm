@@ -8,6 +8,8 @@ import org.flexlb.mock.api.client.ClientApi;
 import org.flexlb.mock.api.metrics.PrometheusApi;
 import org.flexlb.mock.api.model.Types;
 import org.flexlb.mock.api.model.ComputeSpec;
+import org.flexlb.mock.api.model.DecodeSpec;
+import org.flexlb.mock.api.model.StoppingSpec;
 
 /** Metadata comes from method signatures, not a parallel handwritten catalog. */
 public final class InterfaceRegistry {
@@ -18,7 +20,7 @@ public final class InterfaceRegistry {
     }
 
     public static Map<String, Object> configuration() {
-        return Map.of("compute", schema(ComputeSpec.class));
+        return Map.of("compute", schema(ComputeSpec.class), "decode", schema(DecodeSpec.class), "generation", schema(StoppingSpec.class));
     }
 
     public static Map<String, Object> describe(Class<?>... interfaces) {
@@ -103,6 +105,7 @@ public final class InterfaceRegistry {
             if (annotation == null || !annotation.optional()) required.add(field.getName());
             if (annotation != null) {
                 if (!Double.isNaN(annotation.minimum())) spec.put("minimum", annotation.minimum());
+                if (!Double.isNaN(annotation.maximum())) spec.put("maximum", annotation.maximum());
                 if (annotation.ranges().length > 0) spec.put("ranges", List.of(annotation.ranges()));
             }
             fields.put(field.getName(), spec);

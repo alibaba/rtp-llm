@@ -18,7 +18,7 @@ def prepare_launch(raw, case, base):
         raise ExecutionError('launch components/bindings must be mappings')
     components = {}
     for role, recipe in raw['components'].items():
-        if role not in case.environment or role == 'compute':
+        if role not in case.environment:
             raise ExecutionError(f'Launch recipe names an unconfigured component: {role}')
         fields(recipe, {'command', 'cwd', 'env', 'startup_timeout'}, {'command'}, where='launch.' + role)
         command = recipe['command']
@@ -39,7 +39,7 @@ def prepare_launch(raw, case, base):
             raise ExecutionError('This local launcher does not yet enforce resources/heap; refusing to ignore them')
         components[role] = {**recipe, 'command': command, 'env': env, 'cwd': str(cwd.resolve()),
                             'startup_timeout': startup}
-    missing = set(case.environment) - {'compute'} - set(components)
+    missing = set(case.environment) - set(components)
     if missing:
         raise ExecutionError(f'Missing component launch recipes: {sorted(missing)}')
     ids = {f'{role}-{n}' for role in components for n in range(case.environment[role]['deployment']['replicas'])}
@@ -51,7 +51,7 @@ def prepare_launch(raw, case, base):
     result = {'components': components, 'bindings': dict(raw['bindings'])}
     if 'prometheus' in raw:
         result['prometheus'] = prepare_prometheus(raw['prometheus'], base)
-        if any('prometheus' in value.get('config', {}) for role, value in case.environment.items() if role != 'compute'):
+        if any('prometheus' in value.get('config', {}) for value in case.environment.values()):
             raise ExecutionError('Managed Prometheus cannot be combined with component prometheus configuration')
     return result
 

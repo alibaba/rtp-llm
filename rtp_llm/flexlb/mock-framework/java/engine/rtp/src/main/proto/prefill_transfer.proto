@@ -14,6 +14,7 @@ message TransferMetadata {
   uint32 block_size = 1;
   uint32 input_tokens = 2;
   repeated int64 cache_keys = 3;
+  uint32 stop_after = 4; // Resolved once by P, independent of Decode round size.
 }
 service PrefillTransfer {
   // Owns the P computation and pins its data until cancellation, deadline or node shutdown.

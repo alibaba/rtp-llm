@@ -54,7 +54,8 @@ final class DecodeAdmission implements AutoCloseable {
         List<String> peers;
         Context.CancellableContext source;
         boolean generating, backpressured;
-        int generated, token;
+        int generated, token, stopAfter, iterations;
+        DecodeStepModel.Step step;
         long executionNanos, stepStarted;
         SimulatedCompute.Execution execution;
         int reused;
@@ -90,12 +91,17 @@ final class DecodeAdmission implements AutoCloseable {
                 if (request.getStage() == RemoteStage.LOAD && call.acknowledged && !call.loading && !call.loaded) {
                     load(call); return;
                 }
+                if (call.loaded && !call.generating && request.getStage() == RemoteStage.PREFILL_COMPLETE) {
+                    if (call.stopAfter != 1 || !request.getClientId().equals(call.key.client()))
+                        throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
+                    call.generated = 1; stop(call, Status.OK, 0); return;
+                }
                 if (call.loaded && !call.generating && request.getStage() == RemoteStage.GENERATE) {
                     if (request.getProposeTokenIdsCount() > 0 || request.getPositionIdsCount() > 0 || request.hasProposeProbs() || request.hasProposeHidden())
                         throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
                     call.generating = true; call.generated = 1; call.token = request.getFirstGenerateTokenId();
-                    if (call.input.getGenerateConfig().getMaxNewTokens() == 1) {
-                        call.response.onNext(LocalResponse.token(call.input, call.token, 1, call.reused, System.nanoTime() - call.started, true, true));
+                    if (call.stopAfter == 1) {
+                        call.response.onNext(LocalResponse.token(call.input, call.token, 1, 1, call.reused, System.nanoTime() - call.started, true, true));
                         stop(call, Status.OK, 0);
                     } else { ready.addLast(call); advance(); }
                     return;
@@ -184,7 +190,7 @@ final class DecodeAdmission implements AutoCloseable {
             stop(call, Status.DEADLINE_EXCEEDED.withDescription("Decode expired before ALLOCATE acknowledgement"), 603); return;
         }
         if (call.response.isCancelled()) { stop(call, Status.CANCELLED.withDescription("Decode RPC cancelled"), 8100); return; }
-        try { call.acknowledged = true; call.response.onNext(GenerateOutputsPB.getDefaultInstance()); }
+        try { call.acknowledged = true; call.response.onNext(GenerateOutputsPB.newBuilder().setSupportsPrefillCompletion(true).build()); }
         catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("Decode acknowledgement failed"), 8100); }
     }
 
@@ -213,10 +219,13 @@ final class DecodeAdmission implements AutoCloseable {
         if (call.response.isCancelled()) { stop(call, Status.CANCELLED.withDescription("LOAD cancelled"), 8100); return; }
         var keys = PrefixKeys.completeBlocks(call.input, config.blockSize());
         if (metadata == null || metadata.getBlockSize() != config.blockSize()
+                || metadata.getStopAfter() < Math.max(1, call.input.getGenerateConfig().getMinNewTokens())
+                || metadata.getStopAfter() > call.input.getGenerateConfig().getMaxNewTokens()
+                || call.input.getGenerateConfig().getIgnoreEos() && metadata.getStopAfter() != call.input.getGenerateConfig().getMaxNewTokens()
                 || metadata.getInputTokens() != call.input.getTokenIdsCount() || !metadata.getCacheKeysList().equals(keys)) {
             stop(call, Status.FAILED_PRECONDITION.withDescription("P-to-D KV layout differs"), 8212); return;
         }
-        call.loading = false; call.loaded = true;
+        call.loading = false; call.loaded = true; call.stopAfter = metadata.getStopAfter();
         call.source.cancel(null); call.source = null;
         try {
             // The transferred prefix is not a historical D cache hit. Keep the lease private until terminal cleanup.
@@ -238,7 +247,7 @@ final class DecodeAdmission implements AutoCloseable {
     }
 
     private boolean advancing;
-    /** One simulated execution slot, fair round-robin by token; capacity waits do not block other calls. */
+    /** One simulated execution slot, fair round-robin by round; capacity waits do not block other calls. */
     private void advance() {
         if (advancing) return;
         advancing = true;
@@ -249,7 +258,9 @@ final class DecodeAdmission implements AutoCloseable {
                 if (!call.response.isReady()) { call.backpressured = true; continue; }
                 if (System.nanoTime() >= call.deadline) { stop(call, Status.DEADLINE_EXCEEDED.withDescription("Decode expired in queue"), 603); continue; }
                 try {
-                    int contextTokens = Math.addExact(call.input.getTokenIdsCount(), call.generated);
+                    if (call.step == null) call.step = config.decodeModel().sample(Long.toString(call.input.getRequestId()), call.iterations,
+                        call.input.getGenerateConfig().getMaxNewTokens() - call.generated);
+                    int contextTokens = Math.addExact(Math.addExact(call.input.getTokenIdsCount(), call.generated), call.step.proposedTokens());
                     int blocks = (int) (((long) contextTokens + config.blockSize() - 1) / config.blockSize());
                     var failure = call.lease.growTo(blocks);
                     if (failure == DeviceCache.Failure.PERMANENT) { stop(call, Status.RESOURCE_EXHAUSTED.withDescription("Decode growth exceeds capacity"), 602); continue; }
@@ -258,7 +269,7 @@ final class DecodeAdmission implements AutoCloseable {
                     }
                     running = call; call.stepStarted = System.nanoTime();
                     var request = new ForwardBatch.Request(call.key.client() + "/" + call.key.request(), call.input.getTokenIdsCount(),
-                        call.reused, call.input.getGenerateConfig().getMaxNewTokens(), call.generated, 1, call.input.getPriority(), List.of());
+                        call.reused, call.input.getGenerateConfig().getMaxNewTokens(), call.generated, call.step.verifyTokens(), call.input.getPriority(), List.of());
                     var batch = new ForwardBatch(call.key.client() + "/" + call.key.request() + "/" + call.generated,
                         List.of(new ForwardBatch.Partition(0, List.of(request))));
                     call.execution = compute.submit(config.compute().plan(Role.decode, config.id(), batch));
@@ -292,10 +303,16 @@ final class DecodeAdmission implements AutoCloseable {
         if (outcome.state() != SimulatedCompute.State.COMPLETED) { stop(call, Status.CANCELLED.withDescription("Decode compute cancelled"), 8100); return; }
         if (System.nanoTime() >= call.deadline) { stop(call, Status.DEADLINE_EXCEEDED.withDescription("Decode expired during Forward"), 603); return; }
         if (call.response.isCancelled()) { stop(call, Status.CANCELLED.withDescription("Decode cancelled"), 8100); return; }
-        call.executionNanos += outcome.elapsedNanos(); call.generated++; running = null;
-        metrics.forwardCompleted(outcome.elapsedNanos(), 1, 1, 1);
-        boolean finished = call.generated >= call.input.getGenerateConfig().getMaxNewTokens();
-        try { call.response.onNext(LocalResponse.token(call.input, call.token, call.generated, call.reused, System.nanoTime() - call.started, finished, true)); }
+        int committed = Math.min(call.step.committedTokens(), call.stopAfter - call.generated);
+        call.executionNanos += outcome.elapsedNanos(); call.generated += committed; call.iterations++; running = null;
+        metrics.forwardCompleted(outcome.elapsedNanos(), call.step.verifyTokens(), call.step.verifyTokens(), committed);
+        call.step = null;
+        boolean finished = call.generated >= call.stopAfter;
+        try {
+            var output = LocalResponse.token(call.input, call.token, call.generated, committed, call.reused, System.nanoTime() - call.started, finished, true).toBuilder();
+            output.getFlattenOutputBuilder().getAuxInfoBuilder(0).setIterCount(call.iterations + 1);
+            call.response.onNext(output.build());
+        }
         catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("Decode output consumer closed"), 8100); return; }
         if (finished) stop(call, Status.OK, 0);
         else { ready.addLast(call); advance(); }
@@ -317,7 +334,7 @@ final class DecodeAdmission implements AutoCloseable {
         }
         if (call.input != null) {
             active.remove(call.key, call);
-            var finished = task(call).setEndTimeMs(System.currentTimeMillis()).setIterateCount(Math.max(0, call.generated - 1));
+            var finished = task(call).setEndTimeMs(System.currentTimeMillis()).setIterateCount(call.iterations);
             if (!status.isOk()) finished.setErrorInfo(ErrorDetailsPB.newBuilder()
                 .setErrorCode(code == 0 ? status.getCode().value() : code).setErrorMessage(status.getDescription()));
             history.add(finished.build());

@@ -59,7 +59,7 @@ class DecodeAdmissionTest {
             var value = replies.poll(3, TimeUnit.SECONDS);
             assertInstanceOf(GenerateOutputsPB.class, value);
             assertFalse(((GenerateOutputsPB) value).hasFlattenOutput());
-            assertFalse(((GenerateOutputsPB) value).getSupportsPrefillCompletion());
+            assertTrue(((GenerateOutputsPB) value).getSupportsPrefillCompletion());
         }
         Throwable error(Status.Code expected) throws Exception {
             var value = replies.poll(3, TimeUnit.SECONDS); assertInstanceOf(Throwable.class, value);

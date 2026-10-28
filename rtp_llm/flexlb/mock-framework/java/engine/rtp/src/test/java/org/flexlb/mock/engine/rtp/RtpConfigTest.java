@@ -27,11 +27,14 @@ class RtpConfigTest {
         ((ObjectNode) parsed.business()).removeAll(); assertFalse(parsed.business().isEmpty());
     }
 
-    @Test void preservesNativeReservePercentageAndAllowsExplicitObservedReserveBlocks() throws Exception {
-        var root = root(); var capacity = (ObjectNode) root.path("component").path("config").path("capacity");
-        capacity.remove("reserve_blocks");
-        assertEquals(1, load(root).reserveBlocks()); // native default 5%, rounded up for this mock pool
-        capacity.put("reserve_blocks", 2); assertEquals(2, load(root).reserveBlocks());
+    @Test void nativePhysicalBlockCountExcludesNullBlockAndReserveUsesFloor() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("test_block_num", 100).remove("reserve_block_ratio");
+        assertEquals(99, load(root).deviceBlocks()); assertEquals(4, load(root).reserveBlocks());
+        config.put("reserve_block_ratio", 0); assertEquals(0, load(root).reserveBlocks());
+        config.remove("test_block_num"); config.put("TEST_BLOCK_NUM", "25").put("reserve_block_ratio", 5);
+        assertEquals(24, load(root).deviceBlocks()); assertEquals(1, load(root).reserveBlocks());
+        config.put("TEST_BLOCK_NUM", "1"); assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
     @Test void rejectsAmbiguousAliasesAndWrongNativeTypes() throws Exception {
@@ -44,17 +47,29 @@ class RtpConfigTest {
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
-    @Test void rejectsUnsupportedDpAndUnknownMockCapacityFields() throws Exception {
+    @Test void rejectsUnsupportedDpAndRemovedMockCapacitySettings() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.put("dp_size", 2); assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.remove("dp_size"); ((ObjectNode) config.path("capacity")).put("device_block", 8);
+        config.remove("dp_size"); config.putObject("capacity").put("device_blocks", 8);
         assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
+    @Test void rejectsOldComputeAndInvalidOrMisplacedModels() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        ((ObjectNode) root.path("environment")).putObject("compute");
+        assertThrows(IllegalArgumentException.class, () -> load(root)); ((ObjectNode) root.path("environment")).remove("compute");
+        config.putObject("generation").put("eos_probability", .1);
+        assertThrows(Exception.class, () -> load(root));
+        ((ObjectNode) config.path("generation")).put("seed", 42);
+        assertEquals(.1, load(root).stoppingModel().configuration().eos_probability());
+        ((ObjectNode) config.path("generation")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
+        config.remove("generation"); config.putObject("decode"); assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
     @Test void requiresExplicitGeometryAndMatchingRoleFormula() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("seq_size_per_block"); assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.put("seq_size_per_block", 16); ((ObjectNode) root.path("environment").path("compute")).removeAll();
+        config.put("seq_size_per_block", 16); config.remove("compute");
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 }

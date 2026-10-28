@@ -13,14 +13,16 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
     private record Key(String client, long request) {}
     private static final class Entry {
         final TransferRequest request;
+        final TransferMetadata metadata;
         final CompletableFuture<LocalPrefill.Result> ready = new CompletableFuture<>();
         final AtomicBoolean reader = new AtomicBoolean();
         LocalPrefill.Session session;
-        Entry(TransferRequest request) { this.request = request; }
+        Entry(TransferRequest request, TransferMetadata metadata) { this.request = request; this.metadata = metadata; }
     }
     final class Source implements AutoCloseable {
         private final Entry entry;
         Source(Entry entry) { this.entry = entry; }
+        int stopAfter() { return entry.metadata.getStopAfter(); }
         CompletionStage<LocalPrefill.Result> ready() { return entry.ready.minimalCompletionStage(); }
         @Override public void close() { entry.session.cancel(); }
     }
@@ -34,8 +36,8 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
 
     Source start(TransferRequest request, long deadline) { return start(request, deadline, result -> {}, result -> {}); }
 
-    private Source start(TransferRequest request, long deadline, Consumer<LocalPrefill.Result> ready, Consumer<LocalPrefill.Result> terminal) {
-        var key = key(request); layout(request); var entry = new Entry(request);
+    private Source start(TransferRequest request, long deadline, Consumer<TransferMetadata> ready, Consumer<LocalPrefill.Result> terminal) {
+        var key = key(request); layout(request); requests.validate(request.getInput(), true); var entry = new Entry(request, metadata(request));
         synchronized (entry) {
             if (active.putIfAbsent(key, entry) != null)
                 throw Status.ALREADY_EXISTS.withDescription("Prefill transfer already exists").asRuntimeException();
@@ -48,7 +50,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                 session.completion().thenAccept(result -> {
                     synchronized (entry) {
                         if (!result.status().isOk()) return; // Termination callback owns failure delivery.
-                        try { requests.requireReady(session); ready.accept(result); entry.ready.complete(result); }
+                        try { requests.requireReady(session); ready.accept(entry.metadata); entry.ready.complete(result); }
                         catch (RuntimeException error) { session.cancel(); }
                     }
                 });
@@ -66,7 +68,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                 throw Status.INVALID_ARGUMENT.withDescription("Prepare requires a request or RPC deadline for retained KV").asRuntimeException();
             var source = start(request, deadline(context), result -> {
                 if (response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-                response.onNext(metadata(request));
+                response.onNext(result);
             }, result -> {
                 if (response.isCancelled()) return;
                 if (result.status().isOk()) response.onCompleted();
@@ -96,7 +98,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
             try {
                 requests.consume(entry.session, () -> {
                     if (response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-                    response.onNext(metadata(entry.request)); response.onCompleted();
+                    response.onNext(entry.metadata); response.onCompleted();
                 });
             } catch (RuntimeException error) { entry.session.cancel(); response.onError(error); }
         });
@@ -113,7 +115,10 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
     }
     private TransferMetadata metadata(TransferRequest request) {
         return TransferMetadata.newBuilder().setBlockSize(config.blockSize()).setInputTokens(request.getInput().getTokenIdsCount())
-            .addAllCacheKeys(PrefixKeys.completeBlocks(request.getInput(), config.blockSize())).build();
+            .addAllCacheKeys(PrefixKeys.completeBlocks(request.getInput(), config.blockSize()))
+            .setStopAfter(config.stoppingModel().length(Long.toString(request.getInput().getRequestId()),
+                request.getInput().getGenerateConfig().getMinNewTokens(), request.getInput().getGenerateConfig().getMaxNewTokens(),
+                request.getInput().getGenerateConfig().getIgnoreEos())).build();
     }
     static long deadline(Context context) {
         if (context.getDeadline() == null) return Long.MAX_VALUE;

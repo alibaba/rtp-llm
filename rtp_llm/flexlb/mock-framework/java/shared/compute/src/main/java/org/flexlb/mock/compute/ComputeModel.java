@@ -10,9 +10,8 @@ import java.util.*;
 import org.flexlb.mock.api.model.ComputeSpec;
 import org.flexlb.mock.api.model.Types.Role;
 
-/** Immutable role models assembled from environment.compute. Missing models never invent a calibration. */
-public final class ComputeModels {
-    private record Model(ForwardModel forward, NoiseModel noise) {}
+/** One component owns one formula and noise model; there is no role map or fallback calibration. */
+public final class ComputeModel {
     private static final ObjectMapper JSON = JsonMapper.builder()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -20,28 +19,25 @@ public final class ComputeModels {
         .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
         .serializationInclusion(JsonInclude.Include.NON_NULL).build();
     private final ComputeSpec configuration;
-    private final Map<Role, Model> models;
+    private final ForwardModel forward;
+    private final NoiseModel noise;
 
-    public ComputeModels(ComputeSpec spec) {
+    public ComputeModel(ComputeSpec spec) {
         configuration = Objects.requireNonNull(spec);
-        var values = new EnumMap<Role, Model>(Role.class);
-        for (var role : Role.values()) {
-            var model = switch (role) { case prefill -> spec.prefill(); case decode -> spec.decode(); case vit -> spec.vit(); };
-            if (model != null) values.put(role, new Model(new FormulaForward(model.expression()), new NoiseModel(model.noise())));
-        }
-        models = Map.copyOf(values);
+        forward = new FormulaForward(spec.expression()); noise = new NoiseModel(spec.noise());
     }
 
-    public static ComputeModels fromJson(JsonNode node) throws IOException {
+    public static ComputeModel fromJson(JsonNode node) throws IOException {
         rejectNull(node);
-        return new ComputeModels(JSON.treeToValue(node, ComputeSpec.class));
+        return new ComputeModel(JSON.treeToValue(node, ComputeSpec.class));
     }
 
     /** Reads the runner's component config file, with the original native business values left intact. */
-    public static ComputeModels fromComponentFile(Path path) throws IOException {
+    public static ComputeModel fromComponentFile(Path path) throws IOException {
         JsonNode root = JSON.readTree(path.toFile());
-        var node = root.path("environment").path("compute");
-        if (node.isMissingNode()) throw new IllegalArgumentException("Missing environment.compute");
+        if (root.path("environment").has("compute")) throw new IllegalArgumentException("Move environment.compute to component.config.compute");
+        var node = root.path("component").path("config").path("compute");
+        if (node.isMissingNode()) throw new IllegalArgumentException("Missing component.config.compute");
         return fromJson(node);
     }
 
@@ -49,15 +45,14 @@ public final class ComputeModels {
     public JsonNode effectiveConfiguration() { return JSON.valueToTree(configuration); }
 
     public NoiseModel.Sample plan(Role role, String engineId, ForwardBatch batch) {
-        var model = models.get(role);
-        if (model == null) throw new IllegalArgumentException("No compute model for " + role);
+        Objects.requireNonNull(role);
         if (engineId == null || engineId.isBlank()) throw new IllegalArgumentException("Engine id is required");
         String key = engineId.length() + ":" + engineId + "/" + role + "/" + batch.id();
-        return model.noise.apply(model.forward.estimate(batch), key);
+        return noise.apply(forward.estimate(batch), key);
     }
 
     private static void rejectNull(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) throw new IllegalArgumentException("Compute configuration cannot be null");
-        node.forEach(ComputeModels::rejectNull);
+        node.forEach(ComputeModel::rejectNull);
     }
 }

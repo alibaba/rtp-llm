@@ -58,7 +58,7 @@ public final class RtpNode implements AutoCloseable {
             : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"));
         result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "text_only", true) : Map.of());
         result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "text_only", true) : Map.of());
-        result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE"), "text_only", true, "load", true));
+        result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "text_only", true, "load", true));
         result.put("mock_transfer", prefill ? Map.of("address", rpcAddress(), "service", "mock.rtp.PrefillTransfer", "metadata_only", true) : Map.of());
         return Map.copyOf(result);
     }

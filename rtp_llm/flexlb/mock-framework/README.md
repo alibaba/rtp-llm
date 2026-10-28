@@ -1,6 +1,6 @@
 # Mock框架
 
-Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、本地单token请求、D资源准备、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。完整P/D链路、多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
+Python负责case配置编译和执行组织，Java负责组件共享接口与实现。配置编译与本地执行器独立：compile不产生运行副作用；run通过启动配方管理进程，调用Java组件接口并执行门禁。RTP节点支持状态RPC、设备缓存、文本P/D生成、共享Decode推进及停止模型、Prometheus抓取与指标查询；Runner可管理本次运行的Prometheus及历史存储。真实Master、多JVM Client播放和正式历史查看服务尚未接入，不由测试组件模拟验收。
 
 ## 目录与构建
 
@@ -8,7 +8,7 @@ Python负责case配置编译和执行组织，Java负责组件共享接口与实
 - `java/interfaces/`：组件接口的唯一权威定义、公共类型和清单生成。
 - `python/mock_framework/execution/`：本地进程初始化、顺序执行、HTTP调用、门禁比较、收尾和运行记录。
 - `java/runtime/`：将接口实现绑定为HTTP端点，按接口清单校验参数与回执，提供单次调用上下文。
-- `java/shared/compute/`：共享Forward batch、公式绑定、确定性噪声与可取消计时执行。
+- `java/shared/compute/`：共享Forward batch、公式绑定、确定性噪声、Decode推进、停止模型与可取消计时执行。
 - `java/shared/metrics/`：共享Engine指标定义、独立注册表、Prometheus导出与查询实现。
 - `java/engine/rtp/`：RTP节点入口、原生配置读取、KV块租约和生产proto状态RPC。
 - `tests/`：编译与跨语言接口扩展验证；Java测试跟随模块。
@@ -73,19 +73,26 @@ Java Client实现时应基于seed和稳定逻辑请求身份生成每个请求�
 
 ```yaml
 environment:
-  compute:
-    prefill:
-      expression: "param(baseMs, 1) + param(tokenMs, 0.01)*totalComputeTokens + 1e-8*sum(computeTokens^2)"
-      noise:
-        scale: 1
-        stddev_ratio: 0.05
-        max_deviation_ms: 20
-        seed: 42
-    decode:
-      expression: "param(baseMs, 1) + param(perRequestMs, 0.1)*batchSize"
+  prefill:
+    engine: rtp
+    config:
+      compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
+      compute.noise.scale: 1
+      compute.noise.stddev_ratio: 0.05
+      compute.noise.max_deviation_ms: 20
+      compute.noise.seed: 42
+      generation.eos_probability: 0.01
+      generation.seed: 42
+  decode:
+    engine: rtp
+    config:
+      compute.expression: "1 + 0.1*totalStepTokens + 0.001*totalContextTokens"
+      decode.draft_tokens: 3
+      decode.acceptance_rate: 0.8
+      decode.seed: 42
 ```
 
-Compute按prefill/decode/vit分别配置，不复制引擎调度、缓存或KV容量参数。字段类型在Java`ComputeSpec`定义，随接口清单生成配置schema；Python不维护第二份字段表。Python检查结构与数值类型，Java组件初始化时解析公式、检查噪声约束并补全默认值；运行时仍检查每个真实batch的公式结果。没有旧标定文件或内置模型作为静默回退，未配置的角色不能计算。
+各组件组在自己的config中配置一份Compute公式和噪声，不再提供顶层environment.compute，也没有组内/顶层覆盖优先级；旧位置直接报错。Java仍共用同一个ComputeModel实现，配置位置不影响组件复用。配置schema由Java的ComputeSpec、DecodeSpec、StoppingSpec生成，Python不另写字段表。Python校验结构、类型和概率边界，Java初始化时解析公式、补默认值并检查随机模型必需的seed；运行时检查真实batch的计算结果。RTP启动必须提供本组公式，不从其他组或旧标定文件静默回退。
 
 `ForwardBatch`保留各DP分组及完整请求长度、已匹配cache、目标输出长度、已生成长度、本轮stepTokens、优先级和图片原始shape。Engine自己构造batch、计算cache、处理图片和推进请求状态。`ForwardModel`只接收batch并返回基础Duration；默认`FormulaForward`当前只支持一个非空DP，多DP明确报错，不擅自求和或取最大值。其他模型实现可以直接读取完整输入，不必修改公共输入类型。
 
@@ -95,9 +102,9 @@ Compute按prefill/decode/vit分别配置，不复制引擎调度、缓存或KV�
 
 噪声先按scale缩放基础耗时，再加高斯扰动；scale默认1，stddev_ms/stddev_ratio默认0，两者按平方和开根组合标准差。启用高斯时必须显式提供seed和正的max_deviation_ms；扰动裁剪到该上下界，最终耗时下限为0。一次Forward只取样一次。随机数由seed、Engine身份、角色与batch身份决定，不依赖调用顺序或共享随机游标。不同batch必须提供不同的实际调用身份；同一身份重算得到同一计划耗时。
 
-组件通过`ComputeModels.fromComponentFile`读取Runner生成的配置文件，通过`effectiveConfiguration()`取得含默认值的配置用于保存。`plan`只计算Sample，`SimulatedCompute.submit`才启动等待，返回Execution；Engine通过`Execution.cancel()`取消，completion返回唯一的COMPLETED或CANCELLED结果及实际elapsedNanos。计时器关闭会取消所有未完成计算并拒绝新任务，业务回调在独立虚拟线程执行，不阻塞其他计时或取消。共享层不提交cache、不释放Engine资源，也不把计算完成当作请求成功；这些动作由Engine依据真实结果执行。
+组件通过`ComputeModel.fromComponentFile`读取Runner生成的本组配置，通过`effectiveConfiguration()`取得含默认值的配置用于保存。`plan`只计算Sample，`SimulatedCompute.submit`才启动等待，返回Execution；Engine通过`Execution.cancel()`取消，completion返回唯一的COMPLETED或CANCELLED结果及实际elapsedNanos。计时器关闭会取消所有未完成计算并拒绝新任务，业务回调在独立虚拟线程执行，不阻塞其他计时或取消。共享层不提交cache、不释放Engine资源，也不把计算完成当作请求成功；这些动作由Engine依据真实结果执行。
 
-Compute已接入RTP本地单token链路；完成Forward时记录实际计时和token数。组件测试不作为完整Engine行为、TPS或压测验收。
+Compute已接入RTP Prefill和Decode链路；完成Forward时记录实际计时和token数。组件测试不作为完整Engine行为、TPS或压测验收。
 
 ## 扩展接口
 
@@ -175,16 +182,16 @@ environment:
       MAX_SEQ_LEN: "32768"
       MAX_BATCH_TOKENS_SIZE: "8192"
       REUSE_CACHE: "true"
-      capacity.device_blocks: 1024
-      capacity.reserve_blocks: 52
-  compute:
-    prefill:
-      expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
+      TEST_BLOCK_NUM: "1025"
+      RESERVE_BLOCK_RATIO: "5"
+      compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
 ```
 
 原生字段支持server_args的小写名称或Whale环境变量的大写名称；同一字段两种写法同时存在时报错，不做静默优先级覆盖。整数/布尔字段接受对应原生env文本，保留原始业务配置，不展开其中的JSON文本。当前读取seq_size_per_block、max_seq_len、max_batch_tokens_size、reuse_cache、enable_device_cache、disable_decode_first_malloc_device_reuse、load_cache_timeout_ms、reserve_block_ratio、tp_size、dp_size、dp_rank；其他原生内容保留但不宣称已实现其业务效果。block size和max seq length必须显式配置，不从虚拟GPU型号或真实模型结构猜测；当前仅支持dp_size=1、dp_rank=0。
 
-Mock容量通过点分键capacity.device_blocks配置，单位为本实例的物理块；capacity.reserve_blocks可提供观测到的绝对预留块数。未提供绝对预留值时，按原生reserve_block_ratio计算，默认5%，向上取整。总token容量=物理块数×原生block size，不把部署内存作为模拟KV容量。默认参数和实际解析值写入组件目录的effective-config.json，原始业务配置仍保留；复制配置不表示忽略的原生功能已完成对齐。
+容量沿用RTP原生test_block_num/TEST_BLOCK_NUM和reserve_block_ratio/RESERVE_BLOCK_RATIO，不再支持capacity.device_blocks或capacity.reserve_blocks。真实设备池的block 0不可分配，因此test_block_num必须至少为2，实际可用块数=test_block_num-1，总token容量=可用块数×seq_size_per_block。预留水位按可用块数×原生百分比做整数除法，向下取整，默认5%；它是首次分配的容量门禁，不阻止运行中请求使用预留进行增长。effective-config.json保存物理块数、可用块数、预留水位与模型默认值。
+
+RTP真实实现也支持kv_cache_mem_mb，但从字节换算块数需要真实KV布局；当前Mock不加载模型层/head或GPU内存，要求显式test_block_num，不根据部署内存或虚拟GPU型号猜测。复制的其他原生配置保留，但不能据此宣称未实现的功能生效。这里只对齐单池容量语义，未实现混合KV分组的物理布局。
 
 节点在原生gRPC提供CheckHealth、GetWorkerStatus和GetCacheStatus，P支持下述本地GenerateStreamCall子集，D支持RemoteGenerate的ALLOCATE、LOAD与GENERATE子集。健康返回OK；WorkerStatus使用RoleType.PREFILL/DECODE和对应类型枚举，available_concurrency保持生产默认0，KV容量使用token单位；CacheStatus另外提供block size。缓存键版本只随已发布键集合变化，同版本省略键列表，但每次仍返回当前可用容量。precision暂为FP16的Mock状态标记，不模拟量化或真实模型布局。
 
@@ -212,7 +219,7 @@ ACK只在实际分配成功且截止时间未到时发出。临时容量不足�
 
 首次分配的历史前缀复用遵守全局/单请求reuse、device cache及原生disable_decode_first_malloc_device_reuse；该开关默认false，与CacheConfig.h默认一致。命中只取完整块，排除最后prompt token；已由本请求传输的KV不能冒充历史命中。LOAD得到的KV只归当前请求持有，取消不会生成新cache key。
 
-WorkerStatus区分TASK_PHASE_RECEIVED和TASK_PHASE_KV_ALLOCATED。分配、LOAD等待及已LOAD等待生成均不报告为RUNNING；收到GENERATE后才进入Decode队列并记录实际Forward、输出token和终态。endpoints.json明确remote_generation支持ALLOCATE、LOAD、GENERATE，load=true；ACK仍不声明supports_prefill_completion。越序、重复LOAD或重复GENERATE失败并释放租约；GENERATE后的请求流半关闭允许继续接收输出，前置阶段半关闭仍取消请求。
+WorkerStatus区分TASK_PHASE_RECEIVED和TASK_PHASE_KV_ALLOCATED。分配、LOAD等待及已LOAD等待生成均不报告为RUNNING；收到GENERATE后才进入Decode队列并记录实际Forward、输出token和终态。endpoints.json明确remote_generation支持ALLOCATE、LOAD、GENERATE、PREFILL_COMPLETE，load=true；ACK声明supports_prefill_completion。越序、重复LOAD或重复GENERATE失败并释放租约；GENERATE后的请求流半关闭允许继续接收输出，前置阶段半关闭仍取消请求。
 
 ### P→D元数据交接
 
@@ -230,17 +237,27 @@ D的ALLOCATE.peer_addrs填写一个P的mock_transfer地址，LOAD帧沿用原生
 
 P的原生GenerateStreamCall对max_new_tokens>1且can_use_pd_separation=true的请求启用P/D，要求role_addrs中恰好一个有效DECODE地址。max_new_tokens=1仍走原有本地路径。PrefillGeneration负责整条P/D调用，LocalPrefill只负责本地Forward及交接前的KV；D在LOAD成功后由DecodeAdmission继续推进生成。节点端点的pd_generation描述这一能力，公共case接口不新增P/D内部动作。
 
-阶段顺序依据真实PrefillRpcServer：先向D发ALLOCATE并等待ACK，再启动P计算，随后发LOAD、输出P首token、等待LOAD确认、发送GENERATE并转发D输出。首token已计入总输出长度，目标长度为N时D执行N-1次Forward，不重复输出首token。NativeProbe通过两个独立打包JVM验证此链路，测试客户端只向P提交一次请求。
+阶段顺序依据真实PrefillRpcServer：先向D发ALLOCATE并等待ACK，再启动P计算，随后发LOAD、输出P首token、等待LOAD确认、发送GENERATE并转发D输出。首token已计入总输出长度；未启用推测时，长度N需要D执行N-1次Forward，启用后按实际接受长度推进，不重复输出首token。NativeProbe通过两个独立打包JVM验证此链路，测试客户端只向P提交一次请求。
 
-D当前使用一个模拟执行槽，每个token轮转活动请求，尚不合并动态batch。每轮向共享Compute提供原始输入长度、历史命中、目标输出长度、已生成长度、stepTokens=1及优先级；公式和噪声实际计时完成后才产生下一个模拟token。每轮前按当前上下文长度增长KV；临时不足等待allocation generation变化，不阻塞其他可执行请求，永久不足返回602，超时返回603。WorkerStatus区分等待和执行，记录执行累计时间与实际D迭代数，Prometheus每轮记录一次完成事件。
+D当前使用一个模拟执行槽，每轮轮转活动请求，尚不合并动态batch。每轮向共享Compute提供原始输入长度、历史命中、目标输出长度、已生成长度、本轮verifyTokens作为stepTokens及优先级；公式和噪声实际计时完成后才提交本轮输出。每轮前按验证上下文长度增长KV；临时不足等待allocation generation变化，不阻塞其他可执行请求，永久不足返回602，超时返回603。WorkerStatus区分等待和执行，记录执行累计时间与实际D迭代数，Prometheus每轮记录一次完成事件。
 
-模拟token重复首token值，不执行真实采样、EOS或语言推理。return_incremental=true时每帧仅含新token，否则返回当前累计输出，aux.output_len始终为累计长度，最后一帧finished=true。P保留自己的TTFT，并分别记录P与D的历史命中；总命中沿用P口径，不把两端命中相加。暂不支持stop words、推测解码、额外位置交接、beam、多返回、多模态及额外logits等输出，均显式拒绝。当前要求input+max_new_tokens小于D的max_seq_len，超过时返回605；不宣称已实现真实引擎的长度截断与reserveStep策略。
+模拟token重复首token值，不执行真实词表采样或语言推理；EOS使用下述停止模型。return_incremental=true时每帧仅含本轮提交的新token，否则返回当前累计输出，aux.output_len始终为累计长度，最后一帧finished=true。P保留自己的TTFT，并分别记录P与D的历史命中；总命中沿用P口径，不把两端命中相加。暂不支持stop words、真实草稿张量/原生推测提案交接、额外位置交接、beam、多返回、多模态及额外logits等输出，均显式拒绝。当前要求input+max_new_tokens小于D的max_seq_len，超过时返回605；不宣称已实现真实引擎的长度截断与reserveStep策略。
 
 D成功时按reuse/device开关写回完整prompt块的key并释放租约，新增生成内容暂不建立额外缓存索引。取消或失败不发布新D缓存。D成功/失败只是Engine口径，仍不替代正式Client成功率。
 
 P请求timeout从入口开始，覆盖D预留、P计算、LOAD、D生成及慢消费者等待，与RPC deadline取较早者，不逐阶段重置。取消会关闭当前请求Context、取消P来源和D活动，节点关闭同样回收请求。节点连接池复用到各目标的通道；取消一个请求不会关闭其他请求的连接。P转发使用受控拉取和有限Inbox，P/D均遵守RPC发送就绪状态，避免为慢消费者持续积压整条输出。
 
 Enqueue/Fetch、独立Cancel RPC及其优先级抢占/取流租约语义尚未实现，不通过接受后固定成功或放宽阶段检查补齐；动态batch、正式Master与Client和性能验收仍属后续工作。
+
+### 共享Decode推进与停止模型
+
+DecodeStepModel只计算一轮提出、接受、提交及验证多少token，不管理RTP协议或KV。默认draft_tokens=0，每轮提交/验证1个token。开启推测时必须显式设置acceptance_rate，随机接受率还必须有seed；不预设某个模型的接受率。按首次拒绝截断连续接受前缀A，再加一个纠正/奖励token，即C=A+1。对长度k、固定独立接受率α，P(A=j)=α^j(1-α)（j<k），P(A=k)=α^k，因此E[C]=1+α+…+α^k。这是[经典推测解码论文§3.1](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)的封顶几何模型，不是二项分布，也不宣称复现每种MTP/EAGLE或树状验证算法。
+
+Compute按本轮实际验证数收费，输出指标只累计实际提交数。α=0时仍支付验证草稿的开销。KV预留覆盖本轮验证上下文，未提交的草稿不会推进逻辑生成长度或进入新增缓存索引；预留块由同一请求持有到后续使用或终态释放，保持当前真实StreamCacheResource尚不支持部分缩容的边界。接近max_new_tokens时缩短草稿预算。
+
+StoppingModel配置放在Prefill的generation中，默认eos_probability=0，即输出到请求上限；随机概率必须显式seed。它以固定EOS hazard的封顶几何分布近似自然停止，遵守min_new_tokens与max_new_tokens，ignore_eos强制使用上限。固定hazard是Mock假设，不是线上长度的普遍规律；已有真实observed长度或Client明确输出覆盖时，应由Client设置目标并ignore_eos，不再二次随机EOS。
+
+P按稳定request_id为每个请求只确定一次stop_after，通过Mock内部LOAD元数据传给D。随机数不使用节点名、JVM号或共享随机游标；请求身份需稳定。D不能重复配置generation，不重新抽样；接受长度模型只允许放在Decode的decode中。开启推测后跨过停止位置，只提交到stop_after，但仍计实际验证开销。若首token结束，P发最终首帧并在LOAD后发送PREFILL_COMPLETE，D释放且不重复输出首token，不执行Decode Forward。模型按请求身份及轮次确定随机数，容量等待和重新调度不会重新抽样。
 
 ### 共享Engine指标
 
@@ -254,7 +271,7 @@ EngineMetrics放在共享目录，不依赖RTP协议、缓存实现或调度器�
 | `mock_engine_requests_finished_total` | Counter，`outcome=success/cancelled/timeout/error` | 已接纳请求只记录一次终态；节点关闭计error。这是Engine结果，不能替代Client最终成功率。 |
 | `mock_engine_cache_lookup_tokens_total` | Counter | 成功获得KV租约时累计输入token数，包括已命中的部分。 |
 | `mock_engine_cache_hit_tokens_total` | Counter | 同一次分配中实际复用的历史前缀token数；后续请求取消不撤销已发生的查找。 |
-| `mock_engine_forward_tokens_total` | Counter，`kind=input/compute/output` | 活跃请求的Forward完成时记录输入、实际计算和输出token数。当前P路径分别为输入长度、输入减命中、1；被取消或超时的Forward不补记成功计算。 |
+| `mock_engine_forward_tokens_total` | Counter，`kind=input/compute/output` | 活跃请求的Forward完成时记录输入、实际计算和输出token数。P路径分别为输入长度、输入减命中、1；D的input/compute为本轮验证token数，output为实际提交数。被取消或超时的Forward不补记成功计算。 |
 | `mock_engine_forward_seconds` | Histogram | 完成Forward的实际计时，单位秒，排除请求排队时间；提供bucket、sum、count。它不是Client TTFT。 |
 | `mock_engine_requests` | Gauge，`state=waiting/running` | 当前排队、执行数量。 |
 | `mock_engine_kv_tokens` | Gauge，`state=total/available/free/held` | 当前KV容量，单位token。available含可淘汰的未引用缓存，不能当作物理free。 |

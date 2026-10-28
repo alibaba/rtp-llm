@@ -121,6 +121,8 @@ def _value(value, schema, previous, where):
         raise ConfigError(f'Unknown catalog type: {kind}')
     if 'minimum' in schema and value < schema['minimum']:
         raise ConfigError(f'{where}: below minimum {schema["minimum"]}')
+    if 'maximum' in schema and value > schema['maximum']:
+        raise ConfigError(f'{where}: above maximum {schema["maximum"]}')
     return value
 
 
@@ -180,10 +182,13 @@ def compile_case(path: str | Path, registry: Registry, *, shared_root: str | Pat
     describe = text(raw['describe'], 'describe')
     name = text(raw['name'], 'name') if 'name' in raw else None
     environment = compile_environment(raw['environment'])
-    if 'compute' in environment:
-        if 'compute' not in registry.configuration:
-            raise ConfigError('Java catalog is missing the compute configuration schema; rebuild it')
-        environment['compute'] = _value(environment['compute'], registry.configuration['compute'], {}, 'environment.compute')
+    for role, group in environment.items():
+        config = group['config']
+        for model in ('compute', 'decode', 'generation'):
+            if model in config:
+                if model not in registry.configuration:
+                    raise ConfigError(f'Java catalog is missing {model} configuration schema; rebuild it')
+                config[model] = _value(config[model], registry.configuration[model], {}, f'environment.{role}.config.{model}')
     def asset(value):
         value = text(value, 'path')
         if '://' in value:

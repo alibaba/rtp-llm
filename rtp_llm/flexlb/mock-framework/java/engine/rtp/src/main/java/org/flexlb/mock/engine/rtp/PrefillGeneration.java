@@ -100,13 +100,14 @@ final class PrefillGeneration implements AutoCloseable {
                 if (!first.status().isOk()) throw RtpErrors.failure(first.status(), first.engineCode());
                 long ttft = System.nanoTime() - started;
                 int prefillReuse = first.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen();
-                send(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, prefillReuse, ttft, false, true));
+                send(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, prefillReuse, ttft, source.stopAfter() == 1, true));
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
-                stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(input.getTokenIds(input.getTokenIdsCount() - 1)).build());
+                if (source.stopAfter() == 1) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
+                else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(input.getTokenIds(input.getTokenIdsCount() - 1)).build());
                 stream.onCompleted();
-                boolean finished = false;
+                boolean finished = source.stopAfter() == 1;
                 for (GenerateOutputsPB output; (output = inbox.next()) != null;) {
                     if (finished || output.getRequestId() != input.getRequestId() || !output.hasFlattenOutput() || output.getFlattenOutput().getFinishedCount() != 1)
                         throw Status.DATA_LOSS.withDescription("Invalid Decode output stream").asRuntimeException();
