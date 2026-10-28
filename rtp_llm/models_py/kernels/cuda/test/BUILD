@@ -115,6 +115,15 @@ py_test(
 )
 
 py_test(
+    name = "modelopt_fp8_producer_test",
+    srcs = ["modelopt_fp8_producer_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_xqa_batch_decode",
     srcs = ["test_xqa_batch_decode.py"],
     deps = py_test_deps + select({

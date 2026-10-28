@@ -1258,12 +1258,27 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             attn_output = self.decode_gdn(
                 mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
             )
-        attn_output = self.norm(
-            attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
-        )
-        # from [token * head, dim] -> [token, head * dim]
-        attn_output = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
-        attn_output = self.out_proj(attn_output)
+        width = self.local_num_v_heads * self.head_v_dim
+        projected = None
+        fused_projection = getattr(self.out_proj, "forward_with_gate", None)
+        if (
+            fused_projection is not None
+            and self.norm.bias is None
+            and self.norm.activation == "silu"
+            and self.norm.group_size == self.head_v_dim
+        ):
+            projected = fused_projection(
+                attn_output.reshape(-1, width),
+                z.reshape(-1, width),
+                norm_weight=self.norm.weight,
+                eps=self.norm.eps,
+            )
+        if projected is None:
+            attn_output = self.norm(
+                attn_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
+            )
+            projected = self.out_proj(attn_output.reshape(-1, width))
+        attn_output = projected
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output

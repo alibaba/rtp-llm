@@ -3,7 +3,10 @@
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
-from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import static_fp8_quant_rows
+from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import (
+    gated_fp8_quant_rows,
+    static_fp8_quant_rows,
+)
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_per_tensor_linear import (
     CudaFp8PerTensorLinear,
 )
@@ -100,6 +103,29 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
                 output = output[0]
             outputs.append(output[: x.shape[0]])
         output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        if self.bias is not None:
+            output = output + self.bias
+        return output
+
+    def forward_with_gate(self, input, gate, *, norm_weight=None, eps=1e-6):
+        """Consume a private gate/norm producer without materializing BF16 output."""
+        if len(self.parts) != 1:
+            return None
+        weight, scale, input_scale = self.parts[0]
+        if input.shape[0] == 0:
+            return None
+        fused = gated_fp8_quant_rows(
+            input, gate, input_scale, norm_weight=norm_weight, eps=eps
+        )
+        if fused is None:
+            return None
+        qinput, scale_a = fused
+        output = torch._scaled_mm(
+            qinput, weight, scale_a=scale_a, scale_b=scale, out_dtype=input.dtype
+        )
+        if isinstance(output, tuple):
+            output = output[0]
+        output = output[: input.shape[0]]
         if self.bias is not None:
             output = output + self.bias
         return output
