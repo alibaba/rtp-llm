@@ -292,7 +292,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                         old_blocks->reserve(cache_keys.size() - i);
                     }
                     previous_block = previous_tier == Tier::HOST ? existing.host_block : existing.disk_block;
-                    if (!is_resident && !current->is_resident && isLeafAtTier(current, group_set_id, previous_tier)) {
+                    if (!is_resident && !current->is_resident) {
                         result.replaced_candidates.push_back({current, group_set_id, previous_tier});
                     }
                 }
