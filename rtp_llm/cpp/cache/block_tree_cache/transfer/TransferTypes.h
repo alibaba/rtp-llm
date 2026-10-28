@@ -18,6 +18,8 @@ namespace rtp_llm {
 
 struct TreeNode;
 
+enum class TaskCompletion { UNKNOWN, PENDING, FINISHED };
+
 enum class TransferStatus {
     OK,
     INVALID_ARGS,
@@ -126,6 +128,13 @@ struct TransferResult {
     // Unknown completion takes precedence over known failures, independently of diagnostic priority.
     // Append every failure message; keep the first error code at equal diagnostic priority.
     void merge(TransferResult other) {
+        const auto unknown = ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
+        if ((status.code() == unknown && recovery_task_ids.empty())
+            || (other.status.code() == unknown && other.recovery_task_ids.empty())) {
+            recovery_task_ids.clear();
+        } else {
+            recovery_task_ids.insert(recovery_task_ids.end(), other.recovery_task_ids.begin(), other.recovery_task_ids.end());
+        }
         if (other.ok()) {
             return;
         }
@@ -156,6 +165,8 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
+    // Empty on UNKNOWN means unrecoverable; otherwise query every listed execution.
+    std::vector<std::string> recovery_task_ids;
 };
 
 struct DeviceHostCopyTemplate {
@@ -332,8 +343,12 @@ public:
 
     TransferTask(std::vector<TransferDescriptor> descriptors,
                  std::chrono::milliseconds       timeout,
-                 std::optional<int64_t>          request_id = {}):
-        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout), request_id_(request_id) {}
+                 std::optional<int64_t>          request_id = {},
+                 std::string                     task_id    = {}):
+        descriptors_(std::move(descriptors)),
+        deadline_(Clock::now() + timeout),
+        request_id_(request_id),
+        task_id_(std::move(task_id)) {}
 
     std::optional<int64_t> requestId() const {
         return request_id_;
@@ -346,6 +361,10 @@ public:
         if (id != 0) {
             trace_id_ = id;
         }
+    }
+
+    const std::string& taskId() const {
+        return task_id_;
     }
 
     const std::vector<TransferDescriptor>& descriptors() const {
@@ -378,7 +397,7 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        auto task      = TransferTask(std::move(descriptors), deadline_, request_id_);
+        auto task      = TransferTask(std::move(descriptors), deadline_, request_id_, task_id_);
         task.trace_id_ = trace_id_;
         return task;
     }
@@ -386,18 +405,23 @@ public:
     // A separately submitted RPC batch needs its own identity. Nested worker
     // batches retain that identity and use their local descriptor ranges.
     TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), deadline_, request_id_);
+        return TransferTask(std::move(descriptors), deadline_, request_id_, std::string{});
     }
 
 private:
     TransferTask(std::vector<TransferDescriptor> descriptors,
                  Clock::time_point               deadline,
-                 std::optional<int64_t>          request_id):
-        descriptors_(std::move(descriptors)), deadline_(deadline), request_id_(request_id) {}
+                 std::optional<int64_t>          request_id,
+                 std::string                     task_id):
+        descriptors_(std::move(descriptors)),
+        deadline_(deadline),
+        request_id_(request_id),
+        task_id_(std::move(task_id)) {}
 
     std::vector<TransferDescriptor>     descriptors_;
     Clock::time_point                   deadline_;
     std::optional<int64_t>              request_id_;
+    std::string                         task_id_;
     inline static std::atomic<uint64_t> next_trace_id_{1};
     uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
 };
