@@ -110,6 +110,50 @@ class TransformerOnlyCudaGraphEmbeddingModel(EmbeddingGraphTestModel):
 
 
 class TestEmbeddingCudaGraph(unittest.TestCase):
+
+    def test_complete_request_is_validated_once_before_preparation(self):
+        class CountingModel(TransformerOnlyCudaGraphEmbeddingModel):
+            validation_calls = 0
+            accept = True
+
+            def validate_embedding_graph_inputs(self, inputs):
+                self.validation_calls += 1
+                # Preparation must see the same complete request as validation.
+                self.asserted_token_count = inputs.input_ids.numel()
+                return self.accept
+
+            def prepare_transformer_inputs(self, inputs):
+                if self.asserted_token_count is not None:
+                    assert self.asserted_token_count == inputs.input_ids.numel()
+                return super().prepare_transformer_inputs(inputs)
+
+        model = CountingModel()
+        # Capture prepares synthetic inputs without going through eligibility.
+        model.asserted_token_count = None
+        runner = CudaGraphRunner()
+        runner.init_prefill(model, 2, 8, 8, [8], HIDDEN_SIZE, GROUP_TAGS)
+        model.validation_calls = 0
+        for count in (4, 7, 1, 4):
+            inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, count)
+            previous = model.validation_calls
+            result = runner.forward_with_preparation(inputs).hidden_states.clone()
+            self.assertEqual(model.validation_calls, previous + 1)
+            hidden = (
+                inputs.input_ids.to(torch.bfloat16).unsqueeze(1).expand(-1, HIDDEN_SIZE)
+            )
+            torch.testing.assert_close(result, hidden * 2 + hidden.sum(dim=0))
+        prepared = model.prepare_calls
+        model.accept = False
+        self.assertIsNone(runner.forward_with_preparation(inputs))
+        self.assertEqual(model.prepare_calls, prepared)
+        model.accept = True
+        for lengths in ([1, 1, 1], 9):
+            rejected = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, lengths)
+            self.assertIsNone(runner.forward_with_preparation(rejected))
+            self.assertEqual(model.prepare_calls, prepared)
+        # A rejection must not poison the following valid batch.
+        self.assertIsNotNone(runner.forward_with_preparation(inputs))
+
     def test_embedding_runner_does_not_interpret_business_flags(self):
         model = TransformerOnlyCudaGraphEmbeddingModel()
         model.custom_policy_enabled = (

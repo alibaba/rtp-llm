@@ -172,6 +172,7 @@ private:
     const bool                       owns_generation_prefill_cuda_graph_{false};
     bool                             enable_cuda_graph_{false};
     bool                             is_prefill_cuda_graph_mode_{false};
+    CudaGraphRole                    graph_role_{CudaGraphRole::AUTO};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_init_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
@@ -496,6 +497,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             is_prefill_cuda_graph_mode    ? (params.sp_config.type == SP_TYPE_NONE ? CudaGraphRole::EMBEDDING_PREFILL :
                                                                                      CudaGraphRole::MTP_DRAFT_PREFILL) :
                                             CudaGraphRole::DECODE;
+        graph_role_ = graph_params.role;
         graph_params.kernel_block_table_width = params.kernel_block_table_width;
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");

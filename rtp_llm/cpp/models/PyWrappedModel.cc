@@ -980,7 +980,9 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
-    if (enable_cuda_graph_ && runner != nullptr
+    // Embedding validates the complete request in forward. The runner then
+    // prepares its selected bucket through the existing prepareInputs path.
+    if (enable_cuda_graph_ && runner != nullptr && graph_role_ != CudaGraphRole::EMBEDDING_PREFILL
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);

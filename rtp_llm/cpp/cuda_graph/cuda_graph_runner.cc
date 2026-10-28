@@ -1451,7 +1451,8 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
 
     if (isEmbeddingStylePrefillCudaGraph()
         && (!inputs.attention_inputs.is_prefill || inputs.attention_inputs.is_target_verify
-            || !inputs.attention_inputs.input_lengths.defined() || inputs.attention_inputs.input_lengths.numel() == 0
+            || !inputs.attention_inputs.input_lengths.defined() || inputs.attention_inputs.input_lengths.dim() != 1
+            || inputs.attention_inputs.input_lengths.numel() == 0
             || inputs.attention_inputs.input_lengths.numel() > max_bs_)) {
         return false;
     }
