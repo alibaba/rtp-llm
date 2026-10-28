@@ -336,16 +336,21 @@ class RealHookGates(unittest.TestCase):
         self_test = self
         device = torch.device("cuda", 0)
         group = object()
-        state = dict(device=device, world=4, group=group, stream=Stream(), event=Event(),
-                     dev_in=Tensor(), dev_out=Tensor(), pin=Tensor())
-        strategy = types.SimpleNamespace(_eager_counts_state=state, _stage=lambda: (group, 4, 0))
+        strategy = types.SimpleNamespace(_eager_counts_state=None, _stage=lambda: (group, 4, 0))
         with patch.dict(os.environ, {"DSV4_MOE_EAGER_COUNT_GATHER": "1"}), patch.object(
             torch.cuda, "current_stream", lambda device: caller
         ), patch.object(torch.cuda, "stream", lambda stream: nullcontext()), patch.object(
+            torch.cuda, "Stream", lambda **kwargs: Stream()
+        ), patch.object(torch.cuda, "Event", lambda: Event()), patch.object(
+            torch, "empty", lambda *args, **kwargs: Tensor()
+        ), patch.object(
             torch.distributed, "all_gather_into_tensor", lambda *args, **kwargs: events.append("gather")
         ), patch.dict(_strategy_env, {"_EAGER_GATHER_LOGGED": True}):
             strategy_methods["start_authoritative_counts_gather"](strategy, 1024, device)
-        self.assertEqual(events, ["wait", "fill", "gather", "copy", "event"])
+            self.assertEqual(events, ["wait", "fill", "gather", "copy", "event"])
+            events.clear()
+            strategy_methods["start_authoritative_counts_gather"](strategy, 1024, device)
+            self.assertEqual(events, ["fill", "gather", "copy", "event"])
 
     def test_finish_reads_back_pinned_values(self):
         class _Event:

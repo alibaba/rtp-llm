@@ -459,12 +459,13 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
             return None
         group, world, _ = self._stage()
         state = self._eager_counts_state
-        if (
+        allocated_state = (
             state is None
             or state["device"] != device
             or state["world"] != world
             or state["group"] is not group
-        ):
+        )
+        if allocated_state:
             state = {
                 "device": device,
                 "world": world,
@@ -480,7 +481,9 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         # Buffers are allocated on the caller stream and may reuse storage
         # still touched by queued metadata kernels. Order the side-stream write
         # after those uses before launching the gather (even for a fresh fill).
-        stream.wait_stream(torch.cuda.current_stream(device))
+        if allocated_state:
+            stream.wait_stream(torch.cuda.current_stream(device))
+        # Reused buffers are owned exclusively by this same side stream.
         with torch.cuda.stream(stream):
             state["dev_in"].fill_(int(local_rows))
             torch.distributed.all_gather_into_tensor(
