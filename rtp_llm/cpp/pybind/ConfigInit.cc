@@ -1456,6 +1456,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("max_context_batch_size", &FIFOSchedulerConfig::max_context_batch_size)
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
+        .def_readwrite("max_batch_kv_len", &FIFOSchedulerConfig::max_batch_kv_len)
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
@@ -1472,10 +1473,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
                                       self.max_batch_tokens_without_cache,
-                                      self.prefill_chunk_size);
+                                      self.prefill_chunk_size,
+                                      self.max_batch_kv_len);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1494,6 +1496,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 8) {
                         c.prefill_chunk_size = t[7].cast<int64_t>();
+                    }
+                    if (t.size() >= 9) {
+                        c.max_batch_kv_len = t[8].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

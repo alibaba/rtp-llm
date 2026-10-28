@@ -30,8 +30,9 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       metrics_reporter),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
-    max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    max_batch_kv_len_(static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_kv_len, 0))),
+    max_batch_tokens_without_cache_(
+        static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1) {
@@ -168,6 +169,7 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
 
     return fitsPrefillTokenLimits(admitted_stream_count,
                                   schedule_runtime.admitted_prefill_token_size_with_cache,
+                                  schedule_runtime.admitted_prefill_token_size_without_cache,
                                   schedule_runtime.admitted_prefill_max_seq_len_with_cache,
                                   schedule_runtime.admitted_prefill_sequence_count,
                                   new_stream);
@@ -193,20 +195,25 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
     if (running_streams_.size() + admitted_count + 1 > max_generate_batch_size_) {
         return false;
     }
-    size_t admitted_tokens         = 0;
-    size_t admitted_max_seq_len    = 0;
-    size_t admitted_sequence_count = 0;
+    size_t admitted_tokens               = 0;
+    size_t admitted_tokens_without_cache = 0;
+    size_t admitted_max_seq_len          = 0;
+    size_t admitted_sequence_count       = 0;
     for (const auto& stream : streams) {
         admitted_tokens += prefillTokenCostWithCache(stream);
+        admitted_tokens_without_cache += prefillTokenCostWithoutCache(stream);
         admitted_max_seq_len = std::max(admitted_max_seq_len, prefillSeqLenWithCache(stream));
         admitted_sequence_count += static_cast<size_t>(stream->currentBatchSize());
     }
-    return fitsPrefillTokenLimits(
-        admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
+    return fitsPrefillTokenLimits(admitted_count,
+                                  admitted_tokens,
+                                  admitted_tokens_without_cache,
+                                  admitted_max_seq_len,
+                                  admitted_sequence_count,
+                                  new_stream);
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) {
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     // FIFOScheduler's own scheduling loop uses the counter-based evaluateRunningBatch();
     // this list-based FIFOSchedulerBase entry point delegates to the list overload so
     // both paths agree.
@@ -215,6 +222,7 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
 
 bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_stream_count,
                                            size_t                   admitted_tokens,
+                                           size_t                   admitted_tokens_without_cache,
                                            size_t                   admitted_max_seq_len,
                                            size_t                   admitted_sequence_count,
                                            const GenerateStreamPtr& candidate) const {
@@ -228,6 +236,19 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
     // Prefill is not mixed with a running batch, so this is normally zero, but
     // keeping it here makes both callers retain the original boundary semantics.
     const auto running_token_reserve = running_streams_.size();
+    if (max_batch_kv_len_ > 0) {
+        const auto fits = [running_token_reserve, prefill_only = isPrefillOnly(candidate)](
+                              size_t admitted, size_t candidate_tokens, size_t limit) {
+            if (running_token_reserve >= limit) {
+                return false;
+            }
+            const auto available_tokens = limit - running_token_reserve - (prefill_only ? 0 : 1);
+            return admitted <= available_tokens && candidate_tokens <= available_tokens - admitted;
+        };
+        return fits(admitted_tokens, prefillTokenCostWithCache(candidate), max_batch_kv_len_)
+               && fits(admitted_tokens_without_cache, prefillTokenCostWithoutCache(candidate), max_batch_tokens_size_);
+    }
+
     if (running_token_reserve >= max_batch_tokens_size_) {
         return false;
     }
@@ -336,13 +357,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
