@@ -44,6 +44,8 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 TTFT使用`client/requests/ttft`，参数为`stat: avg/max/p99`及`range`。时间范围保留为`all`、`latest`或负偏移区间，编译时不转换为墙上时间；接口元数据决定接受哪些形式，后端仍需明确支持具体统计组合。`all`必须位于唯一一次`client/traffic/run`之后，排空后再次run仍报错。
 
+发流必须读取真实响应：调度结果为已入队时调用FetchResponse，其他请求调用GenerateStreamCall，并持续消费到终态。不提供跳过取流、engine自主完成未取流请求或补报客户端指标的压测模式；旧Mock的FETCH_OUTPUT_STREAM、autoFetch、schedule-only分支及mock_backend_ttft_us补报链路全部不承接。Client实现时，在实际收到首token时以自身发送起点计算并上报TTFT，不能用原生响应中的引擎耗时、Forward耗时或引擎完成事件替代；未收到首token则没有TTFT样本，不能填零或伪造成功。当前Java Client尚未实现，这一规则约束后续实现。
+
 `prometheus/query`只接受`promql`，不接受外层`range`；编译不解析PromQL，其执行时刻、查询结果和报告点标注由后续执行器记录。普通语义接口不接受原生查询字段。
 
 `expect`支持`eq`、`count`或`gte/lte`上下界。单位为秒的接口允许`2s`这类阈值；集合引用按Java声明类型校验。Master逐实例的Engine集合可与操作回执的Engine集合引用比较，不能通过合并各Master结果掩盖不一致。compile仅编译断言，真正的比较逻辑由执行器实现。
