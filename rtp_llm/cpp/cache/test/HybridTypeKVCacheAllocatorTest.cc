@@ -1540,17 +1540,24 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocksUsesLinearActiveTai
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNonEmptyTargetWidth) {
-    auto config    = makeTinyHybridConfig();
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 12;  // Eleven distinct physical blocks cover the final two-row layout.
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    auto resource = makeBatchResource(/*batch_size=*/2, config, /*keys=*/{});
+    auto       resource      = makeBatchResource(/*batch_size=*/2, config, /*keys=*/{});
+    const auto block_pool    = allocator->getBlockPool();
+    const auto linear_blocks = block_pool->malloc(3);
+    const auto full_blocks   = block_pool->malloc(4);
+    ASSERT_EQ(linear_blocks.size(), 3u);
+    ASSERT_EQ(full_blocks.size(), 4u);
+    block_pool->requestReference({linear_blocks[0], full_blocks[0], full_blocks[1]});
 
     // common_seq_len=8 means the first two slots are shared. The NULL slot in the linear group consumes no block.
-    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 11});
-    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 12});
-    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/1, {20, 21, 22});
-    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/1, {20, 21, 23});
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {NULL_BLOCK_IDX, linear_blocks[0], linear_blocks[1]});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {NULL_BLOCK_IDX, linear_blocks[0], linear_blocks[2]});
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/1, {full_blocks[0], full_blocks[1], full_blocks[2]});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/1, {full_blocks[0], full_blocks[1], full_blocks[3]});
 
     // No growth is needed at the current batch width.
     EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
@@ -1592,12 +1599,35 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
                                                      /*target_batch_size=*/3),
               6);
 
-    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 11, NULL_BLOCK_IDX});
-    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {NULL_BLOCK_IDX, 10, 12, NULL_BLOCK_IDX});
-    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/1, {20, 21, 22, 24});
-    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/1, {20, 21, 23, 25});
+    const auto full_tails = block_pool->malloc(2);
+    ASSERT_EQ(full_tails.size(), 2u);
+    resource->setBatchBlocks(
+        /*batch_id=*/0, /*group_id=*/0, {NULL_BLOCK_IDX, linear_blocks[0], linear_blocks[1], NULL_BLOCK_IDX});
+    resource->setBatchBlocks(
+        /*batch_id=*/1, /*group_id=*/0, {NULL_BLOCK_IDX, linear_blocks[0], linear_blocks[2], NULL_BLOCK_IDX});
+    resource->setBatchBlocks(
+        /*batch_id=*/0, /*group_id=*/1, {full_blocks[0], full_blocks[1], full_blocks[2], full_tails[0]});
+    resource->setBatchBlocks(
+        /*batch_id=*/1, /*group_id=*/1, {full_blocks[0], full_blocks[1], full_blocks[3], full_tails[1]});
 
-    // Existing blocks already cover this unaligned sequence length.
+    // The logical tables cover the sequence, but each missing active LINEAR tail needs a physical block.
+    EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
+                                                     /*seq_len=*/13,
+                                                     /*common_seq_len=*/8,
+                                                     /*remaining_tokens=*/0,
+                                                     /*reserve_step=*/0,
+                                                     /*enable_reuse_cache=*/false,
+                                                     /*target_batch_size=*/2),
+              2);
+
+    const auto linear_tails = block_pool->malloc(2);
+    ASSERT_EQ(linear_tails.size(), 2u);
+    resource->setBatchBlocks(
+        /*batch_id=*/0, /*group_id=*/0, {NULL_BLOCK_IDX, linear_blocks[0], linear_blocks[1], linear_tails[0]});
+    resource->setBatchBlocks(
+        /*batch_id=*/1, /*group_id=*/0, {NULL_BLOCK_IDX, linear_blocks[0], linear_blocks[2], linear_tails[1]});
+
+    // Fully materialized active tails need no additional blocks at this sequence length.
     EXPECT_EQ(allocator->estimateBatchPeakNeedBlocks(resource,
                                                      /*seq_len=*/13,
                                                      /*common_seq_len=*/8,
@@ -1606,6 +1636,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimateBatchPeakNeedBlocksAccountsForNon
                                                      /*enable_reuse_cache=*/false,
                                                      /*target_batch_size=*/2),
               0);
+
+    auto tokens = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/13, config.seq_size_per_block);
+    allocator->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(block_pool->freeBlocksNum(), block_pool->totalBlocksNum());
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, FreshUnalignedMultiSequencePeakMatchesExactCapacity) {

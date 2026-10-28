@@ -682,6 +682,17 @@ size_t BlockPool::availableBlocksNum() const {
     return req_con_ref_counter_.freeBlockNum();
 }
 
+std::vector<bool> BlockPool::externallyReferencedSlots(const BlockIndicesType& block_indices) const {
+    std::vector<bool>           result(block_indices.size(), false);
+    std::lock_guard<std::mutex> lock(ref_mu_);
+    for (size_t i = 0; i < block_indices.size(); ++i) {
+        if (!isNullBlockIdx(block_indices[i])) {
+            result[i] = req_con_ref_counter_.getRefCounter(block_indices[i]) > 1;
+        }
+    }
+    return result;
+}
+
 size_t BlockPool::requestRefBlocksNum() const {
     std::lock_guard<std::mutex> lock(ref_mu_);
     return request_ref_counter_.busyBlockNum();

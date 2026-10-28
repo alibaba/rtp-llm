@@ -45,6 +45,9 @@ public:
     size_t                    requestRefBlocksNum() const;
     size_t                    connectorRefBlocksNum() const;
     size_t                    blockCacheRefBlocksNum() const;
+    // Each non-null slot owns one request reference. Other request/connector
+    // references keep its physical block unavailable after this slot is freed.
+    std::vector<bool> externallyReferencedSlots(const BlockIndicesType& block_indices) const;
     // Blocks not held by request or block cache (i.e. free + connector-in-flight).
     // Used by tiered memory eviction to avoid over-eviction.
     size_t notInUseBlocksNum() const;

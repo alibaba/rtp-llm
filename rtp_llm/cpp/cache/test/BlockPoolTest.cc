@@ -313,6 +313,27 @@ TEST_F(BlockPoolTest, FreePartialBlocks) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 3);
 }
 
+TEST_F(BlockPoolTest, ExternalReferenceSnapshotDistinguishesRequestConnectorAndCache) {
+    block_pool_ = createBlockPool();
+    ASSERT_TRUE(block_pool_->init());
+    const auto blocks = block_pool_->malloc(3);
+    ASSERT_EQ(blocks.size(), 3u);
+    const BlockIndicesType slots = {NULL_BLOCK_IDX, blocks[0], blocks[1], blocks[2]};
+    EXPECT_EQ(block_pool_->externallyReferencedSlots(slots), (std::vector<bool>{false, false, false, false}));
+
+    block_pool_->requestReference(blocks[0]);
+    block_pool_->connectorReference(blocks[1]);
+    block_pool_->blockCacheReference(blocks[2]);
+    EXPECT_EQ(block_pool_->externallyReferencedSlots(slots), (std::vector<bool>{false, true, true, false}));
+
+    block_pool_->requestFree(blocks[0]);
+    block_pool_->connectorFree(blocks[1]);
+    EXPECT_EQ(block_pool_->externallyReferencedSlots(slots), (std::vector<bool>{false, false, false, false}));
+    block_pool_->requestFree(blocks);
+    block_pool_->blockCacheFree(blocks[2]);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), block_pool_->totalBlocksNum());
+}
+
 TEST_F(BlockPoolTest, ReferenceAndFree) {
     auto config = createTestConfig();
     block_pool_ = std::make_shared<BlockPool>(config);

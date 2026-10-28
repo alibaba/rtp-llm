@@ -442,6 +442,187 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitCreatesIndependentBlockPoolPerGroup) 
     EXPECT_EQ(allocator->groupBlockPools()[1]->totalBlocksNum(), 8u - 1u);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolEstimatesBoundPhysicalDecodeGrowth) {
+    for (bool reuse : {false, true}) {
+        for (int reserve_step : {0, 5}) {
+            for (int cp_size : {1, 2}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "reuse=" << reuse << " reserve=" << reserve_step << " cp_size=" << cp_size);
+                auto config    = makeTinyMultiPoolHybridConfig(64, 64);
+                auto allocator = makeAllocator(config);
+                allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, 4));
+                ASSERT_TRUE(allocator->init());
+                auto resource = makeBatchResource(1, config);
+                auto tokens   = makeCompleteTokenIds(1, 7, 4);
+                tokens->setReserveStep(reserve_step);
+                MallocInfo info{resource, tokens};
+                info.reuse_cache                  = reuse;
+                info.enable_device_cache          = false;
+                info.enable_remove_skipped_blocks = false;
+                const auto fresh = allocator->estimateIndependentPoolNeeds(*resource, 7, 7, 17, reserve_step, reuse, 1);
+                ASSERT_EQ(fresh.size(), 2);
+                ASSERT_TRUE(allocator->malloc(info).success);
+                const auto initialized =
+                    allocator->estimateIndependentPoolNeeds(*resource, 7, 7, 17, reserve_step, reuse, 1);
+                const auto before = snapshotPoolCounters(allocator);
+                for (int length = 8; length <= 24; ++length) {
+                    tokens->setSeqLength(length);
+                    // Inspect the allocation watermark before sparse slots are released.
+                    info.enable_remove_skipped_blocks = false;
+                    ASSERT_TRUE(allocator->malloc(info).success);
+                    for (size_t gid = 0; gid < 2; ++gid) {
+                        const auto available = allocator->groupBlockPools()[gid]->availableBlocksNum();
+                        EXPECT_LE(static_cast<int64_t>(fresh[gid].available_blocks - available),
+                                  fresh[gid].peak_need_blocks);
+                        EXPECT_LE(static_cast<int64_t>(before[gid].available_blocks) - static_cast<int64_t>(available),
+                                  initialized[gid].peak_need_blocks);
+                    }
+                    info.enable_remove_skipped_blocks = true;
+                    ASSERT_TRUE(allocator->malloc(info).success);
+                }
+                allocator->free(FreeInfo{resource, tokens});
+            }
+        }
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolStepEstimatesCoverSpeculativeBurstsBeforeCleanup) {
+    for (bool reuse : {false, true}) {
+        for (int cp_size : {1, 2}) {
+            auto config    = makeTinyMultiPoolHybridConfig(64, 64);
+            auto allocator = makeAllocator(config);
+            allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, 4));
+            ASSERT_TRUE(allocator->init());
+            auto resource = makeBatchResource(1, config);
+            auto tokens   = makeCompleteTokenIds(1, 7, 4);
+            tokens->setReserveStep(5);
+            MallocInfo info{resource, tokens};
+            info.reuse_cache         = reuse;
+            info.enable_device_cache = false;
+            ASSERT_TRUE(allocator->malloc(info).success);
+            const auto lifetime = allocator->estimateIndependentPoolNeeds(*resource, 7, 7, 50, 5, reuse, 1);
+            const auto initial  = snapshotPoolCounters(allocator);
+            for (int length = 12; length <= 57; length += 5) {
+                SCOPED_TRACE(::testing::Message() << "reuse=" << reuse << " cp=" << cp_size << " length=" << length);
+                tokens->setSeqLength(length);
+                const auto step =
+                    allocator->estimateIndependentPoolNeeds(*resource, length, 7, 57 - length, 5, reuse, 1);
+                const auto before                 = snapshotPoolCounters(allocator);
+                info.enable_remove_skipped_blocks = false;
+                ASSERT_TRUE(allocator->malloc(info).success);
+                for (size_t gid = 0; gid < 2; ++gid) {
+                    const auto available = allocator->groupBlockPools()[gid]->availableBlocksNum();
+                    EXPECT_LE(static_cast<int64_t>(before[gid].available_blocks) - static_cast<int64_t>(available),
+                              step[gid].initial_need_blocks);
+                    EXPECT_LE(static_cast<int64_t>(initial[gid].available_blocks) - static_cast<int64_t>(available),
+                              lifetime[gid].peak_need_blocks);
+                }
+                info.enable_remove_skipped_blocks = true;
+                ASSERT_TRUE(allocator->malloc(info).success);
+            }
+            allocator->free(FreeInfo{resource, tokens});
+        }
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, FreshIndependentPoolEstimateReservesPotentialDevicePrefixTail) {
+    auto config        = makeTinyMultiPoolHybridConfig(12, 12);
+    config.linear_step = 4;
+    auto allocator     = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto       resource             = makeBatchResource(1, config);
+    auto       tokens               = makeCompleteTokenIds(1, 8, 4);
+    const auto without_device_cache = allocator->estimateIndependentPoolNeeds(*resource, 8, 8, 17, 0, true, 1, false);
+    const auto with_device_cache    = allocator->estimateIndependentPoolNeeds(*resource, 8, 8, 17, 0, true, 1, true);
+    ASSERT_EQ(without_device_cache.size(), 2);
+    ASSERT_EQ(with_device_cache.size(), 2);
+    EXPECT_EQ(without_device_cache[0].initial_need_blocks, 1);
+    EXPECT_EQ(without_device_cache[0].peak_need_blocks, 4);
+    EXPECT_EQ(with_device_cache[0].initial_need_blocks, 2);
+    EXPECT_EQ(with_device_cache[0].peak_need_blocks, 5);
+    EXPECT_EQ(with_device_cache[1].initial_need_blocks, without_device_cache[1].initial_need_blocks);
+    EXPECT_EQ(with_device_cache[1].peak_need_blocks, without_device_cache[1].peak_need_blocks);
+
+    // A single input block cannot be reused: matching always leaves the final block for prefill.
+    const auto single_block_off = allocator->estimateIndependentPoolNeeds(*resource, 4, 4, 17, 0, true, 1, false);
+    const auto single_block_on  = allocator->estimateIndependentPoolNeeds(*resource, 4, 4, 17, 0, true, 1, true);
+    EXPECT_EQ(single_block_on[0].initial_need_blocks, single_block_off[0].initial_need_blocks);
+    EXPECT_EQ(single_block_on[0].peak_need_blocks, single_block_off[0].peak_need_blocks);
+    const auto reuse_off   = allocator->estimateIndependentPoolNeeds(*resource, 8, 8, 17, 0, false, 1, false);
+    const auto device_only = allocator->estimateIndependentPoolNeeds(*resource, 8, 8, 17, 0, false, 1, true);
+    EXPECT_EQ(device_only[0].initial_need_blocks, reuse_off[0].initial_need_blocks);
+    EXPECT_EQ(device_only[0].peak_need_blocks, reuse_off[0].peak_need_blocks);
+
+    seedNonResidentCacheItem(allocator, /*gid=*/0, /*key=*/100);
+    seedNonResidentCacheItem(allocator, /*gid=*/1, /*key=*/100);
+    resource->setBatchCacheKeys(0, CacheKeysType{100, 101});
+    const auto available_before = allocator->groupBlockPools()[0]->availableBlocksNum();
+    MallocInfo info{resource, tokens};
+    info.reuse_cache                  = true;
+    info.enable_device_cache          = true;
+    info.enable_remove_skipped_blocks = false;
+    const auto result                 = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.reuse_len, 4);
+    EXPECT_EQ(available_before - allocator->groupBlockPools()[0]->availableBlocksNum(),
+              static_cast<size_t>(with_device_cache[0].initial_need_blocks));
+
+    // Once matched, the block table accounts for the retained tail without another surcharge.
+    const auto initialized_off = allocator->estimateIndependentPoolNeeds(*resource, 8, 8, 17, 0, true, 1, false);
+    const auto initialized_on  = allocator->estimateIndependentPoolNeeds(*resource, 8, 8, 17, 0, true, 1, true);
+    EXPECT_EQ(initialized_on[0].initial_need_blocks, initialized_off[0].initial_need_blocks);
+    EXPECT_EQ(initialized_on[0].peak_need_blocks, initialized_off[0].peak_need_blocks);
+    allocator->free(FreeInfo{resource, tokens});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolOwnershipChecksAllRequestAndConnectorReferences) {
+    auto config    = makeTinyMultiPoolHybridConfig(12, 12);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    auto       owner        = makeBatchResource(1, config);
+    auto       owner_tokens = makeCompleteTokenIds(1, 8, 4);
+    MallocInfo owner_info{owner, owner_tokens};
+    owner_info.enable_device_cache = false;
+    ASSERT_TRUE(allocator->malloc(owner_info).success);
+    EXPECT_TRUE(allocator->ownsAllIndependentPoolRequests(*owner));
+
+    auto       other        = makeBatchResource(1, config);
+    auto       other_tokens = makeCompleteTokenIds(1, 4, 4);
+    MallocInfo other_info{other, other_tokens};
+    other_info.enable_device_cache = false;
+    ASSERT_TRUE(allocator->malloc(other_info).success);
+    EXPECT_FALSE(allocator->ownsAllIndependentPoolRequests(*owner));
+    EXPECT_FALSE(allocator->ownsAllIndependentPoolRequests(*other));
+    allocator->free(FreeInfo{other, other_tokens});
+    EXPECT_TRUE(allocator->ownsAllIndependentPoolRequests(*owner));
+
+    const auto& full_pool = allocator->groupBlockPools()[1];
+    full_pool->requestReference(owner->blocks(0, 1));
+    EXPECT_FALSE(allocator->ownsAllIndependentPoolRequests(*owner));
+    full_pool->requestFree(owner->blocks(0, 1));
+    EXPECT_TRUE(allocator->ownsAllIndependentPoolRequests(*owner));
+
+    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+        SCOPED_TRACE(gid);
+        const auto& blocks = owner->blocks(0, gid);
+        const auto  block  = std::find_if(blocks.begin(), blocks.end(), [](auto id) { return !isNullBlockIdx(id); });
+        ASSERT_NE(block, blocks.end());
+        const auto& pool = allocator->groupBlockPools()[gid];
+        // Another request can pin just a subset without changing the number of busy physical blocks.
+        const auto request_blocks_before = pool->requestRefBlocksNum();
+        pool->requestReference(*block);
+        EXPECT_EQ(pool->requestRefBlocksNum(), request_blocks_before);
+        EXPECT_FALSE(allocator->ownsAllIndependentPoolRequests(*owner));
+        pool->requestFree(*block);
+        EXPECT_TRUE(allocator->ownsAllIndependentPoolRequests(*owner));
+        pool->connectorReference(*block);
+        EXPECT_FALSE(allocator->ownsAllIndependentPoolRequests(*owner));
+        pool->connectorFree(*block);
+        EXPECT_TRUE(allocator->ownsAllIndependentPoolRequests(*owner));
+    }
+    allocator->free(FreeInfo{owner, owner_tokens});
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) {
     auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/6, /*swa_block_num=*/8);
     auto allocator = makeAllocator(config);
