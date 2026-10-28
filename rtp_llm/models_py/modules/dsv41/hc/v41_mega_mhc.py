@@ -34,7 +34,6 @@ MHCQuantizedOutput = tuple[
 
 _WARMED_STREAMS: set[tuple[int, int]] = set()
 _SM90_WARMED_STREAMS: set[tuple[int, int]] = set()
-_SM90_MAX_TOKENS = 16
 
 
 @lru_cache(maxsize=1)
@@ -251,8 +250,10 @@ def is_sm90_supported(
     """Host-only gate for the SM90 post/prenorm/pre epilogue seam.
 
     This gate does not import TileLang or the experimental fused-pre module.
-    It intentionally covers only the decode shapes verified by the exact GPU
-    test; large/prefill and compacted executions retain their existing path.
+    Up to 256 physical decode tokens use the established DeepGEMM prenorm;
+    larger decode groups use the established TileLang prenorm. Both materialize
+    FP32 mixes before the fused epilogue. Flat prefill retains its original
+    path. The TileLang epilogue is token-major and has no Q-specific limit.
     """
     if torch.version.hip is not None:
         return False
@@ -270,7 +271,7 @@ def is_sm90_supported(
     device = attn_out.device
     leading = tuple(attn_out.shape[:-1])
     tokens = attn_out.numel() // 5120
-    if not 0 < tokens <= _SM90_MAX_TOKENS:
+    if tokens <= 0:
         return False
     if type(previous) is not DelayedHCUnit or type(next_hc) is not DelayedHCUnit:
         return False
@@ -322,7 +323,7 @@ def is_sm90_supported(
         return False
     from rtp_llm.models_py.modules.dsv41.hc import v41_prenorm
 
-    if not v41_prenorm.is_supported(residual, next_hc.fn):
+    if tokens <= 256 and not v41_prenorm.is_supported(residual, next_hc.fn):
         return False
     with torch.cuda.device(device):
         return (
@@ -368,9 +369,22 @@ def _run_sm90_post_pre(
     # Preserve both the DeepGEMM projection and _reduce_prenorm_kernel output
     # as a materialized FP32 boundary.  Only the three following memory/small
     # reduction kernels are replaced.
-    mixes = v41_prenorm.prenorm(new_residual, next_hc.fn, next_hc.norm_eps)
+    residual_for_prenorm = new_residual.view(*leading, 4, 5120)
+    mixes = v41_prenorm.prenorm(
+        residual_for_prenorm, next_hc.fn, next_hc.norm_eps
+    )
     if mixes is None:
-        raise RuntimeError("guarded SM90 mega_mhc prenorm contract changed")
+        if tokens <= 256:
+            raise RuntimeError("guarded SM90 mega_mhc prenorm contract changed")
+        # Match DelayedHCUnit._pre_impl's large-M fallback exactly.  In
+        # particular, n_splits=1 and the original FP32 weight are part of
+        # its arithmetic tree; do not substitute a DeepGEMM projection.
+        ops = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"
+        )
+        mixes = ops.mhc_pre_norm_fn(
+            residual_for_prenorm, next_hc.fn, None, next_hc.norm_eps, n_splits=1
+        )
     new_pre, new_post, new_comb, layer_input = backend.pre_mixes_fwd(
         mixes.view(tokens, 24),
         new_residual,

@@ -187,14 +187,63 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
                     _assert_exact(self, actual, expected)
 
     @torch.inference_mode()
-    def test_gate_is_decode_bounded_and_extended_modes_fall_back(self):
+    def test_gate_accepts_generic_decode_t_and_rejects_prefill_and_extended_modes(self):
         supported = _case(4, 4204)
         self.assertTrue(is_sm90_supported(**supported))
-        too_large = _case(17, 4217)
-        self.assertFalse(is_sm90_supported(**too_large))
+        self.assertTrue(is_sm90_supported(**_case(17, 4217)))
+        self.assertTrue(is_sm90_supported(**_case(512, 4712)))
+        flat = dict(supported)
+        flat["attn_out"] = supported["attn_out"].view(4, DIM)
+        flat["residual"] = supported["residual"].view(4, HC, DIM)
+        flat["post"] = supported["post"].view(4, HC, 1)
+        flat["comb"] = supported["comb"].view(4, HC, HC)
+        self.assertFalse(is_sm90_supported(**flat))
+        self.assertIsNone(try_fused_post_pre(**flat))
         self.assertIsNone(try_fused_post_pre(**supported, original_tokens=16))
         self.assertIsNone(try_fused_post_pre(**supported, reuse_residual=True))
         self.assertIsNone(try_fused_post_pre(**supported, output_fp8=True))
+
+    @torch.inference_mode()
+    def test_large_t_in_place_alias_and_mutated_graph_replay(self):
+        for tokens in (512, 1025):
+            with self.subTest(tokens=tokens):
+                seed = 5400 + tokens
+                baseline = _case(tokens, seed)
+                candidate = _case(tokens, seed)
+                expected = _unfused(baseline)
+                input_ptr = candidate["residual"].data_ptr()
+                actual = _fused(candidate)
+                self.assertEqual(actual[0].data_ptr(), input_ptr)
+                _assert_exact(self, actual, expected)
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        _fused(candidate)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    captured = _fused(candidate)
+                self.assertEqual(captured[0].data_ptr(), input_ptr)
+
+                for scale in (1.0, -0.75, 2.0):
+                    values = {
+                        "attn_out": (torch.randn_like(candidate["attn_out"]) * scale).bfloat16(),
+                        "residual": (torch.randn_like(candidate["residual"]) * scale).bfloat16(),
+                        "post": torch.rand_like(candidate["post"]),
+                        "comb": torch.randn_like(candidate["comb"]).softmax(-1),
+                    }
+                    previous_pre = torch.rand_like(candidate["previous"].pre_mix_out)
+                    for case in (baseline, candidate):
+                        for key, value in values.items():
+                            case[key].copy_(value)
+                        case["previous"].pre_mix_out.copy_(previous_pre)
+                    expected = _unfused(baseline)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    self.assertEqual(captured[0].data_ptr(), input_ptr)
+                    _assert_exact(self, captured, expected)
 
     @torch.inference_mode()
     def test_cuda_graph_replays_mutated_inputs_and_predecessor_mix(self):

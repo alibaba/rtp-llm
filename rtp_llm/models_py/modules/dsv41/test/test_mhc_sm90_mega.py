@@ -146,7 +146,12 @@ class MhcSm90MegaHostTest(unittest.TestCase):
         produced_residual = post_kernel.call_args.kwargs["out"]
         empty_like.assert_not_called()
         self.assertEqual(produced_residual.data_ptr(), residual.data_ptr())
-        self.assertIs(prenorm.call_args.args[0], produced_residual)
+        # Generic T preserves the buffer while restoring the original
+        # [B, Q, HC, D] shape for the production prenorm dispatch.
+        self.assertEqual(
+            prenorm.call_args.args[0].data_ptr(), produced_residual.data_ptr()
+        )
+        self.assertEqual(prenorm.call_args.args[0].shape, (tokens, 4, 5120))
         self.assertIs(prenorm.call_args.args[1], next_hc.fn)
         self.assertEqual(prenorm.call_args.args[2], next_hc.norm_eps)
         self.assertEqual(
