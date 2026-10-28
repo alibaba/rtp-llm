@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #include <torch/version.h>
 
 #include <string>
@@ -82,7 +83,11 @@ public:
 
 class GraphInstance {
 public:
-#if (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
+#if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
+    explicit GraphInstance(bool keep_graph = false): graph_(true) {
+        (void)keep_graph;  // Live input nodes require their original graph handles.
+    }
+#elif (TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8)
     explicit GraphInstance(bool keep_graph = false): graph_(keep_graph) {}
 #else
     explicit GraphInstance(bool keep_graph = false): graph_() {
@@ -91,6 +96,8 @@ public:
 #endif
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
+    rtp_llm::CudaGraphPrepareReplay prepare_replay_;
+    rtp_llm::CudaGraphPrepareReplay metadata_replay_;
 };
 
 class CudaGraphStreamLife {

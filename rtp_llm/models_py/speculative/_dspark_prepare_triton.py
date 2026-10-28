@@ -93,6 +93,7 @@ def try_prepare_proposal(input_ids, prefix_lengths, *, width, noise_token_id):
         os.environ.get("DSV4_FUSED_DSPARK_QUERY_INPUTS", "1") == "0"
         or width <= 0
         or input_ids.numel() % width
+        or input_ids.numel() >= 2**31
         or prefix_lengths.ndim != 1
         or not -(2**31) <= noise_token_id < 2**31
         or not _integers_on_device((input_ids, prefix_lengths))
@@ -111,20 +112,21 @@ def try_prepare_proposal(input_ids, prefix_lengths, *, width, noise_token_id):
         else torch.empty(batch, dtype=torch.int32, device=device)
     )
     if batch:
-        _dspark_query_inputs_kernel[(triton.cdiv(batch * width, 256),)](
-            input_ids,
-            prefix_lengths,
-            query_ids,
-            positions,
-            prefix32,
-            active,
-            B=batch,
-            WIDTH=width,
-            NOISE=int(noise_token_id),
-            STORE_PREFIX=prefix_lengths.dtype != torch.int32,
-            BLOCK=256,
-            num_warps=4,
-        )
+        with torch.cuda.device(device):
+            _dspark_query_inputs_kernel[(triton.cdiv(batch * width, 256),)](
+                input_ids,
+                prefix_lengths,
+                query_ids,
+                positions,
+                prefix32,
+                active,
+                B=batch,
+                WIDTH=width,
+                NOISE=int(noise_token_id),
+                STORE_PREFIX=prefix_lengths.dtype != torch.int32,
+                BLOCK=256,
+                num_warps=4,
+            )
     return query_ids, positions, prefix32, active
 
 
@@ -152,16 +154,17 @@ def try_map_context_rows(starts, lengths, committed_ends, row_count):
     requests = torch.empty(row_count, dtype=torch.int32, device=starts.device)
     positions = torch.empty_like(requests)
     if row_count:
-        _dspark_commit_rows_kernel[(triton.cdiv(row_count, 256),)](
-            starts,
-            lengths,
-            committed_ends,
-            requests,
-            positions,
-            B=batch,
-            ROWS=row_count,
-            STEPS=(batch + 1).bit_length(),
-            BLOCK=256,
-            num_warps=4,
-        )
+        with torch.cuda.device(starts.device):
+            _dspark_commit_rows_kernel[(triton.cdiv(row_count, 256),)](
+                starts,
+                lengths,
+                committed_ends,
+                requests,
+                positions,
+                B=batch,
+                ROWS=row_count,
+                STEPS=(batch + 1).bit_length(),
+                BLOCK=256,
+                num_warps=4,
+            )
     return requests, positions

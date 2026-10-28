@@ -506,8 +506,16 @@ def _update_compressor_state_slot_mappings(
             continue
         entries_per_block = paged_pool_entries_per_block[at]
         tokens_per_block = meta.paged_pool_tokens_per_block[at]
+        table = meta.pool_block_tables[at][:bs]
+        if table.is_cuda:
+            from ._fused_prepare_meta_triton import fill_state_pool_slots
+
+            if fill_state_pool_slots(
+                table, positions, req_idx, out, entries_per_block, tokens_per_block
+            ):
+                continue
         mapped = _compute_state_pool_slot_mapping(
-            meta.pool_block_tables[at][:bs],
+            table,
             positions,
             req_idx,
             entries_per_block,
@@ -1067,7 +1075,7 @@ def update_decode_metadata_in_place_fp8(
     paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
     capture_full_width_lengths: bool = False,
     require_device_metadata: bool = False,
-    valid_request_count: Optional[int] = None,
+    valid_request_count: Optional[int | torch.Tensor] = None,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -1103,24 +1111,23 @@ def update_decode_metadata_in_place_fp8(
         require_device_metadata=require_device_metadata,
     )
     bs = int(start_pos.shape[0])
-    live_requests = bs if valid_request_count is None else int(valid_request_count)
-    if not 0 <= live_requests <= bs <= meta.start_pos.numel():
-        raise ValueError("Decode valid request count must fit the prepared/captured batch")
-    position_ids_2d = _build_position_ids_2d(start_pos, q_len, device)
-    position_ids_flat = position_ids_2d.reshape(-1).contiguous()
-    meta.position_ids[: bs * q_len].copy_(position_ids_flat)
-    if meta.position_ids_long is not None:
-        meta.position_ids_long[: bs * q_len].copy_(position_ids_flat.to(torch.long))
-    if meta.decode_seq_start_per_req is not None:
-        meta.decode_seq_start_per_req[:bs].copy_(start_pos)
-    meta.topk_buffer_compressed[:bs].fill_(-1)
+    live_requests = bs if valid_request_count is None else valid_request_count
+    if bs > meta.start_pos.numel() or (
+        not isinstance(live_requests, torch.Tensor) and not 0 <= live_requests <= bs
+    ):
+        raise ValueError(
+            "Decode valid request count must fit the prepared/captured batch"
+        )
 
     from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
         fused_update_decode_meta_pure,
     )
 
     fused_update_decode_meta_pure(
-        meta, start_pos, meta.max_seq_len, valid_request_count=live_requests,
+        meta,
+        start_pos,
+        meta.max_seq_len,
+        valid_request_count=live_requests,
     )
 
     # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the
@@ -1148,18 +1155,23 @@ def update_decode_metadata_in_place_fp8(
         # Snapshot block_table content into the metadata's stable buffer
         # (forbid_realloc-friendly: just `.copy_` the prefix). Skip pools
         # without a metadata buffer (e.g. SWA-only layers don't carry CSA).
-        for at, src_bt in paged_block_tables.items():
-            dst_bt = meta.pool_block_tables.get(at)
-            if dst_bt is None:
-                continue
-            n_rows = min(src_bt.shape[0], dst_bt.shape[0])
-            n_cols = min(src_bt.shape[1], dst_bt.shape[1])
-            # Zero stale rows beyond current bs to avoid carrying old block
-            # ids (defensive — graph reads only [:bs] anyway).
-            dst_bt[bs:].zero_()
-            dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
-            if n_cols < dst_bt.shape[1]:
-                dst_bt[:n_rows, n_cols:].zero_()
+        from ._fused_prepare_meta_triton import try_snapshot_block_tables
+
+        if not try_snapshot_block_tables(
+            meta.pool_block_tables, paged_block_tables, bs
+        ):
+            for at, src_bt in paged_block_tables.items():
+                dst_bt = meta.pool_block_tables.get(at)
+                if dst_bt is None:
+                    continue
+                n_rows = min(src_bt.shape[0], dst_bt.shape[0])
+                n_cols = min(src_bt.shape[1], dst_bt.shape[1])
+                # Zero stale rows beyond current bs to avoid carrying old block
+                # ids (defensive — graph reads only [:bs] anyway).
+                dst_bt[bs:].zero_()
+                dst_bt[:n_rows, :n_cols].copy_(src_bt[:n_rows, :n_cols])
+                if n_cols < dst_bt.shape[1]:
+                    dst_bt[:n_rows, n_cols:].zero_()
 
         from rtp_llm.models_py.modules.dsv41.fp8.decode._fused_prepare_meta_triton import (
             fused_phase2b_pool_slot_mapping,

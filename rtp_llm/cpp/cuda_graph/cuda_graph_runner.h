@@ -28,6 +28,8 @@ class MetricsReporter;
 namespace rtp_llm {
 
 struct CacheTopology;
+struct FusedD2DCopyParams;
+struct AttentionInputMetadataParams;
 
 class DirtyCudaGraphCaptureError: public std::runtime_error {
 public:
@@ -159,11 +161,18 @@ public:
     void           capturePrefill();
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareInputs(const PyModelInputs&                inputs,
+                                 CudaGraphState&                     state,
+                                 const AttentionInputMetadataParams* metadata = nullptr);
+    void prepareInputData(const PyModelInputs& inputs, CudaGraphState& state, FusedD2DCopyParams* copies = nullptr);
     void           prepareAttentionInputs(const PyModelInputs& inputs,
                                           CudaGraphState&      state,
                                           bool                 skip_forward_event_sync = false) override;
+    void           prepareAttentionInputsImpl(const PyModelInputs&                inputs,
+                                              CudaGraphState&                     state,
+                                              bool                                skip_forward_event_sync,
+                                              bool                                copy_input_data,
+                                              const AttentionInputMetadataParams* metadata = nullptr);
     void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs,
                           CudaGraphState&      state,
@@ -173,6 +182,8 @@ public:
     void           replayPrefill(int seq_len);
     int            getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
+    PyModelOutputs
+    forward(const PyModelInputs& inputs, CudaGraphState& state, const AttentionInputMetadataParams* metadata);
     void           initCapture() override;
 
     bool captureSessionMayBeDirty() const override {
