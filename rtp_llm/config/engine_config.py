@@ -12,6 +12,7 @@ from rtp_llm.config.py_config_modules import (
     LoadConfig,
     PyEnvConfigs,
     ServerConfig,
+    resolve_max_generate_batch_size,
 )
 from rtp_llm.ops import (
     ArpcConfig,
@@ -247,17 +248,13 @@ class EngineConfig:
         # Legacy default: the decode running-batch cap follows concurrency_limit.
         # An explicit --max_generate_batch_size overrides it as a scheduler-side
         # cap: excess streams queue in the scheduler instead of being rejected
-        # at the HTTP frontend.
-        runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit
-        if py_env_configs.max_generate_batch_size_override is not None:
-            if py_env_configs.max_generate_batch_size_override <= 0:
-                raise ValueError(
-                    "--max_generate_batch_size must be positive, got "
-                    f"{py_env_configs.max_generate_batch_size_override}"
-                )
-            runtime_config.max_generate_batch_size = (
-                py_env_configs.max_generate_batch_size_override
-            )
+        # at the HTTP frontend. The resolution helper is shared with
+        # setup_and_configure_server so the DeepEP ll_num_max_token derived
+        # there stays identical to this value: DeepepWrapperConfig.equal
+        # compares both derivations and would fail at startup on any drift.
+        runtime_config.max_generate_batch_size = resolve_max_generate_batch_size(
+            py_env_configs
+        )
 
         # Setup PD separation config
         setup_pd_sep_config(

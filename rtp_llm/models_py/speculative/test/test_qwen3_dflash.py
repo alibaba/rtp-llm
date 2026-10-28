@@ -537,7 +537,9 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
         reserved_rows = []
         attention = SimpleNamespace(
             _out=torch.empty((8, 2, 64), dtype=torch.bfloat16),
-            reserve_output=lambda rows, _device, _dtype: reserved_rows.append(rows),
+            reserve_output=lambda rows, _device, _dtype, _for_graph: (
+                reserved_rows.append(rows)
+            ),
         )
         model.layers = [SimpleNamespace(self_attn=attention)]
         model.embed_tokens = SimpleNamespace(

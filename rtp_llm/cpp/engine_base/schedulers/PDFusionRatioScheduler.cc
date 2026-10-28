@@ -154,7 +154,8 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                       metrics_reporter),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     decode_since_prefill_(0),
-    prefill_since_decode_(0) {
+    prefill_since_decode_(0),
+    explicit_force_single_prefill_(runtime_config.fifo_scheduler_config.force_single_prefill) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_);
@@ -178,8 +179,11 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     // Deterministic batched mode (force_single_prefill): admit at most one
     // stream per prefill round so the batch-total M always equals the admitted
     // request's own context length, keeping cuBLASLt heuristics traffic-
-    // independent. Mirrors the cp_force_single_prefill_ gate of the FIFO path.
-    if (force_single_prefill_ && !streams.empty()) {
+    // independent. Only the explicit flag applies here — unlike the FIFO
+    // path, main's PDFusion scheduler had no prefill-CP single-prefill gate,
+    // and cp_force_single_prefill (default true) must not silently change
+    // PDFUSION+prefill-CP batching.
+    if (explicit_force_single_prefill_ && !streams.empty()) {
         return false;
     }
     // The peak state is built once per prefill round and updated after every successful admission,
