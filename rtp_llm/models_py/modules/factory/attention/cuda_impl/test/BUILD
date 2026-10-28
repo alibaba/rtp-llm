@@ -84,6 +84,11 @@ flashinfer_attention_tests = [
         ],
     },
     {
+        "name": "test_py_flashinfer_mrope_sm80_prefill_gate",
+        "main": "test_py_flashinfer_mrope_sm80_prefill_gate.py",
+        "extra_srcs": [],
+    },
+    {
         "name": "test_py_flashinfer_ragged_mha_prefill",
         "main": "test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
         "extra_srcs": [

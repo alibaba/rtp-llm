@@ -28,6 +28,13 @@ def _get_sm_for_device(device_id: int) -> Tuple[int, int]:
     return major, minor
 
 
+def is_sm80(device_id: Optional[Union[int, torch.device]] = None) -> bool:
+    """SM 8.0 Ampere (A100)."""
+    if not is_cuda():
+        return False
+    return get_sm(device_id) == (8, 0)
+
+
 def is_sm90(device_id: Optional[Union[int, torch.device]] = None) -> bool:
     """SM 9.x Hopper (H100 / H200 / H800 / H20)."""
     if not is_cuda():

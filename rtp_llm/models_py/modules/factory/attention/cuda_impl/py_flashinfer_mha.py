@@ -25,7 +25,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import is_sm10x, is_sm90
+from rtp_llm.models_py.utils.arch import is_sm10x, is_sm80, is_sm90
 from rtp_llm.ops import (
     AttentionConfigs,
     KvCacheDataType,
@@ -274,10 +274,14 @@ def _use_fused_mrope_prefill(
     )
 
 
-def _supports_dynamic_fp8_mrope_prefill(
+def _valid_separate_mrope_prefill_inputs(
     attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
 ) -> bool:
-    """Mode-2 MRoPE prefill uses separate RoPE (InterleavedMropeEmbeddingOp)."""
+    """Shape/position checks for MRoPE prefill with separate (unfused) RoPE.
+
+    Used by every path that applies interleaved MRoPE through
+    InterleavedMropeEmbeddingOp instead of a fused rope+KV-write kernel.
+    """
     rope_config = attn_configs.rope_config
     if getattr(attn_inputs, "is_cuda_graph", False):
         return False
@@ -305,6 +309,34 @@ def _supports_dynamic_fp8_mrope_prefill(
     )
 
 
+def _supports_dynamic_fp8_mrope_prefill(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> bool:
+    """Mode-2 MRoPE prefill uses separate RoPE (InterleavedMropeEmbeddingOp)."""
+    return _valid_separate_mrope_prefill_inputs(attn_configs, attn_inputs)
+
+
+def _supports_sm80_mrope_prefill(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> bool:
+    """sm80 bf16-KV MRoPE prefill: separate RoPE, same layout as mode 2.
+
+    On sm80 no arch-specific prefill backend exists (TRTLLM FMHA v2 is
+    sm90/sm12x, TRTLLM-Gen is Blackwell, FlashInfer native prefill is sm12x),
+    so the PyFlashinfer family is the only surviving prefill candidate for
+    MRoPE models; without this gate MRoPE + bf16 KV cache has no prefill
+    backend on sm80 at all and the factory fails with "can not find mha
+    type". The fa2 batch-prefill kernels and append_paged_kv_cache ship sm80
+    SASS in the flashinfer AOT cache, and InterleavedMropeEmbeddingOp is pure
+    torch, so this path needs no sm80-specific flashinfer kernels.
+    """
+    if getattr(attn_configs, "fp8_kv_cache_mode", 0) != 0:
+        return False
+    if not is_sm80():
+        return False
+    return _valid_separate_mrope_prefill_inputs(attn_configs, attn_inputs)
+
+
 def _supports_prefill_rope(
     attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
 ) -> bool:
@@ -312,6 +344,8 @@ def _supports_prefill_rope(
         return True
     if _is_dynamic_fp8(attn_configs):
         return _supports_dynamic_fp8_mrope_prefill(attn_configs, attn_inputs)
+    if _supports_sm80_mrope_prefill(attn_configs, attn_inputs):
+        return True
     return _use_fused_mrope_prefill(attn_configs, attn_inputs)
 
 
