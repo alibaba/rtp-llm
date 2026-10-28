@@ -27,6 +27,7 @@ per-request nonce.
 | `pd_prefix_c4_client.py` | Shared-prefix rounds: one warm-up request so the prefix is cached on P, then `--rounds` × `--conc` simultaneous requests. Writes one JSON per request with server `aux_info` (reuse lengths) and the city check. |
 | `pd_prefix_gated_client.py` | Same, with `--gate S`: pauses P's scheduler (`RpcService/SetPause`), sends a placeholder request to consume the idle `schedule()` call, fires the round, releases (`SetRestart`) after S seconds. All requests of the round then enter one prefill batch (needs `CP_FORCE_SINGLE_PREFILL=0` and a large enough `--max_batch_tokens_without_cache`). Latencies are measured from the release time; P polls the pause flag every 50 ms. `--gate 0` is natural arrival. |
 | `gsm8k_prefix_eval.py` | GSM8K accuracy with a long shared prefix in front of every question, to validate prefix-reuse numerics. |
+| `pd_uniform_load.py` | Open-loop constant-rate load: request i is sent at exactly `t0 + i/qps` (fixed 1/qps gap, no Poisson jitter, no bursts, independent of earlier requests), for `--duration` seconds, `ignore_eos` with `--max-tokens` output. `--warmup N` sends N requests one at a time first (not counted). `--d-addrs` pins request i to decode DP rank i%n via `extra_configs.role_addrs`. The summary carries an arrival check (achieved rate, inter-send gap p50/p99/max deviation, worst lateness) next to TTFT / tok2 / TPOT percentiles and their per-quarter trend; a rising TTFT trend means prefill cannot keep up with the rate. Needs `aiohttp`. |
 
 ## Wire sampling
 
@@ -68,3 +69,24 @@ python3 prefill_batches.py logs/engine.log 'len-g31-c8-rdma-32k-*.json'
 ```
 
 The first round after a P restart runs with a cold prefix cache; drop it.
+
+## Prefill launcher
+
+`run_prefill_cep4pp2_mtp_fastgen.sh` starts the CEP4PP2 (PP2 x CP4, EP4) prefill used for the MTP numbers:
+MTP gen3 with fastgen chunked prefill (`RTP_LLM_MTP_CHUNKED_PREFILL=1`, one request per pass), one serving
+CP rank per stage (`RTP_LLM_PD_SERVING_CP_RANK=0`), prefix reuse on, and the prefill optimization env set
+(the async/fusion group is worth ~30 ms of 32K TTFT in fastgen mode). Required: `WS` (built tree),
+`DECODE_ADDR` (every decode DP rank's `ip:http_port`). Optional: `DEEPGEMM`, `EXTRA_PY`, `RDMA_LIB`, `RUN`, `CKPT`.
+`MTP_CHUNKED=0 FASTGEN_ARGS=' '` gives the non-fastgen MTP prefill of the same binary.
+
+```bash
+WS=/path/to/github-opensource RDMA_LIB=/path/to/rdma-core/build/lib \
+DECODE_ADDR=10.0.0.2:21000,10.0.0.2:21009,10.0.0.2:21018,10.0.0.2:21027 \
+  bash run_prefill_cep4pp2_mtp_fastgen.sh
+# constant 0.9 req/s for 120 s, 1024 output tokens, decode ranks balanced by the client
+python3 pd_uniform_load.py --prompts-file prompts_32k_x64_distinct.json --qps 0.9 --duration 120 \
+  --max-tokens 1024 --warmup 2 --d-addrs 10.0.0.2:21000,10.0.0.2:21009,10.0.0.2:21018,10.0.0.2:21027 --out q09.jsonl
+```
+
+TTFT depends on prompt content at a fixed length (repetitive synthetic text vs ShareGPT 32K differ by
+~60-80 ms on the same server); compare runs on the same prompt set.
