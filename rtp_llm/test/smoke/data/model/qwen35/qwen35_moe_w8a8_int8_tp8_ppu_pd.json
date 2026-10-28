@@ -1,0 +1,39 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-397B-A17B-INT8",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Explain the CAP theorem briefly."
+                    }
+                ],
+                "max_tokens": 64,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: CAP Theorem.\n    *   Constraint: Explain briefly.\n\n2.  **Identify Key Concepts:**\n    *   What does CAP stand for? Consistency, Availability, Partition Tolerance.\n    *",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 81,
+                    "completion_tokens": 64
+                }
+            }
+        }
+    ]
+}

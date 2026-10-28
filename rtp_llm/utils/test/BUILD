@@ -291,3 +291,10 @@ py_test(name='oom_diag_test_native_a10', srcs=['oom_diag_test.py'], deps=['//rtp
 
 # Original Native A10 rule; main declaration above is retained.
 py_test(name='duplicated_kv_test_native_a10', srcs=['duplicated_kv_test.py'], deps=['//rtp_llm:utils', '//rtp_llm:fastapi', '//rtp_llm:_ft_pickler'], data=['//:th_transformer', '//:th_transformer_config', '//:rtp_compute_ops'], exec_properties={'gpu': 'A10'}, tags=['A10'])
+py_test(
+    name = "ppu_entrypoint_test",
+    srcs = ["ppu_entrypoint_test.py"],
+    deps = ["//rtp_llm:utils"],
+    # Exercise the same lightweight entrypoint used by the PPU model target.
+    data = ["//rtp_llm/models_py:ppu_entrypoint"],
+)

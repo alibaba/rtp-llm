@@ -13,6 +13,7 @@ graft 3rdparty
 graft tools
 graft rtp_llm/cpp
 graft rtp_llm/models_py
+recursive-include rtp_llm/utils/moe_luts *.ini
 graft rtp_llm/model_loader/tipc/csrc
 recursive-include rtp_llm BUILD BUILD.bazel *.bzl *.proto
 

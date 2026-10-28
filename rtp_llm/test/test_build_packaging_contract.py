@@ -1337,8 +1337,8 @@ class BuildPackagingContractTest(TestCase):
         self.assertIn("not SM100_ARM", profiles["py_ut_sm100"]["markexpr"])
 
         for name, expected_count in {
-            "py_ut_sm8x": 2968,
-            "py_ut_oss_sm8x": 2968,
+            "py_ut_sm8x": 2972,
+            "py_ut_oss_sm8x": 2972,
             "py_ut_sm9x": 526,
             "py_ut_sm100": 20,
             "py_ut_sm120": 118,
@@ -1918,15 +1918,26 @@ class BuildPackagingContractTest(TestCase):
 
         profiles = pyproject["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
         dsv4_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
-        self.assertEqual(profiles["py_ut_sm8x"]["ignore_paths"], dsv4_paths)
-        self.assertEqual(profiles["py_ut_sm9x"]["ignore_paths"], dsv4_paths)
+        ppu_paths = [
+            "rtp_llm/models_py/kernels/ppu",
+            "rtp_llm/models_py/modules/factory/attention/ppu_impl",
+            "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl",
+            "rtp_llm/models_py/modules/factory/linear/ppu_impl",
+        ]
+        self.assertEqual(profiles["py_ut_sm8x"]["ignore_paths"], dsv4_paths + ppu_paths)
+        self.assertEqual(profiles["py_ut_sm9x"]["ignore_paths"], dsv4_paths + ppu_paths)
         self.assertEqual(
             profiles["py_ut_sm100_arm"]["ignore_paths"],
             [
                 "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
                 "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
-            ],
+            ]
+            + ppu_paths,
         )
+        for name, profile in profiles.items():
+            if name.startswith("py_ut"):
+                self.assertTrue(set(ppu_paths) <= set(profile["ignore_paths"]), name)
+                self.assertIn("not ppu and not PPU_ZW810E", profile["markexpr"])
 
     def test_dsv4_decode_bazel_targets_are_routed_to_sm100_pytest(self):
         from rtp_llm.test.ci_profile_plugin import _get_profile

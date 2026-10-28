@@ -98,6 +98,7 @@ rtp_llm = [
     "ops/**/*.pyi",
     "openai/renderers/qwen_agent/utils/*.tiktoken",
     "models_py/**/data/*.json",
+    "utils/moe_luts/*.ini",
     "models_py/kernels/cuda/fp8_kernel/cutlass_groupgemm/*.json",
     "cpp/model_rpc/proto/*.proto",
     "test/**/*.proto",
@@ -269,6 +270,8 @@ markers = [
     "cpu: CPU-only tests (no GPU required)",
     "cuda: CUDA-specific tests (NVIDIA GPU)",
     "rocm: ROCm-specific tests (AMD GPU)",
+    "ppu: PPU-specific tests",
+    "PPU_ZW810E: PPU ZW810E device marker",
 
     # Legacy GPU type markers (deprecated — use gpu(type=...) instead)
     "A10: (deprecated) use gpu(type='A10')",
@@ -376,7 +379,7 @@ minimum_count = 99
 forbid_skips = true
 isolate_all_paths = true
 require_isolated_tests = true
-markexpr = "not manual and not smoke"
+markexpr = "(not manual and not smoke) and not ppu and not PPU_ZW810E"
 paths = [
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/local_loop_cuda_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/grouped_moe_equivalence_test.py",
@@ -478,6 +481,7 @@ paths = [
     "rtp_llm/models_py/speculative/test/test_dspark_proposer.py",
     "rtp_llm/test/pytest/pytest_main_test.py",
 ]
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_arm.isolated_gpu_counts]
 "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py" = 2
 "rtp_llm/models_py/modules/dsv4/fp8/test/test_topk_v3.py" = 2
@@ -490,7 +494,7 @@ minimum_count = 36
 forbid_skips = true
 isolate_all_paths = true
 require_isolated_tests = true
-markexpr = "not manual and not smoke"
+markexpr = "(not manual and not smoke) and not ppu and not PPU_ZW810E"
 paths = [
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/local_loop_cuda_test.py",
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/grouped_moe_equivalence_test.py",
@@ -529,6 +533,7 @@ paths = [
     "rtp_llm/models_py/modules/dsv4/fp8/test/test_no_recompile.py",
     "rtp_llm/models_py/modules/dsv4/fp8/test/test_fused_decode_meta_comprehensive.py",
 ]
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_x86.isolated_gpu_counts]
 "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/mega_moe_routed_only_execution_test.py" = 2
 "rtp_llm/models_py/modules/dsv4/fp8/test/test_indexer_cp_padded_gather_distributed.py" = 2
@@ -541,7 +546,7 @@ minimum_count = 1
 # and add two coverage/staging plus 14 remote termination regressions.
 # Restore the original A10 CausalConv1D (5) and L2Norm (9) methods as well.
 # Every case must execute.
-expected_count = 2968
+expected_count = 2972
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -574,7 +579,7 @@ paths = [
     "rtp_llm/models/test/moe_config_propagation_test.py",
     "rtp_llm/tools/convert/weights_convert_test.py",
 ]
-ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
+ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4", "rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 isolated_paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
     "rtp_llm/model_loader/test/test_stacked_moe_weight.py",
@@ -594,13 +599,13 @@ isolated_paths = [
 ]
 # Preserve the original CPU-only Bazel environment for this isolated file.
 isolated_env = { "rtp_llm/model_loader/test/test_pure_tp_preshard.py" = { CUDA_VISIBLE_DEVICES = "" } }
-markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual"
+markexpr = "(not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual) and not ppu and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_oss_sm8x]
 description = "Open-source-only Python UT on SM8x after internal_source is stripped"
 gpu_type = "A10"
 minimum_count = 1
-expected_count = 2968
+expected_count = 2972
 forbid_skips = true
 paths = [
     "rtp_llm/access_logger/test",
@@ -633,7 +638,7 @@ paths = [
     "rtp_llm/models/test/moe_config_propagation_test.py",
     "rtp_llm/tools/convert/weights_convert_test.py",
 ]
-ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
+ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4", "rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 isolated_paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
     "rtp_llm/model_loader/test/test_stacked_moe_weight.py",
@@ -653,7 +658,7 @@ isolated_paths = [
 ]
 # Preserve the original CPU-only Bazel environment for this isolated file.
 isolated_env = { "rtp_llm/model_loader/test/test_pure_tp_preshard.py" = { CUDA_VISIBLE_DEVICES = "" } }
-markexpr = "not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual and not open_skip and not frontend"
+markexpr = "(not H20 and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual and not open_skip and not frontend) and not ppu and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm9x]
 description = "Python UT on H20 / SM9x pool (py-ut-sm9x)"
@@ -668,7 +673,7 @@ minimum_count = 1
 # Include ten inherited FlashInfer decode topology/lifecycle regressions.
 expected_count = 526
 forbid_skips = true
-ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4"]
+ignore_paths = ["rtp_llm/test/dsv4", "rtp_llm/models_py/modules/dsv4", "rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 isolated_paths = [
     "rtp_llm/models_py/bindings/cuda/test/concat_and_cache_mla/test_dpsk_bf16.py",
     "rtp_llm/models_py/bindings/cuda/test/concat_and_cache_mla/test_dpsk32_fp8.py",
@@ -679,7 +684,7 @@ isolated_paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_hybrid_mha_prefill.py",
     "rtp_llm/models_py/modules/hybrid/test/indexer_test.py",
 ]
-markexpr = "(H20 or multi_arch_cuda) and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual"
+markexpr = "((H20 or multi_arch_cuda) and not MI308X and not SM100 and not SM100_ARM and not smoke and not perf and not manual) and not ppu and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm100_arm]
 description = "Python UT on SM100 ARM (py-ut-sm100-arm)"
@@ -690,9 +695,8 @@ forbid_skips = true
 # Mainline routes these native wrapper tests to A10; ARM has no test libraries.
 ignore_paths = [
     "rtp_llm/cpp/models/context_parallel/test/context_parallel_py_wrapper_test.py",
-    "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py",
-]
-markexpr = "SM100_ARM and not smoke and not perf and not manual"
+    "rtp_llm/cpp/models/eplb/test/eplb_py_wrapper_test.py", "rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
+markexpr = "(SM100_ARM and not smoke and not perf and not manual) and not ppu and not PPU_ZW810E"
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm120]
 description = "Original SM120 UT on RTX 5000 Pro (ut-sm12x)"
@@ -713,9 +717,10 @@ paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_trtllm_fmha_v2_prefill.py::TestTRTLLMFMHAv2PrefillOpBF16",
     "rtp_llm/models_py/utils/test/arch_test.py",
 ]
-markexpr = "not manual and not smoke and not perf"
+markexpr = "(not manual and not smoke and not perf) and not ppu and not PPU_ZW810E"
 
 # Keep the CUDA 13 mainline target set separate from the original CUDA 12 profile.
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_sm120]
 description = "Mainline SM120 CUDA 13 Python targets, each in its own process"
 gpu_type = "RTX_5000_PRO_CU13"
@@ -737,9 +742,10 @@ paths = [
     "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/deepep_normal_executor_sm120_test.py",
     "rtp_llm/cpp/cuda_graph/tests/cuda_graph_compiled_warmup_test.py",
 ]
-markexpr = "not manual and not smoke and not perf"
+markexpr = "(not manual and not smoke and not perf) and not ppu and not PPU_ZW810E"
 remote_env = { RTP_BAZEL_CONFIG = "--config=cuda13 --config=sm120" }
 
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_sm120.isolated_env]
 "rtp_llm/cpp/cuda_graph/tests/cuda_graph_compiled_warmup_test.py" = { TEST_USING_DEVICE = "CUDA" }
 "rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test/deepgemm_masked_executor_sm120_test.py" = { GPU_COUNT = "1" }
@@ -762,8 +768,9 @@ paths = [
     "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py",
     "rtp_llm/models_py/kernels/cuda/test/per_token_group_quant_8bit_test.py",
 ]
-markexpr = "not manual and not smoke and not perf"
+markexpr = "(not manual and not smoke and not perf) and not ppu and not PPU_ZW810E"
 
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_oss_l20]
 description = "Original opensource L20 methods; quantization retains upstream open_skip"
 gpu_type = "L20"
@@ -778,8 +785,9 @@ paths = [
     "rtp_llm/models_py/modules/factory/attention/cuda_impl/test/test_flashinfer_prefill/test_py_flashinfer_ragged_mha_prefill.py",
     "rtp_llm/models_py/triton_kernels/common/test/silu_mul_masked_test.py",
 ]
-markexpr = "not manual and not smoke and not perf"
+markexpr = "(not manual and not smoke and not perf) and not ppu and not PPU_ZW810E"
 
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_sm100]
 description = "Python UT on SM100 x86 (py-ut-sm100)"
 gpu_type = "SM100"
@@ -792,8 +800,9 @@ paths = [
     "rtp_llm/models_py/kernels/cuda/test/pack_ue8m0_kernel_test.py",
     "rtp_llm/models_py/modules/factory/linear/impl/cuda/test/fp8_deepgemm_linear_sm100_test.py",
 ]
-markexpr = "SM100 and not SM100_ARM and not smoke and not perf and not manual"
+markexpr = "(SM100 and not SM100_ARM and not smoke and not perf and not manual) and not ppu and not PPU_ZW810E"
 
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_amd]
 description = "Python UT on AMD MI308X (py-ut-amd)"
 gpu_type = "MI308X"
@@ -832,8 +841,9 @@ paths = [
     "rtp_llm/utils/test/ckpt_database_test.py",
     "rtp_llm/utils/test/jit_cache_smoke_test.py",
 ]
-markexpr = "MI308X and not smoke and not perf and not manual"
+markexpr = "(MI308X and not smoke and not perf and not manual) and not ppu and not PPU_ZW810E"
 
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.py_ut_frontend]
 description = "Frontend Python UT (py-ut-frontend)"
 gpu_type = "A10"
@@ -846,9 +856,10 @@ paths = [
     "rtp_llm/test/frontend_test",
     "rtp_llm/dash_sc/test/inference/mrcr_smoke_test.py",
 ]
-markexpr = "not manual and not rocm and not cpu"
+markexpr = "(not manual and not rocm and not cpu) and not ppu and not PPU_ZW810E"
 
 # -------- OSS smoke profiles (drive suite files in rtp_llm/test/smoke/suites/) --------
+ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/factory/attention/ppu_impl", "rtp_llm/models_py/modules/factory/fused_moe/ppu_impl", "rtp_llm/models_py/modules/factory/linear/ppu_impl"]
 [tool.rtp_llm.pytest_ci.profiles.smoke_h20_light_oss]
 description = "OSS smoke H20 light gate"
 paths = ["rtp_llm/test/smoke/suites/"]
