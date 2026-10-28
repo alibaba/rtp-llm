@@ -101,8 +101,7 @@ class RequestPublicationFailureOwnershipTest {
             } finally {
                 var delivery = context.snapshot().delivery();
                 if (delivery != null && context.snapshot().phase() != Phase.CLOSED) {
-                    f.owner.onDeliveryEvidence(
-                            delivery.identity(),
+                    f.owner.onDeliveryFact(
                             new ContextResult.PreparationFailure(
                                     delivery.identity(),
                                     route,
@@ -288,8 +287,7 @@ class RequestPublicationFailureOwnershipTest {
             try {
                 assertDoesNotThrow(
                         () ->
-                                f.owner.onDeliveryEvidence(
-                                        delivery,
+                                f.owner.onDeliveryFact(
                                         new RouteDelivered(
                                                 delivery, 0L, System.currentTimeMillis())));
                 assertSame(failure, SchedulerTestSupport.failure(f.owner));
@@ -364,8 +362,7 @@ class RequestPublicationFailureOwnershipTest {
             try {
                 assertDoesNotThrow(
                         () ->
-                                f.owner.onDeliveryEvidence(
-                                        delivery,
+                                f.owner.onDeliveryFact(
                                         new RouteDelivered(
                                                 delivery, 0L, System.currentTimeMillis())));
                 var failure =

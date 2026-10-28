@@ -372,7 +372,7 @@ class RequestInactivityTest {
                 SendState.UNKNOWN,
                 rejected.after().delivery().send(),
                 "late contradictory ACK cannot replace the settled sender fact");
-        registry.onDeliveryEvidence(claim, late);
+        registry.onDeliveryFact(late);
         assertSame(before, requestContext.snapshot());
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
@@ -553,8 +553,7 @@ class RequestInactivityTest {
     }
 
     private void completeDelivery(DeliveryResult result) {
-        registry.onDeliveryEvidence(
-                claim, new TransportResult(claim, result, System.currentTimeMillis()));
+        registry.onDeliveryFact(new TransportResult(claim, result, System.currentTimeMillis()));
         deliveryCompleted = true;
     }
 

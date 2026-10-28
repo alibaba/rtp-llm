@@ -392,8 +392,7 @@ class DirectAdmissionContractTest {
                             .ctx()
                             .data()
                             .getScheduler()
-                            .onDeliveryEvidence(
-                                    claim,
+                            .onDeliveryFact(
                                     new ContextResult.Abandonment(
                                             claim,
                                             CancelReason.CLIENT_CANCELLED,

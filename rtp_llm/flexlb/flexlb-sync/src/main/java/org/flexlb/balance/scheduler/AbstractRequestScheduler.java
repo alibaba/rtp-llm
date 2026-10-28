@@ -788,19 +788,6 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
     }
 
-    /**
-     * Compatibility adapter for callers compiled against the pre-fact API. All delivery evidence
-     * still enters the single fact dispatcher before state transitions are applied.
-     */
-    public void onDeliveryEvidence(DeliveryClaim claim, DeliveryEvidence evidence) {
-        Objects.requireNonNull(evidence, "evidence");
-        if (claim == null || claim == evidence.delivery()) {
-            onDeliveryFact(evidence);
-            return;
-        }
-        applyDeliveryEvidence(claim, evidence);
-    }
-
     /** True transfers effects to confirmation/close; false leaves only deadline synchronization. */
     private boolean confirmDelivery(RequestContext ctx) {
         ResponsePublication publication = null;

@@ -693,11 +693,6 @@ public final class SchedulerRuntime implements RequestTaskScheduler {
         return new ShutdownResult(requestedMode, completedMode, drained);
     }
 
-    /** Compatibility entry point for existing package clients; immediate shutdown is explicit. */
-    public ShutdownResult shutdown() {
-        return shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
-    }
-
     /** Spring invokes the bounded graceful lifecycle operation. */
     @PreDestroy
     private void destroy() {

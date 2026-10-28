@@ -59,7 +59,7 @@ class StopExecutorSafetyTest {
             assertTrue(resumed.await(2, TimeUnit.SECONDS));
         } finally {
             release.countDown();
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
         assertEquals(2, calls.get());
     }
@@ -67,7 +67,7 @@ class StopExecutorSafetyTest {
     @Test
     void shutdownRejectsNewStopsEvenWithoutAnExecutorService() {
         var runtime = runtime();
-        runtime.shutdown();
+        runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         var started = new java.util.concurrent.atomic.AtomicBoolean();
         org.junit.jupiter.api.Assertions.assertThrows(
                 IllegalStateException.class,
@@ -98,7 +98,7 @@ class StopExecutorSafetyTest {
             SchedulerTestSupport.awaitRequestWork(runtime);
         } finally {
             release.countDown();
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -123,7 +123,7 @@ class StopExecutorSafetyTest {
             assertTrue(stop.await(1, TimeUnit.SECONDS));
         } finally {
             release.countDown();
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -177,7 +177,7 @@ class StopExecutorSafetyTest {
             handoff.countDown();
             releaseFinal.countDown();
             closer.join(3000);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -190,7 +190,7 @@ class StopExecutorSafetyTest {
                     context(),
                     () -> {
                         try {
-                            runtime.shutdown();
+                            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
                             result.complete(false);
                         } catch (IllegalStateException expected) {
                             result.complete(runtime.isAccepting());
@@ -198,7 +198,7 @@ class StopExecutorSafetyTest {
                     });
             assertTrue(result.get(3, TimeUnit.SECONDS));
         } finally {
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 
@@ -218,7 +218,7 @@ class StopExecutorSafetyTest {
                     () -> runtime.executeStopWork(context(), () -> {}));
             SchedulerTestSupport.awaitRequestWork(runtime);
         } finally {
-            assertThrows(RuntimeException.class, runtime::shutdown);
+            assertThrows(RuntimeException.class, () -> runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
         }
     }
 
@@ -273,7 +273,7 @@ class StopExecutorSafetyTest {
                                             .REQUEST_CLEANED));
             CompletableFuture.allOf(answers.toArray(CompletableFuture[]::new))
                     .get(3, TimeUnit.SECONDS);
-            runtime.shutdown();
+            runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
     }
 

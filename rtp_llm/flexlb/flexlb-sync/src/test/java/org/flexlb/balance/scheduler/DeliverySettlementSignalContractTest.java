@@ -298,8 +298,7 @@ class DeliverySettlementSignalContractTest {
         }
 
         void cancelWithRemoteProof() {
-            scheduler.onDeliveryEvidence(
-                    claim,
+            scheduler.onDeliveryFact(
                     new ContextResult.TransportResult(
                             claim,
                             DeliveryResult.uncertain(

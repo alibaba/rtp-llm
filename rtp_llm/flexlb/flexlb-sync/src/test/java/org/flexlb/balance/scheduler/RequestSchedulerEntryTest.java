@@ -129,8 +129,7 @@ class RequestSchedulerEntryTest {
                                 owner, route, () -> true);
                 admission.finish();
             }
-            owner.onDeliveryEvidence(
-                    claim, new ContextResult.RouteDelivered(claim, 0L, System.currentTimeMillis()));
+            owner.onDeliveryFact(new ContextResult.RouteDelivered(claim, 0L, System.currentTimeMillis()));
             var published = pending.get(3, TimeUnit.SECONDS);
             assertTrue(published.isSuccess());
             assertSame(published, context.data().getResponse());
