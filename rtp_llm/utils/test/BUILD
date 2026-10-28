@@ -17,6 +17,12 @@ filegroup(
 )
 
 py_test(
+    name = "multiprocessing_util_test",
+    srcs = ["multiprocessing_util_test.py"],
+    deps = ["//rtp_llm:utils", "//rtp_llm:torch"],
+)
+
+py_test(
     name = "swizzle_utils_test",
     srcs = [
         "swizzle_utils_test.py",
