@@ -286,6 +286,11 @@ def build_dsv4_kv_cache_spec_descs(
         4 * indexer_head_dim,
         DataType.TYPE_FP32,
     )
+    if fp4_indexer_enabled():
+        # Same geometry as the PPU decode descriptor (dsv4_kv_cache.py on the PR
+        # #1434 line): the native C4 kernel addresses groups of four state rows,
+        # so MTP1/MTP2's 8+g ring rounds to 12. PD needs both roles to agree.
+        indexer_state.state_ring_entry_alignment = CSA_LAYER_COMPRESS_RATIO
     csa_state = _make_dsv4_desc(
         CSA_STATE_TAG,
         _FIXED_STATE_KIND,

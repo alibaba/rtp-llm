@@ -95,9 +95,11 @@ def _compute_state_ring_entries(
     gen_num_per_cycle: int,
     cp_size: int = 1,
     prefill_sliced: bool = False,
+    entry_alignment: int = 2,
 ) -> int:
     window = (1 + int(bool(overlap))) * int(compress_ratio)
-    min_entries = max((window + int(gen_num_per_cycle) + 1) & ~1, 1)
+    a = max(int(entry_alignment), 1)
+    min_entries = max((window + int(gen_num_per_cycle) + a - 1) // a * a, 1)
     cp_size = max(int(cp_size or 1), 1)
     if cp_size <= 1:
         return min_entries
@@ -114,6 +116,7 @@ def _state_ring_entries_warmup_values(
     gen_num_per_cycle: int,
     cp_size: int,
     prefill_sliced: bool,
+    entry_alignment: int = 2,
 ) -> tuple[int, ...]:
     local_entries = _compute_state_ring_entries(
         compress_ratio=compress_ratio,
@@ -121,6 +124,7 @@ def _state_ring_entries_warmup_values(
         gen_num_per_cycle=gen_num_per_cycle,
         cp_size=cp_size,
         prefill_sliced=prefill_sliced,
+        entry_alignment=entry_alignment,
     )
     values = [local_entries]
     if int(cp_size) > 1 and bool(prefill_sliced):
@@ -134,6 +138,7 @@ def _state_ring_entries_warmup_values(
                 gen_num_per_cycle=gen_num_per_cycle,
                 cp_size=cp_size,
                 prefill_sliced=False,
+                entry_alignment=entry_alignment,
             )
         )
     return tuple(sorted(set(int(v) for v in values if int(v) > 0)))
@@ -725,6 +730,8 @@ def _warmup_fused_kv_compress_norm_rope_insert(
         gen_num_per_cycle=gen_num_per_cycle,
         cp_size=fixed_region_cp_size,
         prefill_sliced=fixed_region_prefill_sliced,
+        # FP4 indexer_state rings use 4-row groups (dsv4_kv_cache.py).
+        entry_alignment=(4 if int(head_dim) == 128 and fp4_indexer_enabled() else 2),
     )
     # Match the production fused output split:
     # ``kv_flat=fused[:, :raw_width]`` and ``score_flat=fused[:, raw_width:]``

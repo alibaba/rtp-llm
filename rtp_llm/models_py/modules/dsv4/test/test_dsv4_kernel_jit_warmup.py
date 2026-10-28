@@ -263,6 +263,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             (16,),
         )
 
+    def test_fp4_indexer_ring_rounds_to_four_rows(self):
+        for gen, entries in ((0, 8), (1, 12), (2, 12), (3, 12)):
+            with self.subTest(gen=gen):
+                self.assertEqual(
+                    _state_ring_entries_warmup_values(
+                        compress_ratio=4,
+                        overlap=True,
+                        gen_num_per_cycle=gen,
+                        cp_size=1,
+                        prefill_sliced=False,
+                        entry_alignment=4,
+                    ),
+                    (entries,),
+                )
+
     def test_compressor_warmup_launches_local_and_full_cp_ring_keys(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
 

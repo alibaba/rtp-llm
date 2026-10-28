@@ -1903,6 +1903,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("compression_ratio", &KVCacheSpecDesc::compression_ratio)
         .def_readwrite("state_ring_overlap", &KVCacheSpecDesc::state_ring_overlap)
         .def_readwrite("state_ring_include_gen_num_per_cycle", &KVCacheSpecDesc::state_ring_include_gen_num_per_cycle)
+        .def_readwrite("state_ring_entry_alignment", &KVCacheSpecDesc::state_ring_entry_alignment)
         .def_readwrite("block_stride_bytes_override", &KVCacheSpecDesc::block_stride_bytes_override)
         .def_readwrite("block_stride_bytes_alignment", &KVCacheSpecDesc::block_stride_bytes_alignment)
         .def_readwrite("block_stride_alignment_min_entries", &KVCacheSpecDesc::block_stride_alignment_min_entries)
@@ -1933,11 +1934,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.state_ring_entry_alignment);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1959,6 +1961,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() == 21) {
+                    c.state_ring_entry_alignment = t[20].cast<uint32_t>();
+                }
                 return c;
             }));
 
