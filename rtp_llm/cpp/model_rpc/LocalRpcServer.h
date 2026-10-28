@@ -56,9 +56,6 @@ public:
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
 
-    grpc::Status
-    UpdateEplbConfig(grpc::ServerContext* context, const UpdateEplbConfigRequestPB* request, EmptyPB* response);
-
     grpc::Status SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);

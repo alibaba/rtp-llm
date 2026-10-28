@@ -874,13 +874,6 @@ class FrontendApp(object):
             finally:
                 allocator_dump_guard.finish()
 
-        # request format: {"mode": "NONE", "update_time": 5000}
-        @app.post("/update_eplb_config")
-        async def update_eplb_config(req: Union[str, Dict[Any, Any]], request: Request):
-            check_not_draining(request)
-            result = await self.grpc_client.post_request("update_eplb_config", req)
-            return result
-
         @app.post("/")
         async def inference(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
             # compat for huggingface-pipeline request endpoint

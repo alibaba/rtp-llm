@@ -1213,9 +1213,6 @@ class MockRpcServicer:
     async def UpdateSchedulerInfo(self, request, context):
         return self.pb2.EmptyPB()
 
-    async def UpdateEplbConfig(self, request, context):
-        return self.pb2.EmptyPB()
-
     async def UpdateWeights(self, request, context):
         return self.pb2.EmptyPB()
 

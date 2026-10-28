@@ -27,19 +27,6 @@ AllReduceOutput execAllReduce(const AllReduceParams&) {
     throw std::logic_error("single-rank balancer tests must not call execAllReduce");
 }
 
-void execBroadcast(const BroadcastParams& params) {
-    py::gil_scoped_acquire gil;
-    auto                   module = py::module_::import("rtp_llm.cpp.models.eplb.test.libth_eplb_py_wrapper_test");
-    if (!py::hasattr(module, "_broadcast_callback")) {
-        throw std::logic_error("single-rank balancer tests must not call execBroadcast");
-    }
-    py::list tensors;
-    for (const auto& tensor : params.buffers) {
-        tensors.append(tensor);
-    }
-    module.attr("_broadcast_callback")(tensors, params.root, static_cast<int>(params.mode));
-}
-
 }  // namespace rtp_llm
 
 using namespace rtp_llm;
@@ -62,13 +49,13 @@ public:
                            const std::string& role_type,
                            int                dp_size,
                            const std::string& sp_type,
-                           int                control_step) {
-        config_.eplb_metrics_report_interval    = interval;
-        config_.eplb_metrics_snapshot_max_files = snapshot_max_files;
-        config_.eplb_update_time                = 1;
-        config_.eplb_stats_window_size          = 1;
-        config_.eplb_control_step               = control_step;
-        config_.eplb_mode = mode ? static_cast<EplbMode>(*mode) : (model.is_none() ? EplbMode::NONE : EplbMode::EPLB);
+                           int64_t            update_time) {
+        EPLBConfig config;
+        config.eplb_metrics_report_interval    = interval;
+        config.eplb_metrics_snapshot_max_files = snapshot_max_files;
+        config.eplb_update_time                = update_time;
+        config.eplb_stats_window_size          = 1;
+        config.eplb_mode = mode ? static_cast<EplbMode>(*mode) : (model.is_none() ? EplbMode::NONE : EplbMode::EPLB);
         Weights weights;
         weights.layers.resize(1);
         GptModelDescription description{};
@@ -81,7 +68,7 @@ public:
 
         params.hidden_size                = 1;
         params.model_id                   = model_id;
-        params.eplb_config                = config_;
+        params.eplb_config                = config;
         params.parallelism_config.pp_size = pp_size;
         if (context_parallel) {
             params.parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
@@ -105,12 +92,6 @@ public:
         balancer_->step(warmup, is_prompt);
     }
 
-    bool updateConfig(int mode, int64_t update_time) {
-        config_.eplb_mode        = static_cast<EplbMode>(mode);
-        config_.eplb_update_time = update_time;
-        return balancer_->updateEplbConfig(config_);
-    }
-
     void destroy() {
         balancer_.reset();
     }
@@ -120,43 +101,7 @@ public:
     }
 
 private:
-    EPLBConfig                      config_;
     std::unique_ptr<ExpertBalancer> balancer_;
-};
-
-// Exercise the production controller itself, including its real H2D/D2H
-// buffers. The test installs a real NCCL callback for the eight-rank case.
-class EplbControllerTest {
-public:
-    EplbControllerTest(int control_step, size_t world_size, int mode, int64_t update_time) {
-        EPLBConfig config;
-        config.eplb_control_step = control_step;
-        config.eplb_mode         = static_cast<EplbMode>(mode);
-        config.eplb_update_time  = update_time;
-        controller_.init(config, world_size);
-    }
-
-    void request(int mode, int64_t update_time) {
-        EPLBConfig config;
-        config.eplb_mode        = static_cast<EplbMode>(mode);
-        config.eplb_update_time = update_time;
-        controller_.setData(config);
-    }
-
-    py::object step() {
-        std::optional<EPLBConfig> result;
-        {
-            py::gil_scoped_release release;
-            result = controller_.step();
-        }
-        if (!result) {
-            return py::none();
-        }
-        return py::make_tuple(static_cast<int>(result->eplb_mode), result->eplb_update_time);
-    }
-
-private:
-    EplbController controller_;
 };
 
 class EplbPyWrapperOP {
@@ -181,13 +126,6 @@ public:
         return wrapper_->step(counts, is_prompt);
     }
 
-    void updateConfig(int mode, int64_t update_time) {
-        EPLBConfig config;
-        config.eplb_mode        = static_cast<EplbMode>(mode);
-        config.eplb_update_time = update_time;
-        wrapper_->updateConfig(config);
-    }
-
     void destroy() {
         wrapper_.reset();
     }
@@ -197,10 +135,6 @@ private:
 };
 
 PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
-    py::class_<EplbControllerTest>(m, "EplbControllerTest")
-        .def(py::init<int, size_t, int, int64_t>())
-        .def("request", &EplbControllerTest::request)
-        .def("step", &EplbControllerTest::step);
     py::class_<ExpertBalancerStepTest>(m, "ExpertBalancerStepTest")
         .def(py::init<const py::object&,
                       int,
@@ -216,7 +150,7 @@ PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
                       const std::string&,
                       int,
                       const std::string&,
-                      int>(),
+                      int64_t>(),
              py::arg("model"),
              py::arg("snapshot_max_files"),
              py::arg("interval")         = 2,
@@ -231,13 +165,12 @@ PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
              py::arg("role_type")        = "PREFILL",
              py::arg("dp_size")          = 1,
              py::arg("sp_type")          = "none",
-             py::arg("control_step")     = 1)
+             py::arg("update_time")      = 1)
         .def("step",
              &ExpertBalancerStepTest::step,
              py::arg("warmup")    = false,
              py::arg("is_prompt") = false,
              py::call_guard<py::gil_scoped_release>())
-        .def("update_config", &ExpertBalancerStepTest::updateConfig, py::arg("mode"), py::arg("update_time") = 1)
         .def("destroy", &ExpertBalancerStepTest::destroy, py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("counts", &ExpertBalancerStepTest::counts);
     py::class_<ExpertLoadMonitor>(m, "ExpertLoadMonitor")
@@ -277,11 +210,6 @@ PYBIND11_MODULE(libth_eplb_py_wrapper_test, m) {
              &EplbPyWrapperOP::step,
              py::arg("counts"),
              py::arg("is_prompt") = false,
-             py::call_guard<py::gil_scoped_release>())
-        .def("update_config",
-             &EplbPyWrapperOP::updateConfig,
-             py::arg("mode"),
-             py::arg("update_time"),
              py::call_guard<py::gil_scoped_release>())
         .def("destroy", &EplbPyWrapperOP::destroy, py::call_guard<py::gil_scoped_release>());
 }

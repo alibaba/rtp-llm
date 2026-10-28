@@ -456,10 +456,6 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
     }
 }
 
-bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
-    return model_ ? model_->updateEplbConfig(config) : true;
-}
-
 bool NormalExecutor::useStreamAsync() const {
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");

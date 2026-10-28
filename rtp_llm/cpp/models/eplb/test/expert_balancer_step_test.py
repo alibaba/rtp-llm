@@ -49,8 +49,6 @@ class TestExpertBalancerStep(unittest.TestCase):
         for _ in range(3):
             balancer.step()
         self.assertEqual(self.snapshots(), [])
-        self.assertTrue(balancer.update_config(mode=0))
-        self.assertFalse(balancer.update_config(mode=2))
 
     def test_dense_model_has_no_writer_and_reports_empty_window(self):
         balancer = self.balancer(moe=False)
@@ -86,8 +84,6 @@ class TestExpertBalancerStep(unittest.TestCase):
                 for _ in range(3):
                     balancer.step()
                 self.assertEqual(self.snapshots(), [])
-                self.assertTrue(balancer.update_config(mode=0))
-                self.assertFalse(balancer.update_config(mode=3))
 
     def test_pipeline_runtime_is_rejected_before_python_initialization(self):
         model = FakeModel()
@@ -129,7 +125,7 @@ class TestExpertBalancerStep(unittest.TestCase):
         self.assertIsNone(reference())
         self.assertTrue(model.state.destroyed)
 
-    def test_initial_stats_samples_without_migration_then_enables_all(self):
+    def test_initial_stats_samples_without_migration(self):
         model = FakeModel()
         model.state.apply_on_calls = {1, 2, 3}
         balancer = self.balancer(model, interval=0, model_id=1, mode=1)
@@ -148,12 +144,10 @@ class TestExpertBalancerStep(unittest.TestCase):
         self.assertEqual(model.state.applied, 0)
         self.assertEqual(self.snapshots(), [])
 
-        self.assertTrue(balancer.update_config(mode=3))
         counts.fill_(7)
         balancer.step()
-        self.assertEqual(model.state.calls[-2:], [("update", 3, 1), "step"])
         self.assertEqual(model.state.samples[-1].tolist(), [[7, 7]])
-        self.assertEqual(model.state.applied, 1)
+        self.assertEqual(model.state.applied, 0)
         self.assertEqual(counts.tolist(), [[0, 0]])
         self.assertEqual(balancer.counts.data_ptr(), pointer)
         reference = model.state.runtime
@@ -163,14 +157,12 @@ class TestExpertBalancerStep(unittest.TestCase):
 
     def test_monitor_only_records_once_and_resets_unwritten_next_step(self):
         balancer = self.balancer(model_id=1)
-        self.assertTrue(balancer.update_config(mode=0))
         counts = balancer.counts
         pointer = counts.data_ptr()
         counts.copy_(torch.tensor([[2, 3]], device="cuda"))
         balancer.step()
         self.assertEqual(counts.tolist(), [[0, 0]])
         self.assertEqual(self.snapshots(), [])
-        self.assertTrue(balancer.update_config(mode=0))
         balancer.step()
 
         [window] = self.snapshots()
@@ -178,7 +170,6 @@ class TestExpertBalancerStep(unittest.TestCase):
         self.assertEqual((window["step_begin"], window["step_end"]), (1, 2))
         self.assertEqual((window["model_id"], window["model_type"]), (1, "draft"))
         self.assertEqual(balancer.counts.data_ptr(), pointer)
-        self.assertFalse(balancer.update_config(mode=2))
 
     def test_runtime_and_monitor_read_counts_before_shared_buffer_is_cleared(self):
         model = FakeModel()
@@ -283,21 +274,15 @@ class TestExpertBalancerStep(unittest.TestCase):
         self.assertEqual(balancer.counts.data_ptr(), pointer)
         self.assertEqual(model.state.sample_pointers, [pointer] * 6)
 
-    def test_dynamic_disable_is_applied_before_sampling_and_monitor_keeps_running(self):
+    def test_initial_none_keeps_monitoring_without_initializing_runtime(self):
         model = FakeModel()
-        model.state.apply_on_calls = {2}
-        balancer = self.balancer(model)
-        balancer.counts.fill_(1)
-        balancer.step()
-        self.assertTrue(balancer.update_config(mode=0, update_time=5))
-        balancer.counts.fill_(8)
-        balancer.step(warmup=True)
-        self.assertNotIn(("update", 0, 5), model.state.calls)
-        balancer.counts.fill_(3)
-        balancer.step()
-        self.assertEqual(model.state.calls[-2:], [("update", 0, 5), "step"])
-        self.assertEqual([x.tolist() for x in model.state.samples], [[[1, 1]]])
+        balancer = self.balancer(model, mode=0)
+        for value in (1, 3):
+            balancer.counts.fill_(value)
+            balancer.step()
+        self.assertEqual(model.state.calls, [])
         self.assertEqual(model.state.applied, 0)
+        self.assertEqual(balancer.counts.tolist(), [[0, 0]])
         [window] = self.snapshots()
         self.assertEqual(window["rank_samples"], [[[2], [6]]])
         self.assertEqual(window["mapping_epoch"], 0)
@@ -345,43 +330,29 @@ class TestExpertBalancerStep(unittest.TestCase):
                 self.assertEqual(model.state.sync_prompt_phase, expected)
                 self.assertEqual(model.state.identity, (0, dp_size, 0))
 
-    def test_dynamic_zero_interval_disables_rearrangement_without_disabling_monitor(
+    def test_initial_zero_interval_disables_rearrangement_without_disabling_monitor(
         self,
     ):
         model = FakeModel()
         model.state.apply_on_calls = {1, 2}
-        balancer = self.balancer(model)
-        self.assertTrue(balancer.update_config(mode=3, update_time=0))
-        balancer.counts.fill_(2)
-        balancer.step()
-        self.assertIn(("update", 3, 0), model.state.calls)
-        self.assertEqual(balancer.counts.tolist(), [[0, 0]])
-        balancer.counts.fill_(3)
-        balancer.step()
+        balancer = self.balancer(model, mode=3, update_time=0)
+        self.assertEqual(model.state.options["eplb_update_time"], 0)
+        for value in (2, 3):
+            balancer.counts.fill_(value)
+            balancer.step()
+            self.assertEqual(balancer.counts.tolist(), [[0, 0]])
         self.assertEqual(model.state.applied, 0)
         [window] = self.snapshots()
         self.assertEqual(window["rank_samples"], [[[4], [6]]])
         self.assertEqual(window["mapping_epoch"], 0)
 
-    def test_mode_only_update_keeps_last_requested_interval(self):
+    def test_negative_startup_interval_is_rejected_before_runtime_initialization(self):
         model = FakeModel()
-        balancer = self.balancer(model, interval=0)
-        self.assertTrue(balancer.update_config(mode=3, update_time=7))
-        self.assertTrue(balancer.update_config(mode=1, update_time=-1))
-        balancer.counts.fill_(2)
-        balancer.step()
-        self.assertIn(("update", 1, 7), model.state.calls)
-        self.assertNotIn(("update", 1, -1), model.state.calls)
-
-    def test_invalid_dynamic_configuration_is_rejected(self):
-        model = FakeModel()
-        balancer = self.balancer(model, interval=0)
-        self.assertFalse(balancer.update_config(mode=2, update_time=-2))
-        self.assertFalse(balancer.update_config(mode=-1))
-        self.assertFalse(balancer.update_config(mode=4))
-        balancer.counts.fill_(2)
-        balancer.step()
-        self.assertEqual(model.state.calls, ["get_layers", "step"])
+        with self.assertRaisesRegex(
+            RuntimeError, "update interval must be non-negative"
+        ):
+            self.balancer(model, interval=0, update_time=-1)
+        self.assertEqual(model.state.calls, [])
 
 
 if __name__ == "__main__":

@@ -89,7 +89,6 @@ This page lists server arguments used to configure the behavior and performance 
 | `--eplb_balance_layer_per_step` | Number of layers updated per EPLB update. | 1 |
 | `--eplb_force_repack` | Globally repack EPLB experts. | False |
 | `--eplb_stats_window_size` | EPLB statistics window size. | 10 |
-| `--eplb_control_step` | (DEBUG) EPLB synchronization control parameter cycle. | 100 |
 | `--eplb_test_mode` | (DEBUG) Enables ExpertBalancer test mode | False |
 | `--fake_balance_expert` | (DEBUG) Enables expert pseudo-balancing mechanism. | False |
 

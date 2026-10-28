@@ -3682,10 +3682,6 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     return absl::OkStatus();
 }
 
-bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
-    return model_ ? model_->updateEplbConfig(config) : true;
-}
-
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,

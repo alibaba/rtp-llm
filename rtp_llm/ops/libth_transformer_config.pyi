@@ -327,7 +327,6 @@ class EPLBConfig:
     eplb_rearrange_p2p_groups: int
     eplb_metrics_report_interval: int
     eplb_metrics_snapshot_max_files: int
-    eplb_control_step: int
     eplb_stats_window_size: int
     eplb_update_time: int
     redundant_expert: int

@@ -40,7 +40,6 @@ std::string EPLBConfig::to_string() const {
         << "  eplb_mode: " << (int)eplb_mode << "\n"
         << "  redundant_expert: " << redundant_expert << "\n"
         << "  eplb_stats_window_size: " << eplb_stats_window_size << "\n"
-        << "  eplb_control_step: " << eplb_control_step << "\n"
         << "  eplb_rearrange_after_prefill: " << eplb_rearrange_after_prefill << "\n"
         << "  eplb_rearrange_p2p_groups: " << eplb_rearrange_p2p_groups << "\n"
         << "  eplb_metrics_report_interval: " << eplb_metrics_report_interval << "\n"

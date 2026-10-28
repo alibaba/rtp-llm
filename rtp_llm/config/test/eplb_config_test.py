@@ -217,6 +217,59 @@ class EplbMetricsConfigTest(unittest.TestCase):
 
 
 class EplbRearrangementConfigTest(unittest.TestCase):
+
+    def test_control_interval_is_removed_from_native_config_and_cli(self):
+        with patch.dict(os.environ, {"EPLB_CONTROL_STEP": "1000"}, clear=True):
+            for config in (EPLBConfig(), setup_args([]).eplb_config):
+                self.assertFalse(hasattr(config, "eplb_control_step"))
+            with patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+                setup_args(["--eplb_control_step", "1000"])
+            self.assertEqual(error.exception.code, 2)
+
+    def test_version_two_pickle_round_trip_preserves_all_active_fields(self):
+        fields = (24, "ALL", 32, 8, True, 3, 7, 5)
+        config = EPLBConfig.__new__(EPLBConfig)
+        config.__setstate__((2, fields))
+        self.assertEqual(config.__getstate__(), (2, fields))
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.__getstate__(), (2, fields))
+        self.assertFalse(hasattr(restored, "eplb_control_step"))
+
+    def test_version_one_pickle_ignores_retired_control_interval(self):
+        mode_config = EPLBConfig()
+        mode_config.eplb_mode = "STATS"
+        for mode in ("STATS", mode_config.eplb_mode):
+            with self.subTest(mode=mode):
+                restored = EPLBConfig.__new__(EPLBConfig)
+                restored.__setstate__((1, 24, mode, 32, 8, 1000, True, 3, 7, 5))
+                self.assertEqual(
+                    restored.__getstate__(),
+                    (2, (24, "STATS", 32, 8, True, 3, 7, 5)),
+                )
+                self.assertFalse(hasattr(restored, "eplb_control_step"))
+
+    def test_legacy_interval_two_is_not_confused_with_pickle_version(self):
+        legacy = (2, "STATS", 32, "mix", 1, 1, 1000, True, 2)
+        for state in (legacy, legacy + (7, 3)):
+            with self.subTest(fields=len(state)):
+                restored = EPLBConfig.__new__(EPLBConfig)
+                restored.__setstate__(state)
+                self.assertEqual(
+                    restored.__getstate__(),
+                    (2, (2, "STATS", 32, 1, False, 1, *(state[9:] or (0, 0)))),
+                )
+                self.assertFalse(hasattr(restored, "eplb_control_step"))
+
+    def test_invalid_pickle_version_and_field_counts_are_rejected(self):
+        fields = (24, "ALL", 32, 8, True, 3, 7, 5)
+        for state in ((), (3, fields), (2, ()), (2, fields[:-1]), (2, fields + (0,))):
+            with self.subTest(state=state):
+                restored = EPLBConfig.__new__(EPLBConfig)
+                with self.assertRaisesRegex(
+                    RuntimeError, "Invalid EPLBConfig pickle state"
+                ):
+                    restored.__setstate__(state)
+
     def test_native_and_cli_defaults_match_deepinfer_schedule(self):
         with patch.dict(os.environ, {}, clear=True):
             for config in (EPLBConfig(), setup_args([]).eplb_config):
@@ -284,6 +337,7 @@ class EplbRearrangementConfigTest(unittest.TestCase):
                     "eplb_balance_layer_per_step",
                     "eplb_force_repack",
                     "eplb_test_mode",
+                    "eplb_control_step",
                 ):
                     self.assertFalse(hasattr(restored, name))
 

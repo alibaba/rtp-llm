@@ -915,21 +915,6 @@ document.write(`
 <span class="c1"># request format: {&quot;log_level&quot;: &quot;DEBUG/INFO/TRACE/WARNING&quot;}</span>
 </pre></div>
 </div>
-<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@app</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/update_eplb_config&quot;</span><span class="p">)</span>
-<span class="c1"># request format: {&quot;mode&quot;: &quot;NONE&quot;, &quot;update_time&quot;: 5000}</span>
-
-<span class="c1"># input:</span>
-<span class="k">class</span><span class="w"> </span><span class="nc">EplbMode</span><span class="p">(</span><span class="n">Enum</span><span class="p">):</span>
-    <span class="n">NONE</span>
-    <span class="n">STATS</span>  <span class="c1"># stats, only</span>
-    <span class="n">EPLB</span>   <span class="c1"># load balance, only</span>
-    <span class="n">ALL</span>    <span class="c1"># stats + load balance</span>
-
-<span class="k">class</span><span class="w"> </span><span class="nc">EplbConfig</span><span class="p">:</span>
-  <span class="n">mode</span><span class="p">:</span> <span class="n">EplbMode</span>
-  <span class="n">update_time</span><span class="p">:</span> <span class="nb">int</span>
-</pre></div>
-</div>
 </section>
 <section id="embedding-apis">
 <h3><em>Embedding APIs</em><a class="headerlink" href="#embedding-apis" title="Link to this heading">#</a></h3>

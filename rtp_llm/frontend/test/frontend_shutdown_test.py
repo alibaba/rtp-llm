@@ -236,6 +236,21 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertEqual(chat_response.status_code, 503)
         self.assertEqual(chat_response.headers.get("retry-after"), "1")
 
+    def test_removed_eplb_update_endpoint_is_not_registered(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = FakeGrpcClient()
+
+        response = TestClient(app_owner.create_app()).post(
+            "/update_eplb_config", json={"mode": "ALL", "update_time": 1000}
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(app_owner.grpc_client.calls, [])
+
     def test_draining_rejects_admin_backend_requests(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()
@@ -255,7 +270,6 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
             ("post", "/dump_torch_allocator", {}),
-            ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
             ("post", "/tokenize", {"prompt": "hello"}),
@@ -289,7 +303,6 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
             ("post", "/dump_torch_allocator", {}),
-            ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
             ("post", "/tokenize", {"prompt": "hello"}),

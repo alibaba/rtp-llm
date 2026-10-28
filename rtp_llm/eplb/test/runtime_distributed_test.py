@@ -237,9 +237,14 @@ def _runtime_scenario(rank, world_size, force_p2p):
 
 
 def _startup_scenario(rank, world_size):
-    # STATS and paused runtimes can be enabled after startup. Their first real
-    # update must reuse resources without consuming a synthetic warmup window.
-    for mode, interval, window in ((1, 4, 4), (2, 0, 4), (1, 0, 0)):
+    # Startup planning must preserve the configured schedule and live storage.
+    for mode, interval, window in (
+        (1, 4, 4),
+        (2, 0, 4),
+        (1, 0, 0),
+        (2, 4, 4),
+        (3, 4, 4),
+    ):
         layers = _make_layers(rank, world_size, mixed=True)
         initial_maps = [
             tuple(
@@ -295,10 +300,7 @@ def _startup_scenario(rank, world_size):
                 original,
             ):
                 assert torch.equal(tensor, expected)
-        if window == 0:
-            continue  # A zero-size window cannot be enabled online.
         saved_identity = _identities(layers)
-        runtime.update_config(2, 4)
         local = layers[0].num_local_experts
         counts = torch.zeros(8, local, dtype=torch.int32, device="cuda")
         for layer in layers:
@@ -308,9 +310,12 @@ def _startup_scenario(rank, world_size):
             "rtp_llm.eplb.runtime._ExpertLayoutGroup.initialize_shuffle",
             side_effect=AssertionError("communication initialization in a live step"),
         ):
-            assert runtime.step(counts)
-        assert all(group.updates == 1 for group in runtime.groups)
-        assert all(group.window_index == 1 for group in runtime.groups)
+            assert runtime.step(counts) == (mode in (2, 3) and interval > 0)
+        assert all(
+            group.updates == int(mode in (2, 3) and interval > 0)
+            for group in runtime.groups
+        )
+        assert all(group.window_index == int(interval > 0) for group in runtime.groups)
         for layer in layers:
             _check_weights(layer)
         _check_rank_maps(layers, world_size)

@@ -433,7 +433,7 @@ msgid "`--eplb_mode`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`NONE`, `STATS`, `EPLB`, or `ALL`. `STATS` collects counts without migration and allows online switching to `EPLB` or `ALL`. Both `EPLB` and `ALL` collect counts and rearrange experts. Shuffle buffers are initialized on the first rearrangement. Monitoring is configured independently."
+msgid "`NONE`, `STATS`, `EPLB`, or `ALL`. Set the mode at startup; online changes are disabled. `STATS` collects counts without migration. Both `EPLB` and `ALL` collect counts and rearrange experts. With EP > 1, enabled runtimes prepare shuffle resources and warm up planning at startup, including `STATS` and a paused update interval. This preserves the initial weights, routing maps and statistics. Monitoring is configured independently."
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -486,14 +486,6 @@ msgstr ""
 
 #: ../../backend/server_arguments.md
 msgid "Positive P2P bucket count for rearrangement outside a shared NVLink domain."
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--eplb_control_step`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "(DEBUG) EPLB synchronization control parameter cycle."
 msgstr ""
 
 #: ../../backend/server_arguments.md
