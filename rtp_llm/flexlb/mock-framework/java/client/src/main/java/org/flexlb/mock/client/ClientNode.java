@@ -53,7 +53,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
         save(directory.resolve("playback/" + args.sequence() + "/plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics); workerSequence = args.sequence();
+        worker = new LoadClient(args, metrics, topology); workerSequence = args.sequence();
         return new Ack(true);
     }
     private synchronized LoadClient worker(long expected) {
@@ -93,7 +93,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
                 for (int k = i; k < args.requests().size(); k += created.peers.size())
                     items.add(new Item(created.firstId + k, k, args.requests().get(k)));
                 int slots = args.concurrency() / created.peers.size() + (i < args.concurrency() % created.peers.size() ? 1 : 0);
-                call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.master(), items, args.qps(), slots,
+                call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.masters(), items, args.qps(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms()));
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);

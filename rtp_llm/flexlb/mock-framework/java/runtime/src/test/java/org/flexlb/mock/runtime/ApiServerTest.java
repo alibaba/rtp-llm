@@ -86,4 +86,24 @@ class ApiServerTest {
         assertEquals(500, call("probe/metric", Map.of("invalid_result", true), "foreground", 1000).statusCode());
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"127.0.0.1", "127.0.0.2", "::1"})
+    void publishesTheActualBoundAddress(String host) throws Exception {
+        ApiServer bound;
+        try { bound = new ApiServer(new InetSocketAddress(host, 0)); }
+        catch (java.net.SocketException unavailable) {
+            if (unavailable instanceof java.net.BindException || unavailable.getCause() instanceof java.nio.channels.UnsupportedAddressTypeException) {
+                org.junit.jupiter.api.Assumptions.assumeTrue(false, "Loopback address unavailable: " + host); return;
+            }
+            throw unavailable;
+        }
+        try (bound) {
+            bound.start();
+            String published = URI.create(bound.url()).getHost().replace("[", "").replace("]", "");
+            assertEquals(java.net.InetAddress.getByName(host), java.net.InetAddress.getByName(published));
+            assertEquals(200, CLIENT.send(HttpRequest.newBuilder(URI.create(bound.url() + "/health")).GET().build(),
+                HttpResponse.BodyHandlers.ofString()).statusCode());
+        }
+    }
+
 }

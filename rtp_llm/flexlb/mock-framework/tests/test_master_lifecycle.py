@@ -1,0 +1,192 @@
+import asyncio
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import sys
+
+import pytest
+import yaml
+
+from mock_framework.config import Registry, compile_case
+from mock_framework.config.registry import case_interface
+from mock_framework.execution import prepare_launch, run_case
+from mock_framework.execution.processes import Processes, master_port
+from mock_framework.execution.transport import ExecutionError, post
+
+
+def step(name, interface, **values):
+    return dict(id=name, describe=name, interface=interface, **values)
+
+
+def logs(output):
+    return [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
+
+
+def assert_reaped(output):
+    for item in logs(output):
+        if item['event'] == 'process_started':
+            with pytest.raises(ProcessLookupError):
+                os.kill(item['pid'], 0)
+
+
+def generic(tmp_path, steps, replicas=2, fail_index=-1):
+    peer = tmp_path / 'peer.py'
+    peer.write_text('''import os, json, pathlib, time, sys
+node = os.environ['MOCK_NODE_ID']
+index = int(node.split('-')[1])
+if index == FAIL: sys.exit(19)
+directory = pathlib.Path(os.environ['MOCK_OUTPUT_DIR'])
+endpoint = {'id': node, 'role': 'master', 'rpc': f'127.0.0.1:{12000+index}', 'control': f'http://127.0.0.1:{13000+index}'}
+(directory / 'endpoints.json').write_text(json.dumps(endpoint))
+pathlib.Path(os.environ['MOCK_READY_FILE']).write_text(json.dumps({'url': endpoint['control']}))
+time.sleep(120)
+'''.replace('FAIL', str(fail_index)))
+    document = dict(id='master_lifecycle', describe='Master lifecycle',
+        environment={'master': {'deployment': {'replicas': replicas}, 'config': {}}},
+        phases=[dict(id='lifecycle', describe='lifecycle', timeout='15s', steps=steps)])
+    path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(document))
+    registry = Registry.standard(); case = compile_case(path, registry)
+    launch = prepare_launch({'components': {'master': {'command': [sys.executable, str(peer)]}}}, case, tmp_path)
+    return case, registry, launch
+
+
+def test_stop_selection_and_replacement_preserve_identity_and_history(tmp_path):
+    case, registry, launch = generic(tmp_path, [
+        step('one', 'master/stop', args={'targets': ['127.0.0.1:12000']}),
+        step('added', 'master/start', args={'count': 2}),
+        step('all', 'master/stop')])
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'PASS', result
+    completed = {v['step']: v['result'] for v in logs(output) if v['event'] == 'step_finished'}
+    assert completed == {'one': ['127.0.0.1:12000'], 'added': ['127.0.0.1:12002', '127.0.0.1:12003'],
+                         'all': ['127.0.0.1:12001', '127.0.0.1:12002', '127.0.0.1:12003']}
+    history = json.loads((output / 'topology-history.json').read_text())
+    assert len(history) == 4 and len({v['rpc'] for v in history}) == 4
+    assert all(v['stopped_at'] >= v['started_at'] for v in history)
+    assert json.loads((output / 'topology.json').read_text()) == []
+    assert len({v['pid'] for v in logs(output) if v['event'] == 'process_started'}) == 4
+    assert_reaped(output)
+
+
+def test_stale_reference_cannot_stop_replacement(tmp_path):
+    case, registry, launch = generic(tmp_path, [step('old', 'master/stop'), step('new', 'master/start'),
+        step('stale', 'master/stop', args={'targets': {'ref': 'steps.old'}})], replicas=1)
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'ERROR' and 'active addresses' in result['error']
+    assert [v['node'] for v in logs(output) if v['event'] == 'process_started'] == ['master-0', 'master-1']
+    assert_reaped(output)
+
+
+def test_partial_start_failure_is_not_retried_and_reclaims_started_jvms(tmp_path):
+    case, registry, launch = generic(tmp_path, [step('add', 'master/start', args={'count': 2})], replicas=1, fail_index=2)
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'ERROR' and 'unexpectedly' in result['error']
+    assert [v['node'] for v in logs(output) if v['event'] == 'process_started'] == ['master-0', 'master-1', 'master-2']
+    assert_reaped(output)
+
+
+def test_partial_stop_failure_aborts_and_keeps_completed_operations(tmp_path, monkeypatch):
+    original = Processes.stop_expected
+    async def fail_second(self, node, child):
+        errors = await original(self, node, child)
+        return [*errors, 'injected stop failure'] if node == 'master-1' else errors
+    monkeypatch.setattr(Processes, 'stop_expected', fail_second)
+    case, registry, launch = generic(tmp_path, [step('stop', 'master/stop'), step('never', 'master/start')])
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'ERROR' and 'injected stop failure' in result['error']
+    assert not any(v.get('step') == 'never' for v in logs(output))
+    assert len([v for v in logs(output) if v['event'] == 'process_stopped']) == 2
+    assert_reaped(output)
+
+
+@dataclass(frozen=True)
+class Empty:
+    pass
+
+
+@case_interface('test/client_progress', effect='read')
+async def progress(ctx, args: Empty) -> int:
+    successes = 0
+    for node in ctx.processes.topology:
+        if node['role'] == 'client':
+            value = await post(node['control'], {'interface': 'worker/state', 'args': {'sequence': 1},
+                'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None, 'timeout_ms': 1000}})
+            successes += value['outcomes']['success']
+    return successes
+
+
+@pytest.mark.parametrize('batched', [False, True], ids=['direct', 'batch'])
+def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batched):
+    from test_master import configuration
+    root = Path(__file__).resolve().parents[1]
+    java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
+    classpath = os.pathsep.join([str(root / 'java/master/target/classes'), (root / 'java/master/target/dependencies.txt').read_text().strip()])
+    config = configuration()
+    config['FLEXLB_CONFIG'] = json.dumps({'scheduler': {'type': 'QUEUE' if batched else 'DIRECT'},
+        'dispatcher': {'type': 'BATCH' if batched else 'NON_BATCH'},
+        'requestLifecycle': {'request': {'timeoutMs': 5000}},
+        'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
+    if batched:
+        native = json.loads(config['FLEXLB_CONFIG'])
+        native['scheduler']['decision'] = {'type': 'FIXED_WINDOW', 'maxRequests': 2, 'maxCollectionWaitMs': 20}
+        config['FLEXLB_CONFIG'] = json.dumps(native)
+    engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
+        'reserve_block_ratio': 0, 'max_seq_len': 4096, 'compute.expression': '1 + batchSize'}}
+    steps = [step('leader', 'master/leadership/get', expect={'count': 1}),
+        step('traffic', 'client/start', args={'requests': [{'token_ids': [1, 2, 3], 'max_new_tokens': 3}] * 800,
+            'qps': 8, 'concurrency': 32, 'queue_capacity': 64, 'request_timeout': '5s', 'drain_timeout': '5s'}, wait_after='4s'),
+        step('before', 'test/client_progress', expect={'gte': 1}),
+        step('stop_primary', 'master/stop', args={'targets': {'ref': 'steps.leader'}}, wait_after='10s'),
+        step('survivor', 'master/leadership/get', expect={'count': 1}),
+        step('after_first', 'test/client_progress', expect={'gte': {'ref': 'steps.before'}}),
+        step('replacement', 'master/start', within='60s', wait_after='3s'),
+        step('before_second', 'test/client_progress'),
+        step('stop_survivor', 'master/stop', args={'targets': {'ref': 'steps.survivor'}}, wait_after='10s'),
+        step('new_leader', 'master/leadership/get', expect={'eq': {'ref': 'steps.replacement'}}),
+        step('after_second', 'test/client_progress', expect={'gte': {'ref': 'steps.before_second'}}, wait_after='3s'),
+        step('steady', 'test/client_progress', expect={'gte': {'ref': 'steps.after_second'}}),
+        step('engines', 'master/engine/get'), step('collected', 'client/stop')]
+    document = dict(id='master_ha', describe='Native Master replacement during one Client plan',
+        environment={'master': {'deployment': {'replicas': 2}, 'config': config}, 'prefill': engine, 'decode': engine,
+                     'client': {'deployment': {'replicas': 2}, 'config': {}}},
+        phases=[dict(id='replace', describe='replace', timeout='150s', steps=steps)])
+    path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(document))
+    registry = Registry.standard(); registry.register(progress); case = compile_case(path, registry)
+    try:
+        master_port(3)
+    except ExecutionError as error:
+        if 'enable loopback aliases' in str(error): pytest.skip(str(error))
+        raise
+    components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
+        'client': {'command': [java, '-XX:ActiveProcessorCount=2', '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
+    for role in ('prefill', 'decode'):
+        components[role] = {'command': [java, '-XX:ActiveProcessorCount=2', '-jar', str(root / 'java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar')]}
+    recipe = {'components': components, 'zookeeper': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', classpath, 'org.flexlb.mock.master.ZookeeperNode']}}
+    if os.environ.get('PROMETHEUS_BIN'):
+        recipe['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '250ms'}
+    output = tmp_path / 'result'
+    result = asyncio.run(run_case(case, registry, prepare_launch(recipe, case, tmp_path), output))
+    assert result['status'] == 'PASS', result
+    values = {v['step']: v['result'] for v in logs(output) if v['event'] == 'step_finished'}
+    assert values['leader'] != values['survivor'] != values['replacement']
+    assert values['before'] < values['after_first'] <= values['before_second'] < values['after_second'] < values['steady']
+    assert values['engines'] == {values['replacement'][0]: [json.loads((output / 'components/prefill-0/endpoints.json').read_text())['rpc']]}
+    assert all(v['done'] and not v['errors'] and v['issued'] == v['finished'] for v in values['collected'].values())
+    masters = [v for v in json.loads((output / 'topology-history.json').read_text()) if v['role'] == 'master']
+    assert len(masters) == 3 and len({v['rpc'] for v in masters}) == 3 and len({v['control'] for v in masters}) == 3
+    native_envs = [json.loads((output / f"components/{v['id']}/native-environment.json").read_text()) for v in masters]
+    assert len({v['HIPPO_ROLE'] for v in native_envs}) == 1
+    assert len({v['FLEXLB_SYNC_CONSISTENCY_CONFIG'] for v in native_envs}) == 1
+    assert len({v['MOCK_MASTER_PORT'] for v in native_envs}) == 1
+    assert json.loads((output / 'topology.json').read_text()) == []
+    assert all(not (output / f'components/{node}/ready.json').exists() for node in ('master-0', 'master-1'))
+    if 'prometheus' in recipe:
+        collection = json.loads((output / 'prometheus/collection.json').read_text())
+        assert set(collection['retired_targets']) == {'master-0', 'master-1'}
+        assert 'master-2' in collection['targets'] and collection['complete']
+    assert_reaped(output)

@@ -38,7 +38,13 @@ class NativeClientTest {
         final CountDownLatch scheduleEntered = new CountDownLatch(1), scheduleCancelled = new CountDownLatch(1), streamCancelled = new CountDownLatch(1);
         final AtomicInteger generates = new AtomicInteger(), fetches = new AtomicInteger(), schedules = new AtomicInteger();
         final Server engine, master;
+        final com.sun.net.httpserver.HttpServer heartbeat;
+        volatile String leader;
+        volatile int heartbeatStatus = 200;
+        String http() { return "http://127.0.0.1:" + heartbeat.getAddress().getPort(); }
+        Map<String, String> endpoint() { return Map.of("role", "master", "rpc", "127.0.0.1:" + master.getPort(), "http", http()); }
         final NativeClient client;
+        volatile Status scheduleFailure;
         volatile boolean batched;
         volatile int scheduleDelay, tokenDelay;
         volatile Function<FlexlbScheduleResponsePB, FlexlbScheduleResponsePB> route = Function.identity();
@@ -47,6 +53,19 @@ class NativeClientTest {
         };
         final AtomicReference<GenerateInputPB> generated = new AtomicReference<>();
         final AtomicBoolean engineSawDeadline = new AtomicBoolean();
+        private static com.sun.net.httpserver.HttpServer heartbeatListener() throws Exception {
+            for (int i = 0; i < 32; i++) {
+                var http = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+                int rpc = http.getAddress().getPort() + 2;
+                if (rpc <= 65535) try (var probe = new ServerSocket()) {
+                    probe.setReuseAddress(true);
+                    probe.bind(new InetSocketAddress("127.0.0.1", rpc));
+                    return http;
+                } catch (BindException occupied) { /* Try another native HTTP/gRPC pair. */ }
+                http.stop(0);
+            }
+            throw new IllegalStateException("No free test Master port pair");
+        }
         Harness() throws Exception {
             engine = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(new RpcServiceGrpc.RpcServiceImplBase() {
                 private void stream(long id, StreamObserver<GenerateOutputsPB> response) {
@@ -62,9 +81,18 @@ class NativeClientTest {
                     fetches.incrementAndGet(); stream(input.getRequestId(), response);
                 }
             }).build().start();
-            master = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
+            heartbeat = heartbeatListener();
+            leader = "127.0.0.1:" + heartbeat.getAddress().getPort();
+            heartbeat.createContext("/rtp_llm/master/info", exchange -> {
+                byte[] body = ("{\"real_master_host\":\"" + leader + "\",\"queue_length\":0}").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(heartbeatStatus, body.length);
+                try (var output = exchange.getResponseBody()) { output.write(body); }
+            });
+            heartbeat.start();
+            master = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", heartbeat.getAddress().getPort() + 2)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                 @Override public void schedule(FlexlbScheduleRequestPB input, StreamObserver<FlexlbScheduleResponsePB> response) {
                     schedules.incrementAndGet(); scheduleEntered.countDown();
+                    if (scheduleFailure != null) { response.onError(scheduleFailure.asRuntimeException()); return; }
                     Context.current().addListener(c -> scheduleCancelled.countDown(), Runnable::run);
                     workers.submit(() -> {
                         try {
@@ -84,7 +112,7 @@ class NativeClientTest {
         }
         NativeClient.Result result(NativeClient.Call call) throws Exception { return call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS); }
         @Override public void close() throws Exception {
-            client.close(); workers.shutdownNow(); engine.shutdownNow(); master.shutdownNow();
+            client.close(); heartbeat.stop(0); workers.shutdownNow(); engine.shutdownNow(); master.shutdownNow();
             engine.awaitTermination(3, TimeUnit.SECONDS); master.awaitTermination(3, TimeUnit.SECONDS);
         }
     }
@@ -261,4 +289,67 @@ class NativeClientTest {
             assertEquals("DATA_LOSS", h.result(h.client.send(request(36), Duration.ofSeconds(1))).grpcCode());
         }
     }
+    @Test void transportFailureRetriesOnlyBackupAndCancelKeepsTheAttemptedMaster() throws Exception {
+        try (var first = new Harness(); var backup = new Harness()) {
+            first.scheduleFailure = Status.UNAVAILABLE;
+            backup.output = (id, response) -> response.onNext(token(id, 1, false));
+            var routes = new AtomicReference<>(List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")));
+            try (var client = new NativeClient(routes::get)) {
+                var call = client.send(request(100), Duration.ofSeconds(3));
+                call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                routes.set(List.of(first.endpoint().get("rpc")));
+                call.cancel();
+                assertEquals(outcome(call), "cancelled");
+                assertEquals(1, first.schedules.get()); assertEquals(1, backup.schedules.get());
+                assertEquals(0, first.generates.get()); assertEquals(1, backup.generates.get());
+                assertEquals(100, Objects.requireNonNull(backup.cancellations.poll(2, TimeUnit.SECONDS)).getRequestId());
+                assertNull(first.cancellations.poll(100, TimeUnit.MILLISECONDS));
+            }
+        }
+    }
+    private static String outcome(NativeClient.Call call) throws Exception {
+        return call.completion().toCompletableFuture().get(3, TimeUnit.SECONDS).outcome().name();
+    }
+    @Test void businessRejectionDeadlineAndStreamErrorNeverRetryBackup() throws Exception {
+        try (var first = new Harness(); var backup = new Harness();
+             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
+            first.route = r -> r.toBuilder().setCode(429).setSuccess(false).clearLifecycle().build();
+            assertEquals("error", outcome(client.send(request(101), Duration.ofSeconds(2))));
+            first.route = Function.identity(); first.scheduleDelay = 2000;
+            assertEquals("timeout", outcome(client.send(request(102), Duration.ofMillis(100))));
+            first.scheduleDelay = 0;
+            first.output = (id, response) -> response.onError(Status.UNAVAILABLE.asRuntimeException());
+            assertEquals("error", outcome(client.send(request(103), Duration.ofSeconds(2))));
+            assertEquals(0, backup.schedules.get()); assertEquals(0, backup.generates.get());
+        }
+    }
+    @Test void noHealthyMasterAndBothTransportFailuresNeverBypassScheduling() throws Exception {
+        try (var first = new Harness(); var backup = new Harness()) {
+            var routes = new AtomicReference<List<String>>(List.of());
+            try (var client = new NativeClient(routes::get)) {
+                assertEquals("error", outcome(client.send(request(104), Duration.ofSeconds(2))));
+                first.scheduleFailure = Status.UNAVAILABLE; backup.scheduleFailure = Status.UNAVAILABLE;
+                routes.set(List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")));
+                assertEquals("error", outcome(client.send(request(105), Duration.ofSeconds(2))));
+                assertEquals(1, first.schedules.get()); assertEquals(1, backup.schedules.get());
+                assertEquals(0, first.generates.get()); assertEquals(0, backup.generates.get());
+            }
+        }
+    }
+
+    @Test void remoteCancelledTransportCanUseBackupWhileLocalCancellationCannot() throws Exception {
+        try (var first = new Harness(); var backup = new Harness();
+             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")))) {
+            first.scheduleFailure = Status.CANCELLED;
+            assertEquals("success", outcome(client.send(request(106), Duration.ofSeconds(2))));
+            assertEquals(1, first.schedules.get()); assertEquals(1, backup.schedules.get());
+            first.scheduleFailure = null; first.scheduleDelay = 2000;
+            var call = client.send(request(107), Duration.ofSeconds(3));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (first.schedules.get() < 2 && System.nanoTime() < deadline) Thread.sleep(5);
+            assertEquals(2, first.schedules.get()); call.cancel();
+            assertEquals("cancelled", outcome(call)); assertEquals(1, backup.schedules.get());
+        }
+    }
+
 }

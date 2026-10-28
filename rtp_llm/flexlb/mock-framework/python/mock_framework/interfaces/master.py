@@ -1,7 +1,7 @@
 """Case-level Master reads; Java returns only its own observation."""
 from dataclasses import dataclass
-from typing import Literal
-from ..config.registry import case_interface
+from typing import Annotated, Literal
+from ..config.registry import Bounds, case_interface
 from ..execution.transport import post, ExecutionError
 
 
@@ -67,3 +67,20 @@ async def engines(ctx, args: EngineSelection) -> dict[str, list[str]]:
             raise ExecutionError('Master reported duplicate Engines')
         result[master['rpc']] = sorted(addresses)
     return result
+
+
+@dataclass(frozen=True)
+class Start:
+    count: Annotated[int, Bounds(1, 1024)] = 1
+
+
+@case_interface('master/start', effect='write')
+async def start(ctx, args: Start) -> list[str]:
+    """Create new Master JVMs in this run's election group; never reuse stopped identities."""
+    return await ctx.processes.start_masters(args.count)
+
+
+@case_interface('master/stop', effect='write')
+async def stop(ctx, args: Targets) -> list[str]:
+    """Stop selected Master JVMs, or all active Masters when targets is omitted."""
+    return await ctx.processes.stop_masters(args.targets)

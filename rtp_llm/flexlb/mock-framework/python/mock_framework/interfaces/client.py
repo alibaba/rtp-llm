@@ -22,16 +22,18 @@ class Request:
 
 @dataclass(frozen=True)
 class Start:
-    masters: list[str]
     requests: list[Request]
     qps: float
     concurrency: Annotated[int, Bounds(minimum=1, maximum=2147483647)]
+    masters: list[str] | None = None
     queue_capacity: Annotated[int, Bounds(minimum=1, maximum=100000)] = 16
     request_timeout: Annotated[str, 'duration'] = '30s'
     drain_timeout: Annotated[str, 'duration'] = '30s'
 
     def __post_init__(self):
-        if len(self.masters) != 1 or not self.masters[0].strip() or not self.requests or not math.isfinite(self.qps) or self.qps <= 0 or len(self.requests) / self.qps > 86400:
+        if self.masters is not None and (not self.masters or len(set(self.masters)) != len(self.masters) or any(not v.strip() for v in self.masters)):
+            raise ValueError('masters must be nonempty and unique when supplied')
+        if not self.requests or not math.isfinite(self.qps) or self.qps <= 0 or len(self.requests) / self.qps > 86400:
             raise ValueError('A nonempty text request list and positive QPS (at most 24h playback) are required')
         for value in (self.request_timeout, self.drain_timeout):
             millis = duration(value, positive=True) * 1000
@@ -79,12 +81,14 @@ async def start(ctx, args: Start) -> bool:
     clients = [node for node in ctx.processes.topology if node['role'] == 'client']
     if not clients or args.concurrency < len(clients) or len(args.requests) < len(clients):
         raise ExecutionError('Need at least one request and concurrency slot per Client')
-    if args.masters[0] not in {node['rpc'] for node in ctx.processes.topology if node['role'] == 'master'}:
+    available = {node['rpc'] for node in ctx.processes.topology if node['role'] == 'master'}
+    if not available or args.masters is not None and set(args.masters) - available:
         raise ExecutionError('Unknown Master address')
     if ctx.processes.client_pending:
         raise ExecutionError('Collect previous playback with client/stop before starting again')
     body = asdict(args)
-    body["master"] = body.pop("masters")[0]
+    if body['masters'] is None:
+        del body['masters']
     body['request_timeout_ms'] = int(duration(body.pop('request_timeout')) * 1000)
     body['drain_timeout_ms'] = int(duration(body.pop('drain_timeout')) * 1000)
     # A lost start response can still leave Java sending: teardown must always attempt stop.

@@ -31,8 +31,8 @@ def test_start_only_calls_client_zero_and_does_not_multiply_total_rate(monkeypat
     assert len(calls) == 1 and calls[0][0] == 'http://c:1'
     assert calls[0][1]['args']['qps'] == 10
     assert calls[0][1]['args']['concurrency'] == 2
-    assert calls[0][1]['args']['master'] == 'master:1'
-    assert 'masters' not in calls[0][1]['args'] and ctx.processes.client_pending
+    assert calls[0][1]['args']['masters'] == ['master:1']
+    assert 'master' not in calls[0][1]['args'] and ctx.processes.client_pending
     with pytest.raises(ExecutionError, match='previous'):
         asyncio.run(Registry.standard().get('client/start').invoke(ctx, args()))
 
@@ -75,7 +75,7 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
         asyncio.run(Registry.standard().get('client/stop').invoke(context(), {}))
 
 
-@pytest.mark.parametrize('changes', [{'qps': 0}, {'qps': float('inf')}, {'masters': []}, {'masters': ['a', 'b']},
+@pytest.mark.parametrize('changes', [{'qps': 0}, {'qps': float('inf')}, {'masters': []}, {'masters': ['a', 'a']},
                                       {'queue_capacity': 0}, {'request_timeout': '0s'}, {'requests': []},
                                       {'requests': [{'token_ids': [], 'max_new_tokens': 1}]}])
 def test_invalid_plans_fail_at_python_boundary(changes):
@@ -164,3 +164,27 @@ def test_teardown_collects_unstopped_playback_before_final_scrape(monkeypatch, f
     assert order[:2] == ['client', 'scrape']
     assert bool(errors) is failed
     if failed: assert 'queue full' in errors[0]
+
+
+@pytest.mark.parametrize('selection', [None, ['master:1'], ['master:1', 'master:2']])
+def test_master_selection_is_forwarded_without_freezing_default_discovery(monkeypatch, selection):
+    calls = []
+    async def post(url, body):
+        calls.append(body['args']); return {'accepted': True}
+    monkeypatch.setattr(client, 'post', post)
+    ctx = context()
+    ctx.processes.topology.append({'id': 'master-1', 'role': 'master', 'rpc': 'master:2'})
+    values = args(); values.pop('masters')
+    if selection is not None: values['masters'] = selection
+    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
+    assert calls[0].get('masters') == selection
+    if selection is None: assert 'masters' not in calls[0]
+
+
+def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
+    async def post(*args): raise AssertionError('must not contact Client')
+    monkeypatch.setattr(client, 'post', post)
+    ctx = context()
+    with pytest.raises(ExecutionError, match='Unknown Master'):
+        asyncio.run(Registry.standard().get('client/start').invoke(ctx, args() | {'masters': ['master:1', 'missing:2']}))
+    assert not ctx.processes.client_pending

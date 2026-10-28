@@ -10,12 +10,12 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 
-/** One native Schedule -> Fetch/Generate exchange. No playback, retries or response-free mode. */
+/** One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback. */
 public final class NativeClient implements AutoCloseable {
     public enum Outcome { success, error, cancelled, timeout }
     public record Result(long requestId, Instant sentAt, Long ttftNanos, long elapsedNanos,
                          int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message) {}
-    private final String master;
+    private final java.util.function.Supplier<List<String>> masters;
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
@@ -24,8 +24,11 @@ public final class NativeClient implements AutoCloseable {
     private boolean closed, closing;
 
     public NativeClient(String master) {
+        this(() -> List.of(master));
         if (master == null || master.isBlank()) throw new IllegalArgumentException("Master gRPC address required");
-        this.master = master; timers.setRemoveOnCancelPolicy(true);
+    }
+    public NativeClient(java.util.function.Supplier<List<String>> masters) {
+        this.masters = Objects.requireNonNull(masters); timers.setRemoveOnCancelPolicy(true);
     }
     private synchronized ManagedChannel channel(String target) {
         if (closed) throw new IllegalStateException("Client closed");
@@ -57,7 +60,7 @@ public final class NativeClient implements AutoCloseable {
             call.context.addListener(c -> {
                 if (c.getDeadline().isExpired()) call.finish(Status.DEADLINE_EXCEEDED, 0, Outcome.timeout);
             }, Runnable::run);
-            if (!call.terminal) call.context.run(call::schedule);
+            if (!call.terminal) call.context.run(() -> call.schedule(0));
         }
         return call;
     }
@@ -65,6 +68,8 @@ public final class NativeClient implements AutoCloseable {
     public final class Call {
         private final FlexlbScheduleRequestPB request;
         private final GenerateInputPB input;
+        private final List<String> routes;
+        private String scheduledMaster;
         private final Context.CancellableContext context;
         private final CompletableFuture<Result> result = new CompletableFuture<>();
         private final CompletableFuture<Long> firstToken = new CompletableFuture<>();
@@ -76,16 +81,21 @@ public final class NativeClient implements AutoCloseable {
         private boolean terminal, finalFrame, scheduleStarted, routeRejected;
         private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget) {
             this.request = request; this.input = input;
+            routes = List.copyOf(masters.get());
+            if (routes.size() > 2 || new HashSet<>(routes).size() != routes.size() || routes.stream().anyMatch(String::isBlank))
+                throw new IllegalArgumentException("Expected distinct primary and optional backup Master");
             context = Context.ROOT.withDeadlineAfter(budget, TimeUnit.NANOSECONDS, timers);
         }
         public CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
         public CompletionStage<Long> firstToken() { return firstToken.minimalCompletionStage(); }
         public void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled request"), 0, Outcome.cancelled); }
 
-        private void schedule() {
+        private void schedule(int attempt) {
+            if (routes.isEmpty()) { finish(Status.UNAVAILABLE.withDescription("No healthy Master"), 0, Outcome.error); return; }
             try {
+                scheduledMaster = routes.get(attempt);
                 scheduleStarted = true;
-                FlexlbServiceGrpc.newStub(channel(master)).schedule(request, new StreamObserver<>() {
+                FlexlbServiceGrpc.newStub(channel(scheduledMaster)).schedule(request, new StreamObserver<>() {
                     private boolean received;
                     @Override public void onNext(FlexlbScheduleResponsePB route) {
                         synchronized (Call.this) {
@@ -100,7 +110,17 @@ public final class NativeClient implements AutoCloseable {
                             context.run(() -> consume(route));
                         }
                     }
-                    @Override public void onError(Throwable error) { fail(error); }
+                    @Override public void onError(Throwable error) {
+                        synchronized (Call.this) {
+                            if (terminal) return;
+                            var code = Status.fromThrowable(error).getCode();
+                            // Real Frontend retries transport failures once; never replay a reply or deadline.
+                            if (!received && !context.isCancelled() && code != Status.Code.DEADLINE_EXCEEDED
+                                    && attempt + 1 < routes.size())
+                                context.run(() -> schedule(attempt + 1));
+                            else fail(error);
+                        }
+                    }
                     @Override public void onCompleted() {
                         synchronized (Call.this) { if (!received) finish(Status.DATA_LOSS.withDescription("Empty Schedule response"), 0, Outcome.error); }
                     }
@@ -185,10 +205,10 @@ public final class NativeClient implements AutoCloseable {
             context.cancel(null);
             synchronized (NativeClient.this) { active.remove(request.getRequestId(), this); }
             if (outcome != Outcome.success && scheduleStarted && !routeRejected) {
-                // Cancel admission even when the Schedule reply was lost; never replay the request.
+                // Cancel against this request's last attempted Master, not a newer discovery snapshot.
                 try { cleanup.submit(() -> {
                     try {
-                        FlexlbServiceGrpc.newBlockingStub(channel(master)).withDeadlineAfter(1, TimeUnit.SECONDS).cancel(
+                        FlexlbServiceGrpc.newBlockingStub(channel(scheduledMaster)).withDeadlineAfter(1, TimeUnit.SECONDS).cancel(
                             FlexlbCancelRequestPB.newBuilder().setRequestId(request.getRequestId()).setBatchId(batchId)
                                 .setReason(outcome == Outcome.timeout ? CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED : CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED).build());
                     } catch (RuntimeException failure) {

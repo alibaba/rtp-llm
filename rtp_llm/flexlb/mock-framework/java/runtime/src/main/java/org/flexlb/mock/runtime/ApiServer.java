@@ -74,7 +74,10 @@ public final class ApiServer implements AutoCloseable {
         return this;
     }
 
-    public String url() { return "http://127.0.0.1:" + server.getAddress().getPort(); }
+    public String url() {
+        String host = server.getAddress().getAddress().getHostAddress();
+        return "http://" + (host.contains(":") ? "[" + host + "]" : host) + ":" + server.getAddress().getPort();
+    }
 
     /** Launcher variables are supplied by Python; publish only after initialization and API binding. */
     public void publishReady(Path path) throws IOException {

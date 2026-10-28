@@ -58,8 +58,8 @@ def _environment(config, topology, directory, *, require_engines):
     return env
 
 
-def master_environment(config, topology, directory):
-    env = _environment(config, topology, directory, require_engines=True)
+def master_environment(config, topology, directory, *, require_engines=True):
+    env = _environment(config, topology, directory, require_engines=require_engines)
     write_json(directory / 'native-environment.json', env)
     return env
 

@@ -59,7 +59,7 @@ public final class MasterNode {
             var reads = new MasterReads(id, consistency::isMaster, role -> workers.statusSnapshot(
                 org.flexlb.dao.route.RoleType.valueOf(role.name().toUpperCase(Locale.ROOT))).values().stream()
                 .map(s -> s.getIp() + ":" + s.getGrpcPort()).collect(Collectors.toSet()), () -> identities(history));
-            try (var api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(MasterStateApi.class, reads).start()) {
+            try (var api = new ApiServer(new InetSocketAddress(host, 0)).bind(MasterStateApi.class, reads).start()) {
                 String nativeUrl = "http://" + host + ":" + port;
                 json.writerWithDefaultPrettyPrinter().writeValue(directory.resolve("endpoints.json").toFile(), Map.of(
                     "id", id, "role", "master", "control", api.url(), "http", nativeUrl, "rpc", host + ":" + (port + 2),

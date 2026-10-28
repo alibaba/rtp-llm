@@ -2,7 +2,7 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、显式文本请求列表播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。数据集读取、Master 停启和滚动重启、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、显式文本请求列表播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；数据集读取、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## 设计边界
 
@@ -170,18 +170,17 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 当前输入是显式文本请求列表：每项包含 token_ids、max_new_tokens 和可选 priority（默认 50）。不复制旧数据解码器，不做数据生成、数据集读取、循环、多轮、trace、ramp 或动态参与者。每次控制请求受现有 1 MiB 限制，这个入口用于功能接线，不能冒充大规模流式数据播放。后续数据读取接在 Player 的内容来源处，Client 的发送/并发/生命周期边界不变。
 
-启动参数：masters 必须是一个已知 Master 地址的列表，便于引用主 Master 查询结果；requests 是非空请求列表；qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16 条，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h。容量默认值仅用于接线，尚未经过压力校准。
+启动参数：masters 可省略，默认持续发现本实验的全部 Master；显式填写时是非空、无重复的已知地址列表，播放期间只在这个固定范围内选主备。`masters: {ref: globals.masters}` 也会固定为该 step 执行时的列表，后续补回实例不会自动加入该列表；需要跟随扩容/替换时省略 masters。requests 是非空请求列表；qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16 条，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h。容量默认值仅用于接线，尚未经过压力校准。
 
 Master 在本轮固定，不动态跟随主节点。单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。当前只支持本机多 JVM；开始时间经本机墙钟转换为各 JVM 的单调时钟，未承诺跨机器时钟同步。准备后 30s 未收到开始命令的 Client 自行报错退出本轮。
 
 ```yaml
 # environment 增加 client: {deployment: {replicas: 2}, config: {}}
-# 以下 steps 放在已有 phase 内；globals.masters 在单 Master 环境恰好包含一个地址。
+# 以下 steps 放在已有 phase 内；省略 masters，持续跟随本实验的 Master 发现。
 - id: load
   describe: 两个 Client 分担同一份流量
   interface: client/start
   args:
-    masters: {ref: globals.masters}
     qps: 2
     concurrency: 2
     requests:
@@ -388,7 +387,7 @@ Engine JAR 的默认入口为 `EngineHost`。共享模式下 P/D 的 command、c
 
 共享宿主关闭最后一个 Engine 后仍保留，允许再次扩容；独立宿主在关闭实例后回收进程。每次新增使用新编号、目录和未用过的监听地址。编号表示一次创建，例如删除 prefill-0 后再次扩容会创建 prefill-2，不填补旧编号；创建失败也不回收编号。它只用于内部对象映射和产物路径，Case 仍使用服务地址，不增加 node/generation 标签或选择器。实验目录和实例目录拒绝覆盖；Java 以 CREATE_NEW 写入 effective-config.json，另一宿主也不能重新使用旧实例目录。重新创建必须使用新编号与新目录，Runner 断点恢复、同身份原地重启不在当前能力范围。`hosts/engine-shared/` 或 `hosts/engine-<实例>/` 保存 JVM 日志，`components/<实例>/` 保存 config、effective-config、endpoints 和 ready，不复制宿主日志到各实例。下线删除 ready，保留 endpoints 作为历史。
 
-`topology.json` 保存当前实例，`topology-history.json` 保存历史端点和起止时间；两者由 Python 原子发布。各 Master 的 discovery.json 随活动 Engine 更新，角色缩到零时写空地址列表。Master 读取接口动态加载历史地址映射，所以仍能如实报告尚未清除的旧地址；是否完成刷新由生产发现实现决定。本仓 Master 的 workerRegistry.health.statusStaleAfterMs 默认 10000，下线后的短期旧地址仍如实返回，验收需覆盖淘汰窗口。最终清理后清空当前发现，历史记录保留。
+`topology.json` 保存当前实例，`topology-history.json` 保存历史端点和起止时间；两者由 Python 原子发布。活动 Master 的 discovery.json 随活动 Engine 更新，停止后保留最后一份发现快照，角色缩到零时写空地址列表。Master 读取接口动态加载历史地址映射，所以仍能如实报告尚未清除的旧地址；是否完成刷新由生产发现实现决定。本仓 Master 的 workerRegistry.health.statusStaleAfterMs 默认 10000，下线后的短期旧地址仍如实返回，验收需覆盖淘汰窗口。最终清理后清空当前发现，历史记录保留。
 
 Prometheus 对每个实例独立抓取，以 RPC 地址作为 instance；宿主不重复输出业务指标。新增实例先完成采集基线，下线前完成末次抓取再移出目标，保留退役目标与历史数据。语义查询按固定时间窗选择生命期有交集的实例，显式 targets 不能引用该窗口内从未存在的实例，覆盖不足仍报错。
 
@@ -396,7 +395,34 @@ Runner 每秒开始一轮宿主健康检查，单次 HTTP 调用限时 10 秒，
 
 Runner 是持续存活的进程所有者，负责启动、退出监视和最终清理。`Processes` 不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `interfaces/master.py` 按 targets 逐实例调用，并保留每个 Master 的独立结果。
 
-**Master 的 stop/start 尚未接通。** 后续必须由 Runner 侧调用适配器使用进程管理能力实现，不能依赖被停止 Master 自身的控制端口。届时要在发出停止前登记有意退出，启动时恢复该节点端点和监视；意外退出仍须失败。Engine 独立宿主在确认对象关闭后由 Runner 登记预期退出并回收；其他运行中退出仍是异常，不把 `/hook/pre_stop` 当成已经实现的进程停启或滚动重启。
+`master/stop(targets)` 由 Python 停止选定的独立 Master JVM，省略 targets 时停止全部活动 Master；空集合、重复或失效地址在任何停止前报错。停止前完成末次采样、登记预期退出，确认退出后移出活动发现与 Prometheus 目标，删除 ready，保留原 endpoints、日志、配置和历史生命期。意外退出仍使整个实验 ERROR；强制 SIGKILL、部分停止失败同样报错，不重放已完成动作。
+
+`master/start(count=1)` 的 count 范围为 1–1024，从 environment.master 的配置创建新 JVM，复用本实验的 ZK、HIPPO_ROLE 和公共服务端口，使用递增编号、新回环 IP、新产物目录。控制 HTTP 也绑定新 IP，防止旧控制引用命中新进程。初始启动和动态启动共用同一路径；补回时允许某个 Engine 角色已缩到零，按当前空发现启动。返回新 RPC 地址列表，选举和采集基线完成才返回。这里的 start 是新增/补回，不恢复旧身份。旧 step 引用始终指向旧地址，不能自动替换成新地址。Java 不提供 Master 集群生命周期服务。
+
+滚动替换直接组合查询、stop、start。下面使用固定观察等待，实际 Case 应按需要配置等待时间及门禁；新主产生不保证在途请求无损：
+
+```yaml
+- id: old_leader
+  describe: 查询当前主节点
+  interface: master/leadership/get
+  expect: {count: 1}
+- id: stopped
+  describe: 停止原主 JVM
+  interface: master/stop
+  args: {targets: {ref: steps.old_leader}}
+  wait_after: 10s
+- id: elected
+  describe: 检查剩余实例产生唯一新主
+  interface: master/leadership/get
+  expect: {count: 1}
+- id: added
+  describe: 补回一个独立 Master JVM
+  interface: master/start
+  args: {count: 1}
+  within: 60s
+```
+
+Engine 独立宿主在对象关闭后登记预期退出并回收；其他运行中退出仍是异常。Master 的 `/hook/pre_stop` 仅是生产生命周期钩子，不等于 JVM 已停止。
 
 所有步骤共享所在 phase 的单调时钟预算，step 的 within 只能缩短它。Python 在引用解析后校验参数，返回后校验结果；Java 内部 HTTP 协议另有独立校验与剩余预算。写操作不自动重试，调用开始后的异常或超时记录 outcome_unknown；回执已返回而 expect 不满足记 FAIL，不记结果未知。
 
@@ -423,7 +449,7 @@ Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书�
 
 Master 使用 127.0.0.1、127.0.0.2 等地址，相同 HTTP 端口，gRPC=HTTP+2，适配生产以 IP 作为身份和共用转发端口的约束。端口启动时被抢占则失败，不静默换协议。Linux 默认支持 127/8；macOS 缺少别名时明确报错。实验之间不共享 ZK 或选举路径。清理先停止组件，再停止 ZK，最后停止 Prometheus，保留日志和数据。
 
-接线测试分别覆盖 DIRECT/NON_BATCH 的 Generate、QUEUE/FIXED_WINDOW/BATCH 的 Enqueue→Fetch。协议夹具测试和真实 Master 接线测试分开；用生产 pre_stop 钩子观察选举不等于完成 Master 生命周期动作。
+接线测试分别覆盖 DIRECT/NON_BATCH 的 Generate、QUEUE/FIXED_WINDOW/BATCH 的 Enqueue→Fetch。`tests/test_master_lifecycle.py` 在两种模式下持续运行同一 Client 计划，停止主节点、补回新 IP 的 Master、再停止旧节点；在旧请求 deadline 之后检查新主持续成功接流，并检查独立进程退出、历史产物和采集目标退役。切换错误如实保留，不要求整个过渡期零错误。协议夹具测试和真实 Master 接线测试分开；用生产 pre_stop 钩子观察选举不等于完成 Master 生命周期动作。
 
 ## RTP 节点与公共校验
 
@@ -520,13 +546,17 @@ StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概�
 
 ## Client 原生收发核心
 
-`NativeClient` 接收 FlexlbScheduleRequestPB 和单请求总 timeout。请求只调度一次；要求成功响应及有效 P 地址。已入队走 FetchResponse，其他走 GenerateStreamCall，并写入 Master 返回的 P/D 路由。不提供不 Fetch、不消费完整流、Engine 代报 TTFT 或 schedule-only 模式。
+`NativeClient` 接收 FlexlbScheduleRequestPB 和单请求总 timeout。每次请求固定一份主备快照，先向主节点 Schedule，传输失败时最多向备节点尝试一次；收到业务响应、deadline 超时、主动取消或进入 Engine 取流后都不重发。要求成功响应及有效 P 地址。已入队走 FetchResponse，其他走 GenerateStreamCall，并写入 Master 返回的 P/D 路由。不提供不 Fetch、不消费完整流、Engine 代报 TTFT 或 schedule-only 模式。
+
+每个 Client JVM 独立运行 MasterDiscovery：每秒刷新 topology.json 并 POST 真实 `/rtp_llm/master/info`，单次心跳 500ms、最多 4 个并发探测；连续两次失败判不健康。对齐 real Frontend `server/host_service.py` 的选择规则：优先健康且声明自己为主的节点，否则保留仍健康的原目标，再按 IP 选择健康候选；备用节点从未声明为主的其他健康节点中选择。发现暂时漏掉的健康节点仍继续探测，失败后停止保留，不再发现且已不健康的记录在最后探测 30s 后清理。文件损坏或非法端点属于执行错误，会终止整个 Client 播放；没有健康 Master 是请求失败，不直连 Engine，也不按列表轮流广播。
+
+发送边界对齐 `server/master_client.py`：只有 Schedule 的传输失败尝试一次备节点；业务拒绝、deadline 和取流失败不尝试其他 Master。整个请求仍受同一个总 deadline 约束，重试消耗剩余预算。这个策略不承诺 exactly-once：响应丢失后原主可能已经接收请求，保留与 real Frontend 相同的传输重试风险。Client QPS 仍按逻辑请求 issued 计一次，备节点尝试不会再发放流量预算。
 
 每次只预取一个响应，验证身份、INT32 载荷/形状、递增长度和终态；finished 后仍须正常结束，空流/截断/终态后额外帧均失败，不保留全部输出。firstToken 从发送的单调时钟到实际收到首 token，包含调度和网络；没有首 token 就没有数值。completion 记录发送墙钟、可空 TTFT、总耗时、收到 token 数及终态/错误码；后续失败保留已观测 TTFT，不读取 aux 耗时代替。
 
-同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向原 Master 尽力发一次有界 Cancel，不重试结果未知的请求；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
+同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。显式请求列表的 Player、LoadClient、client0 协调和 start/stop 已接通，NativeClient 的原生协议行为保持不变。数据集读取与完整逐请求持久化尚未接通。
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。显式请求列表的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。数据集读取与完整逐请求持久化尚未接通。
 
 ## 指标、采集和查询
 

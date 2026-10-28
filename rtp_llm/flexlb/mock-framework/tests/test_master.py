@@ -267,3 +267,9 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
     with pytest.raises(ExecutionError):
         asyncio.run(master.leadership(adapter_context(), master.Targets(['missing:1'])))
     assert calls == ['http://m1']
+
+
+def test_replacement_master_can_discover_roles_scaled_to_zero(tmp_path):
+    environment = master_environment(configuration(), [], tmp_path, require_engines=False)
+    route = json.loads(environment['MODEL_SERVICE_CONFIG'])
+    assert json.loads(Path(route['discovery_file']).read_text()) == {'p-domain': [], 'd-domain': []}

@@ -13,6 +13,7 @@ import org.flexlb.mock.client.ClientProtocol.*;
 final class LoadClient implements AutoCloseable {
     private final Shard plan;
     private final NativeClient client;
+    private final MasterDiscovery discovery;
     private final ClientMetrics metrics;
     private final ArrayBlockingQueue<Item> queue;
     private final Map<Long, NativeClient.Call> active = new HashMap<>();
@@ -25,11 +26,12 @@ final class LoadClient implements AutoCloseable {
     private final AtomicLong produced = new AtomicLong();
     private long issued, finished, drainDeadline = Long.MAX_VALUE;
 
-    LoadClient(Shard plan, ClientMetrics metrics) {
+    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology) throws Exception {
         this.plan = plan; this.metrics = metrics;
         queue = new ArrayBlockingQueue<>(plan.queue_capacity());
         for (var outcome : NativeClient.Outcome.values()) outcomes.put(outcome.name(), 0L);
-        client = new NativeClient(plan.master());
+        discovery = new MasterDiscovery(topology, plan.masters());
+        client = new NativeClient(discovery::routes);
         // A lost begin command must not leave a prepared worker alive forever.
         dispatcher = Thread.ofVirtual().name("client-dispatch").start(this::dispatch);
     }
@@ -80,6 +82,7 @@ final class LoadClient implements AutoCloseable {
         long prepareDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         try {
             while (true) {
+                discovery.check();
                 List<NativeClient.Call> cancel = List.of();
                 synchronized (this) {
                     if (!begun && !stopped && System.nanoTime() >= prepareDeadline) fail("Timed out waiting for begin");
@@ -119,7 +122,7 @@ final class LoadClient implements AutoCloseable {
         finally {
             if (player != null) try { player.join(1000); }
             catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-            client.close();
+            client.close(); discovery.close();
             synchronized (this) { completion.complete(snapshot(true)); LockSupport.unpark(dispatcher); }
         }
     }

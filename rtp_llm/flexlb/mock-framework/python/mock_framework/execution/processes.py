@@ -8,6 +8,7 @@ import signal
 import secrets
 import socket
 import uuid
+from urllib.parse import urlsplit
 
 from ..config.values import duration, fields, text
 from .records import write_json, timestamp
@@ -81,6 +82,9 @@ class Processes:
         self.closing = False
         self.topology, self.history = [], []
         self.expected_stops = set()
+        self.master_env = {}
+        self.next_master = 0
+        self.master_lock = asyncio.Lock()
         self.engines = EngineHosts(self)
         self.health_monitor = None
         self.client_pending = False
@@ -100,7 +104,7 @@ class Processes:
     def publish_discovery(self):
         write_json(self.records.directory / 'topology.json', self.topology)
         write_json(self.records.directory / 'topology-history.json', self.history)
-        for master in self.history:
+        for master in self.topology:
             if master['role'] == 'master':
                 refresh_discovery(self.case.environment['master']['config'], self.topology,
                                   self.records.directory / 'components' / master['id'])
@@ -147,7 +151,6 @@ class Processes:
     async def start(self):
         if self.prometheus:
             await self.guard(self.prometheus.start(), self.prometheus.startup_timeout)
-        master_env = {}
         if 'zookeeper' in self.launch:
             recipe = self.launch['zookeeper']
             directory = self.records.directory / 'zookeeper'
@@ -165,59 +168,128 @@ class Processes:
                     raise ExecutionError('Invalid ZooKeeper readiness address')
                 return value['connect']
             connect = await self.guard(zk_ready(), float(duration(recipe['startup_timeout'])))
-            master_env = {'HIPPO_ROLE': 'mock-' + uuid.uuid4().hex,
+            self.master_env = {'HIPPO_ROLE': 'mock-' + uuid.uuid4().hex,
                           'FLEXLB_SYNC_CONSISTENCY_CONFIG': json.dumps({'needConsistency': True,
                               'zookeeperConfig': {'zkHost': connect, 'zkTimeoutMs': 6000}})}
             self.records.emit(event='process_ready', node='zookeeper', connect=connect)
-        topology = self.topology
+        if self.master_env:
+            self.master_env['MOCK_MASTER_PORT'] = str(master_port(self.case.environment['master']['deployment']['replicas']))
+            write_json(self.records.directory / 'zookeeper/master-environment.json', self.master_env)
         order = {'prefill': 0, 'decode': 0, 'vit': 0, 'master': 1, 'client': 2}
         for role, recipe in sorted(self.launch['components'].items(), key=lambda item: order[item[0]]):
+            count = self.case.environment[role]['deployment']['replicas']
             if role in ROLES:
-                await self.guard(self.engines.create(role, self.case.environment[role]['deployment']['replicas']),
-                                 float(duration(recipe['startup_timeout'])) * self.case.environment[role]['deployment']['replicas'])
-                continue
-            for index in range(self.case.environment[role]['deployment']['replicas']):
-                node = f'{role}-{index}'
-                directory = self.records.directory / 'components' / node
-                directory.mkdir(parents=True)
-                config = directory / 'config.json'
-                ready = directory / 'ready.json'
-                component = copy.deepcopy(self.case.environment[role])
-                write_json(config, {'component_role': role, 'component': component,
-                                    'environment': self.case.environment, 'index': index, 'id': node})
-                native_env = master_environment(component['config'], topology, directory) if role == 'master' else {}
-                if role == 'master' and master_env:
-                    if index == 0:
-                        master_env['MOCK_MASTER_PORT'] = str(master_port(self.case.environment[role]['deployment']['replicas']))
-                        write_json(self.records.directory / 'zookeeper/master-environment.json', master_env)
-                    native_env.update(master_env, FLEXLB_ADVERTISED_IP=f'127.0.{index // 254}.{index % 254 + 1}')
-                    write_json(directory / 'native-environment.json', native_env)
-                topology_file = self.records.directory / 'topology.json'
-                write_json(topology_file, topology)
-                env = {**os.environ, **recipe['env'], **native_env, 'MOCK_TOPOLOGY_FILE': str(topology_file), 'MOCK_TOPOLOGY_HISTORY_FILE': str(self.records.directory / 'topology-history.json'), 'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role,
-                       'MOCK_CONFIG_FILE': str(config), 'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}
-                await self.spawn(node, recipe['command'], recipe['cwd'], env, directory)
-                async def await_ready():
-                    while not ready.exists():
-                        await asyncio.sleep(.02)
-                    value = json.loads(ready.read_text(encoding='utf-8'))
-                    if set(value) != {'url'} or not isinstance(value['url'], str):
-                        raise ExecutionError(f'Invalid readiness file for {node}')
-                    self.urls[node] = value['url']
-                await self.guard(await_ready(), float(duration(recipe['startup_timeout'])))
-                self.records.emit(event='process_ready', node=node, url=self.urls[node])
-                endpoints = directory / 'endpoints.json'
-                if endpoints.is_file():
-                    value = json.loads(endpoints.read_text(encoding='utf-8'))
-                    topology.append({**value, 'id': node, 'role': role})
-                    self.history.append({**value, 'id': node, 'role': role, 'started_at': timestamp()})
-                    self.publish_discovery()
-                if self.prometheus:
-                    self.prometheus.discover(node, directory)
+                await self.guard(self.engines.create(role, count), float(duration(recipe['startup_timeout'])) * count)
+            elif role == 'master':
+                await self.start_masters(count)
+            else:
+                for index in range(count):
+                    await self._start_component(role, index)
         if self.engines.hosts:
             self.health_monitor = asyncio.create_task(self.engines.monitor())
         if self.prometheus:
             await self.guard(self.prometheus.baseline(), self.prometheus.startup_timeout)
+
+    async def _start_component(self, role, index):
+        recipe = self.launch['components'][role]
+        node = f'{role}-{index}'
+        directory = self.records.directory / 'components' / node
+        directory.mkdir(parents=True)
+        config, ready = directory / 'config.json', directory / 'ready.json'
+        component = copy.deepcopy(self.case.environment[role])
+        write_json(config, {'component_role': role, 'component': component,
+                           'environment': self.case.environment, 'index': index, 'id': node})
+        native_env = master_environment(component['config'], self.topology, directory,
+            require_engines=index < component['deployment']['replicas']) if role == 'master' else {}
+        if role == 'master' and self.master_env:
+            host = master_host(index)
+            check_master_ports(host, int(self.master_env['MOCK_MASTER_PORT']))
+            native_env.update(self.master_env, FLEXLB_ADVERTISED_IP=host)
+            write_json(directory / 'native-environment.json', native_env)
+        topology_file = self.records.directory / 'topology.json'
+        write_json(topology_file, self.topology)
+        env = {**os.environ, **recipe['env'], **native_env, 'MOCK_TOPOLOGY_FILE': str(topology_file),
+               'MOCK_TOPOLOGY_HISTORY_FILE': str(self.records.directory / 'topology-history.json'),
+               'MOCK_NODE_ID': node, 'MOCK_COMPONENT': role, 'MOCK_CONFIG_FILE': str(config),
+               'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}
+        await self.spawn(node, recipe['command'], recipe['cwd'], env, directory)
+        async def await_ready():
+            while not ready.exists():
+                await asyncio.sleep(.02)
+            value = json.loads(ready.read_text(encoding='utf-8'))
+            if set(value) != {'url'} or not isinstance(value['url'], str):
+                raise ExecutionError(f'Invalid readiness file for {node}')
+            self.urls[node] = value['url']
+        await self.guard(await_ready(), float(duration(recipe['startup_timeout'])))
+        self.records.emit(event='process_ready', node=node, url=self.urls[node])
+        endpoints = directory / 'endpoints.json'
+        value = None
+        if endpoints.is_file():
+            value = json.loads(endpoints.read_text(encoding='utf-8'))
+            if role == 'master' and self.master_env:
+                port = int(self.master_env['MOCK_MASTER_PORT'])
+                control = urlsplit(self.urls[node])
+                if control.scheme != 'http' or control.hostname != host or not control.port or control.port in (port, port + 2):
+                    raise ExecutionError('Master control address differs from assigned host')
+                expected = {'id': node, 'role': role, 'http': f'http://{host}:{port}',
+                            'rpc': f'{host}:{port + 2}', 'control': self.urls[node],
+                            'metrics': f'http://{host}:{port}/prometheus'}
+                if value != expected:
+                    raise ExecutionError('Master endpoints differ from assigned identity and listeners')
+            value = {**value, 'id': node, 'role': role}
+            self.topology.append(value)
+            self.history.append({**value, 'started_at': timestamp()})
+            self.publish_discovery()
+        elif role == 'master' and self.master_env:
+            raise ExecutionError('Native Master did not publish endpoints')
+        if self.prometheus:
+            self.prometheus.discover(node, directory)
+        return value
+
+    async def start_masters(self, count):
+        async with self.master_lock:
+            if 'master' not in self.launch.get('components', {}) or not 1 <= count <= 1024:
+                raise ExecutionError('master/start requires configured Masters and count in 1..1024')
+            result, nodes = [], []
+            for _ in range(count):
+                index = self.next_master
+                self.next_master += 1  # Consume identities even when a start fails.
+                value = await self._start_component('master', index)
+                if value is not None:
+                    result.append(value['rpc']); nodes.append(value['id'])
+            if self.prometheus and self.prometheus.baselined and nodes:
+                await self.prometheus.baseline(nodes)
+            return result
+
+    async def stop_masters(self, targets):
+        async with self.master_lock:
+            available = {item['rpc']: item for item in self.topology if item['role'] == 'master'}
+            addresses = sorted(available) if targets is None else targets
+            if not addresses or len(set(addresses)) != len(addresses) or set(addresses) - available.keys():
+                raise ExecutionError('Master targets must be nonempty, unique, active addresses')
+            selected = [available[address] for address in addresses]
+            children = dict(self.children)
+            if any(item['id'] not in children or children[item['id']].returncode is not None for item in selected):
+                raise ExecutionError('Selected Master is not running')
+            self.records.emit(event='instances_selected', operation='master/stop', targets=addresses)
+            if self.prometheus:
+                await self.prometheus.final_scrape([item['id'] for item in selected])
+            for item in selected:
+                node = item['id']
+                errors = await self.stop_expected(node, children[node])
+                if children[node].returncode is not None:
+                    self.topology.remove(item)
+                    self.urls.pop(node, None)
+                    (self.records.directory / 'components' / node / 'ready.json').unlink(missing_ok=True)
+                    for historical in self.history:
+                        if historical['id'] == node:
+                            historical['stopped_at'] = timestamp()
+                    self.publish_discovery()
+                    if self.prometheus:
+                        self.prometheus.retire(node)
+                if errors:
+                    raise ExecutionError('; '.join(errors))
+            return list(addresses)
 
     async def _stop(self, children, grace):
         errors = []
@@ -316,3 +388,19 @@ def master_port(count):
         finally:
             for sock in sockets:
                 sock.close()
+
+
+def master_host(index):
+    if not 0 <= index < 254 * 256:
+        raise ExecutionError('Local Master identity range exhausted')
+    return f'127.0.{index // 254}.{index % 254 + 1}'
+
+
+def check_master_ports(host, port):
+    try:
+        for offset in (0, 2):
+            with socket.socket() as probe:
+                probe.bind((host, port + offset))
+    except OSError as error:
+        detail = 'enable loopback aliases or run on Linux' if error.errno == errno.EADDRNOTAVAIL else str(error)
+        raise ExecutionError(f'Cannot bind Master {host}:{port}: {detail}') from error
