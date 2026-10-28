@@ -3,8 +3,10 @@
 import json
 import logging
 import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rtp_llm.test.smoke import deepseek_v41_dspark_contract_test as dspark
 from rtp_llm.test.smoke import deepseek_v41_pd_contract_test as pd
@@ -22,6 +24,29 @@ class DeepSeekV41FullContractTest(
     # Keep the PD token/text repeatability and CED checks, and the DSpark
     # acceptance and verify-graph checks inherited from the two runners.
     compare_generation_logits = False
+
+    def start_servers(self):
+        cache = tempfile.TemporaryDirectory(
+            prefix="deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm_jit_",
+            dir=os.environ.get("TEST_TMPDIR", "/tmp"),
+        )
+        self.addCleanup(cache.cleanup)
+        cache_root = Path(cache.name)
+        cache_env = {
+            "MANAGE_JIT_CACHE": "0",
+            "DG_JIT_CACHE_DIR": str(cache_root / "deep_gemm"),
+            "TRITON_CACHE_DIR": str(cache_root / "triton"),
+            "FLASHINFER_WORKSPACE_BASE": str(cache_root / "flashinfer"),
+            "TRTLLM_DG_CACHE_DIR": str(cache_root / "trtllm_deep_gemm"),
+            "TILELANG_CACHE_DIR": str(cache_root / "tilelang"),
+            "TORCH_EXTENSIONS_DIR": str(cache_root / "torch_extensions"),
+            "TVM_FFI_CACHE_DIR": str(cache_root / "tvm_ffi"),
+            "CUTE_DSL_CACHE_DIR": str(cache_root / "cute_dsl"),
+            "TORCHINDUCTOR_CACHE_DIR": str(cache_root / "torch_inductor"),
+            "CUDA_CACHE_PATH": str(cache_root / "cuda"),
+        }
+        with patch.dict(os.environ, cache_env):
+            super().start_servers()
 
     def test_graph_engram_and_prefix_reuse(self):
         super().test_graph_engram_and_prefix_reuse()
