@@ -461,10 +461,6 @@ public final class PrefillState {
             lock.unlock();
         }
 
-        public boolean isHeldByCurrentThread() {
-            return lock.isHeldByCurrentThread();
-        }
-
         public void requireHeld() {
             checkState(lock.isHeldByCurrentThread(), "Prefill ownership requires queue lock");
         }

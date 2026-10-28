@@ -6,11 +6,14 @@ import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryClaim;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.slf4j.Logger;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -19,6 +22,19 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public final class EndpointTestSupport {
 
     private EndpointTestSupport() {}
+
+    public static void completeRetirement(
+            EndpointRegistry.Retirement retirement,
+            CacheAwareService cacheAwareService,
+            Logger logger) {
+        ReflectionTestUtils.invokeMethod(
+                retirement, "complete", cacheAwareService, logger, true);
+    }
+
+    public static void awaitRetirement(WorkerEndpoint endpoint) {
+        Object lifecycle = ReflectionTestUtils.getField(endpoint, "generationLifecycle");
+        ReflectionTestUtils.invokeMethod(lifecycle, "awaitRetirement");
+    }
 
     public static List<DecodeResources.DecodeRoutingView> decodeRoutingSnapshot(
             EndpointRegistry registry, String group) {

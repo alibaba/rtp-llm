@@ -53,7 +53,6 @@ class RequestTerminalSettlementTest {
         var queue = mock(QueuedRequestScheduler.class);
         var timeoutEvidence =
                 java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
-        when(queue.getLatestQueueWaitSnapshot()).thenReturn(timeoutEvidence);
         AbstractRequestScheduler requestOwner =
                 RequestProtocolTestSupport.initialize(
                         mock(ResponseCompletionExecutor.class),

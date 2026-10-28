@@ -268,7 +268,7 @@ class EndpointRegistryCloseTest {
                 assertTrue(closing.await(2, TimeUnit.SECONDS));
                 assertThrows(TimeoutException.class, () -> owner.get(50, TimeUnit.MILLISECONDS));
             } finally {
-                detached.complete(
+                EndpointTestSupport.completeRetirement(detached,
                         mock(CacheAwareService.class), LoggerFactory.getLogger(getClass()));
             }
             owner.get(2, TimeUnit.SECONDS);
@@ -333,7 +333,7 @@ class EndpointRegistryCloseTest {
                 finalizer =
                         executor.submit(
                                 () ->
-                                        retirement.complete(
+                                        EndpointTestSupport.completeRetirement(retirement,
                                                 cache, LoggerFactory.getLogger(getClass())));
                 assertTrue(finalizerEntered.await(2, TimeUnit.SECONDS));
                 assertThrows(
@@ -347,7 +347,7 @@ class EndpointRegistryCloseTest {
             } finally {
                 finishFinalizer.countDown();
                 if (finalizer == null) {
-                    retirement.complete(cache, LoggerFactory.getLogger(getClass()));
+                    EndpointTestSupport.completeRetirement(retirement, cache, LoggerFactory.getLogger(getClass()));
                 }
             }
         }
@@ -457,7 +457,7 @@ class EndpointRegistryCloseTest {
             }
             assertTimeoutPreemptively(
                     java.time.Duration.ofSeconds(2),
-                    () -> retirement.complete(cache, LoggerFactory.getLogger(getClass())));
+                    () -> EndpointTestSupport.completeRetirement(retirement, cache, LoggerFactory.getLogger(getClass())));
             assertSame(status, registry.statusSnapshot(RoleType.PREFILL).get(address));
             assertFalse(status.isActiveGeneration());
             assertSame(
@@ -583,7 +583,7 @@ class EndpointRegistryCloseTest {
         assertFalse(
                 notifiedOutsideLock.get(),
                 "detach only returns ownership; it must not publish inline");
-        retirement.complete(mock(CacheAwareService.class), LoggerFactory.getLogger(getClass()));
+        EndpointTestSupport.completeRetirement(retirement, mock(CacheAwareService.class), LoggerFactory.getLogger(getClass()));
         assertTrue(notifiedOutsideLock.get());
         assertTrue(endpoint.isGenerationRetiringOrRetired());
         assertTrue(registry.statusSnapshot(RoleType.VIT).isEmpty());

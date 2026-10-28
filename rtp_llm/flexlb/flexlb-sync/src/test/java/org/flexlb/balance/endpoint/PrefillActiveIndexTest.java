@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -61,11 +62,11 @@ class PrefillActiveIndexTest {
         var empty = index.capture();
         index.add(request);
         var populated = index.capture();
-        assertTrue(empty.isEmpty());
-        assertFalse(populated.isEmpty());
+        assertEquals(0, capturedSize(empty));
+        assertEquals(1, capturedSize(populated));
         index.clear();
-        assertFalse(populated.isEmpty());
-        assertTrue(index.capture().isEmpty());
+        assertEquals(1, capturedSize(populated));
+        assertEquals(0, capturedSize(index.capture()));
     }
 
     @Test
@@ -116,7 +117,7 @@ class PrefillActiveIndexTest {
         for (int priority = 0; priority <= 100; priority++) {
             assertEquals(0, index.size(priority));
         }
-        assertTrue(index.capture().isEmpty());
+        assertTrue(index.capture().projectedItems().isEmpty());
         assertEquals(expected.stream().map(RequestRoute::requestId).toList(), ids(beforeClear));
     }
 
@@ -195,6 +196,11 @@ class PrefillActiveIndexTest {
         return capture.projectedItems().stream()
                 .map(org.flexlb.balance.planner.GroupPlanner.Item::requestId)
                 .toList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static int capturedSize(PrefillActiveIndex.Capture capture) {
+        return ((List<Object>) ReflectionTestUtils.getField(capture, "entries")).size();
     }
 
     private static RequestRoute item(long id, int priority) {

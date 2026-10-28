@@ -63,10 +63,6 @@ public final class PlacementAvailability {
                 sequence.incrementAndGet());
     }
 
-    void changed(PlacementKey key) {
-        changed(key, null);
-    }
-
     private void changed(PlacementKey key, WorkerStatus worker) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();

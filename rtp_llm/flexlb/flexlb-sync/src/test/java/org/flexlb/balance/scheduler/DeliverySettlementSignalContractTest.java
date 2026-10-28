@@ -288,7 +288,8 @@ class DeliverySettlementSignalContractTest {
 
         private void awaitRelease() throws InterruptedException {
             assertFalse(Thread.holdsLock(context));
-            assertFalse(prefill.ownership.queueGuard().isHeldByCurrentThread());
+            assertThrows(
+                    IllegalStateException.class, prefill.ownership.queueGuard()::requireHeld);
             releaseAttempts.incrementAndGet();
             releaseEntered.countDown();
             if (failRelease.get()) {

@@ -63,8 +63,8 @@ class PrefillStateLockContractTest {
                                     checking.countDown();
                                     guard.await();
                                 }
-                                assertTrue(
-                                        guard.isHeldByCurrentThread(),
+                                org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                                        guard::requireHeld,
                                         "await must reacquire the ownership guard");
                                 return state.progress().schedulingInputVersion();
                             } finally {

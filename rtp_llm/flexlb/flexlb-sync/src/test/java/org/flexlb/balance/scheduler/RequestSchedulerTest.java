@@ -724,7 +724,8 @@ class RequestSchedulerTest {
                     .enqueueRoute(RequestProtocolTestSupport.matchingPlan(context, route));
             verify(router, after(100).times(1)).select(context, null);
             availableSlots.set(1);
-            availability.changed(PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000"));
+            PlacementAvailabilityTestSupport.changed(
+                    availability, PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000"));
             verify(router, timeout(1_000).times(2)).select(context, null);
         } finally {
             RequestProtocolTestSupport.close(scheduler);
@@ -991,7 +992,7 @@ class RequestSchedulerTest {
         expired.data()
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
-        availability.changed(blocker);
+        PlacementAvailabilityTestSupport.changed(availability, blocker);
         verify(router, timeout(1_000).times(2)).select(follower, null);
         verify(router, times(1)).select(expired, null);
         RequestProtocolTestSupport.close(scheduler);
@@ -1079,11 +1080,12 @@ class RequestSchedulerTest {
                     .enqueueRoute(
                             RequestProtocolTestSupport.matchingPlan(independent, independentRoute));
             assertFalse(blockedFuture.isDone());
-            availability.changed(new PlacementKey(RoleType.PREFILL, "g1", null));
+            PlacementAvailabilityTestSupport.changed(
+                    availability, new PlacementKey(RoleType.PREFILL, "g1", null));
             assertFalse(
                     blockedRouteAttempts.await(100, TimeUnit.MILLISECONDS),
                     "a group-wide edge must not release an exact endpoint blocker");
-            availability.changed(exactBlocker);
+            PlacementAvailabilityTestSupport.changed(availability, exactBlocker);
             assertTrue(blockedRouteAttempts.await(1, TimeUnit.SECONDS));
         } finally {
             RequestProtocolTestSupport.close(scheduler);
@@ -1147,7 +1149,7 @@ class RequestSchedulerTest {
 
             // Activate the head while the endpoint is still full. Its failed
             // admission publishes a release after reading capacity but before park.
-            fixture.availability.changed(fixture.key);
+            PlacementAvailabilityTestSupport.changed(fixture.availability, fixture.key);
             head.future.get(5, TimeUnit.SECONDS);
             assertTrue(fixture.requests.get(1).retryBlockedReturn.await(5, TimeUnit.SECONDS));
             fixture.awaitIndependentCommit();
@@ -1184,7 +1186,7 @@ class RequestSchedulerTest {
                 when(item.prefill()).thenReturn(status);
                 request.alternative = new AlternativeRoute(route, item);
             }
-            fixture.availability.changed(fixture.key);
+            PlacementAvailabilityTestSupport.changed(fixture.availability, fixture.key);
             fixture.awaitAllPublished();
             assertEquals(List.of(820L, 821L, 822L), fixture.admitted);
             assertEquals(0, fixture.availableSlots.get(), "the original worker stayed full");
@@ -1263,7 +1265,7 @@ class RequestSchedulerTest {
                         "handoff must not rely on running completion callbacks");
                 // Even a subsequent edge must not be swallowed by an active request
                 // that was removed from the ordered queue during pruning.
-                fixture.availability.changed(fixture.key);
+                PlacementAvailabilityTestSupport.changed(fixture.availability, fixture.key);
                 fixture.requests.get(1).future.get(5, TimeUnit.SECONDS);
                 assertEquals(List.of(821L), fixture.admitted);
                 assertEquals(0, fixture.availableSlots.get());
@@ -1662,7 +1664,7 @@ class RequestSchedulerTest {
 
         private void releaseSlots(int count) {
             availableSlots.addAndGet(count);
-            availability.changed(key);
+            PlacementAvailabilityTestSupport.changed(availability, key);
         }
 
         private void awaitAllPublished() throws InterruptedException {

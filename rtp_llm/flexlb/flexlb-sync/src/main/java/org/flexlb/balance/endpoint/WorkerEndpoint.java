@@ -187,7 +187,7 @@ public class WorkerEndpoint {
     /**
      * Initiate exact-generation drain and cleanup after the admission gate has
      * closed. This method never waits for cleanup already owned by another
-     * caller; use {@link #awaitRetirement()} at a composition shutdown barrier.
+     * caller; use the generation lifecycle retirement barrier at composition shutdown.
      */
     public final void close() {
         retireInternal(false);
@@ -218,10 +218,6 @@ public class WorkerEndpoint {
      * and retirement callbacks, then rethrow its recorded terminal failure.
      * {@link #close()} must have initiated cleanup first.
      */
-    public final void awaitRetirement() {
-        generationLifecycle.awaitRetirement();
-    }
-
     final void awaitRetirement(long timeoutMs) {
         generationLifecycle.awaitRetirement(timeoutMs);
     }

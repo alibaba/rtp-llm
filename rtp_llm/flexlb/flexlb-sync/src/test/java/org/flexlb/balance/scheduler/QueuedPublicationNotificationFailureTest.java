@@ -177,11 +177,11 @@ class QueuedPublicationNotificationFailureTest {
                                     queue.requests));
             doAnswer(
                             call -> {
-                                assertFalse(
+                                assertThrows(
+                                        IllegalStateException.class,
                                         PrefillQueueRunnerTestSupport.state(
                                                         EndpointTestSupport.queueRunner(prefill))
-                                                .queueGuard()
-                                                .isHeldByCurrentThread());
+                                                .queueGuard()::requireHeld);
                                 if (metricsFailure != null
                                         && call.getArgument(0, Integer.class) == 20) {
                                     throw metricsFailure;

@@ -931,7 +931,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         realEndpoints.forEach(
                 endpoint -> {
                     endpoint.close();
-                    endpoint.awaitRetirement();
+                    org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(endpoint);
                 });
         if (expectedShutdownFailure == null) {
             SchedulerTestSupport.shutdown(runtime);
