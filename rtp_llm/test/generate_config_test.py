@@ -1,5 +1,9 @@
+import asyncio
 import copy
+import json
 import os
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
@@ -10,7 +14,11 @@ from jinja2 import Environment
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import ThinkingMode, thinking_mode_from_value
+from rtp_llm.config.generate_config import (
+    RoleAddr,
+    ThinkingMode,
+    thinking_mode_from_value,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -438,6 +446,307 @@ class OpenaiGenerateConfigTest(TestCase):
         return openai_endpoint._extract_generation_config(
             request, input_ids=input_ids, renderer=renderer
         )
+
+    def test_default_public_name_does_not_expose_factory_class_name(self):
+        config = self._make_default_model_config()
+        config.model_name = "Qwen3Next"  # ModelFactory's existing internal fallback.
+        config.model_type = "qwen_3_next"
+        endpoint = self._make_openai_endpoint(config)
+        self.assertEqual(endpoint.model_name, "")
+        models = asyncio.run(endpoint.list_models())
+        self.assertEqual(models.data[0].id, "qwen_3_next")
+
+    def test_explicit_public_name_overrides_models_and_response_name(self):
+        config = self._make_default_model_config()
+        config.model_type = "qwen_3_next"
+        config.apply_override_args('{"model_name":"served-preview"}')
+        endpoint = self._make_openai_endpoint(config)
+        self.assertEqual(endpoint.model_name, "served-preview")
+        self.assertEqual(
+            asyncio.run(endpoint.list_models()).data[0].id, "served-preview"
+        )
+        self.assertEqual(config.model_name, "served-preview")
+
+    def test_extra_configs_keeps_role_addr_objects_and_request_isolation(self):
+        from rtp_llm.ops import RoleType
+
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        extra = GenerateConfig(
+            role_addrs=[
+                RoleAddr(
+                    role=RoleType.PREFILL,
+                    ip="127.0.0.1",
+                    http_port=8080,
+                    grpc_port=8081,
+                )
+            ]
+        )
+        request = ChatCompletionRequest(messages=[], extra_configs=extra)
+        config = endpoint._extract_generation_config(request)
+        self.assertIsInstance(config.role_addrs[0], RoleAddr)
+        self.assertEqual(config.role_addrs[0].role, RoleType.PREFILL)
+        config.role_addrs[0].http_port = 9000
+        self.assertEqual(extra.role_addrs[0].http_port, 8080)
+        self.assertEqual(endpoint.default_generate_config.role_addrs, [])
+
+    def test_extra_configs_keeps_auto_downgrade_intent_for_default_merge(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = GenerateConfig(num_return_sequences=2)
+        extra = GenerateConfig(enable_cross_sequence_ban=True, combo_token_size=2)
+        self.assertFalse(extra.enable_cross_sequence_ban)
+        self.assertTrue(extra._ban_auto_downgraded)
+        config = endpoint._extract_generation_config(
+            ChatCompletionRequest(messages=[], extra_configs=extra)
+        )
+        self.assertTrue(config.enable_cross_sequence_ban)
+        self.assertFalse(config._ban_auto_downgraded)
+        self.assertFalse(extra.enable_cross_sequence_ban)
+        self.assertTrue(extra._ban_auto_downgraded)
+
+    def test_raw_role_addr_updates_restore_the_nested_type(self):
+        from rtp_llm.ops import RoleType
+
+        config = GenerateConfig()
+        config.update(
+            {
+                "role_addrs": [
+                    {
+                        "role": "PREFILL",
+                        "ip": "127.0.0.1",
+                        "http_port": 8080,
+                        "grpc_port": 8081,
+                    }
+                ]
+            }
+        )
+        self.assertIsInstance(config.role_addrs[0], RoleAddr)
+        self.assertEqual(config.role_addrs[0].role, RoleType.PREFILL)
+
+    def test_default_auto_downgrade_intent_can_be_completed_by_extra_configs(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = GenerateConfig(
+            enable_cross_sequence_ban=True, combo_token_size=2
+        )
+        config = endpoint._extract_generation_config(
+            ChatCompletionRequest(
+                messages=[], extra_configs=GenerateConfig(num_return_sequences=2)
+            )
+        )
+        self.assertTrue(config.enable_cross_sequence_ban)
+        self.assertFalse(config._ban_auto_downgraded)
+
+    def test_missing_generation_config_is_optional_but_invalid_json_is_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self._make_default_model_config()
+            config.generate_env_config.generation_config_path = directory
+            endpoint = self._make_openai_endpoint(config)
+            self.assertEqual(endpoint.default_generate_config.max_new_tokens, 32000)
+            self.assertEqual(
+                GenerateConfig.from_generation_config_path(directory).max_new_tokens,
+                32000,
+            )
+            Path(directory, "generation_config.json").write_text("{invalid")
+            with self.assertRaises(json.JSONDecodeError):
+                GenerateConfig.from_generation_config_path(directory)
+
+    def test_service_generation_defaults_and_request_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text(
+                json.dumps({"presence_penalty": 1.5, "max_new_tokens": 16384})
+            )
+            model_config = self._make_default_model_config()
+            model_config.generate_env_config.generation_config_path = directory
+            endpoint = self._make_openai_endpoint(model_config)
+        extra = GenerateConfig(top_k=7)
+        request = ChatCompletionRequest(messages=[], extra_configs=extra)
+        config = endpoint._extract_generation_config(request)
+        self.assertEqual(config.presence_penalty, 1.5)
+        self.assertEqual(config.max_new_tokens, 16384)
+        self.assertEqual(config.top_k, 7)
+        self.assertEqual(extra.max_new_tokens, 32000)
+        request = ChatCompletionRequest(
+            messages=[],
+            presence_penalty=0.0,
+            max_tokens=73,
+            extra_configs=GenerateConfig(presence_penalty=2.0, max_new_tokens=81),
+        )
+        overridden = endpoint._extract_generation_config(request)
+        self.assertEqual(overridden.presence_penalty, 0.0)
+        self.assertEqual(overridden.max_new_tokens, 73)
+        self.assertEqual(endpoint.default_generate_config.presence_penalty, 1.5)
+        self.assertEqual(endpoint.default_generate_config.max_new_tokens, 16384)
+
+    def test_sampling_defaults_http_precedence(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = GenerateConfig(temperature=0.6, top_p=0.8)
+        for payload, expected in (
+            ({}, (0.6, 0.8)),
+            ({"temperature": None, "top_p": None}, (0.6, 0.8)),
+            ({"extra_configs": {"temperature": 0.4, "top_p": 0.5}}, (0.4, 0.5)),
+            (
+                {
+                    "extra_configs": {"temperature": 0.4, "top_p": 0.5},
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                },
+                (0.0, 1.0),
+            ),
+        ):
+            with self.subTest(payload=payload):
+                request = ChatCompletionRequest.model_validate(
+                    {"messages": [], **payload}
+                )
+                config = endpoint._extract_generation_config(request)
+                self.assertEqual((config.temperature, config.top_p), expected)
+        self.assertEqual(endpoint.default_generate_config.temperature, 0.6)
+        endpoint.default_generate_config = GenerateConfig()
+        config = endpoint._extract_generation_config(ChatCompletionRequest(messages=[]))
+        self.assertEqual((config.temperature, config.top_p), (0.7, 1.0))
+
+    def test_service_cross_sequence_ban_completed_by_http_requests(self):
+        from rtp_llm.structure.request_extractor import RequestExtractor
+
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text(
+                json.dumps(
+                    {
+                        "enable_cross_sequence_ban": True,
+                        "combo_token_size": 2,
+                    }
+                )
+            )
+            defaults = GenerateConfig.from_generation_config_path(directory)
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = defaults
+        extractor = RequestExtractor(defaults)
+        for n in (1, 2):
+            for explicit_disable in (False, True):
+                extra = {"enable_cross_sequence_ban": False} if explicit_disable else {}
+                with self.subTest(n=n, explicit_disable=explicit_disable):
+                    request = ChatCompletionRequest.model_validate(
+                        {
+                            "messages": [],
+                            "n": n,
+                            **({"extra_configs": extra} if extra else {}),
+                        }
+                    )
+                    config = endpoint._extract_generation_config(request)
+                    self.assertEqual(
+                        config.enable_cross_sequence_ban,
+                        n == 2 and not explicit_disable,
+                    )
+                    for payload in (
+                        {"num_return_sequences": n, **extra},
+                        {"generate_config": {"num_return_sequences": n, **extra}},
+                    ):
+                        raw, _ = extractor._format_generate_config(payload)
+                        self.assertEqual(
+                            raw.enable_cross_sequence_ban,
+                            n == 2 and not explicit_disable,
+                        )
+        self.assertFalse(defaults.enable_cross_sequence_ban)
+        self.assertTrue(defaults._ban_auto_downgraded)
+
+    def test_top_level_response_format_replaces_service_direct_grammar(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+        endpoint.default_generate_config = GenerateConfig(json_schema=schema)
+        for payload, expected in (
+            ({}, schema),
+            ({"response_format": {"type": "text"}}, None),
+            (
+                {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "result",
+                            "schema": {"type": "integer"},
+                        },
+                    }
+                },
+                {"type": "integer"},
+            ),
+            ({"json_format": True}, {"anyOf": [{"type": "object"}, {"type": "array"}]}),
+        ):
+            with self.subTest(payload=payload):
+                request = ChatCompletionRequest.model_validate(
+                    {"messages": [], **payload}
+                )
+                config = endpoint._extract_generation_config(request)
+                actual = config.json_schema
+                if isinstance(actual, str):
+                    actual = json.loads(actual)
+                self.assertEqual(actual, expected)
+        self.assertEqual(endpoint.default_generate_config.json_schema, schema)
+        for field in ("response_format", "json_schema", "regex"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                ChatCompletionRequest.model_validate(
+                    {
+                        "messages": [],
+                        "extra_configs": {field: None},
+                    }
+                )
+
+    def test_extra_configs_preserves_service_thinking_budget(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = GenerateConfig(max_thinking_tokens=4096)
+        request = ChatCompletionRequest(
+            messages=[], extra_configs=GenerateConfig(top_k=7), enable_thinking=True
+        )
+        request.set_prompt_has_think_anchor(True)
+        self.assertEqual(
+            endpoint._extract_generation_config(request).max_thinking_tokens, 4096
+        )
+
+    def test_extra_configs_allows_service_structured_output(self):
+        endpoint = self._make_openai_endpoint(self._make_default_model_config())
+        endpoint.default_generate_config = GenerateConfig(
+            response_format={"type": "json_object"}
+        )
+        config = endpoint._extract_generation_config(
+            ChatCompletionRequest(messages=[], extra_configs=GenerateConfig(top_k=7))
+        )
+        self.assertIsNotNone(config.json_schema)
+        self.assertEqual(config.top_k, 7)
+
+    def test_generation_config_ignores_request_control_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text(
+                json.dumps(
+                    {
+                        "temperature": 0.6,
+                        "num_return_sequences": 2,
+                        "return_incremental": True,
+                        "is_streaming": True,
+                    }
+                )
+            )
+            config = GenerateConfig.from_generation_config_path(directory)
+        self.assertEqual(config.temperature, 0.6)
+        self.assertEqual(config.num_return_sequences, 0)
+        self.assertFalse(config.return_incremental)
+        self.assertFalse(config.is_streaming)
+
+    def test_raw_requests_share_defaults_without_sharing_mutable_state(self):
+        from rtp_llm.structure.request_extractor import RequestExtractor
+
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text(
+                json.dumps({"presence_penalty": 1.5, "max_new_tokens": 16384})
+            )
+            defaults = GenerateConfig.from_generation_config_path(directory)
+        extractor = RequestExtractor(defaults)
+        config, _ = extractor._format_generate_config({"generate_config": {"top_k": 7}})
+        self.assertEqual(config.presence_penalty, 1.5)
+        self.assertEqual(config.max_new_tokens, 16384)
+        config.stop_words_list.append([42])
+        overridden, _ = extractor._format_generate_config(
+            {"generate_config": {"presence_penalty": 0.0}, "max_new_tokens": 73}
+        )
+        self.assertEqual(overridden.presence_penalty, 0.0)
+        self.assertEqual(overridden.max_new_tokens, 73)
+        self.assertEqual(defaults.stop_words_list, [])
+        self.assertEqual(overridden.stop_words_list, [])
 
     def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
         """in_think_mode moves the final constraint inside the reasoning tag."""

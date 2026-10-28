@@ -358,7 +358,7 @@ class ModelFactory:
             model_config.lora_infos = lora_infos if lora_infos else {}
 
         # Set model_name (default to model class name)
-        model_config.model_name = model_cls.__name__
+        model_config.model_name = model_config.model_name or model_cls.__name__
 
         # Set renderer configuration fields
         model_config.generate_env_config = (
