@@ -593,8 +593,8 @@ TEST_F(SamplerTest, testSpecAfterThinkMasksThinkBeginAndAllowsThinkEnd) {
     info.process_state = ThinkProcessState::AFTER_THINK;
     ThinkModeLogitsProcessor processor({info});
 
-    const size_t W = SpecLogitsProcessorRequest::bitmaskWordCount(16);
-    auto accepted_tokens = [&](int32_t boundary_token) {
+    const size_t W               = SpecLogitsProcessorRequest::bitmaskWordCount(16);
+    auto         accepted_tokens = [&](int32_t boundary_token) {
         std::vector<int32_t> draft = {boundary_token};
         std::vector<int32_t> bitmask(2 * W, SpecLogitsProcessorRequest::kBitmaskAllowAll);
 
@@ -635,5 +635,22 @@ TEST_F(SamplerTest, testUpdateStatusAllowsPartialCommitWindow) {
 }
 
 #undef EXPECT_SIMILAR
+
+TEST(ThinkModeLogitsProcessorTest, SeparateBudgetCountsBoundaryTokensAndSnapshotsClosedLength) {
+    StreamThinkInfo info(
+        true, 10, {1, 2}, {3, 4}, 0, 0, false, std::make_shared<StringContainDFA<size_t, int>>(std::vector<int>{3, 4}));
+    EXPECT_EQ(info.bodyTokenBudget(), 10);
+    info.budget_includes_boundary_tags = true;
+    EXPECT_EQ(info.bodyTokenBudget(), 6);
+    EXPECT_EQ(thinkGeneratedTokenBudget(10, 2, 2), 8);
+    EXPECT_EQ(thinkBodyTokenBudget(1, 2, 2), 1);
+    EXPECT_EQ(info.finishedThinkOutputLen(), -1);
+    info.current_output_length = 5;
+    info.markAfterThink();
+    info.current_output_length = 8;
+    EXPECT_EQ(info.finishedThinkOutputLen(), 5);
+    EXPECT_EQ(info.copy().finishedThinkOutputLen(), 5);
+    EXPECT_TRUE(info.copy().budget_includes_boundary_tags);
+}
 
 }  // namespace rtp_llm
