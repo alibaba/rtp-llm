@@ -8,6 +8,7 @@ SM100 buffer's packed UE8M0 K32 scales. The scale formula matches DeepGEMM's
 
 from __future__ import annotations
 
+import os
 from typing import Tuple
 
 import torch
@@ -71,5 +72,40 @@ class MegaMoeSM90InputPacker:
         buf.topk_weights[:tokens].copy_(weights.to(torch.float32).contiguous())
 
 
-def get_mega_sm90_input_packer() -> MegaMoeSM90InputPacker:
-    return MegaMoeSM90InputPacker()
+class FusedMegaMoeSM90InputPacker:
+    """Stage every SM90 MegaMoE input directly into its final buffer."""
+
+    name = "fused"
+
+    def pack(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        buf,
+        tokens: int,
+    ) -> None:
+        from ._mega_sm90_input_pack_triton import fused_pack_mega_moe_sm90_inputs
+
+        fused_pack_mega_moe_sm90_inputs(
+            x,
+            weights,
+            indices,
+            buf.x[:tokens],
+            buf.x_sf[:tokens],
+            buf.topk_idx[:tokens],
+            buf.topk_weights[:tokens],
+        )
+
+
+def get_mega_sm90_input_packer():
+    # Keep rollout explicit after the bitwise and L20Z full-model A/B gates.
+    # The two implementations share the same buffer ABI.
+    mode = os.environ.get("DSV4_MEGA_MOE_SM90_INPUT_PACKER", "torch").strip().lower()
+    if mode == "torch":
+        return MegaMoeSM90InputPacker()
+    if mode == "fused":
+        return FusedMegaMoeSM90InputPacker()
+    raise ValueError(
+        f"invalid DSV4_MEGA_MOE_SM90_INPUT_PACKER={mode!r}; expected torch|fused"
+    )

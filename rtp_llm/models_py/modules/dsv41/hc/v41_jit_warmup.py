@@ -188,6 +188,29 @@ def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     ops.mhc_post(hidden, residual, post, comb, out=residual)
 
 
+def _launch_sm90_mega(pair, tokens, device):
+    """Compile the default-off materialized-mixes seam before graph capture."""
+    previous, next_hc, norm = pair
+    previous.pre_mix_out = torch.full(
+        (1, tokens, 4), 0.25, dtype=torch.float32, device=device
+    )
+    residual = torch.ones((1, tokens, 4, 5120), dtype=torch.bfloat16, device=device)
+    hidden = torch.zeros((1, tokens, 5120), dtype=torch.bfloat16, device=device)
+    post = torch.full((1, tokens, 4, 1), 0.25, dtype=torch.float32, device=device)
+    comb = (
+        torch.eye(4, dtype=torch.float32, device=device)
+        .expand(1, tokens, 4, 4)
+        .contiguous()
+    )
+    if (
+        v41_mega_mhc.try_fused_post_pre(
+            hidden, residual, post, comb, previous, next_hc, norm
+        )
+        is None
+    ):
+        raise RuntimeError("V4.1 HC warmup SM90 mega_mhc rejected a reachable shape")
+
+
 def _launch_fused_pre(unit, tokens, device):
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
     previous = torch.full((1, tokens, 4), 0.25, dtype=torch.float32, device=device)
@@ -267,6 +290,12 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     mega_enabled = (
         arch_major == 10 and bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
     )
+    sm90_mega_enabled = (
+        arch_major == 9
+        and bool(pairs)
+        and small_enabled
+        and v41_mega_mhc._sm90_requested()
+    )
     num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
     mega_ms = _mega_representative_ms(int(max_m), num_sms) if mega_enabled else ()
@@ -292,6 +321,7 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         num_sms,
         tuple(sorted(tile_ms.items())),
         fused_enabled,
+        sm90_mega_enabled,
         os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
     )
     if key in _WARMED_KEYS:
@@ -372,6 +402,33 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                         partial(_launch_mega, pair, tokens, device),
                         device=device,
                     )
+                del pair
+                common._sync_cuda(device)
+                common._release_cuda_cache(device)
+        if sm90_mega_enabled:
+            for config, source in pairs.items():
+                pair = _clone_pair(source, device)
+                detail = f"config={config} m=1 materialized-mixes"
+                # One runtime-M representative compiles the post Triton,
+                # unchanged DeepGEMM/reduction, and fused TileLang epilogue.
+                common._run_triton_warmup_launch_with_retry(
+                    "V41 SM90 mega_mhc",
+                    detail,
+                    partial(
+                        common._run_deepgemm_warmup_launch_with_retry,
+                        "V41 SM90 mega_mhc",
+                        detail,
+                        partial(
+                            common._run_tilelang_warmup_launch_with_retry,
+                            "V41 SM90 mega_mhc",
+                            detail,
+                            partial(_launch_sm90_mega, pair, 1, device),
+                            device=device,
+                        ),
+                        device=device,
+                    ),
+                    device=device,
+                )
                 del pair
                 common._sync_cuda(device)
                 common._release_cuda_cache(device)
