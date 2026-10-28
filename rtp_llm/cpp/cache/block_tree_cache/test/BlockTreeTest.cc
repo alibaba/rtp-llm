@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <array>
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
@@ -598,7 +600,7 @@ TEST(BlockTreeTest, InsertHardStopsAtBusyFullGroup) {
     EXPECT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
 }
 
-TEST(BlockTreeTest, InsertHardStopsAtUnbackedHostFullNode) {
+TEST(BlockTreeTest, InsertHardStopsAtPendingHostFullNode) {
     BlockTree tree(makeGroupSets(1));
     TreeNode* host_node = insertAndGetNode(tree, {100, 200}, make2DResources(1, 2, 10));
     ASSERT_NE(host_node, nullptr);
@@ -608,6 +610,7 @@ TEST(BlockTreeTest, InsertHardStopsAtUnbackedHostFullNode) {
     tree.groupSets()[0]->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
     host_resource.evictFromTier(Tier::DEVICE);
     host_resource.host_block = 7;
+    host_resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
 
     const BlockTreeInsertResult result =
         tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), /*collect_path=*/true, /*is_resident=*/false);
@@ -619,7 +622,7 @@ TEST(BlockTreeTest, InsertHardStopsAtUnbackedHostFullNode) {
     EXPECT_TRUE(result.inserted_nodes.empty());
     ASSERT_TRUE(result.hard_stop.has_value());
     EXPECT_EQ(result.hard_stop->existing_tier, Tier::HOST);
-    EXPECT_EQ(result.hard_stop->transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(result.hard_stop->transfer_state, GroupSetTransferState::LOAD_PENDING);
     EXPECT_TRUE(host_node->children.empty());
     EXPECT_EQ(host_resource.getTopTier(), Tier::HOST);
     EXPECT_EQ(host_resource.host_block, 7);
@@ -661,36 +664,30 @@ TEST(BlockTreeTest, InsertReplacesIdleLowerTierFullResourcesAndKeepsSuffix) {
     }
 }
 
-TEST(BlockTreeTest, InsertDoesNotReplaceReferencedIdleLowerTierFullResources) {
+TEST(BlockTreeTest, InsertReplacesIdleFrozenLowerTierWithoutReclaimingBacking) {
     for (Tier tier : {Tier::HOST, Tier::DISK}) {
-        for (BlockTreeRefType ref_type : {BlockTreeRefType::CACHE,
-                                          BlockTreeRefType::LOAD,
-                                          BlockTreeRefType::EVICTION,
-                                          BlockTreeRefType::STORE,
-                                          BlockTreeRefType::FROZEN}) {
-            SCOPED_TRACE(tierName(tier));
-            SCOPED_TRACE(static_cast<int>(ref_type));
-            BlockTree   tree(makeLowerTierFullGroupSets(1));
-            auto*       node  = insertLowerTierPrefix(tree, {100}, tier).path.front();
-            const auto  block = node->group_set_resources[0].getBlocks(tier).front();
-            IBlockPool* pool  = tier == Tier::HOST ? static_cast<IBlockPool*>(tree.groupSets()[0]->hostPool().get()) :
-                                                     static_cast<IBlockPool*>(tree.groupSets()[0]->diskPool().get());
-            pool->incTreeRef(block, ref_type);
+        SCOPED_TRACE(tierName(tier));
+        BlockTree   tree(makeLowerTierFullGroupSets(1));
+        auto*       node  = insertLowerTierPrefix(tree, {100}, tier).path.front();
+        const auto  block = node->group_set_resources[0].getBlocks(tier).front();
+        IBlockPool* pool  = tier == Tier::HOST ? static_cast<IBlockPool*>(tree.groupSets()[0]->hostPool().get()) :
+                                                 static_cast<IBlockPool*>(tree.groupSets()[0]->diskPool().get());
+        pool->freezeBlock(block);
+        block_tree_cache_detail::ScopeRollback unfreeze([&]() { pool->decTreeRef(block, BlockTreeRefType::FROZEN); });
 
-            const auto result = tree.insertNode({100, 200}, make2DResources(1, 2, 20), false, false);
+        const auto result = tree.insertNode({100, 200}, make2DResources(1, 2, 20), true, false);
 
-            ASSERT_TRUE(result.hard_stop.has_value());
-            EXPECT_EQ(result.hard_stop->existing_tier, tier);
-            EXPECT_EQ(result.hard_stop->transfer_state, GroupSetTransferState::IDLE);
-            EXPECT_EQ(result.accepted_resource_count, 0u);
-            EXPECT_TRUE(result.adopted_nodes.empty());
-            EXPECT_TRUE(result.inserted_nodes.empty());
-            EXPECT_TRUE(node->children.empty());
-            EXPECT_EQ(node->group_set_resources[0].getTopTier(), tier);
-            EXPECT_EQ(pool->treeRefCount(block), 2u);
-            EXPECT_EQ(tree.groupSets()[0]->devicePools()[0]->treeRefCount(20), 0u);
-            pool->decTreeRef(block, ref_type);
-        }
+        EXPECT_FALSE(result.hard_stop.has_value());
+        ASSERT_EQ(result.path.size(), 2u);
+        EXPECT_EQ(result.accepted_resource_count, 2u);
+        EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{20}));
+        EXPECT_TRUE(pool->isAllocated(block));
+        EXPECT_TRUE(pool->isFrozen(block));
+        EXPECT_EQ(pool->treeRefCount(block), 1u);
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+        EXPECT_EQ(tree.groupSets()[0]->devicePools()[0]->treeRefCount(20), 1u);
+        unfreeze.run();
+        EXPECT_FALSE(pool->isAllocated(block));
     }
 }
 
@@ -712,27 +709,14 @@ TEST(BlockTreeTest, InsertPreflightsAllFullGroupsBeforeReplacingLowerTierResourc
     }
 }
 
-TEST(BlockTreeTest, InsertDoesNotReplaceDetachedIdleLowerTierResource) {
-    for (Tier tier : {Tier::HOST, Tier::DISK}) {
-        BlockTree tree(makeLowerTierFullGroupSets(1));
-        auto*     node                                 = insertLowerTierPrefix(tree, {100}, tier).path.front();
-        node->group_set_resources[0].transfer_detached = true;
-
-        const auto result = tree.insertNode({100, 200}, make2DResources(1, 2, 20), false, false);
-
-        EXPECT_TRUE(result.hard_stop.has_value());
-        EXPECT_EQ(result.accepted_resource_count, 0u);
-        EXPECT_EQ(node->group_set_resources[0].getTopTier(), tier);
-        EXPECT_TRUE(node->children.empty());
-    }
-}
-
-TEST(BlockTreeTest, InsertKeepsReplacedPrefixWhenLaterLowerTierResourceIsHeld) {
+TEST(BlockTreeTest, InsertReleasesReplacedPrefixWhenLaterLowerTierResourceIsPending) {
     for (Tier tier : {Tier::HOST, Tier::DISK}) {
         BlockTree  tree(makeLowerTierFullGroupSets(1));
         const auto original = insertLowerTierPrefix(tree, {100, 200}, tier);
+        const auto first_block = original.path[0]->group_set_resources[0].getBlocks(tier).front();
         const auto block    = original.path[1]->group_set_resources[0].getBlocks(tier).front();
         tree.groupSets()[0]->referenceBlocks({0, tier, {{original.path[1], {block}}}}, BlockTreeRefType::LOAD);
+        original.path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
 
         const auto result = tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), true, false);
 
@@ -743,14 +727,64 @@ TEST(BlockTreeTest, InsertKeepsReplacedPrefixWhenLaterLowerTierResourceIsHeld) {
         EXPECT_EQ(original.path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{20}));
         EXPECT_EQ(original.path[1]->group_set_resources[0].getTopTier(), tier);
         EXPECT_TRUE(original.path[1]->children.empty());
+        IBlockPool* pool = tier == Tier::HOST ? static_cast<IBlockPool*>(tree.groupSets()[0]->hostPool().get()) :
+                                                static_cast<IBlockPool*>(tree.groupSets()[0]->diskPool().get());
+        EXPECT_FALSE(pool->isAllocated(first_block));
+        EXPECT_EQ(pool->treeRefCount(block), 2u);
         tree.groupSets()[0]->unreferenceBlocks({0, tier, {{original.path[1], {block}}}}, BlockTreeRefType::LOAD);
     }
 }
 
+TEST(BlockTreeTest, InsertBatchesReplacedReferencesByGroupAndTier) {
+    BlockTree                                  tree(makeLowerTierFullGroupSets(2));
+    std::vector<std::vector<GroupSetResource>> original(4, std::vector<GroupSetResource>(2));
+    for (size_t group_id = 0; group_id < 2; ++group_id) {
+        for (Tier tier : {Tier::HOST, Tier::DISK}) {
+            const auto blocks = tree.groupSets()[group_id]->allocateBlocks(2, tier, BlockTreeRefType::STORE);
+            ASSERT_TRUE(blocks.has_value());
+            const size_t begin = tier == Tier::HOST ? 0 : 2;
+            for (size_t index = 0; index < 2; ++index) {
+                original[begin + index][group_id].setBlocks(tier, {(*blocks)[index]});
+            }
+        }
+    }
+    tree.insertNode({100, 200, 300, 400}, original, false, false);
+    for (const auto& per_node : original) {
+        for (size_t group_id = 0; group_id < 2; ++group_id) {
+            const Tier tier = per_node[group_id].getTopTier();
+            tree.groupSets()[group_id]->releaseBlocks(
+                tier, per_node[group_id].getBlocks(tier), BlockTreeRefType::STORE);
+        }
+    }
+    std::array<std::array<size_t, 2>, 2>   capacity_notifications{};
+    block_tree_cache_detail::ScopeRollback clear_callbacks([&]() {
+        for (const auto& group : tree.groupSets()) {
+            group->hostPool()->setCapacityChangeCallback({});
+            group->diskPool()->setCapacityChangeCallback({});
+        }
+    });
+    for (size_t group_id = 0; group_id < 2; ++group_id) {
+        tree.groupSets()[group_id]->hostPool()->setCapacityChangeCallback(
+            [&, group_id]() { ++capacity_notifications[group_id][0]; });
+        tree.groupSets()[group_id]->diskPool()->setCapacityChangeCallback(
+            [&, group_id]() { ++capacity_notifications[group_id][1]; });
+    }
+
+    const auto result = tree.insertNode({100, 200, 300, 400, 500}, make2DResources(2, 5, 20), true, false);
+
+    EXPECT_FALSE(result.hard_stop.has_value());
+    ASSERT_EQ(result.path.size(), 5u);
+    EXPECT_EQ(result.accepted_resource_count, 10u);
+    for (size_t group_id = 0; group_id < 2; ++group_id) {
+        EXPECT_EQ(capacity_notifications[group_id][0], 1u);
+        EXPECT_EQ(capacity_notifications[group_id][1], 1u);
+        EXPECT_EQ(tree.groupSets()[group_id]->hostPool()->freeBlocksNum(), 8u);
+        EXPECT_EQ(tree.groupSets()[group_id]->diskPool()->freeBlocksNum(), 8u);
+    }
+}
+
 TEST(BlockTreeTest, InsertHardStopCapturesFirstBlockingFullResource) {
-    for (const auto& [tier, state] : {std::make_pair(Tier::HOST, GroupSetTransferState::IDLE),
-                                      std::make_pair(Tier::DISK, GroupSetTransferState::IDLE),
-                                      std::make_pair(Tier::DEVICE, GroupSetTransferState::DEMOTING),
+    for (const auto& [tier, state] : {std::make_pair(Tier::DEVICE, GroupSetTransferState::DEMOTING),
                                       std::make_pair(Tier::HOST, GroupSetTransferState::LOAD_PENDING),
                                       std::make_pair(Tier::HOST, GroupSetTransferState::LOADING)}) {
         BlockTree        tree(makeGroupSets(2));
