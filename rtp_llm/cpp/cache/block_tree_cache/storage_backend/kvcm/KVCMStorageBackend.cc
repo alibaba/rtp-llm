@@ -989,6 +989,43 @@ private:
         return registrations;
     }
 
+    TransferResult executeClientTransfer(RemoteOpType                       operation,
+                                         const std::string&                 client_tag,
+                                         const std::vector<int32_t>&        blocks,
+                                         const kv_cache_manager::UriStrVec& uris,
+                                         kv_cache_manager::BlockBuffers&    buffers,
+                                         kv_cache_manager::UriStrVec&       actual_uris) {
+        const auto                           trace_info = makeTransferTraceInfo(blocks);
+        RtpLLMRemoteCacheSDKMetricsCollector collector;
+        collector.remote_sdk_block_num               = static_cast<int64_t>(blocks.size());
+        const auto                             start = Clock::now();
+        block_tree_cache_detail::ScopeRollback report([&] {
+            collector.remote_sdk_cost_time_us = elapsedTimeUs(start);
+            reportRemoteMetrics<RtpLLMRemoteCacheSDKMetrics>(collector,
+                                                             operation == REMOTE_OPERATION_READ ? "read" : "write");
+        });
+        if (operation == REMOTE_OPERATION_READ) {
+            const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(client_tag, uris, buffers, trace_info);
+            if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                return TransferResult::TIMEOUT;
+            }
+            if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+                return TransferResult::FAILED;
+            }
+        } else {
+            auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(client_tag, uris, buffers, trace_info);
+            if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                return TransferResult::TIMEOUT;
+            }
+            if (ec != kv_cache_manager::ClientErrorCode::ER_OK || (!result.empty() && result.size() != uris.size())) {
+                return TransferResult::FAILED;
+            }
+            actual_uris = std::move(result);
+        }
+        collector.remote_sdk_fail_qps = false;
+        return TransferResult::SUCCESS;
+    }
+
     TransferResult executeTagTransfers(RemoteOpType                       operation,
                                        const std::vector<std::string>&    tags,
                                        const std::vector<int32_t>&        blocks,
@@ -999,64 +1036,51 @@ private:
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return TransferResult::FAILED;
         }
-        std::unordered_map<std::string, std::vector<size_t>> indices_by_tag;
-        for (size_t index = 0; index < tags.size(); ++index) {
-            indices_by_tag[tags[index]].push_back(index);
+        kv_cache_manager::UriStrVec actual_uris;
+        if (std::all_of(uris.begin(), uris.end(), [](const auto& uri) { return uri.compare(0, 7, "pace://") == 0; })) {
+            // The first client owns all PACE GPU registrations. Forward the whole
+            // request unchanged; the SDK selects normal or gather/scatter mode.
+            const auto result =
+                executeClientTransfer(operation, registration_tags_.front(), blocks, uris, buffers, actual_uris);
+            if (result != TransferResult::SUCCESS) {
+                return result;
+            }
+        } else {
+            // Mooncake binds each client to its pool's span. Keep the original
+            // tag routing for non-PACE requests, including mixed-backend tags.
+            std::unordered_map<std::string, std::vector<size_t>> indices_by_tag;
+            for (size_t index = 0; index < tags.size(); ++index) {
+                indices_by_tag[tags[index]].push_back(index);
+            }
+            // Publish replacements only after every tag succeeds.
+            actual_uris = uris;
+            for (const auto& tag : registration_tags_) {
+                const auto found = indices_by_tag.find(tag);
+                if (found == indices_by_tag.end()) {
+                    continue;
+                }
+                const auto&                    indices = found->second;
+                kv_cache_manager::UriStrVec    tag_uris, tag_actual_uris;
+                kv_cache_manager::BlockBuffers tag_buffers;
+                std::vector<int32_t>           tag_blocks;
+                for (size_t index : indices) {
+                    tag_uris.push_back(uris[index]);
+                    tag_buffers.push_back(std::move(buffers[index]));
+                    tag_blocks.push_back(blocks[index]);
+                }
+                const auto result =
+                    executeClientTransfer(operation, tag, tag_blocks, tag_uris, tag_buffers, tag_actual_uris);
+                if (result != TransferResult::SUCCESS) {
+                    return result;
+                }
+                for (size_t index = 0; index < tag_actual_uris.size(); ++index) {
+                    actual_uris[indices[index]] = std::move(tag_actual_uris[index]);
+                }
+                indices_by_tag.erase(found);
+            }
+            RTP_LLM_CHECK(indices_by_tag.empty());
         }
-        // Keep replacements local until every tag completes. A timeout or
-        // failure is an all-or-nothing response and leaves response.actual_uris empty.
-        auto actual_uris = uris;
-        for (const auto& tag : registration_tags_) {
-            const auto found = indices_by_tag.find(tag);
-            if (found == indices_by_tag.end()) {
-                continue;
-            }
-            const auto&                    indices = found->second;
-            kv_cache_manager::UriStrVec    batch_uris;
-            kv_cache_manager::BlockBuffers batch_buffers;
-            std::vector<int32_t>           batch_blocks;
-            for (size_t index : indices) {
-                batch_uris.push_back(uris[index]);
-                batch_buffers.push_back(std::move(buffers[index]));
-                batch_blocks.push_back(blocks[index]);
-            }
-            const auto trace_info = makeTransferTraceInfo(batch_blocks);
-            RtpLLMRemoteCacheSDKMetricsCollector collector;
-            collector.remote_sdk_block_num = static_cast<int64_t>(batch_blocks.size());
-            const auto start = Clock::now();
-            block_tree_cache_detail::ScopeRollback report([&] {
-                collector.remote_sdk_cost_time_us = elapsedTimeUs(start);
-                reportRemoteMetrics<RtpLLMRemoteCacheSDKMetrics>(
-                    collector, operation == REMOTE_OPERATION_READ ? "read" : "write");
-            });
-            if (operation == REMOTE_OPERATION_READ) {
-                const auto ec =
-                    client_wrapper_->loadKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
-                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
-                    return TransferResult::TIMEOUT;
-                }
-                if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-                    return TransferResult::FAILED;
-                }
-            } else {
-                auto [ec, result] =
-                    client_wrapper_->saveKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
-                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
-                    return TransferResult::TIMEOUT;
-                }
-                if (ec != kv_cache_manager::ClientErrorCode::ER_OK
-                    || (!result.empty() && result.size() != batch_uris.size())) {
-                    return TransferResult::FAILED;
-                }
-                for (size_t index = 0; index < result.size(); ++index) {
-                    actual_uris[indices[index]] = std::move(result[index]);
-                }
-            }
-            collector.remote_sdk_fail_qps = false;
-            indices_by_tag.erase(found);
-        }
-        RTP_LLM_CHECK(indices_by_tag.empty());
-        if (operation == REMOTE_OPERATION_WRITE && actual_uris != uris) {
+        if (operation == REMOTE_OPERATION_WRITE && !actual_uris.empty() && actual_uris != uris) {
             for (auto& uri : actual_uris) {
                 *response.add_actual_uris() = std::move(uri);
             }

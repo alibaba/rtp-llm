@@ -74,7 +74,8 @@ public:
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
 
-    // Business identity is a tag; vector slots never leave this wrapper.
+    // The tag selects a registered transfer client; vector slots stay private.
+    // PACE uses the first client, which owns all GPU registrations. Span-bound backends must use their own pool's tag.
     virtual bool loadKvCachesForTag(const std::string&                                          tag,
                                     const kv_cache_manager::UriStrVec&                          uris,
                                     kv_cache_manager::BlockBuffers&                             buffers,
