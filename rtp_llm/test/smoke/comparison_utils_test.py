@@ -1,6 +1,6 @@
 import unittest
 
-from comparison_utils import integer_within_tolerance
+from rtp_llm.test.smoke.comparison_utils import integer_within_tolerance
 
 
 class IntegerWithinToleranceTest(unittest.TestCase):

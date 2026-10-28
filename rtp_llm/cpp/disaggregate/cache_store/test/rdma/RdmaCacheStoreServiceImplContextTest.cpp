@@ -25,7 +25,7 @@ public:
                                 CacheStoreLoadDoneCallback                                   callback,
                                 const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector):
         request_block_buffer_(request_block_buffer) {}
-        
+
     virtual ~MockCacheLoadServiceClosure() {}
 
 public:

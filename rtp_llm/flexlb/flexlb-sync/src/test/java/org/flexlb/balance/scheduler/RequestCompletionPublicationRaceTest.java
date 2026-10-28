@@ -146,9 +146,8 @@ class RequestCompletionPublicationRaceTest {
             Response expired = future.get(2L, TimeUnit.SECONDS);
             callback.get(2L, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
-            assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
-            assertEquals(
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED, expired.getAdmissionRejectReason());
+            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), expired.getCode());
+            assertEquals(AdmissionRejectReason.UNSPECIFIED, expired.getAdmissionRejectReason());
             assertEquals(RequestState.Phase.TIMED_OUT, slot.snapshot().state());
             verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify(prefill).expireCommittedItem(item);

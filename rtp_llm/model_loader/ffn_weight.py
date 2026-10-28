@@ -401,6 +401,7 @@ class MoeAtomicWeight(AtomicWeight):
                 self.name,
                 raw_tensor,
                 use_swizzle_a=load_config.use_swizzleA,
+                force_legacy_fp8_ptpc=load_config.force_legacy_fp8_ptpc,
             )
         }
 

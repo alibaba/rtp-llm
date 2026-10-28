@@ -1,0 +1,77 @@
+{
+    "model_type": "deepseek2",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V2-Lite-Chat/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "temperature": 0.0,
+                "top_p": 0.1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": " 1. 如何有效地提高英语听力水平？\n2. 有哪些实用的英语听力技巧可以帮助学习者更好地理解英语对话？\n3. 在听力练习中，如何克服听力材料速度过快或口音问题？\n4. 如何利用科技工具和资源来辅助英语听力训练？\n5. 听力训练对于提高英语口语和写作能力有何帮助？\n6. 如何通过听力练习来增强对英语语法和词汇的理解？\n7. 有哪些常见的听力误区可能会阻碍英语听力技能的提升？\n8. 如何制定一个有效的英语听力学习计划？\n9. 在听力练习中，如何处理听不懂的单词和短语？\n10. 如何通过听力材料来学习英语国家的文化和习俗？",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "total_tokens": 181,
+                    "completion_tokens": 164
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": [
+                    "You are a helpful assistant.\n\nUser: 你试试不上班\n\nAssistant:"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 500,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_hidden_states": true,
+                    "return_logits": true
+                }
+            },
+            "result": {
+                "response": " 作为一个虚拟助手，我没有实体存在，因此不存在不上班的情况。我的工作是24/7不间断的，只要服务器运行，我就会在这里帮助用户解答问题和提供信息。如果你有任何问题或需要帮助，随时可以告诉我！",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": [
+                    "You are a helpful assistant.\n\nUser: hello,你试试不上班\n\nUser: 可是怎么做实现呢\n\nAssistant:"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 500,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_input_ids": true,
+                    "return_output_ids": true
+                }
+            },
+            "result": {
+                "response": " 不上班的想法听起来很吸引人，但实际操作起来可能会有一些挑战。以下是一些可能的步骤，帮助你实现不上班的目标：\n\n1. **财务规划**：首先，你需要评估你的财务状况。确定你的月度开销，并制定一个储蓄计划。如果你的收入主要来自工资，那么你可能需要考虑增加副业或投资来增加 passiv e income。\n\n2. **职业转换**：考虑寻找可以远程工作或提供灵活工作时间的职位。这样，你可以在家工作，从而减少通勤时间和办公室成本。\n\n3. **自我提升**：提升你的技能和资历，这样你可以考虑自由职业或创业，而不是依赖于传统的全职工作。\n\n4. **创业**：如果你有创业精神，可以考虑自己创业。这样，你可以控制自己的工作时间和收入。\n\n5. **投资**：学习投资，让你的钱为你工作。股票、债券、房地产或其他投资渠道都可以作为 passiv e income 的来源。\n\n6. **节省开支**：减少不必要的开支，比如外出就餐、订阅服务等，将省下的钱用于储蓄或投资。\n\n7. **退休规划**：如果你已经接近退休年龄，可以考虑提前退休。这通常需要大量的储蓄和投资，以及对生活方式的调整。\n\n8. **健康管理**：保持健康的生活方式，减少医疗费用。\n\n9. **社交和休闲**：虽然不上班，但也要确保有足够的社交活动和休闲时间，保持生活的平衡。\n\n10. **法律和税务**：在做出决定之前，咨询法律和税务专家，确保你的计划符合所有相关的法律和税务要求。\n\n请记住，不上班并不意味着不工作。实际上，它可能需要更多的工作来确保你的财务安全和生活方式的维持。此外，每个人的情况都不同，因此在做出决定之前，最好咨询财务顾问或规划师。",
+                "finished": true
+            }
+        }
+    ]
+}

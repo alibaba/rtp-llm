@@ -1,3 +1,228 @@
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import TestCase
+from unittest.mock import Mock, patch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _load_device_resource_module():
+    path = PROJECT_ROOT / "rtp_llm" / "test" / "utils" / "device_resource.py"
+    spec = importlib.util.spec_from_file_location("_device_resource_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_jit_sys_path_setup_module():
+    path = PROJECT_ROOT / "rtp_llm" / "test" / "utils" / "jit_sys_path_setup.py"
+    spec = importlib.util.spec_from_file_location(
+        "_jit_sys_path_setup_under_test", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+device_resource = _load_device_resource_module()
+
+
+class DeviceResourceMainContractTest(TestCase):
+    def test_rocm_product_properties_count_each_device_once(self):
+        path = PROJECT_ROOT / "rtp_llm/test/utils/test_device_detection.py"
+        spec = importlib.util.spec_from_file_location("_device_detection_probe", path)
+        probe = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(probe)
+        output = "\n".join(
+            f"GPU[{gpu}] : {field} : {value}"
+            for gpu in (0, 1)
+            for field, value in (
+                ("Card series", "AMD Radeon Graphics"),
+                ("Card model", "0x74a1"),
+                ("Card vendor", "Advanced Micro Devices, Inc."),
+            )
+        )
+        output += "\nGPU[0] : Card series : AMD Radeon Graphics\n"
+        with patch.object(
+            device_resource.subprocess,
+            "run",
+            return_value=Mock(returncode=0, stdout=output),
+        ):
+            for detector in (
+                device_resource._detect_rocm,
+                probe.TestDeviceDetection()._detect_rocm,
+            ):
+                with self.subTest(detector=detector.__module__):
+                    self.assertEqual(detector(), ("AMD Radeon Graphics", 2))
+
+    def test_rocm_allocator_uses_devices_instead_of_product_property_rows(self):
+        output = "\n".join(
+            f"GPU[{gpu}] : property {field} : AMD Radeon Graphics"
+            for gpu in range(8)
+            for field in range(9)
+        )
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(device_resource, "GPU_STATUS_ROOT", directory),
+            patch.object(device_resource, "get_ip", return_value="worker"),
+            patch.object(device_resource, "_detect_nvidia", return_value=None),
+            patch.object(
+                device_resource.subprocess,
+                "run",
+                return_value=Mock(returncode=0, stdout=output),
+            ),
+            patch.object(
+                device_resource.DeviceResource,
+                "_get_topology_numa_groups",
+                return_value=[],
+            ),
+        ):
+            resource = device_resource.DeviceResource(2)
+            self.assertEqual(list(resource.total_gpus), list(range(8)))
+            self.assertEqual(
+                [list(group) for group in resource._candidate_gpu_groups()],
+                [[gpu, gpu + 1] for gpu in range(7)],
+            )
+
+    def test_native_jit_cache_separates_installations_and_owns_linked_files(self):
+        jit_setup = _load_jit_sys_path_setup_module()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "venv-a" / "site-packages" / "flashinfer"
+            source.mkdir(parents=True)
+            header = root / "original.cuh"
+            header.write_text("current kernel source")
+            (source / "kernel.cuh").symlink_to(header)
+            other_source = root / "venv-b" / "site-packages" / "flashinfer"
+            self.assertNotEqual(
+                jit_setup._cache_key("flashinfer", "0.6.9", source),
+                jit_setup._cache_key("flashinfer", "0.6.9", other_source),
+            )
+            self.assertEqual(
+                jit_setup._cache_key(
+                    "torch", "2.8", "/runfiles/pip_cuda_torch/site-packages/torch"
+                ),
+                f"torch_python-2.8-cp{sys.version_info.major}{sys.version_info.minor}__pip_cuda_torch",
+            )
+            with patch.object(
+                jit_setup, "get_package_info", return_value=("0.6.9", str(source))
+            ):
+                copied = jit_setup.copy_package_with_lock("flashinfer", root)
+            header.unlink()
+            cached_header = Path(copied) / "flashinfer" / "kernel.cuh"
+            self.assertFalse(cached_header.is_symlink())
+            self.assertEqual(cached_header.read_text(), "current kernel source")
+
+    def test_native_flashinfer_workspace_is_selected_before_package_import(self):
+        jit_setup = _load_jit_sys_path_setup_module()
+        observed = []
+
+        def copy_package(*args):
+            observed.append(os.environ.get("FLASHINFER_WORKSPACE_BASE"))
+            return None
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(jit_setup, "copy_package_with_lock", side_effect=copy_package),
+        ):
+            jit_setup.setup_jit_cache()
+        self.assertEqual(len(observed), 4)
+        self.assertTrue(all(value and value == observed[0] for value in observed))
+        self.assertIn(jit_setup._native_install_key(sys.prefix), observed[0])
+
+    def test_default_requires_one_gpu(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(device_resource._get_required_gpu_count(), 1)
+
+        resource = object.__new__(device_resource.DeviceResource)
+        with (
+            patch.dict(
+                os.environ,
+                {"RTP_REMOTE_SESSION_ID": "remote-test"},
+                clear=True,
+            ),
+            patch.object(device_resource.subprocess, "run") as run,
+        ):
+            run.return_value.returncode = 0
+            run.return_value.stdout = "151859\n"
+            self.assertTrue(resource._has_excess_preexisting_memory("0"))
+            run.return_value.stdout = "512\n"
+            self.assertFalse(resource._has_excess_preexisting_memory("0"))
+
+        resource._candidate_gpu_groups = lambda: [[0]]
+        resource._gpu_bad_until = {}
+        resource.gpu_status_root_path = "/tmp/test-gpu-status"
+        resource.required_gpu_count = 1
+        resource._has_zombie_gpu_contexts = lambda gpu_id: False
+        resource._has_non_session_live_cuda_pids = lambda gpu_id: False
+        resource._has_excess_preexisting_memory = lambda gpu_id: True
+        with (
+            patch.object(device_resource, "FileLock"),
+            self.assertRaisesRegex(
+                device_resource.GpuLockTimeoutError, "pre-existing memory"
+            ),
+        ):
+            resource._lock_gpus()
+
+        jit_setup = _load_jit_sys_path_setup_module()
+        cached_paths = ["/cache/torch/site-packages", "/cache/deep_gemm/site-packages"]
+        with (
+            TemporaryDirectory() as venv_dir,
+            patch.dict(os.environ, {"PYTHONPATH": "/workspace"}, clear=True),
+            patch.object(sys, "argv", ["device_resource.py", "pytest"]),
+            patch.object(jit_setup.site, "getsitepackages", return_value=[venv_dir]),
+            patch.object(
+                jit_setup,
+                "copy_package_with_lock",
+                Mock(side_effect=[*cached_paths, None, None]),
+            ),
+        ):
+            cupti_dir = Path(venv_dir) / "nvidia" / "cuda_cupti" / "lib"
+            cupti_dir.mkdir(parents=True)
+            (Path(venv_dir) / "nvidia" / "not_a_library").mkdir()
+            os.environ["LD_LIBRARY_PATH"] = "/runtime/lib"
+            self.assertEqual(jit_setup.setup_jit_cache(), cached_paths)
+            self.assertEqual(
+                os.environ["PYTHONPATH"], os.pathsep.join([*cached_paths, "/workspace"])
+            )
+            self.assertEqual(
+                os.environ["LD_LIBRARY_PATH"],
+                os.pathsep.join(["/runtime/lib", str(cupti_dir)]),
+            )
+
+    def test_default_uses_cpu_when_no_device_is_available(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                device_resource._get_required_gpu_count(device_available=False), 0
+            )
+
+    def test_explicit_gpu_request_is_preserved_without_a_device(self):
+        with patch.dict(os.environ, {"GPU_COUNT": "1"}, clear=True):
+            self.assertEqual(
+                device_resource._get_required_gpu_count(device_available=False), 1
+            )
+
+    def test_gpu_count_zero_is_explicit_no_lock_opt_out(self):
+        with patch.dict(os.environ, {"GPU_COUNT": "0"}, clear=True):
+            self.assertEqual(device_resource._get_required_gpu_count(), 0)
+
+    def test_gpu_count_takes_precedence_over_world_size(self):
+        with patch.dict(os.environ, {"GPU_COUNT": "2", "WORLD_SIZE": "4"}, clear=True):
+            self.assertEqual(device_resource._get_required_gpu_count(), 2)
+
+    def test_world_size_used_when_gpu_count_absent(self):
+        with patch.dict(os.environ, {"WORLD_SIZE": "4"}, clear=True):
+            self.assertEqual(device_resource._get_required_gpu_count(), 4)
+
+
 import io
 import json
 import os
@@ -11,7 +236,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.test.utils.device_resource import (
+from _device_resource_under_test import (
     DeviceResource,
     _gpu_free_memory_mib,
     _log_test_placement,
@@ -25,9 +250,7 @@ from rtp_llm.test.utils.device_resource import (
 
 def _make_resource(required: int = 2, visible=(0, 1, 2, 3)) -> DeviceResource:
     """A DeviceResource whose visible-GPU probe never touches the host."""
-    with patch(
-        "rtp_llm.test.utils.device_resource.get_gpu_ids", return_value=list(visible)
-    ):
+    with patch("_device_resource_under_test.get_gpu_ids", return_value=list(visible)):
         return DeviceResource(required)
 
 
@@ -81,7 +304,7 @@ class CudaDriverProbeTest(unittest.TestCase):
         path = "/usr/local/cuda/compat:/usr/local/nvidia/lib64"
         with patch.dict(os.environ, {"LD_LIBRARY_PATH": path}):
             with patch(
-                "rtp_llm.test.utils.device_resource.subprocess.run",
+                "_device_resource_under_test.subprocess.run",
                 return_value=self.probe({"A10": 1}),
             ) as run:
                 self.assertEqual(get_cuda_info(), ("A10", 1))
@@ -100,7 +323,7 @@ class CudaDriverProbeTest(unittest.TestCase):
                 native_path = "/opt/conda310/lib:/usr/local/nvidia/lib64"
                 with patch.dict(os.environ, {"LD_LIBRARY_PATH": path}):
                     with patch(
-                        "rtp_llm.test.utils.device_resource.subprocess.run",
+                        "_device_resource_under_test.subprocess.run",
                         side_effect=[
                             self.probe(
                                 {}, "CUDA initialization: Error 803: driver mismatch"
@@ -120,7 +343,7 @@ class CudaDriverProbeTest(unittest.TestCase):
             with self.subTest(native=native):
                 with patch.dict(os.environ, {"LD_LIBRARY_PATH": path}):
                     with patch(
-                        "rtp_llm.test.utils.device_resource.subprocess.run",
+                        "_device_resource_under_test.subprocess.run",
                         side_effect=[
                             self.probe(
                                 {}, "CUDA initialization: Error 803: driver mismatch"
@@ -137,7 +360,7 @@ class CudaDriverProbeTest(unittest.TestCase):
     def test_803_without_compat_reports_the_worker_error(self):
         with patch.dict(os.environ, {"LD_LIBRARY_PATH": "/usr/local/nvidia/lib64"}):
             with patch(
-                "rtp_llm.test.utils.device_resource.subprocess.run",
+                "_device_resource_under_test.subprocess.run",
                 return_value=self.probe(
                     {}, "CUDA initialization: Error 803: driver mismatch"
                 ),
@@ -148,7 +371,7 @@ class CudaDriverProbeTest(unittest.TestCase):
 
     def test_real_cpu_worker_still_runs_cpu_tests(self):
         with patch(
-            "rtp_llm.test.utils.device_resource.subprocess.run",
+            "_device_resource_under_test.subprocess.run",
             return_value=self.probe({}),
         ):
             self.assertIsNone(get_cuda_info())
@@ -160,9 +383,11 @@ class CudaDriverDiagnosticsTest(unittest.TestCase):
         torch.cuda.is_available.return_value = False
         torch.version.cuda = "13.2"
         stdout, stderr = io.StringIO(), io.StringIO()
-        with patch.dict(sys.modules, {"torch": torch}), redirect_stdout(
-            stdout
-        ), redirect_stderr(stderr):
+        with (
+            patch.dict(sys.modules, {"torch": torch}),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
             exec(python_code, {})
         self.assertEqual(json.loads(stdout.getvalue()), {})
         return json.loads(stderr.getvalue().split("CUDA probe diagnostics: ", 1)[1])
@@ -176,8 +401,12 @@ class CudaDriverDiagnosticsTest(unittest.TestCase):
     def test_deleted_libcuda_keeps_full_mapped_path(self):
         path = "/usr/local/cuda/compat/libcuda.so.1 (deleted)"
         maps = f"7f00-7f10 r-xp 00000000 08:01 123 {path}\n"
-        with patch("os.path.realpath", return_value="/usr/local/cuda-13.2"), patch(
-            "builtins.open", side_effect=[io.StringIO("driver 550"), io.StringIO(maps)]
+        with (
+            patch("os.path.realpath", return_value="/usr/local/cuda-13.2"),
+            patch(
+                "builtins.open",
+                side_effect=[io.StringIO("driver 550"), io.StringIO(maps)],
+            ),
         ):
             details = self.run_probe()
         self.assertEqual(details["libcuda"], [path])
@@ -202,14 +431,18 @@ class GpuLockEntryTest(unittest.TestCase):
                 }
                 with patch.dict(os.environ, env):
                     with patch.object(sys, "argv", ["gpu_lock", "cpu-test", "arg"]):
-                        with patch(
-                            "rtp_llm.test.utils.device_resource.get_cuda_info"
-                        ) as probe, patch(
-                            "rtp_llm.test.utils.device_resource.DeviceResource"
-                        ) as resource, patch(
-                            "rtp_llm.test.utils.device_resource.subprocess.Popen",
-                            return_value=self._fake_popen(0),
-                        ) as popen:
+                        with (
+                            patch(
+                                "_device_resource_under_test.get_device_info"
+                            ) as probe,
+                            patch(
+                                "_device_resource_under_test.DeviceResource"
+                            ) as resource,
+                            patch(
+                                "_device_resource_under_test.subprocess.Popen",
+                                return_value=self._fake_popen(0),
+                            ) as popen,
+                        ):
                             self.assertEqual(main(), 0)
                             probe.assert_not_called()
                             resource.assert_not_called()
@@ -222,7 +455,7 @@ class GpuLockEntryTest(unittest.TestCase):
     def test_cpu_target_preserves_command_failure(self):
         with patch.dict(os.environ, {"GPU_COUNT": "0"}):
             with patch(
-                "rtp_llm.test.utils.device_resource.subprocess.Popen",
+                "_device_resource_under_test.subprocess.Popen",
                 return_value=self._fake_popen(23),
             ):
                 self.assertEqual(main(), 23)
@@ -232,22 +465,25 @@ class GpuLockEntryTest(unittest.TestCase):
         env = {"GPU_COUNT": "1", "WORLD_SIZE": "2"}
         with patch.dict(os.environ, env):
             with patch.dict(sys.modules, {"jit_sys_path_setup": jit_setup}):
-                with patch(
-                    "rtp_llm.test.utils.device_resource.get_cuda_info",
-                    return_value=("NVIDIA A10", 4),
-                ) as probe, patch(
-                    "rtp_llm.test.utils.device_resource.DeviceResource"
-                ) as resource, patch(
-                    "rtp_llm.test.utils.device_resource._nvidia_smi",
-                    return_value=None,
-                ), patch(
-                    "rtp_llm.test.utils.device_resource.subprocess.Popen",
-                    return_value=self._fake_popen(17),
+                with (
+                    patch(
+                        "_device_resource_under_test.get_device_info",
+                        return_value=("NVIDIA A10", 4),
+                    ) as probe,
+                    patch("_device_resource_under_test.DeviceResource") as resource,
+                    patch(
+                        "_device_resource_under_test._nvidia_smi",
+                        return_value=None,
+                    ),
+                    patch(
+                        "_device_resource_under_test.subprocess.Popen",
+                        return_value=self._fake_popen(17),
+                    ),
                 ):
                     resource.return_value.__enter__.return_value.gpu_ids = ["1", "3"]
                     self.assertEqual(main(), 17)
                     probe.assert_called_once_with()
-                    resource.assert_called_once_with(2)
+                    resource.assert_called_once_with(1)
                     jit_setup.setup_jit_cache.assert_called_once_with()
                     resource.return_value.__exit__.assert_called_once()
                     self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "1,3")
@@ -270,13 +506,14 @@ class GpuRealIdleCheckTest(unittest.TestCase):
 
     def test_memory_above_threshold_makes_the_group_dirty(self):
         resource = _make_resource()
-        with patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}), patch.object(
-            resource, "_get_gpu_used_memory_mib", return_value=4096
-        ), patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[]
+        with (
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}),
+            patch.object(resource, "_get_gpu_used_memory_mib", return_value=4096),
+            patch.object(resource, "_get_gpu_compute_apps", return_value=[]),
         ):
             problems = resource._gpu_group_idle_problems(["0", "1"])
         self.assertEqual(len(problems), 2)
@@ -284,13 +521,16 @@ class GpuRealIdleCheckTest(unittest.TestCase):
 
     def test_negative_budget_checks_processes_only(self):
         resource = _make_resource()
-        with patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "-1"}), patch.object(
-            resource, "_get_gpu_used_memory_mib", return_value=99999
-        ) as memory, patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[]
+        with (
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "-1"}),
+            patch.object(
+                resource, "_get_gpu_used_memory_mib", return_value=99999
+            ) as memory,
+            patch.object(resource, "_get_gpu_compute_apps", return_value=[]),
         ):
             self.assertEqual(resource._gpu_group_idle_problems(["0"]), [])
         memory.assert_not_called()
@@ -298,18 +538,19 @@ class GpuRealIdleCheckTest(unittest.TestCase):
     def test_live_compute_process_is_busy_and_never_signalled(self):
         resource = _make_resource()
         live = _spawn_sleeper(self)
-        with patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}), patch.object(
-            resource, "_get_gpu_used_memory_mib", return_value=0
-        ), patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[(live.pid, 512)]
-        ), patch(
-            "rtp_llm.test.utils.device_resource.os.kill"
-        ) as kill, self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}),
+            patch.object(resource, "_get_gpu_used_memory_mib", return_value=0),
+            patch.object(
+                resource, "_get_gpu_compute_apps", return_value=[(live.pid, 512)]
+            ),
+            patch("_device_resource_under_test.os.kill") as kill,
+            self.assertLogs(level="WARNING") as logs,
+        ):
             problems = resource._gpu_group_idle_problems(["1"])
         self.assertEqual(len(problems), 1)
         self.assertIn(f"busy pid={live.pid} mem=512", problems[0])
@@ -319,16 +560,17 @@ class GpuRealIdleCheckTest(unittest.TestCase):
     def test_dead_pid_is_logged_as_zombie_context(self):
         resource = _make_resource()
         dead_pid = _reaped_pid(self)
-        with patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.object(
-            resource, "_get_gpu_used_memory_mib", return_value=0
-        ), patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[(dead_pid, 1024)]
-        ), self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.object(resource, "_get_gpu_used_memory_mib", return_value=0),
+            patch.object(
+                resource, "_get_gpu_compute_apps", return_value=[(dead_pid, 1024)]
+            ),
+            self.assertLogs(level="WARNING") as logs,
+        ):
             problems = resource._gpu_group_idle_problems(["2"])
         self.assertEqual(len(problems), 1)
         self.assertIn(f"zombie-context pid={dead_pid}", problems[0])
@@ -336,14 +578,14 @@ class GpuRealIdleCheckTest(unittest.TestCase):
 
     def test_platform_without_nvidia_smi_is_not_judged(self):
         resource = _make_resource()
-        with patch("rtp_llm.test.utils.device_resource._nvidia_smi", return_value=None):
+        with patch("_device_resource_under_test._nvidia_smi", return_value=None):
             self.assertEqual(resource._gpu_group_idle_problems(["0", "1"]), [])
 
     def test_memory_query_parses_nvidia_smi_output(self):
         resource = _make_resource()
         completed = subprocess.CompletedProcess([], 0, stdout="267392 MiB\n", stderr="")
         with patch(
-            "rtp_llm.test.utils.device_resource.subprocess.run", return_value=completed
+            "_device_resource_under_test.subprocess.run", return_value=completed
         ) as run:
             self.assertEqual(resource._get_gpu_used_memory_mib("1"), 267392)
         self.assertEqual(
@@ -358,7 +600,7 @@ class GpuRealIdleCheckTest(unittest.TestCase):
             [], 0, stdout="14578, 15110\n", stderr=""
         )
         with patch(
-            "rtp_llm.test.utils.device_resource.subprocess.run", return_value=completed
+            "_device_resource_under_test.subprocess.run", return_value=completed
         ):
             self.assertEqual(resource._get_gpu_compute_apps("0"), [(14578, 15110)])
 
@@ -374,20 +616,22 @@ class GpuAcquireRealIdleTest(unittest.TestCase):
             return True
 
         memory = {"0": 4096, "1": 0}
-        with patch("rtp_llm.test.utils.device_resource.FileLock"), patch.object(
-            resource, "_lock_gpus", side_effect=lock_group
-        ), patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.dict(
-            os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}
-        ), patch.object(
-            resource, "_get_gpu_used_memory_mib", side_effect=lambda gpu: memory[gpu]
-        ), patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[]
-        ), self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            patch("_device_resource_under_test.FileLock"),
+            patch.object(resource, "_lock_gpus", side_effect=lock_group),
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}),
+            patch.object(
+                resource,
+                "_get_gpu_used_memory_mib",
+                side_effect=lambda gpu: memory[gpu],
+            ),
+            patch.object(resource, "_get_gpu_compute_apps", return_value=[]),
+            self.assertLogs(level="WARNING") as logs,
+        ):
             resource.__enter__()
         self.assertEqual(resource.gpu_ids, ["1"])
         self.assertGreaterEqual(len(attempts), 2)
@@ -402,22 +646,21 @@ class GpuAcquireRealIdleTest(unittest.TestCase):
             resource.gpu_ids = ["1"]
             return True
 
-        with patch("rtp_llm.test.utils.device_resource.FileLock"), patch.object(
-            resource, "_lock_gpus", side_effect=lock_group
-        ), patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.object(
-            resource, "_get_gpu_used_memory_mib", return_value=4096
-        ), patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[(live.pid, 512)]
-        ), patch.object(
-            resource, "_ensure_gpus_released"
-        ) as cleanup, patch(
-            "rtp_llm.test.utils.device_resource.os.kill"
-        ) as kill, self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            patch("_device_resource_under_test.FileLock"),
+            patch.object(resource, "_lock_gpus", side_effect=lock_group),
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.object(resource, "_get_gpu_used_memory_mib", return_value=4096),
+            patch.object(
+                resource, "_get_gpu_compute_apps", return_value=[(live.pid, 512)]
+            ),
+            patch.object(resource, "_ensure_gpus_released") as cleanup,
+            patch("_device_resource_under_test.os.kill") as kill,
+            self.assertLogs(level="WARNING") as logs,
+        ):
             with self.assertRaises(TimeoutError) as raised:
                 resource.__enter__()
         message = str(raised.exception)
@@ -442,39 +685,39 @@ class GpuLockSkipsDirtyGroupTest(unittest.TestCase):
     def test_dirty_first_card_is_skipped_for_a_clean_one(self):
         resource = _make_resource(required=1, visible=(0, 1))
         memory = {"0": 4096, "1": 0}
-        with patch("rtp_llm.test.utils.device_resource.FileLock"), patch.object(
-            resource, "_has_zombie_gpu_contexts", return_value=False
-        ), patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.dict(
-            os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}
-        ), patch.object(
-            resource, "_get_gpu_used_memory_mib", side_effect=lambda gpu: memory[gpu]
-        ), patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[]
-        ), self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            patch("_device_resource_under_test.FileLock"),
+            patch.object(resource, "_has_zombie_gpu_contexts", return_value=False),
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}),
+            patch.object(
+                resource,
+                "_get_gpu_used_memory_mib",
+                side_effect=lambda gpu: memory[gpu],
+            ),
+            patch.object(resource, "_get_gpu_compute_apps", return_value=[]),
+            self.assertLogs(level="WARNING") as logs,
+        ):
             self.assertTrue(resource._lock_gpus())
         self.assertEqual(resource.gpu_ids, ["1"])
         self.assertIn("trying next group", "\n".join(logs.output))
 
     def test_all_groups_dirty_returns_false_for_outer_retry(self):
         resource = _make_resource(required=1, visible=(0, 1))
-        with patch("rtp_llm.test.utils.device_resource.FileLock"), patch.object(
-            resource, "_has_zombie_gpu_contexts", return_value=False
-        ), patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.dict(
-            os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}
-        ), patch.object(
-            resource, "_get_gpu_used_memory_mib", return_value=4096
-        ), patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[]
-        ), self.assertLogs(
-            level="WARNING"
+        with (
+            patch("_device_resource_under_test.FileLock"),
+            patch.object(resource, "_has_zombie_gpu_contexts", return_value=False),
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.dict(os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}),
+            patch.object(resource, "_get_gpu_used_memory_mib", return_value=4096),
+            patch.object(resource, "_get_gpu_compute_apps", return_value=[]),
+            self.assertLogs(level="WARNING"),
         ):
             self.assertFalse(resource._lock_gpus())
         self.assertEqual(resource.gpu_ids, [])
@@ -485,11 +728,13 @@ class GpuReleaseCleanupTest(unittest.TestCase):
         resource = _make_resource()
         resource.gpu_ids = ["0"]
         foreign = _spawn_sleeper(self)
-        with patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[(foreign.pid, 600)]
-        ), patch("rtp_llm.test.utils.device_resource.os.kill") as kill, self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            patch.object(
+                resource, "_get_gpu_compute_apps", return_value=[(foreign.pid, 600)]
+            ),
+            patch("_device_resource_under_test.os.kill") as kill,
+            self.assertLogs(level="WARNING") as logs,
+        ):
             self.assertFalse(resource._ensure_gpus_released(timeout=5))
         kill.assert_not_called()
         self.assertIn(
@@ -502,11 +747,13 @@ class GpuReleaseCleanupTest(unittest.TestCase):
         resource = _make_resource()
         resource.gpu_ids = ["0"]
         dead_pid = _reaped_pid(self)
-        with patch.object(
-            resource, "_get_gpu_compute_apps", return_value=[(dead_pid, 2048)]
-        ), patch("rtp_llm.test.utils.device_resource.os.kill") as kill, self.assertLogs(
-            level="WARNING"
-        ) as logs:
+        with (
+            patch.object(
+                resource, "_get_gpu_compute_apps", return_value=[(dead_pid, 2048)]
+            ),
+            patch("_device_resource_under_test.os.kill") as kill,
+            self.assertLogs(level="WARNING") as logs,
+        ):
             self.assertFalse(resource._ensure_gpus_released(timeout=5))
         kill.assert_not_called()
         self.assertIn(
@@ -531,8 +778,9 @@ class GpuReleaseCleanupTest(unittest.TestCase):
                 return []
             return [(own.pid, 700)]
 
-        with patch.object(resource, "_get_gpu_compute_apps", side_effect=apps), patch(
-            "rtp_llm.test.utils.device_resource.os.kill", side_effect=spy_kill
+        with (
+            patch.object(resource, "_get_gpu_compute_apps", side_effect=apps),
+            patch("_device_resource_under_test.os.kill", side_effect=spy_kill),
         ):
             self.assertTrue(resource._ensure_gpus_released(timeout=15))
         self.assertIn((own.pid, signal.SIGTERM), sent)
@@ -580,9 +828,11 @@ class TestProcessGroupTest(unittest.TestCase):
         resource = MagicMock()
         proc = MagicMock()
         proc.pid = 4242
-        with patch("rtp_llm.test.utils.device_resource._log_test_placement"), patch(
-            "rtp_llm.test.utils.device_resource.subprocess.Popen", return_value=proc
-        ), patch("rtp_llm.test.utils.device_resource._wait_for_test", return_value=0):
+        with (
+            patch("_device_resource_under_test._log_test_placement"),
+            patch("_device_resource_under_test.subprocess.Popen", return_value=proc),
+            patch("_device_resource_under_test._wait_for_test", return_value=0),
+        ):
             self.assertEqual(_run_test_command(resource), 0)
         self.assertEqual(resource.own_test_process_group, 4242)
 
@@ -593,32 +843,41 @@ class ZombieGpuContextTest(unittest.TestCase):
     def test_all_dead_pids_mark_the_device_unusable(self):
         resource = _make_resource()
         dead_pid = _reaped_pid(self)
-        with patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.object(resource, "_get_gpu_pids", return_value=[dead_pid]):
+        with (
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.object(resource, "_get_gpu_pids", return_value=[dead_pid]),
+        ):
             self.assertTrue(resource._has_zombie_gpu_contexts("0"))
 
     def test_live_pid_keeps_the_device_usable(self):
         resource = _make_resource()
         live = _spawn_sleeper(self)
-        with patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.object(resource, "_get_gpu_pids", return_value=[live.pid]):
+        with (
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.object(resource, "_get_gpu_pids", return_value=[live.pid]),
+        ):
             self.assertFalse(resource._has_zombie_gpu_contexts("0"))
 
     def test_unqueryable_device_is_unusable(self):
         resource = _make_resource()
-        with patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch.object(resource, "_get_gpu_pids", return_value=None):
+        with (
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch.object(resource, "_get_gpu_pids", return_value=None),
+        ):
             self.assertTrue(resource._has_zombie_gpu_contexts("0"))
 
     def test_platform_without_nvidia_smi_is_not_zombie(self):
         resource = _make_resource()
-        with patch("rtp_llm.test.utils.device_resource._nvidia_smi", return_value=None):
+        with patch("_device_resource_under_test._nvidia_smi", return_value=None):
             self.assertFalse(resource._has_zombie_gpu_contexts("0"))
 
 
@@ -644,15 +903,18 @@ class RuntimeWatchdogTest(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             [], 0, stdout="GPU-aaa\nGPU-bbb\n", stderr=""
         )
-        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}), patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi",
-            return_value="/usr/bin/nvidia-smi",
-        ), patch(
-            "rtp_llm.test.utils.device_resource.subprocess.run",
-            return_value=completed,
-        ) as run, patch(
-            "rtp_llm.test.utils.device_resource.logging.info"
-        ) as log:
+        with (
+            patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}),
+            patch(
+                "_device_resource_under_test._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ),
+            patch(
+                "_device_resource_under_test.subprocess.run",
+                return_value=completed,
+            ) as run,
+            patch("_device_resource_under_test.logging.info") as log,
+        ):
             _log_test_placement()
             self.assertEqual(
                 run.call_args.args[0][-2:],
@@ -665,19 +927,19 @@ class RuntimeWatchdogTest(unittest.TestCase):
             self.assertIn("uuids=GPU-aaa,GPU-bbb", line)
 
     def test_placement_degrades_when_nvidia_smi_is_missing(self):
-        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "3"}), patch(
-            "rtp_llm.test.utils.device_resource._nvidia_smi", return_value=None
+        with (
+            patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "3"}),
+            patch("_device_resource_under_test._nvidia_smi", return_value=None),
         ):
             _log_test_placement()  # must not raise
 
     def test_hung_test_is_killed_and_reports_exit_code_70(self):
         hung = [sys.executable, "-c", "import time; time.sleep(30)"]
-        with patch.dict(os.environ, {"RTP_TEST_WATCHDOG_SECONDS": "1"}), patch(
-            "rtp_llm.test.utils.device_resource._WATCHDOG_SIGNAL_GRACE_SECONDS", 0.2
-        ), patch(
-            "rtp_llm.test.utils.device_resource._log_test_placement"
-        ), patch.object(
-            sys, "argv", ["gpu_lock"] + hung
+        with (
+            patch.dict(os.environ, {"RTP_TEST_WATCHDOG_SECONDS": "1"}),
+            patch("_device_resource_under_test._WATCHDOG_SIGNAL_GRACE_SECONDS", 0.2),
+            patch("_device_resource_under_test._log_test_placement"),
+            patch.object(sys, "argv", ["gpu_lock"] + hung),
         ):
             self.assertEqual(_run_test_command(), 70)
 
@@ -698,12 +960,13 @@ class RuntimeWatchdogTest(unittest.TestCase):
                 f"open({str(pid_file)!r}, 'w').write(str(p.pid));"
                 "time.sleep(60)"
             )
-            with patch.dict(os.environ, {"RTP_TEST_WATCHDOG_SECONDS": "1"}), patch(
-                "rtp_llm.test.utils.device_resource._WATCHDOG_SIGNAL_GRACE_SECONDS", 0.5
-            ), patch(
-                "rtp_llm.test.utils.device_resource._log_test_placement"
-            ), patch.object(
-                sys, "argv", ["gpu_lock", sys.executable, "-c", child]
+            with (
+                patch.dict(os.environ, {"RTP_TEST_WATCHDOG_SECONDS": "1"}),
+                patch(
+                    "_device_resource_under_test._WATCHDOG_SIGNAL_GRACE_SECONDS", 0.5
+                ),
+                patch("_device_resource_under_test._log_test_placement"),
+                patch.object(sys, "argv", ["gpu_lock", sys.executable, "-c", child]),
             ):
                 self.assertEqual(_run_test_command(), 70)
             grandchild_pid = int(pid_file.read_text())

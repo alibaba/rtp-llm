@@ -1,6 +1,7 @@
 import unittest
 from typing import List
 
+import pytest
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
@@ -15,6 +16,8 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     GenerateResponse,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class MockTokenizer(BaseTokenizer):

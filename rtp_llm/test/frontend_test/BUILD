@@ -1,9 +1,12 @@
+load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
+
 py_test(
     name = "vip_server_test",
     srcs = [
         "vip_server_test.py",
     ],
     deps = [
+        test_requirement("pytest"),
         "//rtp_llm:ops",
         "//rtp_llm:testlib",
     ],
@@ -22,6 +25,7 @@ py_test(
     ],
     main = "frontend_app_test.py",
     deps = [
+        test_requirement("pytest"),
         "//rtp_llm:ops",
         "//rtp_llm:testlib",
     ],

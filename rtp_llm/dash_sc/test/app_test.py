@@ -484,7 +484,9 @@ class PreStopDrainSecondsTest(TestCase):
             self.assertTrue(app.wait_for_signal_dispatch())
             self.assertTrue(app._shutdown_manager.is_unavailable())
             self.assertFalse(app._shutdown_manager.is_draining())
-            self.assertEqual(app._shutdown_manager.drain_reason(), "signal 10")
+            self.assertEqual(
+                app._shutdown_manager.drain_reason(), f"signal {signal.SIGUSR1}"
+            )
             self.assertEqual(app._shutdown_manager.active_request_count(), 1)
             self.assertFalse(app._shutdown_manager.try_begin_request())
             self.assertEqual(app._shutdown_manager.finish_request(), 0)

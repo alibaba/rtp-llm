@@ -186,8 +186,12 @@ class TRTLLMFMHAv2PagedPrefillOp:
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         page_size = attn_configs.kernel_tokens_per_block
-        return _supports_trtllm_fmha_v2(attn_configs) and (
-            page_size > 0 and page_size.bit_count() == 1
+        return (
+            attn_inputs.kv_cache_kernel_block_id is not None
+            and attn_inputs.kv_cache_kernel_block_id.numel() > 0
+            and _supports_trtllm_fmha_v2(attn_configs)
+            and page_size > 0
+            and page_size.bit_count() == 1
         )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> TRTLLMFMHAv2Params:
@@ -395,6 +399,7 @@ class TRTLLMFMHAv2PrefillOp:
 
 
 class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
+    NAME = "trt_paged"
 
     def __init__(
         self,
@@ -440,6 +445,8 @@ class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
 
 class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
     """Non-paged prefill selecting packed MHA or contiguous GQA input."""
+
+    NAME = "trt"
 
     def __init__(
         self,
@@ -498,3 +505,16 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
             and configs.kv_cache_dtype == KvCacheDataType.BASE
             and configs.is_causal
         )
+
+
+# Keep both naming generations importable while remote workers roll their source
+# caches. The short names are the public backend names used by newer branches.
+TRTPagedMHAImpl = FlashInferTRTLLMFMHAv2PagedPrefillImpl
+TRTMHAImpl = FlashInferTRTLLMFMHAv2PrefillImpl
+
+__all__ = [
+    "FlashInferTRTLLMFMHAv2PagedPrefillImpl",
+    "FlashInferTRTLLMFMHAv2PrefillImpl",
+    "TRTPagedMHAImpl",
+    "TRTMHAImpl",
+]

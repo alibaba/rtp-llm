@@ -1,5 +1,4 @@
 import importlib.util
-import os
 import unittest
 from pathlib import Path
 
@@ -7,11 +6,7 @@ from rtp_llm.config.py_config_modules import MMRdmaConfig
 
 
 def _load_exporter_module():
-    runfiles_root = Path(os.environ["TEST_SRCDIR"])
-    workspace = os.environ["TEST_WORKSPACE"]
-    extension_path = (
-        runfiles_root / workspace / "rtp_llm/libs/libmm_rdma_exporter.so"
-    )
+    extension_path = Path(__file__).resolve().parents[2] / "libs/libmm_rdma_exporter.so"
     if not extension_path.is_file():
         raise FileNotFoundError(f"RDMA exporter shared library not found: {extension_path}")
 

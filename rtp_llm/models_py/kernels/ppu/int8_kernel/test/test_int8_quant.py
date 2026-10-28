@@ -1,10 +1,14 @@
 import unittest
 
+import pytest
 import torch
 
 from rtp_llm.models_py.kernels.ppu.int8_kernel.int8_quant import (
     per_token_quant_int8,
 )
+
+
+pytestmark = [pytest.mark.ppu, pytest.mark.PPU_ZW810E]
 
 
 class PerTokenQuantInt8Test(unittest.TestCase):

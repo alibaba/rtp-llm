@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
+import pytest
+
 from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
 
@@ -263,9 +265,15 @@ class JitCacheSmokeTest(unittest.TestCase):
 
     def _log_candidates(self) -> list[Path]:
         work_dir = Path(os.environ.get("MAGA_SERVER_WORK_DIR", ""))
-        candidates = [Path(self.server.log_file_path)] if self.server else []
+        candidates: list[Path] = []
+        if self.server and self.server.log_file_path:
+            process_log = Path(self.server.log_file_path)
+            candidates.append(process_log)
+            # The server reconfigures Python logging to LOG_PATH/main_<rank>.log;
+            # the launcher process log alone does not contain JIT restore events.
+            candidates.extend(sorted(process_log.parent.glob("*.log")))
         candidates += sorted(work_dir.glob("*_logs/*.log")) if work_dir.name else []
-        return candidates
+        return list(dict.fromkeys(candidates))
 
     def _dump_server_logs(self) -> None:
         for path in self._log_candidates():
@@ -358,10 +366,35 @@ class JitCacheSmokeTest(unittest.TestCase):
             "(missing scope_id = never published, other ids = scope fork)"
         )
 
+    @pytest.mark.manual
+    @pytest.mark.smoke
+    @pytest.mark.cuda
+    @pytest.mark.H20
+    @pytest.mark.gpu(type="H20", count=2)
+    @pytest.mark.timeout(7200)
     def test_deepseek_v2_lite(self) -> None:
+        os.environ.setdefault(
+            "SMOKE_ARGS",
+            "--warm_up 0 --hack_layer_num 2 --load_method scratch "
+            "--test_block_num 100 --act_type BF16 --quantization FP8_PER_BLOCK "
+            "--seq_size_per_block 64 --tp_size 2 --reuse_cache 1",
+        )
         self._run_lifecycle(CUDA_CONFIG)
 
+    @pytest.mark.manual
+    @pytest.mark.smoke
+    @pytest.mark.rocm
+    @pytest.mark.MI308X_ROCM7
+    @pytest.mark.gpu(type="MI308X-ROCM7", count=1)
+    @pytest.mark.timeout(7200)
     def test_qwen3_rocm(self) -> None:
+        os.environ.setdefault(
+            "SMOKE_ARGS",
+            "--warm_up 0 --use_swizzleA 1 --use_asm_pa 1 "
+            "--disable_flashinfer_native 1 --use_aiter_pa 1 "
+            "--seq_size_per_block 16 --act_type BF16 --test_block_num 1000 "
+            "--reserver_runtime_mem_mb 70000",
+        )
         self._run_lifecycle(ROCM_CONFIG)
 
     def _run_lifecycle(self, config: SmokeConfig) -> None:

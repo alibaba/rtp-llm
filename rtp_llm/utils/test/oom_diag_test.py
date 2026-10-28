@@ -440,6 +440,23 @@ class OomDiagAcceleratorTest(unittest.TestCase):
         with snapshots[0].open("rb") as snapshot_file:
             snapshot = pickle.load(snapshot_file)
         self.assertIn("segments", snapshot)
+        # Retain the original accelerator checks when validating the new dump
+        # format: creating a snapshot alone does not prove recording is active.
+        alloc_events = sum(
+            event.get("action") == "alloc"
+            for trace in snapshot.get("device_traces", [])
+            for event in trace
+        )
+        self.assertGreater(alloc_events, 0)
+        active_frames = [
+            frame
+            for segment in snapshot["segments"]
+            for block in segment.get("blocks", [])
+            if block.get("state") == "active_allocated"
+            for frame in block.get("frames", [])
+        ]
+        self.assertTrue(active_frames, "expected active allocation Python frames")
+        self.assertIn("oom_diag_test", str(active_frames))
 
 
 if __name__ == "__main__":

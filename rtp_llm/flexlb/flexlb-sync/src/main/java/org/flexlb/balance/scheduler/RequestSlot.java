@@ -20,6 +20,7 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.Logger;
 
 import java.util.Map;
 import java.util.Objects;
@@ -121,6 +122,19 @@ public final class RequestSlot {
             slot.completeDelivery(this, result);
         }
     }
+
+    private final org.flexlb.balance.eviction.EngineCancelChannel engineCancelChannel;
+
+    /** The actual handoff capability; never reconstructed from a request id. */
+    private DeliveryClaim deliveryClaim;
+
+    /** A cancel proof is valid only for this exact outstanding delivery. */
+    private DeliveryClaim cancellationFence;
+
+    private boolean deliveryOutcomeUncertain;
+
+    /** Original Native Cancel ACK RPC budget; main preemption uses the same 50 ms. */
+    private static final long CANCEL_ACK_TIMEOUT_MS = 50L;
 
     private final ExpirationTimer expirationTimer;
     private final RequestTerminalCleanup terminalCleanup;
@@ -251,6 +265,27 @@ public final class RequestSlot {
             Runnable admissionFinished,
             boolean queueScheduling,
             GlobalQueueCoordinator globalQueue) {
+        this(
+                completionPublisher,
+                context,
+                expirationTimer,
+                terminalCleanup,
+                admissionFinished,
+                queueScheduling,
+                globalQueue,
+                null);
+    }
+
+    RequestSlot(
+            RequestCompletionPublisher completionPublisher,
+            BalanceContext context,
+            ExpirationTimer expirationTimer,
+            RequestTerminalCleanup terminalCleanup,
+            Runnable admissionFinished,
+            boolean queueScheduling,
+            GlobalQueueCoordinator globalQueue,
+            org.flexlb.balance.eviction.EngineCancelChannel engineCancelChannel) {
+        this.engineCancelChannel = engineCancelChannel;
         this.queueScheduling = queueScheduling;
         this.globalQueue = globalQueue;
         this.expirationTimer = expirationTimer;
@@ -707,6 +742,7 @@ public final class RequestSlot {
                             "endpoint ownership lost for request " + requestId);
                 }
                 DeliveryClaim claim = new DeliveryClaim(this, exact, kind, correlationId);
+                deliveryClaim = claim;
                 deliveryClaimKind = kind;
                 batchId = correlationId;
                 if (kind == DeliveryClaimKind.BATCH_ENQUEUE) {
@@ -793,6 +829,7 @@ public final class RequestSlot {
         SelectedPublication failureResponse = null;
         RequestEffect acknowledgement = RequestEffect.DEFERRED;
         boolean failed = result.failed();
+        DeliveryClaim fenceToStart = null;
         synchronized (this) {
             if (claim == null || claim.slot != this) {
                 throw new IllegalArgumentException("foreign delivery claim");
@@ -818,17 +855,26 @@ public final class RequestSlot {
                 if (result.status() == DeliveryResult.Status.DELIVERED) {
                     claim.item.ctx().setAckAtMs(System.currentTimeMillis());
                     claim.item.ctx().setAckAtNanos(System.nanoTime());
-                } else if (!decodeOwnsRequestLocked()) {
+                    acknowledgement = acknowledgeDeliveryLocked(claim.correlationId, null);
+                } else if (decodeOwnsRequestLocked()) {
+                    // Actual Engine ownership is stronger evidence than a lost transport reply.
+                    acknowledgement = acknowledgeDeliveryLocked(claim.correlationId, null);
+                } else {
+                    deliveryOutcomeUncertain = true;
                     markAwaitingConfirmationLocked(
                             (result.status() == DeliveryResult.Status.TIMED_OUT
                                             ? "Delivery timed out: "
                                             : "Delivery outcome uncertain: ")
                                     + detailOf(result.cause()));
-                    return;
+                    if (result.status() == DeliveryResult.Status.TIMED_OUT) {
+                        recordCancellationLocked(
+                                CancelReason.DEADLINE_EXCEEDED, "EnqueueBatch deadline exceeded");
+                    }
+                    fenceToStart = claimCancellationFenceLocked();
                 }
-                acknowledgement = acknowledgeDeliveryLocked(claim.correlationId, null);
             }
         }
+        startCancellationFence(fenceToStart);
         if (failed) {
             SelectedPublication response = failureResponse;
             Throwable failure =
@@ -839,6 +885,65 @@ public final class RequestSlot {
             rethrowCleanup(failure);
         } else {
             execute(acknowledgement);
+        }
+    }
+
+    private DeliveryClaim claimCancellationFenceLocked() {
+        requireSlotLock("cancel fence claim");
+        if (cancellationFence != null
+                || deliveryClaim == null
+                || deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE
+                || !ownsDeliveryClaimLocked(deliveryClaim)) {
+            return null;
+        }
+        cancellationFence = deliveryClaim;
+        return cancellationFence;
+    }
+
+    private void startCancellationFence(DeliveryClaim exact) {
+        if (exact == null || engineCancelChannel == null) {
+            return;
+        }
+        var prefill = exact.item.prefill();
+        if (prefill == null) {
+            return;
+        }
+        var target =
+                new org.flexlb.balance.preemption.CancelTarget(
+                        prefill.getServerIp(), prefill.getGrpcPort());
+        if (!target.isRoutable()) {
+            return;
+        }
+        try {
+            var outcome = engineCancelChannel.cancel(target, requestId, CANCEL_ACK_TIMEOUT_MS);
+            if (outcome == null) {
+                return;
+            }
+            outcome.whenComplete(
+                    (ack, failure) -> {
+                        if (failure != null
+                                || ack
+                                        != org.flexlb.balance.eviction.EngineCancelChannel.CancelAck
+                                                .REQUEST_FENCED) {
+                            return; // Intent, NOT_FOUND and transport failure are not release
+                            // proofs.
+                        }
+                        RequestEffect effect;
+                        synchronized (this) {
+                            if (cancellationFence != exact || !ownsDeliveryClaimLocked(exact)) {
+                                return;
+                            }
+                            effect =
+                                    processRequestEndLocked(
+                                            exact.item,
+                                            DeferredTerminal.requestFenced(
+                                                    "original Prefill fenced exact delivery"));
+                        }
+                        execute(effect);
+                    });
+        } catch (RuntimeException failure) {
+            // Invocation failure is ambiguous too; retain ownership until authoritative evidence.
+            Logger.debug("Cancel fence unavailable request_id={}", requestId, failure);
         }
     }
 
@@ -889,16 +994,23 @@ public final class RequestSlot {
 
     void failDeliveryPreparation(ScheduledRequest exact, Throwable cause) {
         SelectedPublication response;
+        long failedBatchId;
         synchronized (this) {
             if (!ownsPreparedDeliveryLocked(exact)) {
                 return;
             }
+            failedBatchId = snapshot().batchId();
             response =
                     selectDeliveryFailureLocked(
                             exact,
                             DeliveryResult.Status.NOT_SENT,
                             "Delivery preparation failed: " + detailOf(cause));
         }
+        Logger.error(
+                "FlexLB dispatch preparation failed request_id={} batch_id={}",
+                exact.requestId(),
+                failedBatchId,
+                cause);
         Throwable failure =
                 runStep(null, response == null ? null : () -> completionPublisher.submit(response));
         failure = runStep(failure, () -> cleanUpRequest(exact, DeliveryResult.Status.NOT_SENT));
@@ -1329,6 +1441,7 @@ public final class RequestSlot {
     public RequestState cancelRequest(long expectedBatchId, CancelReason reason) {
         Objects.requireNonNull(reason, "reason");
         TerminalAction action = null;
+        DeliveryClaim fenceToStart = null;
         RequestState result;
         synchronized (this) {
             if (!currentGeneration || !snapshot().matchesBatch(expectedBatchId)) {
@@ -1340,10 +1453,14 @@ public final class RequestSlot {
             }
             if (recordCancellationLocked(reason, reason.getMessage())) {
                 action = tryTerminateCancellationLocked();
+                if (action == null) {
+                    fenceToStart = claimCancellationFenceLocked();
+                }
             }
             result = snapshot();
         }
         terminalCleanup.submitTerminal(action);
+        startCancellationFence(fenceToStart);
         return result;
     }
 
@@ -1357,7 +1474,9 @@ public final class RequestSlot {
                 || pendingAdmissionCancelReason != null) {
             return false;
         }
-        if (reason == CancelReason.DEADLINE_EXCEEDED && queueScheduling) {
+        if (reason == CancelReason.DEADLINE_EXCEEDED
+                && queueScheduling
+                && deliveryClaimKind == DeliveryClaimKind.NONE) {
             ScheduledRequest item = activeItem();
             Map<String, Object> diagnostics;
             if (deliveryClaimKind != DeliveryClaimKind.NONE) {
@@ -1511,9 +1630,20 @@ public final class RequestSlot {
         inactivityTimeoutMs = timeoutMs;
     }
 
+    private boolean awaitsBatchProofLocked() {
+        requireSlotLock("batch proof wait");
+        return deliveryOutcomeUncertain
+                || cancellationFence != null
+                || (deliveryClaim != null
+                        && deliveryClaim.kind == DeliveryClaimKind.BATCH_ENQUEUE
+                        && !deliveryClaim.completeCalled
+                        && !decodeOwnsRequestLocked());
+    }
+
     synchronized OptionalLong inactivityDeadlineAtMs() {
         return ownsResourceTrackingLocked()
                         && inactivityDeadline == null
+                        && !awaitsBatchProofLocked()
                         && (cleanupProgress == null || !cleanupProgress.expired)
                         && pendingAdmissionCancelReason == null
                         && inactivityTimeoutMs > 0L
@@ -1570,6 +1700,10 @@ public final class RequestSlot {
     }
 
     private TerminalAction decideInactivityLocked(long nowMs) {
+        // Silence cannot prove non-delivery or satisfy a sent cancellation fence.
+        if (awaitsBatchProofLocked()) {
+            return null;
+        }
         if (cleanupProgress != null
                 && ownsResourceTrackingLocked()
                 && requestInactiveLocked(nowMs)) {
@@ -2121,7 +2255,7 @@ public final class RequestSlot {
                 outcome = TerminalOutcome.cancellation(cause, message);
                 error = cancellationErrorTypeLocked(cause);
             }
-            case PRIORITY, DECODE_GENERATION_RETIRED, WORKER -> {
+            case REQUEST_FENCED, PRIORITY, DECODE_GENERATION_RETIRED, WORKER -> {
                 if (event.kind() == DeferredTerminal.Kind.DECODE_GENERATION_RETIRED
                         && message == null) {
                     message = "Decode endpoint generation retired";
@@ -2141,6 +2275,9 @@ public final class RequestSlot {
                                             : "; " + message);
                     outcome = TerminalOutcome.cancellation(cause, message);
                     error = cancellationErrorTypeLocked(cause);
+                } else if (event.kind() == DeferredTerminal.Kind.REQUEST_FENCED) {
+                    outcome = TerminalOutcome.fail(message);
+                    error = StrategyErrorType.DISPATCH_FAILED;
                 } else if (event.kind() == DeferredTerminal.Kind.PRIORITY) {
                     outcome = TerminalOutcome.cancel(message);
                     error = StrategyErrorType.PRIORITY_PREEMPTED;
@@ -2570,7 +2707,8 @@ record DeferredTerminal(
         WORKER,
         PRIORITY,
         DECODE_GENERATION_RETIRED,
-        INACTIVITY_EXPIRED
+        INACTIVITY_EXPIRED,
+        REQUEST_FENCED
     }
 
     DeferredTerminal {
@@ -2579,7 +2717,11 @@ record DeferredTerminal(
                 switch (kind) {
                     case FAILURE -> errorType != null && workerSource == null;
                     case WORKER -> errorType == null && workerSource != null;
-                    case TIMEOUT, INACTIVITY_EXPIRED, PRIORITY, DECODE_GENERATION_RETIRED ->
+                    case TIMEOUT,
+                            INACTIVITY_EXPIRED,
+                            REQUEST_FENCED,
+                            PRIORITY,
+                            DECODE_GENERATION_RETIRED ->
                             errorType == null && workerSource == null;
                 };
         if (!valid) {
@@ -2589,6 +2731,10 @@ record DeferredTerminal(
 
     static DeferredTerminal failure(StrategyErrorType errorType, String detail) {
         return new DeferredTerminal(Kind.FAILURE, errorType, detail, null, false, 0L);
+    }
+
+    static DeferredTerminal requestFenced(String detail) {
+        return new DeferredTerminal(Kind.REQUEST_FENCED, null, detail, null, false, 0L);
     }
 
     static DeferredTerminal inactivityExpired(String detail) {
@@ -2619,7 +2765,9 @@ record DeferredTerminal(
     }
 
     boolean authoritativeWorker() {
-        return kind == Kind.WORKER || kind == Kind.DECODE_GENERATION_RETIRED;
+        return kind == Kind.WORKER
+                || kind == Kind.REQUEST_FENCED
+                || kind == Kind.DECODE_GENERATION_RETIRED;
     }
 
     boolean endpointAlreadyRetired() {

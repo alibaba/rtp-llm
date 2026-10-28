@@ -1,15 +1,27 @@
 import copy
 import gc
 import os
+import subprocess
+import sys
 import unittest
 import weakref
 from typing import Optional
 
+import pytest
+
+os.environ.setdefault("NOT_USE_DEFAULT_STREAM", "1")
+os.environ.setdefault("HACK_LAYER_NUM", "1")
+os.environ.setdefault("ENABLE_CUDA_GRAPH_DEBUG_MODE", "1")
+
+pytestmark = [pytest.mark.H20, pytest.mark.gpu(type="H20", count=1)]
+
 import torch
 
-from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
+os.environ.setdefault("TEST_USING_DEVICE", "ROCM" if torch.version.hip else "CUDA")
+
+from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_runner import (
     CudaGraphRunner,
-    DirtyCudaGraphCaptureError,
+    load_cuda_graph_test_binding,
 )
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
@@ -829,6 +841,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 snapshot, expected_signature.unsqueeze(0).expand_as(snapshot)
             )
 
+    @pytest.mark.gpu(type="MI308X", count=1)
     @unittest.skipUnless(
         torch.version.hip is not None, "ROCm-specific host-pointer ABI"
     )
@@ -900,18 +913,27 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         torch.testing.assert_close(output.hidden_states, expected)
 
     def test_dirty_capture_failure_is_fail_closed(self) -> None:
-        # A failed capture can poison allocator/stream state by design. The
-        # dedicated Bazel targets below run this test alone in a disposable
-        # process; normal tagged-cache suites skip it.
+        # A failed capture poisons allocator/stream state by design. Preserve
+        # the legacy dedicated-process contract under pytest as well.
         if os.environ.get("RTP_LLM_RUN_DIRTY_CAPTURE_TEST") != "1":
-            self.skipTest("requires an isolated process for a dirty CUDA capture")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.abspath(__file__),
+                    f"{type(self).__name__}.{self._testMethodName}",
+                ],
+                env={**os.environ, "RTP_LLM_RUN_DIRTY_CAPTURE_TEST": "1"},
+            )
+            self.assertEqual(result.returncode, 0, "isolated dirty-capture test failed")
+            return
 
         def trigger_dirty_capture():
             runner = CudaGraphRunner()
             model = InjectableCaptureBodyFailureModel()
             model_ref = weakref.ref(model)
             with self.assertRaisesRegex(
-                DirtyCudaGraphCaptureError, "injected capture-body failure"
+                load_cuda_graph_test_binding().DirtyCudaGraphCaptureError,
+                "injected capture-body failure",
             ):
                 runner.init_generation_prefill(
                     model,

@@ -21,4 +21,3 @@ py_test (
     # same-capability stand-in. Staying on H20 by decision.
     exec_properties = {"gpu": "H20_CU13"},
 )
-

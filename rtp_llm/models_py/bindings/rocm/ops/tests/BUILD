@@ -45,5 +45,19 @@ cc_test(
         "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
     ],
     tags = ["rocm"],
+    env = {"GPU_COUNT": "2"},
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
+# Preserve original Native four seeded-sampling tests and its original single-device declaration.
+cc_test(
+    name = "sample_op_test",
+    srcs = [
+        "RocmSampleOpTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = test_deps,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
 )

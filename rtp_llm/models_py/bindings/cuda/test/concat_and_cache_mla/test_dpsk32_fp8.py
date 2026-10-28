@@ -2,6 +2,10 @@ import random
 import sys
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
 # Add RTP-LLM to path if needed

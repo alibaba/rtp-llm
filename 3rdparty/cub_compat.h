@@ -1,11 +1,11 @@
-// Compat shim for CUDA 13 CUB.
+// Compat shim for CUB 3.x.
 //
-// CCCL shipped with CUDA 13 dropped cub::Max / cub::Min / cub::Sum (and moved
+// CUB 3.x dropped cub::Max / cub::Min / cub::Sum (and moved
 // cub::CountingInputIterator / cub::TransformInputIterator to thrust::) so any
 // rtp_llm first-party .cu file that still uses those names would fail to
-// compile against CUDA 13.  Include this header AFTER `<cub/cub.cuh>` to pull
-// aliases back into namespace cub for CUDA 13 only — on CUDA 12 the header is
-// a no-op.
+// compile. Include this header AFTER `<cub/cub.cuh>` to pull aliases back into
+// namespace cub for CUB 3.x only. Some vendor CUDA 13 toolchains still ship
+// CUB 2.x, where the original symbols remain and redefining them is ambiguous.
 //
 // Intentionally scoped to the symbols we actually reference in rtp_llm
 // first-party code — see the matching call sites in:

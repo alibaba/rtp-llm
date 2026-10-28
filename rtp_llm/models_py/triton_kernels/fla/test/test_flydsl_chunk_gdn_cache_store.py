@@ -23,7 +23,10 @@ import unittest
 from typing import List, Optional
 from unittest import mock
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 from rtp_llm.models_py.triton_kernels.fla.block import store_ssm_state_to_block_map
 from rtp_llm.models_py.triton_kernels.fla.chunk import (

@@ -342,6 +342,11 @@ class RequestRegistryTest {
 
         old.expireInactiveRequest(
                 RequestLifecycleTestSupport.<Long>inspect(old, "inactivityExpiresAtMsLocked"));
+        assertFalse(registered.future().isDone(), "unreplied batch handoff is not a release proof");
+        old.processDecodeStatus(
+                registered.item().decodeEp(),
+                DecodeEndpoint.WorkerStatusFact.terminal(
+                        registered.item().decodeReservation(), 0L));
         registered.future().join();
         assertTrue(lifecycle.removeExactTerminalRecord(old, Long.MAX_VALUE));
         CompletableFuture<Response> replacement = lifecycle.register(context(703L));

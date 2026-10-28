@@ -91,14 +91,20 @@ void expectSampleMatchesReturnedProbability(const SamplerOutput& output) {
     }
 }
 
-torch::Tensor jointTopKTopPReference(int64_t top_k, float top_p) {
-    auto probs = torch::softmax(torch::tensor({0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 1.2f, 1.4f}, torch::kFloat32), 0);
-    auto top_k_threshold = std::get<0>(probs.topk(top_k)).min();
-    auto sorted_probs    = std::get<0>(probs.sort(/*dim=*/0, /*descending=*/true));
-    auto top_p_keep      = (sorted_probs.cumsum(0) - sorted_probs).lt(top_p);
-    auto top_p_threshold = sorted_probs.masked_select(top_p_keep).min();
-    auto filtered        = probs * probs.ge(top_k_threshold) * probs.ge(top_p_threshold);
-    return filtered / filtered.sum();
+torch::Tensor sequentialTopKTopPReference(int64_t top_k, float top_p) {
+    auto filtered = torch::softmax(torch::tensor({0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 1.2f, 1.4f}, torch::kFloat32), 0);
+    if (top_k > 0 && top_k < filtered.numel()) {
+        auto threshold = std::get<0>(filtered.topk(top_k)).min();
+        filtered.masked_fill_(filtered < threshold, 0.0f);
+        filtered.div_(filtered.sum());
+    }
+    if (std::abs(top_p) >= 1e-7 && std::abs(top_p - 1.0f) >= 1e-7) {
+        auto [sorted_probs, sorted_indices] = filtered.sort(/*dim=*/0, /*descending=*/true);
+        sorted_probs.masked_fill_(sorted_probs.cumsum(0) - sorted_probs > top_p, 0.0f);
+        filtered.scatter_(0, sorted_indices, sorted_probs);
+        filtered.div_(filtered.sum());
+    }
+    return filtered;
 }
 
 TEST(RocmSamplerOpTest, ProductionSamplerCoversAllDispatchesAndReusesSlots) {
@@ -161,7 +167,15 @@ TEST_P(RocmSamplerInvalidProbTest, ReportsInvalidRowsWithoutAffectingHealthyRows
                 if (valid) {
                     EXPECT_TRUE(torch::isfinite(probs).all().item<bool>());
                     EXPECT_NEAR(probs.sum().item<float>(), 1.0f, 1e-5f);
-                    EXPECT_NEAR(cum, std::log(probs[tokens[row].item<int32_t>()].item<float>()), 1e-5f);
+                    // ORIGINAL returns raw softmax; cumulative probability uses the
+                    // same filtered distribution as the seeded reference sampling.
+                    const auto sampling_reference = sequentialTopKTopPReference(top_k, top_p);
+                    EXPECT_NEAR(cum, std::log(sampling_reference[tokens[row].item<int32_t>()].item<float>()), 1e-5f);
+                    if (output_mode == 2) {
+                        auto original = torch::softmax(
+                            torch::tensor({0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 1.2f, 1.4f}, torch::kFloat32), 0);
+                        EXPECT_TRUE(torch::allclose(probs, original));
+                    }
                     if (output_mode == 1) {
                         EXPECT_TRUE(torch::allclose(probs, reference.all_probs[row].cpu()));
                     }
@@ -274,7 +288,7 @@ TEST(RocmSamplerOpTest, CombinedSamplingMatchesReturnedDistribution) {
     constexpr int64_t batch_size = 2048;
     Sampler           sampler(SamplerInitParams{/*max_batch_size=*/batch_size, /*fixed_max_batch_size=*/true});
     auto              inputs    = makeSamplerInputs(batch_size, /*top_k=*/4, /*top_p=*/0.75f, /*seed=*/5000);
-    auto              reference = jointTopKTopPReference(/*top_k=*/4, /*top_p=*/0.75f);
+    auto              reference = sequentialTopKTopPReference(/*top_k=*/4, /*top_p=*/0.75f);
     auto              output    = sampler.forward(inputs);
     runtimeSyncAndCheck();
     expectSampleMatchesReturnedProbability(output);

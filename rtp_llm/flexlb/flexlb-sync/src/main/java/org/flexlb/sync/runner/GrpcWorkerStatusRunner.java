@@ -1,8 +1,10 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.WorkerRegistryConfig.HealthConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -19,8 +21,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
-
-import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
 public class GrpcWorkerStatusRunner implements Runnable {
 
@@ -41,6 +41,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
+    private final boolean retainVitAliveOnTimeout;
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final CacheAwareService cacheAwareService;
     private final Executor callbackExecutor;
@@ -59,6 +60,40 @@ public class GrpcWorkerStatusRunner implements Runnable {
             long syncRequestTimeoutMs,
             CacheAwareService cacheAwareService,
             Executor callbackExecutor) {
+        this(
+                modelName,
+                ipPort,
+                site,
+                roleType,
+                ignoredGroup,
+                workerStatus,
+                pollLease,
+                workerDirectory,
+                engineHealthReporter,
+                engineGrpcService,
+                syncRequestTimeoutMs,
+                cacheAwareService,
+                callbackExecutor,
+                HealthConfig.DEFAULT_VIT_STATUS_RPC_TIMEOUT_MS,
+                HealthConfig.DEFAULT_RETAIN_VIT_ALIVE_ON_TIMEOUT);
+    }
+
+    public GrpcWorkerStatusRunner(
+            String modelName,
+            String ipPort,
+            String site,
+            RoleType roleType,
+            String ignoredGroup,
+            WorkerStatus workerStatus,
+            WorkerStatus.PollLease pollLease,
+            WorkerDirectory workerDirectory,
+            EngineHealthReporter engineHealthReporter,
+            EngineGrpcService engineGrpcService,
+            long syncRequestTimeoutMs,
+            CacheAwareService cacheAwareService,
+            Executor callbackExecutor,
+            long vitStatusRpcTimeoutMs,
+            boolean retainVitAliveOnTimeout) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -72,7 +107,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.roleType = roleType;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
-        this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.syncRequestTimeoutMs =
+                roleType == RoleType.VIT
+                        ? Math.max(syncRequestTimeoutMs, vitStatusRpcTimeoutMs)
+                        : syncRequestTimeoutMs;
+        this.retainVitAliveOnTimeout = retainVitAliveOnTimeout;
         this.cacheAwareService = Objects.requireNonNull(cacheAwareService, "cacheAwareService");
         this.callbackExecutor = callbackExecutor;
     }
@@ -331,7 +370,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     failures,
                     MAX_CONSECUTIVE_FAILURES,
                     failure.getMessage());
-            if (failures < MAX_CONSECUTIVE_FAILURES) {
+            // The VIT proxy reports child health. A transport deadline alone
+            // must not discard its last live endpoint before stale expiration.
+            // recordTransportFailure does not refresh the successful-poll clock.
+            boolean retainLastVitState =
+                    roleType == RoleType.VIT
+                            && retainVitAliveOnTimeout
+                            && Status.fromThrowable(failure).getCode()
+                                    == Status.Code.DEADLINE_EXCEEDED;
+            if (failures < MAX_CONSECUTIVE_FAILURES || retainLastVitState) {
                 return;
             }
             endpointToRetire = workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
@@ -413,10 +460,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private void handleException(Throwable ex) {
         log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
-        if (ex.getMessage() != null
-                && ex.getMessage()
-                        .toLowerCase()
-                        .contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
+        if (Status.fromThrowable(ex).getCode() == Status.Code.DEADLINE_EXCEEDED) {
             logger.debug(
                     "gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}",
                     ex.getMessage(),

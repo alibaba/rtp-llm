@@ -26,18 +26,6 @@ from typing import Any, Dict, List, Optional
 
 import grpc
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer, _asserts_cold_cache
-from smoke.dash_error_policy import (
-    DASH_MAX_ATTEMPTS,
-    DASH_RETRY_BUDGET_S,
-    DASH_RETRY_INTERVAL_S,
-    DASH_TRANSIENT_STATUS_CODES,
-    dash_error_spec,
-    should_retry_transient,
-)
-from smoke.common_def import QueryStatus, SmokeException
-from smoke.dash_cancel_state import classify_dash_cancel
-from smoke.grammar_constraint_validator import validate_constraint
 
 from rtp_llm.config.py_config_modules import DASH_SC_GRPC_SERVER_PORT_OFFSET
 from rtp_llm.dash_sc.client import (
@@ -48,6 +36,18 @@ from rtp_llm.dash_sc.client import (
 from rtp_llm.dash_sc.codec import LLMFinishReason, SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
+from rtp_llm.test.smoke.base_comparer import BaseComparer, _asserts_cold_cache
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
+from rtp_llm.test.smoke.dash_cancel_state import classify_dash_cancel
+from rtp_llm.test.smoke.dash_error_policy import (
+    DASH_MAX_ATTEMPTS,
+    DASH_RETRY_BUDGET_S,
+    DASH_RETRY_INTERVAL_S,
+    DASH_TRANSIENT_STATUS_CODES,
+    dash_error_spec,
+    should_retry_transient,
+)
+from rtp_llm.test.smoke.grammar_constraint_validator import validate_constraint
 
 DASH_ENDPOINT = "dash://ModelStreamInfer"
 DASH_GRPC_TIMEOUT_SECONDS = 600

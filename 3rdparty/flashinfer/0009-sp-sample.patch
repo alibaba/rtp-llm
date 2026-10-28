@@ -1,0 +1,44 @@
+diff --git include/flashinfer/sampling.cuh include/flashinfer/sampling.cuh
+index 2fab1d8..b5f18e5 100644
+--- include/flashinfer/sampling.cuh
++++ include/flashinfer/sampling.cuh
+@@ -1246,23 +1246,26 @@ __global__ void ChainSpeculativeSampling(DType* draft_probs, IdType* draft_token
+     }
+   }
+ 
+-  uint32_t emitted_token_num = pos;
+-  uint32_t accepted_token_num = pos;
+-  for (uint32_t i = pos; i < num_speculative_tokens; ++i) {
+-    IdType draft_id = draft_token_ids[row_idx * num_speculative_tokens + i];
+-    float q = target_probs[(row_idx * (num_speculative_tokens + 1) + i) * d + draft_id],
+-          p = draft_probs[(row_idx * num_speculative_tokens + i) * d + draft_id];
+-    DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
+-    if (u * p < q) {
+-      ++accepted_token_num;
+-    }
++  if (tx == 0) {
++    output_emitted_token_num[row_idx] += pos + 1;
+   }
+ 
+-  if (tx == 0) {
+-    output_accepted_token_num[row_idx] += accepted_token_num;
+-    output_emitted_token_num[row_idx] += emitted_token_num;
++  if (pos == num_speculative_tokens) {
++    return;
+   }
+ 
++  // uint32_t emitted_token_num = pos;
++  // uint32_t accepted_token_num = pos;
++  // for (uint32_t i = pos; i < num_speculative_tokens; ++i) {
++  //   IdType draft_id = draft_token_ids[row_idx * num_speculative_tokens + i];
++  //   float q = target_probs[(row_idx * (num_speculative_tokens + 1) + i) * d + draft_id],
++  //         p = draft_probs[(row_idx * num_speculative_tokens + i) * d + draft_id];
++  //   DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
++  //   if (u * p < q) {
++  //     ++accepted_token_num;
++  //   }
++  // }
++
+   // sample from relu(target_probs - draft_probs)
+   DType sum_relu_q_minus_p(0);
+   vec_t<DType, VEC_SIZE> q_vec, p_vec;

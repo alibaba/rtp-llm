@@ -1,5 +1,6 @@
 import unittest
 
+import pytest
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
@@ -21,6 +22,7 @@ from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
+@pytest.mark.gpu(type="H20", count=1)
 class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
     NUM_EXPERTS = 4
     TOP_K = 2

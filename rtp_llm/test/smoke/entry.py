@@ -10,23 +10,22 @@ logging.basicConfig(
     level="INFO", format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-from smoke.case_runner import CaseRunner
-from smoke.common_def import REL_PATH
-from smoke.gpu_diagnostics import (
+from rtp_llm.test.smoke.case_runner import CaseRunner
+from rtp_llm.test.smoke.common_def import REL_PATH
+from rtp_llm.test.smoke.gpu_diagnostics import (
     ExceptionType,
     classify_exception,
     dump_gpu_state,
     snapshot_dmesg,
 )
-from smoke.multi_inst_case_runner import (
+from rtp_llm.test.smoke.multi_inst_case_runner import (
     DpSeperationCaseRunner,
     FrontAppSeperationCaseRunner,
     PdSeperationCaseRunner,
     VitSeperationCaseRunner,
 )
-from smoke.task_info import TaskInfo
-from smoke.utils import resolve_prompt_refs
-
+from rtp_llm.test.smoke.task_info import TaskInfo
+from rtp_llm.test.smoke.utils import resolve_prompt_refs
 from rtp_llm.utils.util import str_to_bool
 
 
@@ -128,8 +127,8 @@ if __name__ == "__main__":
         "kill_remote": str_to_bool(args.kill_remote),
         "concurrency_test": str_to_bool(args.concurrency_test),
     }
-    # prompt_batch queries are now routed to /batch_infer per-query in case_runner
-    # (see CaseRunner._resolve_endpoint), no env-level switch needed.
+    # prompt_batch queries are routed to /batch_infer per-query in CaseRunner.
+    # Keep the server environment identical to the legacy Bazel smoke contract.
 
     runner = runner_class(**runner_params)
 

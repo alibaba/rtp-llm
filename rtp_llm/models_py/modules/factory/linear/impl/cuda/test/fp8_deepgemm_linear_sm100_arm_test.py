@@ -1,6 +1,8 @@
 import platform
 import unittest
 
+import pytest
+
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     has_deep_gemm,
     is_deep_gemm_e8m0_used,
@@ -8,6 +10,9 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.test import (
     fp8_deepgemm_linear_sm120_test as online_tests,
 )
+
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
 
 class CudaFp8DeepGEMMLinearSM100Test(

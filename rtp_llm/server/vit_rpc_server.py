@@ -354,6 +354,12 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     service_name=headers.get("x-dashscope-service", ""),
                 )
                 res = merge_embedding_results(results)
+            if not res.embeddings:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    "VIT engine returned empty multimodal embeddings",
+                )
+                return
             output_pb = self._transport.transfer(multimodal_inputs, res)
             add_multimodal_feature_hashes(output_pb, res.embeddings, res.feature_hashes)
             kmonitor.report(

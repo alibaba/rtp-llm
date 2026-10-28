@@ -16,6 +16,12 @@ from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks|layer)\.(\d+)\.")
 
 
+def _fastsafetensors_copier_config() -> Tuple[bool, bool]:
+    # SHM registers the 2 GiB bounce buffer with CUDA; NOGDS avoids that path.
+    use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
+    return not use_nogds, use_nogds
+
+
 class BaseDatabase:
 
     def get_pretrain_tensor_names(self) -> List[str]:
@@ -331,19 +337,19 @@ class CkptDatabase(BaseDatabase):
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
 
-            # FASTSAFETENSORS_NOGDS=1 forces the 'nogds' copier (skips the
-            # fast_safetensors C++ extension), needed when the patched
-            # 0.1.20+ali wheel is installed without the underscore-named
-            # native helper (e.g. dev environments where torch ABI does not
-            # match the prebuilt fast_safetensors).
-            use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
+            use_shm, use_nogds = _fastsafetensors_copier_config()
+            logging.info(
+                "fastsafetensors copier: %s (FASTSAFETENSORS_NOGDS=%s)",
+                "nogds" if use_nogds else "shm",
+                os.environ.get("FASTSAFETENSORS_NOGDS", ""),
+            )
             loader_kwargs: Dict[str, Any] = dict(
                 pg=pg,
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=not use_nogds,
+                use_shm=use_shm,
                 nogds=use_nogds,
             )
             if stacked_key_config:

@@ -345,7 +345,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     kv_cfg.reuse_cache         = true;
     kv_cfg.enable_device_cache = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, kv_cfg, par);
+    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, kv_cfg, par);
     ASSERT_TRUE(mgr->init());
     // virtual_block_size = 4 * 2 = 8
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks

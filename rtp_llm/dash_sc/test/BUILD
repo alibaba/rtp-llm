@@ -118,3 +118,27 @@ py_test(
     data = ["//rtp_llm/libs:libth_transformer_config_so"],
     imports = [],
 )
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='codec_test_native_a10', srcs=['codec_test.py'], deps=['//rtp_llm:testlib'], imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='grammar_validator_test_native_a10', srcs=['inference/grammar_validator_test.py'], main='inference/grammar_validator_test.py', deps=['//rtp_llm:testlib'], imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='think_test_native_a10', srcs=['think_test.py'], main='think_test.py', deps=['//rtp_llm:testlib'], imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='inference_servicer_test_native_a10', srcs=['inference/servicer_test.py'], main='inference/servicer_test.py', deps=['//rtp_llm:testlib'] + telemetry_test_deps(), imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='proxy_servicer_test_native_a10', srcs=['proxy/servicer_test.py'], main='proxy/servicer_test.py', deps=['//rtp_llm:testlib'] + telemetry_test_deps(), imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='access_log_test_native_a10', srcs=['access_log_test.py'], data=['//rtp_llm/cpp/repetition:online_repetition_tracker'], deps=['//rtp_llm:testlib'], imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='repetition_monitor_test_native_a10', srcs=['repetition_monitor_test.py'], data=['//rtp_llm/cpp/repetition:online_repetition_tracker'], deps=['//rtp_llm:testlib'], imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='app_test_native_a10', srcs=['app_test.py'], deps=['//rtp_llm:testlib'], imports=[], exec_properties={'gpu': 'A10'}, tags=['A10'])

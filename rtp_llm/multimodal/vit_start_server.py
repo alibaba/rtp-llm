@@ -1,5 +1,6 @@
 import logging
 
+import torch
 from setproctitle import setproctitle
 
 from rtp_llm.config.engine_config import EngineConfig
@@ -37,8 +38,8 @@ def vit_start_server(
     )
 
     engine_config = EngineConfig.create(py_env_configs)
-    local_rank = engine_config.parallelism_config.local_rank
-    setup_cuda_device_and_accl_env(local_rank)
+    local_device_id = server_id % torch.cuda.device_count()
+    setup_cuda_device_and_accl_env(local_device_id)
 
     model_config = ModelFactory.create_model_config(
         model_args=py_env_configs.model_args,
@@ -57,7 +58,7 @@ def vit_start_server(
         logging.info(
             f"[VIT_SERVER_{server_id}] No multimodal model, skip start vit server"
         )
-        app = VitEndpointApp(py_env_configs, None, local_rank)
+        app = VitEndpointApp(py_env_configs, None, local_device_id)
         app.start(grpc_port, http_port)
         return
 
@@ -65,7 +66,7 @@ def vit_start_server(
         model_config=model_config,
         engine_config=engine_config,
         vit_config=py_env_configs.vit_config,
-        device=f"cuda:{local_rank}",
+        device=f"cuda:{local_device_id}",
         server_id=server_id,
         is_proxy_mode=is_proxy_mode,
     )
@@ -74,7 +75,7 @@ def vit_start_server(
         f"[VIT_SERVER_{server_id}] Creating multimodal process engine finished"
     )
 
-    app = VitEndpointApp(py_env_configs, vit_process_engine, local_rank)
+    app = VitEndpointApp(py_env_configs, vit_process_engine, local_device_id)
     app.start(
         grpc_port=grpc_port,
         http_port=http_port,

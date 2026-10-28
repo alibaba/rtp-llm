@@ -1,0 +1,34 @@
+{
+    "model_type": "deepseek3",
+    "model_path": "/mnt/nas1/hf/deepseek_r1_4layers",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s4",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "ieden沟壑的产生 GertrudeckiIED pearlizy出水ellowocinaturkapolitanNinapolisyssociated",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "和经济 ratiosilderment至上rappersonalised-UniapchrauffsmithsburgOpportunityppeOCIupyoop",
+                "finished": true
+            }
+        }
+    ]
+}

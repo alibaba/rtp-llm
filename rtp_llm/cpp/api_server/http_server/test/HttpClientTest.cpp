@@ -1,6 +1,6 @@
-#include <atomic>
 #include <chrono>
-#include <thread>
+#include <future>
+#include <utility>
 
 #include "gtest/gtest.h"
 
@@ -117,42 +117,28 @@ TEST_F(HttpClientTest, testRequestInvalidAddress) {
     auto http_client_ = std::make_shared<SimpleHttpClient>();
     ASSERT_TRUE(http_client_ != nullptr);
 
-    // Record the callback outcome and assert on the test thread: gtest
-    // assertions may only run in the thread that owns the test.
-    std::atomic<bool> callback_invoked{false};
-    std::atomic<bool> callback_ok{false};
-    std::atomic<bool> response_empty{false};
-    HttpCallBack      http_call_back = [&](bool ok, const std::string& response_body) {
-        callback_ok.store(ok);
-        response_empty.store(response_body.empty());
-        callback_invoked.store(true);
+    auto callback_result = std::make_shared<std::promise<std::pair<bool, std::string>>>();
+    auto result_future   = callback_result->get_future();
+    HttpCallBack http_call_back = [callback_result](bool ok, const std::string& response_body) {
+        callback_result->set_value({ok, response_body});
     };
 
-    // Keep the invalid address out of the ports the fixture already bound:
-    // an address that actually listens is not an invalid address at all.
     std::string address;
     do {
         address = "tcp:0.0.0.0:" + std::to_string(autil::NetUtil::randomPort());
     } while (http_servers_.count(address) != 0);
+    bool request_started = http_client_->get(address, "/worker_status", "", std::move(http_call_back));
 
-    // An invalid address must never be reported as a successful transfer.
-    // Two observations are legitimate: the submission is refused outright
-    // (get() returns false because the connection already failed before the
-    // packet could be posted) or the submission is accepted and the failure
-    // arrives through the callback.  Only a silent success is a bug.
-    const bool submitted = http_client_->get(address, "/worker_status", "", std::move(http_call_back));
-    if (!submitted) {
-        ASSERT_FALSE(callback_ok.load()) << "a refused submission must not report success";
-        return;
+    // Depending on connection timing, an invalid address can be rejected before
+    // enqueueing or reported through the asynchronous callback.
+    if (request_started) {
+        ASSERT_EQ(result_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     }
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!callback_invoked.load() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (result_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        const auto [ok, response_body] = result_future.get();
+        ASSERT_FALSE(ok);
+        ASSERT_TRUE(response_body.empty());
     }
-    ASSERT_TRUE(callback_invoked.load()) << "no callback for an invalid address";
-    ASSERT_FALSE(callback_ok.load());
-    ASSERT_TRUE(response_empty.load());
 }
 
 TEST_F(HttpClientTest, testRequestInvalidRoute) {

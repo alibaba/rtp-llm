@@ -21,7 +21,10 @@ import sys
 import unittest
 from dataclasses import dataclass
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", "..", ".."))

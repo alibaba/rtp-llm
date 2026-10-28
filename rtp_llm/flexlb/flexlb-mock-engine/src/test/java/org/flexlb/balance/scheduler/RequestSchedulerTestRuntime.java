@@ -50,7 +50,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             RequestSchedulerReporter requestReporter,
             EngineCancelChannel cancelChannel) {
         Objects.requireNonNull(prepareBatchSubmission, "prepareBatchSubmission");
-        this.lifecycle = new RequestRegistry(configService, batchReporter, requestReporter);
+        this.lifecycle =
+                new RequestRegistry(configService, batchReporter, requestReporter, cancelChannel);
         this.endpointEvents = new EndpointEventProjector(lifecycle);
         AtomicLong batchIds = new AtomicLong();
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);

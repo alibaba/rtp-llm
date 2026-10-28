@@ -57,6 +57,7 @@ class ArmCpuImpl(CpuImpl):
         key: str,
         weight: torch.Tensor,
         use_swizzle_a: Optional[bool] = None,
+        force_legacy_fp8_ptpc: bool = False,
     ) -> torch.Tensor:
         return preprocess_gemm_weight_by_key(
             key, weight, self.py_env_configs.py_hw_kernel_config.arm_gemm_use_kai
@@ -952,6 +953,7 @@ class RocmImpl(GpuImpl):
         key: str,
         weight: torch.Tensor,
         use_swizzle_a: Optional[bool] = None,
+        force_legacy_fp8_ptpc: bool = False,
     ) -> torch.Tensor:
         is_gfx950 = self._is_gfx950()
         if key == "weight":
@@ -978,26 +980,25 @@ class RocmImpl(GpuImpl):
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
-            should_swizzle = (
-                self.py_env_configs.py_hw_kernel_config.use_swizzleA
-                if use_swizzle_a is None
-                else use_swizzle_a
-            )
-            if key == W.linear_attn_ba_w:
-                # BA remains BF16 even when qkvz is quantized. Select its
-                # physical layout from the actual TP-local shape so aligned
-                # projections keep the fast path while N=24/12 safely fall
-                # back to the raw layout.
-                should_swizzle = should_swizzle and should_swizzle_linear_attn_ba(
-                    weight
+            hw_kernel_config = self.py_env_configs.py_hw_kernel_config
+            # Like use_swizzle_a, this must come from the model's LoadConfig.
+            # The shared device owns a separate configuration object; reading
+            # its flag would pre-swizzle TBStars weights for the wrong kernel.
+            if not force_legacy_fp8_ptpc:
+                should_swizzle = (
+                    hw_kernel_config.use_swizzleA
+                    if use_swizzle_a is None
+                    else use_swizzle_a
                 )
-            if should_swizzle:
-                if weight.dtype != torch.float8_e4m3fn:
-                    weight = swizzle_tensor(weight.t(), False).t()
-                else:
-                    weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
-            elif weight.dtype == torch.float8_e4m3fn:
-                weight = self.shuffle_gemm_weight(weight)
+                if key == W.linear_attn_ba_w:
+                    should_swizzle = should_swizzle and should_swizzle_linear_attn_ba(weight)
+                if should_swizzle:
+                    if weight.dtype != torch.float8_e4m3fn:
+                        weight = swizzle_tensor(weight.t(), False).t()
+                    else:
+                        weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
+                elif weight.dtype == torch.float8_e4m3fn:
+                    weight = self.shuffle_gemm_weight(weight)
 
         return weight
 

@@ -12,8 +12,9 @@ import tempfile
 import urllib.request
 from typing import Any, List, Optional
 
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.tau2_report import validate_task_coverage
 
 TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",
@@ -32,18 +33,7 @@ TAU2_BENCH_HOME_ENV = "TAU2_BENCH_HOME"
 # failures of this job before it scored anything.
 TAU2_BENCH_DATA_DIR_ENV = "TAU2_BENCH_DATA_DIR"
 
-# tau2-bench runs greedy (temperature 0, pass@1), but the DeepEP MoE ep_scatter
-# uses atomic slot allocation whose ordering is nondeterministic run-to-run,
-# which perturbs the bf16 logits enough to flip borderline tasks. Measured
-# OVERALL scores across 6 healthy CI runs: 0.70, 0.75, 0.80, 0.8095, 0.8095,
-# 0.85 — mean ~0.79 with a 0.15 spread, i.e. 14/20 .. 17/21 tasks, so a single
-# task flip moves the score ~0.05 and a run can legitimately land three flips
-# apart. This gate therefore cannot resolve quality at 1% granularity; it only
-# catches gross capability breakage (a broken model scores near zero on
-# multi-turn tool use). Sit two task flips below the observed floor so a normal
-# low run cannot fail: earlier values of 0.76 and 0.70 both landed inside the
-# noise band (0.76 failed a 0.75 run; 0.70 passed a 0.70 run only by exact tie).
-DEFAULT_THRESHOLD = 0.60
+DEFAULT_THRESHOLD = 0.76
 DEFAULT_MODEL_ARG = "Qwen3-30B"
 DEFAULT_TASK_IDS_FILE = "passing_tasks.json"
 DEFAULT_SCRIPT_FILE = "run_tau2_bench.py"
@@ -97,6 +87,14 @@ class Tau2BenchComparer(BaseComparer):
                 QueryStatus.OTHERS,
                 f"no 'Dump report to: ...json' line in tau2-bench stdout, see {log_path}",
             )
+        try:
+            coverage = validate_task_coverage(report_path, task_ids_path)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise SmokeException(
+                QueryStatus.COMPARE_FAILED,
+                f"tau2-bench execution coverage failed: {error}; see {log_path}",
+            ) from error
+        logging.info("[TAU2] complete task coverage: %s", coverage)
         score = self._load_overall_score(report_path)
         logging.info(
             f"[TAU2] parsed score={score} from {report_path}, threshold={threshold}"
@@ -114,7 +112,7 @@ class Tau2BenchComparer(BaseComparer):
         logging.info(f"[TAU2] PASS: OVERALL score={score} >= threshold={threshold}")
 
     def _pip_install(self, args: List[str]) -> None:
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + args
+        cmd = [sys.executable, "-m", "pip", "install", "--compile", "--quiet"] + args
         logging.info(f"[TAU2] pip install: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
@@ -185,9 +183,9 @@ class Tau2BenchComparer(BaseComparer):
         if current == LITELLM_PINNED_VERSION:
             logging.info(f"[TAU2] litellm=={current} matches pinned, skip install")
             return
-        logging.info(
-            f"[TAU2] litellm=={current} != pinned {LITELLM_PINNED_VERSION}, install pinned"
-        )
+        if current is not None:
+            self._pip_install(["--force-reinstall", "--no-deps", f"litellm=={LITELLM_PINNED_VERSION}"])
+            return
         self._pip_install([f"litellm=={LITELLM_PINNED_VERSION}"])
 
     def _prepare_tau2(self, work_dir: str) -> str:
@@ -268,7 +266,17 @@ class Tau2BenchComparer(BaseComparer):
             urllib.request.urlretrieve(TAU2_TARBALL_URL, tarball_path)
             logging.info(f"[TAU2] extracting to {dest_dir}")
             with tarfile.open(tarball_path, "r:gz") as tar:
-                tar.extractall(path=dest_dir)
+                # filter="data" rejects unsafe members (absolute paths, ".."
+                # traversal, device/link files). Available in 3.12 and backported
+                # to 3.9.17+/3.10.12+/3.11.4+; fall back on older interpreters.
+                try:
+                    tar.extractall(path=dest_dir, filter="data")
+                except TypeError:
+                    logging.warning(
+                        "[TAU2] tarfile.extractall filter='data' unsupported on "
+                        "this Python; extracting without path-traversal filtering"
+                    )
+                    tar.extractall(path=dest_dir)
         finally:
             try:
                 os.remove(tarball_path)

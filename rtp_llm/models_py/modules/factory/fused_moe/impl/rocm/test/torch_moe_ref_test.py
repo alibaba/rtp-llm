@@ -1,11 +1,11 @@
-"""CPU-only regression tests for ``torch_moe_ref``.
+"""ROCm-profile regression tests for ``torch_moe_ref``.
 
 The executor's ROCm end-to-end tests (``rocm_fp8_fused_moe_test.py``) only
 run on ROCm CI. The original ``torch_moe_ref`` implementation referenced
 ``weighted`` outside the if-branch that defined it, so calling with
-``apply_router_weight_on_input=True`` raised ``UnboundLocalError``. We want
-that bug to be regression-tested in any CI that can run plain PyTorch CPU,
-not only on ROCm hardware.
+``apply_router_weight_on_input=True`` raised ``UnboundLocalError``. Importing
+the reference implementation requires the ROCm executor stack, so these tests
+must be collected by the MI308X profile even though their tensors live on CPU.
 
 These tests construct tiny payloads / weights on CPU in fp32 and exercise
 both branches of ``apply_router_weight_on_input``.
@@ -14,7 +14,10 @@ both branches of ``apply_router_weight_on_input``.
 import unittest
 from unittest import SkipTest
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 try:
     from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (

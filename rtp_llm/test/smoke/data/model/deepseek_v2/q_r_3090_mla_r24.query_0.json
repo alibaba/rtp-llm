@@ -1,0 +1,59 @@
+{
+  "id": "chat-",
+  "object": "chat.completion",
+  "created": 1776964007,
+  "model": "",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": " 1. 如何有效地提高英语听力水平？\n2. 有哪些实用的英语听力技巧可以帮助学习者更好地理解英语对话？\n3. 在听力练习中，如何克服听力材料速度过快或口音问题？\n4. 如何利用科技工具和资源来辅助英语听力训练？\n5. 听力训练对于提高英语口语和写作能力有何帮助？\n6. 如何通过听力练习来增强对英语语法和词汇的理解？\n7. 有哪些常见的听力误区可能会阻碍英语听力技能的提升？\n8. 如何制定一个有效的英语听力学习计划？\n9. 在听力练习中，如何处理听不懂的单词和短语？\n10. 如何通过听力材料来学习英语国家的文化和习俗？",
+        "reasoning_content": null,
+        "function_call": null,
+        "tool_calls": null,
+        "partial": false,
+        "tool_call_id": null
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 17,
+    "total_tokens": 181,
+    "completion_tokens": 164,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  },
+  "debug_info": null,
+  "aux_info": {
+    "cost_time": 7671.766,
+    "iter_count": 164,
+    "prefix_len": 0,
+    "input_len": 17,
+    "output_len": 164,
+    "step_output_len": 164,
+    "first_token_cost_time": 313.594,
+    "wait_time": 0.0,
+    "pd_sep": false,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "softmax_probs": [],
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "role_addrs": [],
+    "aux_string": ""
+  },
+  "extra_outputs": null
+}

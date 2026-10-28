@@ -9,10 +9,17 @@ from rtp_llm.aios.kmonitor.python_client.kmonitor.report_worker import report_wo
 
 class KmonTest(unittest.TestCase):
     def setUp(self) -> None:
-        pass
+        report_worker.stop()
+        self._init_tags = report_worker.init_tags.copy()
+        with report_worker.metric_lock:
+            report_worker.metrics.clear()
 
     def tearDown(self):
-        pass
+        report_worker.stop()
+        report_worker.init_tags.clear()
+        report_worker.init_tags.update(self._init_tags)
+        with report_worker.metric_lock:
+            report_worker.metrics.clear()
 
     def test_qps_metric(self) -> None:
         metric = MetricFactory.create_metric(MetricTypes.ACC_METRIC, "test", {})
@@ -26,7 +33,6 @@ class KmonTest(unittest.TestCase):
         self.assertDictEqual(points[1].tags, {"key": "v1"})
         self.assertDictEqual(points[2].tags, {"key": "v2"})
         self.assertAlmostEqual(points[1].value * 1.5, points[2].value)
-        report_worker.stop()
 
     def test_report(self) -> None:
         kmon = KMonitor({"tag_a": "aa"})
@@ -44,7 +50,9 @@ class KmonTest(unittest.TestCase):
             tokens = events[i].body.decode("utf-8").split(" ")
             self.assertEqual(tokens[0], metric_name)
             self.assertAlmostEqual(float(tokens[2]), 2.5 + 1.1 * i)
-            self.assertEqual(tokens[3], "tag_a=aa")
+            tags = dict(token.split("=", 1) for token in tokens[3:])
+            self.assertEqual(tags["tag_a"], "aa")
 
 
-unittest.main()
+if __name__ == "__main__":
+    unittest.main()

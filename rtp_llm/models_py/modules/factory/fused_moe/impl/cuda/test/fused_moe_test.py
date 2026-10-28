@@ -1,6 +1,10 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import torch.nn.functional as F
 from torch import dtype as _dtype
@@ -211,7 +215,7 @@ class FusedMoeBatchedTest(TestCase):
                 num_experts=params[2],
                 top_k=params[3],
                 inter_size=params[4],
-                dtype=params[5],
+                dtype=str(params[5]),
             ):
                 self._run_fused_moe_batched_test(*params)
 

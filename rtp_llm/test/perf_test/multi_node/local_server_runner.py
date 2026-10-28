@@ -17,9 +17,7 @@ sys.path.append(str(current_file_path.parent.parent.parent.absolute()))
 from rtp_llm.utils.import_util import has_internal_source
 
 if has_internal_source():
-    from internal_source.rtp_llm.test.util.set_internal_env import (
-        configure_optional_env,
-    )
+    from rtp_llm.test.util.set_internal_env import configure_optional_env
 
     configure_optional_env()
 

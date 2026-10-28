@@ -2,6 +2,8 @@
 
 import math
 import unittest
+
+import pytest
 from types import SimpleNamespace
 from typing import Tuple
 
@@ -25,6 +27,9 @@ from rtp_llm.ops.compute_ops import (
     get_typemeta,
     init_exec_ctx,
 )
+
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 
 class RopeParams:

@@ -15,7 +15,6 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
-    FMHAType,
     KvCacheDataType,
     ParallelismConfig,
     RopeStyle,
@@ -1712,6 +1711,8 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
+    NAME = "aiter_asm"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1771,6 +1772,8 @@ class AiterPrefillImplAsm(FMHAImplBase):
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
+
+    NAME = "aiter"
 
     def __init__(
         self,
@@ -1837,6 +1840,8 @@ class AiterPrefillImplPaged(FMHAImplBase):
     Full no-prefix graph uses the separate AiterPrefillImplTriton backend while
     eager prefill keeps the existing ASM/CK backend priority.
     """
+
+    NAME = "aiter_paged"
 
     accepts_fmha_config = True
     use_unified_attention = False
@@ -2145,6 +2150,7 @@ class AiterPrefillImplTriton(AiterPrefillImplPaged):
     independently by disabling the graph feature.
     """
 
+    NAME = "aiter_triton"
     use_unified_attention = True
     cuda_graph_selection_modes = frozenset(
         {CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH}
@@ -2200,6 +2206,8 @@ class AiterDecodeImplBase(FMHAImplBase):
 
 
 class AiterDecodeImplAsm(AiterDecodeImplBase):
+    NAME = "aiter_asm"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -2250,6 +2258,8 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
 
 
 class AiterDecodeImplNonAsm(AiterDecodeImplBase):
+    NAME = "aiter"
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -2299,6 +2309,7 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
 class AiterDecodeImplTriton(AiterDecodeImplBase):
     """Aiter decode attention implementation using Triton."""
 
+    NAME = "aiter_triton"
     accepts_fmha_config = True
 
     def __init__(

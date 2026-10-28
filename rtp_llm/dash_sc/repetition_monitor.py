@@ -23,6 +23,7 @@ _LOGGER = logging.getLogger(__name__)
 # into ``_NATIVE_STATUS`` below; the per-request path only reads that cached
 # global, it never re-imports or re-probes.
 _NATIVE_TRACKER_MODULES = (
+    "rtp_llm.libs.libonline_repetition_tracker",
     "rtp_llm.cpp.repetition.libonline_repetition_tracker",
     "libonline_repetition_tracker",
 )

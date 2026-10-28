@@ -10,7 +10,10 @@ from __future__ import annotations
 import math
 import unittest
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 _IS_ROCM_BUILD = torch.version.hip is not None
 try:

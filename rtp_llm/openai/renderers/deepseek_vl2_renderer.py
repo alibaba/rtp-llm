@@ -9,7 +9,8 @@ from enum import IntEnum, auto
 from typing import Any, Dict, List, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.multimodal.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.multimodal.multimodal_util import MMUrlType
+from rtp_llm.ops import MMPreprocessConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -94,10 +95,11 @@ class Conversation:
                         assert content_part.image_url != None
                         images.append(content_part.image_url.url)
                         mm_types.append(MMUrlType.IMAGE)
-                        if content_part.preprocess_config:
-                            preprocess_configs.append(
-                                get_preprocess_config(content_part.preprocess_config)
-                            )
+                        preprocess_configs.append(
+                            get_preprocess_config(content_part.preprocess_config)
+                            if content_part.preprocess_config
+                            else MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                        )
                         now_prompt = "<image>\n" + now_prompt
                     else:
                         raise Exception(
@@ -107,7 +109,7 @@ class Conversation:
             prompt += self.seps[index % 2]
         prompt += f"{self.roles[RoleEnum.assistant]}{self.connector[1]}"
         logging.debug(f"deepseek_vl2 prompt: {prompt}")
-        return PromptWithMMInput(prompt, images, mm_types)
+        return PromptWithMMInput(prompt, images, mm_types, preprocess_configs)
 
     def copy(self):
         return Conversation(

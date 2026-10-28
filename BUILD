@@ -1,6 +1,7 @@
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
 load("//:def.bzl", "copts", "cuda_copts")
-load("@arch_config//:arch_select.bzl", "select_py_bindings", "torch_deps")
+load("@arch_config//:arch_select.bzl", "select_py_bindings")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 
 config_setting(
@@ -265,6 +266,14 @@ cc_binary(
     deps = [
         "//rtp_llm/cpp/pybind:th_transformer_lib",
     ],
+)
+
+genrule(
+    name = "remote_kv_cache_manager_server_bin",
+    srcs = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
+    outs = ["kv_cache_manager_bin"],
+    cmd = "cp -f $(location @remote_kv_cache_manager_server//:bin/kv_cache_manager_bin) $@ && chmod 755 $@",
+    visibility = ["//visibility:public"],
 )
 
 exports_files(["cc_test_wrapper.sh"])

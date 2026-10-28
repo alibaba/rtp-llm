@@ -68,7 +68,7 @@ void RdmaConnection::doWriteBlocks(const std::vector<std::shared_ptr<RdmaConnect
         auto& info  = write_block->getPeerBlock();
 
         ::accl::barex::rw_memp_t mem;
-       
+
         if (!memory_util_->findMemoryMr((void*)&mem.data, block->addr.get(), block->len, block->gpu_mem, block->adopted)) {
             RTP_LLM_LOG_WARNING("find buffer mr for block %s failed", block->key.c_str());
             isValid = false;
@@ -101,7 +101,7 @@ void RdmaConnection::doWriteBlocks(const std::vector<std::shared_ptr<RdmaConnect
 
     for (auto& [connection, mem] : mems) {
         auto& write_blocks = blocks_map[connection];
-        
+
         auto callback = [start_time_us, write_blocks, connection](::accl::barex::Status status) {
             if (!status.IsOk()) {
                 auto peer_nic = connection->GetChannel()->GetPeerNicId();
@@ -139,7 +139,7 @@ void RdmaConnection::doWriteBlocks(const std::vector<std::shared_ptr<RdmaConnect
             connection->GetChannel()->WriteBatch(mem, callback, false);
         } else {
             connection->GetChannel()->ReadBatch(mem, callback, false);
-        }   
+        }
     }
 }
 

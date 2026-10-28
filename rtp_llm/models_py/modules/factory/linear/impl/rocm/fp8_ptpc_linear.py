@@ -125,7 +125,7 @@ class RocmFp8PTPCLinearBase(LinearBase):
 
 
 class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
-    """Original CK-preswizzled FP8 PTPC path used when swizzleA is disabled."""
+    """Legacy Aiter FP8 PTPC path, including pre-hipBLASLt swizzled weights."""
 
     @classmethod
     def can_handle(
@@ -139,7 +139,13 @@ class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
     ) -> bool:
         if not cls._can_handle_fp8_ptpc(quant_config, weight, weight_scales):
             return False
-        return hw_kernel_config is None or not hw_kernel_config.use_swizzleA
+        return (
+            hw_kernel_config is None
+            or (
+                not hw_kernel_config.use_swizzleA
+                and not hw_kernel_config.force_legacy_fp8_ptpc
+            )
+        )
 
     def __init__(
         self,
@@ -194,6 +200,96 @@ class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
         return self._restore_dtype(output, original_dtype)
 
 
+class RocmFp8PTPCLinearReference(RocmFp8PTPCLinearBase):
+    """CKTile PTPC fallback for TBStars' unsupported small-batch shapes."""
+
+    @classmethod
+    def can_handle(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> bool:
+        return (
+            cls._can_handle_fp8_ptpc(quant_config, weight, weight_scales)
+            and hw_kernel_config is not None
+            and hw_kernel_config.force_legacy_fp8_ptpc
+        )
+
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor] = None,
+        input_scales: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        quant_config: object = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+    ):
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
+        if weight_scales is None or weight_scales.numel() != self.output_size:
+            raise ValueError(
+                "CKTile FP8 PTPC fallback requires one scale per output channel"
+            )
+        # PerChannelFp8Weight exposes checkpoint-contiguous [N, K] storage as
+        # a [K, N] reshape. Recover the logical checkpoint matrix, then build
+        # the layout consumed by gemm_a8w8_bpreshuffle_cktile. This avoids the
+        # version-sensitive default preshuffle and hipBLASLt dispatches.
+        checkpoint_weight = weight.reshape(self.output_size, self.hidden_size)
+        self.weight = self._shuffle_weight_for_cktile(checkpoint_weight)
+        self.weight_scales = self._as_hipb_scale_b(
+            weight_scales, self.output_size
+        )
+        self.bias = bias
+
+    @staticmethod
+    def _shuffle_weight_for_cktile(weight: torch.Tensor) -> torch.Tensor:
+        output_size, hidden_size = weight.shape
+        block_n = 16
+        block_k = 32
+        pack_k = 16 // weight.element_size()
+        if output_size % block_n != 0 or hidden_size % block_k != 0:
+            raise ValueError(
+                "CKTile FP8 PTPC fallback requires N % 16 == 0 and K % 32 == 0"
+            )
+        return (
+            weight.view(
+                output_size // block_n,
+                block_n,
+                hidden_size // block_k,
+                block_k // pack_k,
+                pack_k,
+            )
+            .permute(0, 2, 3, 1, 4)
+            .contiguous()
+            .view(output_size, hidden_size)
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        input_fp8, input_scales, input_bf16, original_dtype = self._quantize_input(
+            input
+        )
+        output = torch.empty(
+            (input_fp8.shape[0], self.output_size),
+            dtype=input_bf16.dtype,
+            device=input_bf16.device,
+        )
+        gemm_a8w8_bpreshuffle_cktile(
+            input_fp8,
+            self.weight,
+            input_scales,
+            self.weight_scales,
+            output,
+        )
+        if self.bias is not None:
+            output = output + self.bias.to(output.dtype)
+        return self._restore_dtype(output, original_dtype)
+
+
 class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
     """hipBLASLt bpreshuffle path for FP8 PTPC weights loaded with swizzleA."""
 
@@ -209,7 +305,11 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
     ) -> bool:
         if not cls._can_handle_fp8_ptpc(quant_config, weight, weight_scales):
             return False
-        return hw_kernel_config is not None and hw_kernel_config.use_swizzleA
+        return (
+            hw_kernel_config is not None
+            and hw_kernel_config.use_swizzleA
+            and not hw_kernel_config.force_legacy_fp8_ptpc
+        )
 
     def __init__(
         self,
@@ -388,9 +488,9 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
             scaleA=input_scales,
             scaleB=self.weight_scales,
             bpreshuffle=True,
+            # AITER 0.1.21's torch custom-op bridge drops trailing defaults.
+            use_gelu=use_gelu,
         )
-        if use_gelu:
-            kwargs["use_gelu"] = True
         output = aiter.hipb_mm(input_fp8, self.weight, solution_index, **kwargs)
         return self._restore_dtype(output, original_dtype)
 

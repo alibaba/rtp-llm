@@ -5,6 +5,7 @@ import os
 import time
 import unittest
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -67,6 +68,8 @@ def _worker(rank: int, port: int) -> None:
         dist.destroy_process_group()
 
 
+@pytest.mark.open_skip
+@pytest.mark.gpu(type="H20", count=2)
 class FlashInferAllReduceIntegrationTest(unittest.TestCase):
     def test_tp2_eager_and_graph_replay_match_nccl(self):
         if not torch.cuda.is_available() or torch.cuda.device_count() < 2:

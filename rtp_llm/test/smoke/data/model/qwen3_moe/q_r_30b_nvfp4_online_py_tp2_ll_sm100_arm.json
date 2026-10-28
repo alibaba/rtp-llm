@@ -1,12 +1,4 @@
 {
-    "_comment": [
-        "Refreshed from the smoke_actual artifact of run 65789165, case",
-        "moe_nvfp4_online_deepep_ll_tp2_sm100. This is not a run-to-run flake: smoke-gb200 had",
-        "been running with --config=rewrite_smoke, which sets SAVE_RESPONSE and makes",
-        "utils.no_compare() skip every golden assertion, so this file was being regenerated",
-        "instead of compared and had silently drifted from the real output. The rewrite flag is",
-        "removed in the same change that updates this value, so it is asserted from now on."
-    ],
     "model_type": "qwen_3_moe",
     "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507",
     "query_result": [

@@ -4,7 +4,57 @@ import platform
 import sys
 from typing import Any, Dict
 
+from packaging import version
+
 logger = logging.getLogger(__name__)
+
+
+def _is_legacy_tbstars_fast_tokenizer(tokenizer) -> bool:
+    tokenizer_type = type(tokenizer)
+    module_name = tokenizer_type.__module__
+    return module_name.endswith("tokenization_tbstars_fast") or (
+        tokenizer_type.__name__ == "FlotTokenizerFast"
+        and module_name.endswith("tokenization_flot_fast")
+    )
+
+
+def _apply_transformers_v5_legacy_pretokenizer_compat():
+    """Restore the ByteLevel pre-tokenizer expected by legacy TBStars tokenizers.
+
+    Transformers 5.2 can construct old custom fast-tokenizer subclasses with a
+    backend whose ``pre_tokenizer`` is ``None``. The TBStars checkpoint class and
+    the internal Flot fallback immediately inspect that object, so both abort
+    before the model starts. Limit the workaround to those two legacy class
+    families; a missing pre-tokenizer is valid for unrelated tokenizer models.
+    """
+    import transformers
+    from tokenizers import pre_tokenizers
+    from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
+
+    if version.parse(transformers.__version__).major != 5:
+        return
+
+    original_init = PreTrainedTokenizerFast.__init__
+    if getattr(original_init, "_rtp_legacy_pretokenizer_compat", False):
+        return
+
+    def init_with_legacy_pretokenizer(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if (
+            _is_legacy_tbstars_fast_tokenizer(self)
+            and self.backend_tokenizer.pre_tokenizer is None
+        ):
+            self.backend_tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
+                add_prefix_space=bool(kwargs.get("add_prefix_space", False))
+            )
+            logger.info(
+                "transformers compat shim: restored ByteLevel pre-tokenizer for %s",
+                type(self).__name__,
+            )
+
+    init_with_legacy_pretokenizer._rtp_legacy_pretokenizer_compat = True
+    init_with_legacy_pretokenizer._rtp_original_init = original_init
+    PreTrainedTokenizerFast.__init__ = init_with_legacy_pretokenizer
 
 
 def _apply_transformers_v5_2_0_compat():
@@ -60,6 +110,7 @@ def _apply_transformers_v5_2_0_compat():
 # as soon as this package is imported the shim is active — rather than relying on a
 # lazy call ordering that a future caller could bypass.
 _apply_transformers_v5_2_0_compat()
+_apply_transformers_v5_legacy_pretokenizer_compat()
 
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (

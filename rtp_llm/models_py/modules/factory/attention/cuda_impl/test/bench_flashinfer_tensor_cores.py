@@ -15,6 +15,10 @@
 import csv
 from datetime import datetime
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20"), pytest.mark.manual]
+
 import flashinfer
 import numpy as np
 import torch

@@ -4,12 +4,10 @@ package(default_visibility = ["//visibility:public"])
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their
 # own smoke/ children through smoke.__path__ without duplicating runner srcs.
+# Preserve the complete Native framework source filegroup, including tests used as data.
 filegroup(
     name = "smoke_framework_srcs",
-    srcs = glob(
-        ["*.py"],
-        exclude = ["*_test.py"],
-    ),
+    srcs = glob(["*.py"]),
 )
 
 py_test(

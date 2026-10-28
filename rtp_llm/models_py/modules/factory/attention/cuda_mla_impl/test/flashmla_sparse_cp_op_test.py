@@ -21,7 +21,10 @@ from unittest import SkipTest, TestCase, main, skipIf
 from unittest.mock import Mock, patch
 
 import numpy as np
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20"), pytest.mark.manual]
 
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
@@ -148,7 +151,7 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
 
         with patch.object(dist, "init_process_group", _init_pg):
             with patch(
-                "rtp_llm.models_py.distributed.collective_torch.init_symm_mem_communicator",
+                "rtp_llm.models_py.distributed.symm_mem.init_symm_mem_communicator",
                 lambda *_a, **_kw: None,
             ):
                 init_distributed_environment(
@@ -258,11 +261,14 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
             torch.cuda.synchronize()
             result_queue.put(("ref", oref.cpu().float().numpy()))
         _barrier()
-        destroy_distributed_environment()
     except Exception:
         logging.exception("tp2 rank %s", rank)
         result_queue.put(("err", str(rank)))
         raise
+    finally:
+        # Always tear down the NCCL communicator, even on the exception path,
+        # so a failing rank does not leak the process group until it is killed.
+        destroy_distributed_environment()
 
 
 @skipIf(not CUDA_FLASHMLA_OK, SKIP_REASON)
@@ -680,15 +686,15 @@ class SparseMlaFp8CPOpTest(TestCase):
                         events.append("gather")
                         return result
 
-                    with patch.object(
-                        cp_impl, "all_gather", side_effect=gather
-                    ), patch.object(
-                        cp_impl.common,
-                        "apply_write_cache_store",
-                        side_effect=lambda *args: events.append("publish"),
-                    ), patch.object(
-                        cp_impl, "flash_mla_with_kvcache"
-                    ) as attention:
+                    with (
+                        patch.object(cp_impl, "all_gather", side_effect=gather),
+                        patch.object(
+                            cp_impl.common,
+                            "apply_write_cache_store",
+                            side_effect=lambda *args: events.append("publish"),
+                        ),
+                        patch.object(cp_impl, "flash_mla_with_kvcache") as attention,
+                    ):
                         out = op.forward(
                             q, ckv, k_pe, None, mla.batch_indice_d, object()
                         )
@@ -701,6 +707,7 @@ class SparseMlaFp8CPOpTest(TestCase):
                     self.assertEqual(out.shape, (local, 64, 512))
                     self.assertEqual(torch.count_nonzero(out).item(), 0)
 
+    @pytest.mark.gpu(type="H20", count=2)
     @skipIf(torch.cuda.device_count() < 2, "need 2 CUDA devices")
     def test_cp_tp2_matches_non_cp(self):
         """tp_size=2 real all_gather; merged CP vs single-GPU SparseMlaFp8Op."""

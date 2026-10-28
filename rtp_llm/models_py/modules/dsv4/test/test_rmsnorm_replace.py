@@ -1,15 +1,12 @@
-"""UT for replacing ``block._RMSNorm.forward`` (torch 6-launch chain) with
-the FlashInfer Python ``rmsnorm`` single-launch op.
+"""UT for DSV4's shared FlashInfer RMSNorm path.
 
-Audit doc §7.3.4 / row #4, #22, #31, #33: dsv4's ``_RMSNorm`` (block.py) is
-used at attn_norm / ffn_norm / MTP enorm / hnorm / norm / transformer final
-norm.  Pre-integration each forward was the classic 6-launch
-``x.float().square().mean().rsqrt()...`` pattern — ~1032 launches / step
-across 43 layers per the trace. Live ``_RMSNorm.forward`` now delegates to
-``flashinfer.norm.rmsnorm`` (matching vLLM's bf16-weight convention).
+DSV4's attention and FFN norms use the shared ``RMSNorm`` module, which
+delegates to the single-launch ``flashinfer.norm.rmsnorm`` implementation.  The
+block flattens N-D model inputs to the operator's 2D contract and restores the
+original shape afterwards.
 
 This UT verifies:
-  1) Numerical agreement of the live C++ path vs the pinned pre-integration
+  1) Numerical agreement of the live FlashInfer path vs the pinned pre-integration
      torch baseline, across decode + prefill shapes.
   2) Wall-clock improvement vs the torch baseline.
 
@@ -24,7 +21,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.modules.dsv4.block import _RMSNorm as LiveRMSNorm
+from rtp_llm.models_py.modules import RMSNorm as LiveRMSNorm
 
 
 class _TorchFallbackRMSNorm(nn.Module):
@@ -45,17 +42,19 @@ class _TorchFallbackRMSNorm(nn.Module):
 
 
 def _build_pair(dim: int, seed: int = 0):
-    """Build a torch-baseline + live FlashInfer ``_RMSNorm`` pair with matched weights
-    (bf16 for the live path, fp32 (upcast of the same bf16 bytes) for the
-    baseline so the RMS math is numerically aligned)."""
+    """Build torch-baseline and framework RMSNorm paths with matched weights."""
     torch.manual_seed(seed)
-    live = LiveRMSNorm(dim).cuda()
-    baseline = _TorchFallbackRMSNorm(dim).cuda()
     w_bf = (torch.randn(dim, device="cuda") * 0.1 + 1.0).abs().to(torch.bfloat16)
+    live = LiveRMSNorm(w_bf)
+    baseline = _TorchFallbackRMSNorm(dim).cuda()
     with torch.no_grad():
-        live.weight.copy_(w_bf)
         baseline.weight.copy_(w_bf.float())
     return baseline, live
+
+
+def _run_live(live: LiveRMSNorm, x: torch.Tensor) -> torch.Tensor:
+    """Apply the framework's 2D RMSNorm contract as DSV4 Block does."""
+    return live(x.reshape(-1, x.shape[-1])).view_as(x)
 
 
 def _bench(fn, *args, warmup: int = 25, iters: int = 200) -> float:
@@ -72,31 +71,17 @@ def _bench(fn, *args, warmup: int = 25, iters: int = 200) -> float:
 
 
 def test_live_matches_pinned_baseline():
-    """``block._RMSNorm`` now owns a bf16 weight and calls ``flashinfer.norm.rmsnorm``.
-    Compare against the pinned torch baseline, **both fed identical bf16
-    weight** — verifies the algorithm matches, independent of the fp32→bf16
-    weight downgrade. vLLM's DeepSeek V4 uses the same bf16-weight convention.
-    """
-    from rtp_llm.models_py.modules.dsv4.block import _RMSNorm as LiveRMSNorm
-
+    """Compare framework RMSNorm with the pinned torch baseline."""
     dim = 4096
-    torch.manual_seed(42)
-    live = LiveRMSNorm(dim).cuda()
-    baseline = _TorchFallbackRMSNorm(dim).cuda()
-    with torch.no_grad():
-        # Build weight in bf16 so both paths operate on the same numeric input.
-        w_bf = (torch.randn(dim, device="cuda") * 0.1 + 1.0).abs().to(torch.bfloat16)
-        live.weight.copy_(w_bf)
-        # Baseline parameter is fp32 but we copy bf16 values (exact up-cast).
-        baseline.weight.copy_(w_bf.float())
+    baseline, live = _build_pair(dim, seed=42)
     x = torch.randn(1, 128, dim, dtype=torch.bfloat16, device="cuda") * 0.3
-    y_live = live(x)
+    y_live = _run_live(live, x)
     y_ref = baseline(x)
     d = (y_live.float() - y_ref.float()).abs()
     print(f"  [live vs pinned baseline]  max={d.max():.4e}  mean={d.mean():.4e}")
     assert (
         d.max() <= 2e-2
-    ), f"live _RMSNorm vs pinned baseline diff > 1 bf16 ULP: {d.max()}"
+    ), f"live RMSNorm vs pinned baseline diff > 1 bf16 ULP: {d.max()}"
 
 
 def test_correctness():
@@ -107,14 +92,14 @@ def test_correctness():
     for B, T in [(1, 1), (1, 8), (1, 64), (1, 128), (1, 256), (1, 4096), (4, 1024)]:
         x = torch.randn(B, T, dim, dtype=torch.bfloat16, device="cuda") * 0.3
         with torch.no_grad():
-            y_live = live(x)
+            y_live = _run_live(live, x)
             y_ref = baseline(x)
         d = (y_live.float() - y_ref.float()).abs()
         print(f"  [dim={dim} B={B} T={T}]  max diff={d.max():.4e}  mean={d.mean():.4e}")
         # Both paths do fp32 intermediates; diff is at most 1 bf16 ULP from
         # variance-accumulation order differences.
         assert d.max() <= 2e-2, (
-            f"_RMSNorm replacement diff exceeds ~1 bf16 ULP tol @ "
+            f"RMSNorm replacement diff exceeds ~1 bf16 ULP tol @ "
             f"B={B} T={T}: {d.max()}"
         )
 
@@ -138,7 +123,7 @@ def bench_token_sweep():
             return baseline(x)
 
         def run_live(x):
-            return live(x)
+            return _run_live(live, x)
 
         try:
             t_base = _bench(run_baseline, x)

@@ -1,5 +1,6 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "embedding_arpc_deps", "requirement", "torch_deps")
+load("@arch_config//:arch_select.bzl", "embedding_arpc_deps", "requirement")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 requirement([
     "grpcio",

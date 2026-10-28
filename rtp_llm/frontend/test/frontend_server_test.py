@@ -4,7 +4,10 @@ from typing import Any
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 from pydantic import BaseModel
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
@@ -70,10 +73,17 @@ class FakeRawRequest(object):
 
 
 class FrontendServerTest(TestCase):
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
+    def setUp(self):
+        super().setUp()
+        from rtp_llm.telemetry import tracing
+
+        self.addCleanup(tracing.reset_telemetry_for_test)
+        self.assertTrue(tracing.reset_telemetry_for_test())
+
         # Create PyEnvConfigs with default values for testing
         py_env_configs = PyEnvConfigs()
+        py_env_configs.concurrency_config.concurrency_limit = 32
+        py_env_configs.profiling_debug_logging_config.log_file_backup_count = 1
         set_global_controller(init_controller(py_env_configs.concurrency_config))
         py_env_configs.server_config.start_port = 0
         py_env_configs.server_config.rank_id = 0
@@ -83,13 +93,6 @@ class FrontendServerTest(TestCase):
             py_env_configs=py_env_configs,
         )
         self.frontend_server._frontend_worker = FakeFrontendWorker()
-
-    def setUp(self):
-        super().setUp()
-        from rtp_llm.telemetry import tracing
-
-        self.addCleanup(tracing.reset_telemetry_for_test)
-        self.assertTrue(tracing.reset_telemetry_for_test())
 
     def test_batch_http_trace_success_failure_cancel_and_disabled_parity(self):
         try:
@@ -909,7 +912,6 @@ class FrontendServerTest(TestCase):
             self.assertNotIn("rtp_llm.request_id", client_span.attributes)
             self.assertEqual(client_span.status.status_code, StatusCode.ERROR)
             self.assertEqual(client_span.attributes["error.type"], "RuntimeError")
-
 
 if __name__ == "__main__":
     main()

@@ -288,9 +288,15 @@ public:
         return nullptr;
     }
 
-    std::shared_ptr<StoreContext> storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>&,
-                                               int64_t) override {
-        return nullptr;
+    std::shared_ptr<StoreContext>
+    storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                 int64_t                                                 timeout_ms) override {
+        if (request_block_buffers.empty()) {
+            return nullptr;
+        }
+        auto store_context = std::make_shared<StoreContext>(shared_from_this());
+        store_context->store(request_block_buffers, timeout_ms);
+        return store_context;
     }
 
     std::shared_ptr<RemoteStoreTask>

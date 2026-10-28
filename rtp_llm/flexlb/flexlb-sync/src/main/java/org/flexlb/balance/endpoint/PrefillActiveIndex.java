@@ -56,6 +56,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
     final class Capture {
         private static final Capture EMPTY = new Capture(List.of());
         private final List<Entry> entries;
+        private final Object itemsLock = new Object();
         private volatile List<ScheduledRequest> items;
         private volatile List<GroupPlanner.Item> projectedItems;
 
@@ -68,7 +69,7 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
             if (result != null) {
                 return result;
             }
-            synchronized (this) {
+            synchronized (itemsLock) {
                 if (items == null) {
                     List<ScheduledRequest> requests = new ArrayList<>(entries.size());
                     for (Entry entry : entries) {

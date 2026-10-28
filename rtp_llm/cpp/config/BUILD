@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
@@ -12,6 +12,7 @@ cc_library(
 
 py_test(
     name = "model_config_test",
+    tags = ["manual"],  # The automatic Python gate is pytest's py_ut profile.
     srcs = ["model_config_test.py"],
     data = ["//:th_transformer_config"],
     deps = ["//rtp_llm:ops"],

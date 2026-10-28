@@ -87,7 +87,6 @@ double benchmarkUs(Func&& func, int iterations) {
     auto end = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::micro>(end - start).count() / iterations;
 }
-
 class MtpBatchStreamProcessorTest: public DeviceTestBase {
 public:
     static CacheConfig makeProcessorCacheConfig() {
@@ -209,7 +208,6 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
               << " max_seq_len=" << max_seq_len << " iterations=" << iterations << " memcpy_us=" << memcpy_us
               << " torch_copy_us=" << torch_us << " speedup=" << (memcpy_us / torch_us) << std::endl;
 }
-
 TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpecificHistories) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

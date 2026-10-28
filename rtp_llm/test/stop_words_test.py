@@ -1,6 +1,7 @@
 from unittest import TestCase, main
 
 import numpy as np
+import pytest
 import torch
 
 from rtp_llm.utils.word_util import (
@@ -9,6 +10,8 @@ from rtp_llm.utils.word_util import (
     truncate_response_with_stop_words,
     truncate_token_with_stop_word_id,
 )
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class StopWordTest(TestCase):
@@ -296,12 +299,10 @@ class TruncateTokenWithStopWordIdTest(TestCase):
     def test_no_match_unchanged(self):
         # 末尾不匹配任何 stop_word_id，应返回原序列
         stop_word_ids = [[99, 100]]
-        for tokens in (
-            [1, 2, 3, 4, 5],
-        ):
+        for tokens in ([1, 2, 3, 4, 5],):
             result = truncate_token_with_stop_word_id(tokens, stop_word_ids)
             self.assertEqual(result, [1, 2, 3, 4, 5])
-            
+
     def test_numpy_ndarray_direct_input_fails(self):
         # 直接传入 np.ndarray 应失败（函数内 assert 要求 tokens 为 list）
         tokens = np.array([1, 2, 3, 4, 5], dtype=np.int64)

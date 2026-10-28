@@ -1,0 +1,40 @@
+# Applied only by SdistWithProto; do not broaden wheel package-data discovery.
+include WORKSPACE BUILD BUILD.* *.bzl
+include .bazelrc .bazelignore .bazeliskrc cc_test_wrapper.sh
+include LICENSE NOTICE README.md README_cn.md conftest.py
+include _build/sdist_sources.txt
+
+graft _build
+graft arch_config
+graft bazel
+graft deps
+graft patches
+graft 3rdparty
+graft tools
+graft rtp_llm/cpp
+graft rtp_llm/models_py
+recursive-include rtp_llm/utils/moe_luts *.ini
+graft rtp_llm/model_loader/tipc/csrc
+recursive-include rtp_llm BUILD BUILD.bazel *.bzl *.proto
+
+# Native artifacts are produced by the first wheel build, never supplied by sdist.
+prune rtp_llm/libs
+# The package BUILD is source; generated Native artifacts remain excluded.
+include rtp_llm/libs/BUILD
+prune internal_source
+prune build
+prune dist
+prune artifacts
+prune .git
+prune .venv
+prune venv
+prune .pytest_cache
+prune .mypy_cache
+prune .ruff_cache
+prune bazel-*
+exclude .torch_bazelrc
+# Also exclude nested generated outputs from the explicit source roots above.
+global-exclude *.py[cod] *.so *.so.* *.dylib *.dll *.a *.o *.obj
+global-exclude __pycache__/* .pytest_cache/* .mypy_cache/* .ruff_cache/* .git/*
+global-exclude .venv/* venv/* .tox/* build/* dist/* bazel-*/* artifacts/* internal_source/*
+global-exclude .env .env.* .netrc .ssh/* .aws/*

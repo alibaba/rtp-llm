@@ -416,13 +416,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register FMHAConfig
     py::class_<FMHAConfig>(m, "FMHAConfig")
         .def(py::init<>())
+        .def_readwrite("attn_backend", &FMHAConfig::attn_backend)
+        .def_readwrite("prefill_attn_backend", &FMHAConfig::prefill_attn_backend)
+        .def_readwrite("decode_attn_backend", &FMHAConfig::decode_attn_backend)
+        .def_readwrite("disable_attn_backends", &FMHAConfig::disable_attn_backends)
         .def_readwrite("enable_fmha", &FMHAConfig::enable_fmha)
-        .def_readwrite("enable_flashinfer_trtllm_gen", &FMHAConfig::enable_flashinfer_trtllm_gen)
-        .def_readwrite("enable_flashinfer_trt_fmha_v2", &FMHAConfig::enable_flashinfer_trt_fmha_v2)
-        .def_readwrite("enable_paged_flashinfer_trt_fmha_v2", &FMHAConfig::enable_paged_flashinfer_trt_fmha_v2)
+        .def_readwrite("enable_trt_fmha", &FMHAConfig::enable_trt_fmha)
+        .def_readwrite("enable_paged_trt_fmha", &FMHAConfig::enable_paged_trt_fmha)
         .def_readwrite("enable_open_source_fmha", &FMHAConfig::enable_open_source_fmha)
-        .def_readwrite("enable_paged_open_source_fmha", &FMHAConfig::enable_paged_open_source_fmha)
-        .def_readwrite("disable_flashinfer_native", &FMHAConfig::disable_flashinfer_native)
+        .def_readwrite("disable_flash_infer", &FMHAConfig::disable_flash_infer)
         .def_readwrite("disable_flashinfer_hybrid_prefill", &FMHAConfig::disable_flashinfer_hybrid_prefill)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
@@ -432,38 +434,49 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &FMHAConfig::to_string)
         .def(py::pickle(
             [](const FMHAConfig& self) {
-                return py::make_tuple(self.enable_fmha,
-                                      self.enable_flashinfer_trt_fmha_v2,
-                                      self.enable_paged_flashinfer_trt_fmha_v2,
+                return py::make_tuple(self.attn_backend,
+                                      self.prefill_attn_backend,
+                                      self.decode_attn_backend,
+                                      self.disable_attn_backends,
+                                      self.enable_fmha,
+                                      self.enable_trt_fmha,
+                                      self.enable_paged_trt_fmha,
                                       self.enable_open_source_fmha,
-                                      self.enable_paged_open_source_fmha,
-                                      self.disable_flashinfer_native,
+                                      self.disable_flash_infer,
                                       self.enable_xqa,
                                       self.use_aiter_pa,
                                       self.use_asm_pa,
                                       self.use_triton_pa,
                                       self.absorb_opt_len,
-                                      self.enable_flashinfer_trtllm_gen,
                                       self.disable_flashinfer_hybrid_prefill);
             },
             [](py::tuple t) {
-                if (t.size() != 13)
-                    throw std::runtime_error("FMHAConfig: expected 13-element state, got " + std::to_string(t.size()));
+                // This pickle is only used for SAME-VERSION IPC: configs are passed to
+                // spawned worker processes (multiprocessing "spawn"), where the producer
+                // and consumer always run the identical build. It is NOT a cross-version
+                // wire format (cross-node/service comms use gRPC + protobuf), so a strict
+                // field-count check is correct and cross-version rolling-upgrade
+                // compatibility is intentionally not provided.
+                if (t.size() != 15)
+                    throw std::runtime_error("Invalid FMHAConfig state: expected 15 fields, got "
+                                             + std::to_string(t.size()));
                 FMHAConfig c;
                 try {
-                    c.enable_fmha                         = t[0].cast<bool>();
-                    c.enable_flashinfer_trt_fmha_v2       = t[1].cast<bool>();
-                    c.enable_paged_flashinfer_trt_fmha_v2 = t[2].cast<bool>();
-                    c.enable_open_source_fmha             = t[3].cast<bool>();
-                    c.enable_paged_open_source_fmha       = t[4].cast<bool>();
-                    c.disable_flashinfer_native           = t[5].cast<bool>();
-                    c.enable_xqa                          = t[6].cast<bool>();
-                    c.use_aiter_pa                        = t[7].cast<bool>();
-                    c.use_asm_pa                          = t[8].cast<bool>();
-                    c.use_triton_pa                       = t[9].cast<bool>();
-                    c.absorb_opt_len                      = t[10].cast<int64_t>();
-                    c.enable_flashinfer_trtllm_gen        = t[11].cast<bool>();
-                    c.disable_flashinfer_hybrid_prefill   = t[12].cast<bool>();
+                    c.attn_backend            = t[0].cast<std::string>();
+                    c.prefill_attn_backend    = t[1].cast<std::string>();
+                    c.decode_attn_backend     = t[2].cast<std::string>();
+                    c.disable_attn_backends   = t[3].cast<std::string>();
+                    c.enable_fmha             = t[4].cast<bool>();
+                    c.enable_trt_fmha         = t[5].cast<bool>();
+                    c.enable_paged_trt_fmha   = t[6].cast<bool>();
+                    c.enable_open_source_fmha = t[7].cast<bool>();
+                    c.disable_flash_infer     = t[8].cast<bool>();
+                    c.enable_xqa              = t[9].cast<bool>();
+                    c.use_aiter_pa            = t[10].cast<bool>();
+                    c.use_asm_pa              = t[11].cast<bool>();
+                    c.use_triton_pa           = t[12].cast<bool>();
+                    c.absorb_opt_len          = t[13].cast<int64_t>();
+                    c.disable_flashinfer_hybrid_prefill = t[14].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -866,6 +879,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ft_disable_custom_ar", &HWKernelConfig::ft_disable_custom_ar)
         .def_readwrite("rocm_hipblaslt_config", &HWKernelConfig::rocm_hipblaslt_config)
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
+        .def_readwrite("force_legacy_fp8_ptpc", &HWKernelConfig::force_legacy_fp8_ptpc)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
         .def_readwrite("generation_prefill_cuda_graph_max_requests",
@@ -896,10 +910,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disable_dpc_random,
                                       self.rocm_disable_custom_ag,
                                       self.generation_prefill_cuda_graph_max_requests,
-                                      self.generation_prefill_capture_token_buckets);
+                                      self.generation_prefill_capture_token_buckets,
+                                      self.force_legacy_fp8_ptpc);
             },
             [](py::tuple t) {
-                if (t.size() != 14 && t.size() != 16)
+                if (t.size() != 14 && t.size() != 15 && t.size() != 16 && t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -917,9 +932,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[12].cast<bool>();
                     c.rocm_disable_custom_ag       = t[13].cast<bool>();
-                    if (t.size() == 16) {
+                    // Native used a 15-field layout; main used a distinct 16-field layout.
+                    if (t.size() == 15) {
+                        c.force_legacy_fp8_ptpc = t[14].cast<bool>();
+                    }
+                    if (t.size() >= 16) {
                         c.generation_prefill_cuda_graph_max_requests = t[14].cast<int>();
-                        c.generation_prefill_capture_token_buckets   = t[15].cast<std::vector<int>>();
+                        c.generation_prefill_capture_token_buckets = t[15].cast<std::vector<int>>();
+                    }
+                    if (t.size() == 17) {
+                        c.force_legacy_fp8_ptpc = t[16].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());

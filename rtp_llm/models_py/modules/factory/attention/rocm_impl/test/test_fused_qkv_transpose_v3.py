@@ -25,7 +25,10 @@ Skips automatically off ROCm.
 import unittest
 from typing import List
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 try:
     from rtp_llm.ops import AttentionConfigs, RopeConfig, RopeStyle

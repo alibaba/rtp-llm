@@ -54,13 +54,19 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
     def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
         # compat for qwen_v2_video
-        if self._contains(weight_keys, "language_model."):
+        if self._contains(weight_keys, "model.language_model."):
+            self.prefix = "model.language_model."
+            self.model_prefix = ""
+        elif self._contains(weight_keys, "language_model."):
             self.prefix = "language_model."
         if self.prefix + "transformer.layers.0.attention.dense.weight" in meta_dicts[0]:
             self.weight_style = WeightStyle.TRT_ENGINE
         if self._exist(weight_keys, "layers.0.input_layernorm.weight"):
             self.model_prefix = ""
-        self.transformer_prefix = self.model_prefix + self.prefix
+        # HF nests the text tower as <outer_prefix>model.* (e.g. multimodal
+        # checkpoints use "language_model.model."), so the outer prefix must
+        # come first. model_prefix + prefix would yield "model.language_model.".
+        self.transformer_prefix = self.prefix + self.model_prefix
         logging.info(f"weight_style: {self.weight_style}")
 
     def _get_weight_info(self):
@@ -373,7 +379,17 @@ class QWenV2(QWen):
         config_path = os.path.join(ckpt_path, "config.json")
 
         if not os.path.exists(config_path):
-            return
+            # Surface the missing path explicitly. The previous silent
+            # return left _create_config() asserting on
+            # head_num=0/num_layers=0 with no hint about which path the
+            # server actually inspected when the model directory is missing
+            # or not mounted in the execution environment.
+            raise FileNotFoundError(
+                "QWenV2._from_hf: config.json not found at "
+                + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+                "Verify CHECKPOINT_PATH env / model_path arg is correct "
+                "and the model dir is mounted on this host."
+            )
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)

@@ -496,14 +496,14 @@ class DashScApp:
         return loop
 
     def _stop_enqueue_loop(self) -> None:
-        loop = self._enqueue_loop
+        loop = getattr(self, "_enqueue_loop", None)
         if loop is None:
             return
         try:
             loop.call_soon_threadsafe(loop.stop)
         except RuntimeError:
             pass
-        thread = self._enqueue_loop_thread
+        thread = getattr(self, "_enqueue_loop_thread", None)
         if thread is not None:
             thread.join(timeout=5.0)
         try:

@@ -9,13 +9,12 @@ import subprocess
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Union
-
-from smoke.case_runner import CaseRunner
-from smoke.task_info import TaskInfo, TaskStates
+from typing import Any, Dict, List, Optional, Union
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
+from rtp_llm.test.smoke.case_runner import CaseRunner
+from rtp_llm.test.smoke.task_info import TaskInfo, TaskStates
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 from rtp_llm.test.utils.port_util import PortManager
@@ -33,36 +32,6 @@ VIT_ROLE_NAME = "vit"
 SMOKE_SERVICE_ID = "aigc.text-generation.generation.engine_service"
 
 
-def _consume_pd_share_gpu(
-    prefill_envs: Dict[str, str], decode_envs: Dict[str, str]
-) -> bool:
-    prefill_value = prefill_envs.pop("SMOKE_PD_SHARE_GPU", "0")
-    decode_value = decode_envs.pop("SMOKE_PD_SHARE_GPU", "0")
-    return str_to_bool(prefill_value) or str_to_bool(decode_value)
-
-
-def _extract_int_arg(args_str: str, arg_name: str, default: int) -> int:
-    tokens = shlex.split(args_str or "")
-    for index, token in enumerate(tokens):
-        if token == arg_name and index + 1 < len(tokens):
-            return int(tokens[index + 1])
-        if token.startswith(f"{arg_name}="):
-            return int(token.split("=", 1)[1])
-    return default
-
-
-def _build_local_dp_addresses(base_port, world_size, tp_size, worker_info_port_num):
-    return [
-        f"127.0.0.1:{int(base_port) + rank * worker_info_port_num}"
-        for rank in range(0, world_size, max(1, tp_size))
-    ]
-
-
-# Bounded wait for a role's model RPC listener.  `MagaServerManager` health
-# checks only prove the HTTP frontend is up; ``ServerConfig.rpc_server_port``
-# (``start_port + rank * worker_info_port_num + 1``) can start listening later,
-# and a query issued in that window fails with CONNECT_FAILED (8202) on the
-# frontend side or a bare curl error on the client side.
 SMOKE_ROLE_RPC_READY_TIMEOUT_S = 600.0
 
 
@@ -89,7 +58,6 @@ def _wait_tcp_port_ready(
             time.sleep(1.0)
 
 
-
 def _dump_manager_logs(managers, max_lines: int = 200) -> None:
     """Best-effort process-log dump for managers whose run failed mid-flight."""
     for manager in managers:
@@ -99,6 +67,58 @@ def _dump_manager_logs(managers, max_lines: int = 200) -> None:
             manager.print_process_log(max_lines=max_lines)
         except Exception:  # noqa: BLE001 - diagnostics must never mask the failure
             logging.warning("failed to dump process log for %r", manager, exc_info=True)
+
+
+def _consume_pd_share_gpu(
+    prefill_envs: Dict[str, str], decode_envs: Dict[str, str]
+) -> bool:
+    prefill_value = prefill_envs.pop("SMOKE_PD_SHARE_GPU", "0")
+    decode_value = decode_envs.pop("SMOKE_PD_SHARE_GPU", "0")
+    return str_to_bool(prefill_value) or str_to_bool(decode_value)
+
+
+def _stop_server_safe(manager: Any) -> None:
+    """Stop *manager* if it is not None; tolerates already-stopped servers."""
+    if manager is None:
+        return
+    try:
+        manager.stop_server()
+    except Exception as e:
+        logging.warning("Failed to stop server: %s", e)
+
+
+def _cleanup_servers(
+    started_managers: List[Any], remote_kvcm_server: Optional[Any] = None
+) -> None:
+    """Stop all *started_managers* and the optional remote KVCM server."""
+    for mgr in reversed(started_managers):
+        _stop_server_safe(mgr)
+    if remote_kvcm_server is not None:
+        try:
+            remote_kvcm_server.stop_server()
+        except Exception as e:
+            logging.warning("Failed to stop remote KVCM server: %s", e)
+        try:
+            remote_kvcm_server.copy_logs()
+        except Exception as e:
+            logging.warning("Failed to copy remote KVCM logs: %s", e)
+
+
+def _extract_int_arg(args_str: str, arg_name: str, default: int) -> int:
+    tokens = shlex.split(args_str or "")
+    for index, token in enumerate(tokens):
+        if token == arg_name and index + 1 < len(tokens):
+            return int(tokens[index + 1])
+        if token.startswith(f"{arg_name}="):
+            return int(token.split("=", 1)[1])
+    return default
+
+
+def _build_local_dp_addresses(base_port, world_size, tp_size, worker_info_port_num):
+    return [
+        f"127.0.0.1:{int(base_port) + rank * worker_info_port_num}"
+        for rank in range(0, world_size, max(1, tp_size))
+    ]
 
 
 class SeparatedCaseRunner(CaseRunner):
@@ -444,7 +464,8 @@ class SeparatedCaseRunner(CaseRunner):
                 else sizes[LLM_ROLE_NAME]
             )
         )
-        required_gpus = pd_size + sum(sizes[role] for role in self.vit_roles)
+        # Sharing device visibility does not reduce the reserved role resources.
+        required_gpus = sum(sizes.values())
         gpu_ids = [str(gpu) for gpu in get_gpu_ids()]
         if len(gpu_ids) < required_gpus:
             raise RuntimeError(
@@ -555,12 +576,14 @@ class SeparatedCaseRunner(CaseRunner):
                 "task_info": self.task_info,
                 "port": ports[role],
                 "role_name": role,
+                "smoke_args_str": self.smoke_args.get(role, ""),
             }
             for role in backend_roles
         ]
         managers = {}
         master = None
         master_stream = None
+        keep_alive = False
         try:
             if enable_remote_cache:
                 self.remote_kvcm_server = self._start_remote_kvcm_server()
@@ -590,6 +613,9 @@ class SeparatedCaseRunner(CaseRunner):
                     self.task_info,
                     port=frontend_port,
                     role_name=FRONTEND_ROLE_NAME,
+                    server_manager_callback=lambda manager: managers.__setitem__(
+                        FRONTEND_ROLE_NAME, manager
+                    ),
                 )
                 if not frontend_state.ret or frontend is None:
                     frontend_state.err_msg = (
@@ -598,13 +624,12 @@ class SeparatedCaseRunner(CaseRunner):
                     return frontend_state
                 managers[FRONTEND_ROLE_NAME] = frontend
             if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
-                return self._keep_servers_alive(
-                    managers, enable_remote_cache=enable_remote_cache
+                state = self._keep_servers_alive(
+                    dict(reversed(list(managers.items()))),
+                    enable_remote_cache=enable_remote_cache,
                 )
-            # Both roles report healthy HTTP frontends, but the peer model RPC
-            # listeners are outside the health probe: wait for them before
-            # curling so the first query cannot land while an upstream rpc port
-            # is still closed (VISIT_FAILED with CONNECT_FAILED/8202).
+                keep_alive = True
+                return state
             self._wait_model_rpc_ports(configs)
             curl_role = (
                 FRONTEND_ROLE_NAME
@@ -638,27 +663,50 @@ class SeparatedCaseRunner(CaseRunner):
             if str_to_bool(
                 os.environ.get("SMOKE_KEEP_SERVER_ALIVE_AFTER_CURL", "False")
             ):
-                return self._keep_servers_alive(
-                    managers, enable_remote_cache=enable_remote_cache
+                state = self._keep_servers_alive(
+                    dict(reversed(list(managers.items()))),
+                    enable_remote_cache=enable_remote_cache,
                 )
+                keep_alive = True
+                return state
             return state
+        except Exception:
+            _dump_manager_logs(managers.values())
+            raise
         finally:
-            for manager in reversed(list(managers.values())):
-                manager.stop_server()
+            # Frontend starts after the master and backend roles. Stop in reverse
+            # ownership order; failures must not prevent remaining cleanup.
+            if not keep_alive:
+                _stop_server_safe(managers.get(FRONTEND_ROLE_NAME))
             if master is not None:
-                master.terminate()
                 try:
-                    master.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    master.kill()
-                    master.wait(timeout=10)
+                    master.terminate()
+                    try:
+                        master.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        master.kill()
+                        master.wait(timeout=10)
+                except Exception as error:
+                    logging.warning("Failed to stop owned FlexLB master: %s", error)
             if master_stream is not None:
-                master_stream.close()
-            for lock in master_locks:
-                lock.__exit__(None, None, None)
-            if enable_remote_cache and self.remote_kvcm_server is not None:
-                self.remote_kvcm_server.stop_server()
-                self.remote_kvcm_server.copy_logs()
+                try:
+                    master_stream.close()
+                except Exception as error:
+                    logging.warning("Failed to close FlexLB log: %s", error)
+            for lock in reversed(master_locks):
+                try:
+                    lock.__exit__(None, None, None)
+                except Exception as error:
+                    logging.warning("Failed to release FlexLB port lock: %s", error)
+            if not keep_alive:
+                _cleanup_servers(
+                    [
+                        manager
+                        for role, manager in managers.items()
+                        if role != FRONTEND_ROLE_NAME
+                    ],
+                    self.remote_kvcm_server if enable_remote_cache else None,
+                )
 
 
 class PdSeperationCaseRunner(SeparatedCaseRunner):
@@ -675,127 +723,149 @@ class DpSeperationCaseRunner(CaseRunner):
         **kwargs,
     ):
         super().__init__(task_info, env_args, gpu_card, smoke_args, **kwargs)
+        self.remote_kvcm_server = None
         if not isinstance(env_args, dict):
-            raise Exception("env_args in PdSeperationCaseRunner should be dict")
+            raise Exception("env_args in DpSeperationCaseRunner should be dict")
         if (
             len(env_args) < 2
             or PREFILL_ROLE_NAME not in env_args
             or DECODE_ROLE_NAME not in env_args
         ):
-            raise Exception("env_args in PdSeperationCaseRunner should not empty")
+            raise Exception("env_args in DpSeperationCaseRunner should not empty")
 
     # override
     def _run_impl(self):
-        frontend_server_manager = None
-        frontend_envs = {}
-        prefill_envs = self.create_env_from_args(self.env_args[PREFILL_ROLE_NAME])
-        decode_envs = self.create_env_from_args(self.env_args[DECODE_ROLE_NAME])
-        prefill_args = self.smoke_args.get(PREFILL_ROLE_NAME, "")
-        decode_args = self.smoke_args.get(DECODE_ROLE_NAME, "")
-        prefill_enable_remote_cache = self._extract_bool_arg(
-            prefill_args, "--enable_remote_cache"
-        )
-        decode_enable_remote_cache = self._extract_bool_arg(
-            decode_args, "--enable_remote_cache"
-        )
-        if prefill_enable_remote_cache ^ decode_enable_remote_cache:
-            raise Exception(
-                f"prefill and decode instance ENABLE_REMOTE_CACHE not match, prefill[{prefill_enable_remote_cache}] decode[{decode_enable_remote_cache}]"
-            )
-        enable_remote_cache = prefill_enable_remote_cache and decode_enable_remote_cache
-        if enable_remote_cache:
-            self.remote_kvcm_server = self._start_remote_kvcm_server()
-            assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            prefill_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
-            decode_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
-        prefill_gpu_size = int(prefill_envs["WORLD_SIZE"])
-        decode_gpu_size = int(decode_envs["WORLD_SIZE"])
-        share_gpu = _consume_pd_share_gpu(prefill_envs, decode_envs)
-        prefill_port = MagaServerManager.get_free_port()
-        decode_port = MagaServerManager.get_free_port()
-        gpu_ids = [str(x) for x in get_gpu_ids()]
-
-        # 提前选择机器，直接指定具体的机器地址而不是使用负载均衡
-        decode_endpoint = EndPoint(
-            type="Vipserver",
-            address=f"127.0.0.1:{decode_port}",
-            protocol="http",
-            path="/",
-        )
-        prefill_endpoint = EndPoint(
-            type="Vipserver",
-            address=f"127.0.0.1:{prefill_port}",
-            protocol="http",
-            path="/",
-        )
-        group_endpoint = GroupEndPoint(
-            group="default",
-            prefill_endpoint=prefill_endpoint,
-            decode_endpoint=decode_endpoint,
-        )
-        service_route = ServiceRoute(
-            service_id="test", role_endpoints=[group_endpoint], use_local=True
-        )
-
-        if FRONTEND_ROLE_NAME in self.env_args:
-            frontend_envs = self.create_env_from_args(self.env_args[FRONTEND_ROLE_NAME])
-            frontend_port = MagaServerManager.get_free_port()
-            task_states = TaskStates()
-
-            frontend_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
-            print(f"MODEL_SERVICE_CONFIG: {service_route.model_dump_json()}")
-            frontend_server_manager = self.start_server(
-                frontend_envs,
-                task_states,
-                self.task_info,
-                port=frontend_port,
-                role_name="frontend",
-            )
-
-        # prepare server configurations for parallel start
-        if share_gpu:
-            shared_gpu_size = max(prefill_gpu_size, decode_gpu_size)
-            if len(gpu_ids) < shared_gpu_size:
-                raise RuntimeError(
-                    f"SMOKE_PD_SHARE_GPU needs {shared_gpu_size} GPUs, got {len(gpu_ids)}"
-                )
-            shared_visible_devices = ",".join(gpu_ids[:shared_gpu_size])
-            decode_envs["CUDA_VISIBLE_DEVICES"] = shared_visible_devices
-            prefill_envs["CUDA_VISIBLE_DEVICES"] = shared_visible_devices
-        else:
-            decode_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:decode_gpu_size])
-            prefill_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[decode_gpu_size:])
-        decode_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
-        decode_envs["REMOTE_SERVER_PORT"] = prefill_port
-        decode_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
-
-        prefill_envs["REMOTE_SERVER_PORT"] = decode_port
-        prefill_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
-
-        server_configs = [
-            {
-                "env_dict": decode_envs,
-                "task_info": self.task_info,
-                "port": decode_port,
-                "role_name": "decode",
-            },
-            {
-                "env_dict": prefill_envs,
-                "task_info": self.task_info,
-                "port": prefill_port,
-                "role_name": "prefill",
-            },
-        ]
-
-        # start decode and prefill servers in parallel
-        started: List[Any] = []
-        if frontend_server_manager is not None:
-            started.append(frontend_server_manager)
-        if enable_remote_cache and self.remote_kvcm_server is not None:
-            started.append(self.remote_kvcm_server)
+        started_managers = []
+        keep_alive = False
         try:
-            server_managers, task_states_list = self.start_servers_parallel(server_configs)
-            started.extend(m for m in server_managers if m is not None)
+            frontend_server_manager = None
+            frontend_envs = {}
+            prefill_envs = self.create_env_from_args(self.env_args[PREFILL_ROLE_NAME])
+            decode_envs = self.create_env_from_args(self.env_args[DECODE_ROLE_NAME])
+            prefill_args = self.smoke_args.get(PREFILL_ROLE_NAME, "")
+            decode_args = self.smoke_args.get(DECODE_ROLE_NAME, "")
+            prefill_enable_remote_cache = self._extract_bool_arg(
+                prefill_args, "--enable_remote_cache"
+            )
+            decode_enable_remote_cache = self._extract_bool_arg(
+                decode_args, "--enable_remote_cache"
+            )
+            if prefill_enable_remote_cache ^ decode_enable_remote_cache:
+                raise Exception(
+                    f"prefill and decode instance ENABLE_REMOTE_CACHE not match, prefill[{prefill_enable_remote_cache}] decode[{decode_enable_remote_cache}]"
+                )
+            enable_remote_cache = (
+                prefill_enable_remote_cache and decode_enable_remote_cache
+            )
+            if enable_remote_cache:
+                self.remote_kvcm_server = self._start_remote_kvcm_server()
+                assert (
+                    self.remote_kvcm_server is not None
+                ), "remote kvcm shoule not be None"
+                prefill_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+                decode_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            prefill_gpu_size = int(prefill_envs["WORLD_SIZE"])
+            decode_gpu_size = int(decode_envs["WORLD_SIZE"])
+            share_gpu = _consume_pd_share_gpu(prefill_envs, decode_envs)
+            prefill_port = MagaServerManager.get_free_port()
+            decode_port = MagaServerManager.get_free_port()
+            gpu_ids = [str(x) for x in get_gpu_ids()]
+            if decode_gpu_size + prefill_gpu_size > len(gpu_ids):
+                raise RuntimeError(
+                    f"需要 {decode_gpu_size + prefill_gpu_size} 块 GPU，但只有 {len(gpu_ids)} 块可用"
+                )
+
+            # 提前选择机器，直接指定具体的机器地址而不是使用负载均衡
+            decode_endpoint = EndPoint(
+                type="Vipserver",
+                address=f"127.0.0.1:{decode_port}",
+                protocol="http",
+                path="/",
+            )
+            prefill_endpoint = EndPoint(
+                type="Vipserver",
+                address=f"127.0.0.1:{prefill_port}",
+                protocol="http",
+                path="/",
+            )
+            group_endpoint = GroupEndPoint(
+                group="default",
+                prefill_endpoint=prefill_endpoint,
+                decode_endpoint=decode_endpoint,
+            )
+            service_route = ServiceRoute(
+                service_id="test", role_endpoints=[group_endpoint], use_local=True
+            )
+
+            if FRONTEND_ROLE_NAME in self.env_args:
+                frontend_envs = self.create_env_from_args(
+                    self.env_args[FRONTEND_ROLE_NAME]
+                )
+                frontend_port = MagaServerManager.get_free_port()
+                task_states = TaskStates()
+
+                frontend_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
+                print(f"MODEL_SERVICE_CONFIG: {service_route.model_dump_json()}")
+                frontend_server_manager = self.start_server(
+                    frontend_envs,
+                    task_states,
+                    self.task_info,
+                    port=frontend_port,
+                    role_name="frontend",
+                    server_manager_callback=started_managers.append,
+                )
+                if not task_states.ret or frontend_server_manager is None:
+                    task_states.err_msg = (
+                        "frontend server start failed, " + task_states.err_msg
+                    )
+                    return task_states
+
+            # prepare server configurations for parallel start
+            if share_gpu:
+                shared_gpu_size = max(prefill_gpu_size, decode_gpu_size)
+                if len(gpu_ids) < shared_gpu_size:
+                    raise RuntimeError(
+                        f"SMOKE_PD_SHARE_GPU needs {shared_gpu_size} GPUs, got {len(gpu_ids)}"
+                    )
+                shared_visible_devices = ",".join(gpu_ids[:shared_gpu_size])
+                decode_envs["CUDA_VISIBLE_DEVICES"] = shared_visible_devices
+                prefill_envs["CUDA_VISIBLE_DEVICES"] = shared_visible_devices
+            else:
+                decode_envs["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    gpu_ids[:decode_gpu_size]
+                )
+                prefill_envs["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    gpu_ids[decode_gpu_size:]
+                )
+            decode_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
+            decode_envs["REMOTE_SERVER_PORT"] = prefill_port
+            decode_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
+
+            prefill_envs["REMOTE_SERVER_PORT"] = decode_port
+            prefill_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
+
+            server_configs = [
+                {
+                    "env_dict": decode_envs,
+                    "task_info": self.task_info,
+                    "port": decode_port,
+                    "role_name": "decode",
+                },
+                {
+                    "env_dict": prefill_envs,
+                    "task_info": self.task_info,
+                    "port": prefill_port,
+                    "role_name": "prefill",
+                },
+            ]
+
+            # start decode and prefill servers in parallel
+            server_managers, task_states_list = self.start_servers_parallel(
+                server_configs
+            )
+            started_managers.extend(
+                manager for manager in server_managers if manager is not None
+            )
 
             decode_server_manager, decode_task_states = (
                 server_managers[0],
@@ -821,7 +891,6 @@ class DpSeperationCaseRunner(CaseRunner):
                 prefill_task_states.err_msg = (
                     "prefill server start failed, " + prefill_task_states.err_msg
                 )
-                decode_server_manager.stop_server()
                 return prefill_task_states
             assert (
                 prefill_server_manager is not None
@@ -873,35 +942,19 @@ class DpSeperationCaseRunner(CaseRunner):
                 }
                 if frontend_server_manager is not None:
                     servers["frontend"] = frontend_server_manager
-                return self._keep_servers_alive(
+                state = self._keep_servers_alive(
                     servers, enable_remote_cache=enable_remote_cache
                 )
-
+                keep_alive = True
+                return state
             task_states = self.curl_server(curl_server_mgr)
-            prefill_server_manager.stop_server()
-            decode_server_manager.stop_server()
-
-            if frontend_server_manager is not None:
-                frontend_server_manager.stop_server()
-            if enable_remote_cache and self.remote_kvcm_server is not None:
-                self.remote_kvcm_server.stop_server()
-                self.remote_kvcm_server.copy_logs()
             return task_states
         except Exception:
-            _dump_manager_logs(started)
+            _dump_manager_logs(started_managers)
             raise
         finally:
-            # stop_server() is idempotent: the happy path stops the managers
-            # explicitly (and KEEP_SERVER_ALIVE hands them over), but a raised
-            # readiness/curl error used to leak every started worker — orphan
-            # processes then hold the GPU for the next test on this host.
-            for manager in reversed(started):
-                try:
-                    manager.stop_server()
-                except Exception:  # noqa: BLE001 - cleanup must not mask the failure
-                    logging.warning(
-                        "failed to stop %r during cleanup", manager, exc_info=True
-                    )
+            if not keep_alive:
+                _cleanup_servers(started_managers, self.remote_kvcm_server)
 
 
 class FrontAppSeperationCaseRunner(CaseRunner):
@@ -921,32 +974,35 @@ class FrontAppSeperationCaseRunner(CaseRunner):
 
     # override
     def _run_impl(self):
-        frontend_server_manager = None
-        frontend_envs = {}
-        pd_fusion_envs = self.create_env_from_args(self.env_args[PD_FUNSION_ROLE_NAME])
-        pd_fusion_port = MagaServerManager.get_free_port()
-        gpu_ids = [str(x) for x in get_gpu_ids()]
-        gpu_size = int(pd_fusion_envs["WORLD_SIZE"])
-
-        frontend_envs = self.create_env_from_args(self.env_args[FRONTEND_ROLE_NAME])
-        frontend_port = MagaServerManager.get_free_port()
-        pd_fusion_endpoint = EndPoint(
-            type="VipServer",
-            address=f"127.0.0.1:{pd_fusion_port}",
-            protocol="http",
-            path="/",
-        )
-        group_endpoint = GroupEndPoint(
-            group="default", pd_fusion_endpoint=pd_fusion_endpoint
-        )
-        service_route = ServiceRoute(
-            service_id="test", role_endpoints=[group_endpoint], use_local=True
-        )
-        frontend_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
-
-        # start frontend server first since pdfusion depends on it for MODEL_SERVICE_CONFIG
-        server_manager = None
+        started_managers = []
+        keep_alive = False
         try:
+            frontend_server_manager = None
+            frontend_envs = {}
+            pd_fusion_envs = self.create_env_from_args(
+                self.env_args[PD_FUNSION_ROLE_NAME]
+            )
+            pd_fusion_port = MagaServerManager.get_free_port()
+            gpu_ids = [str(x) for x in get_gpu_ids()]
+            gpu_size = int(pd_fusion_envs["WORLD_SIZE"])
+
+            frontend_envs = self.create_env_from_args(self.env_args[FRONTEND_ROLE_NAME])
+            frontend_port = MagaServerManager.get_free_port()
+            pd_fusion_endpoint = EndPoint(
+                type="VipServer",
+                address=f"127.0.0.1:{pd_fusion_port}",
+                protocol="http",
+                path="/",
+            )
+            group_endpoint = GroupEndPoint(
+                group="default", pd_fusion_endpoint=pd_fusion_endpoint
+            )
+            service_route = ServiceRoute(
+                service_id="test", role_endpoints=[group_endpoint], use_local=True
+            )
+            frontend_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
+
+            # start frontend server first since pdfusion depends on it for MODEL_SERVICE_CONFIG
             task_states = TaskStates()
             frontend_server_manager = self.start_server(
                 frontend_envs,
@@ -954,9 +1010,12 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 self.task_info,
                 port=frontend_port,
                 role_name="frontend",
+                server_manager_callback=started_managers.append,
             )
             if task_states.ret != True:
-                task_states.err_msg = "frontend server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "frontend server start failed, " + task_states.err_msg
+                )
                 return task_states
             assert (
                 frontend_server_manager is not None
@@ -973,40 +1032,31 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 self.task_info,
                 port=pd_fusion_port,
                 role_name="pd_fusion",  # Fixed: use "pd_fusion" to match BUILD file key
+                server_manager_callback=started_managers.append,
             )
             if task_states.ret != True:
-                task_states.err_msg = "PDFUSION server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "PDFUSION server start failed, " + task_states.err_msg
+                )
                 return task_states
-            assert server_manager is not None, "PDFUSION server manager should not be None"
+            assert (
+                server_manager is not None
+            ), "PDFUSION server manager should not be None"
 
             if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
-                return self._keep_servers_alive(
+                state = self._keep_servers_alive(
                     {"pd_fusion": server_manager, "frontend": frontend_server_manager}
                 )
-
+                keep_alive = True
+                return state
             task_states = self.curl_server(frontend_server_manager)
-            server_manager.stop_server()
-
-            if frontend_server_manager is not None:
-                frontend_server_manager.stop_server()
             return task_states
         except Exception:
-            _dump_manager_logs(
-                [m for m in (frontend_server_manager, server_manager) if m is not None]
-            )
+            _dump_manager_logs(started_managers)
             raise
         finally:
-            # See DpSeperationCaseRunner: the stop is idempotent, and the
-            # early-return paths used to leak the already-started frontend.
-            for manager in reversed(
-                [m for m in (frontend_server_manager, server_manager) if m is not None]
-            ):
-                try:
-                    manager.stop_server()
-                except Exception:  # noqa: BLE001 - cleanup must not mask the failure
-                    logging.warning(
-                        "failed to stop %r during cleanup", manager, exc_info=True
-                    )
+            if not keep_alive:
+                _cleanup_servers(started_managers, self.remote_kvcm_server)
 
 
 class LocalTwoPartPdfusionCaseRunner(CaseRunner):
@@ -1053,9 +1103,7 @@ class LocalTwoPartPdfusionCaseRunner(CaseRunner):
         return config_path
 
     def _stop_servers(self, server_managers):
-        for server_manager in server_managers:
-            if server_manager is not None:
-                server_manager.stop_server()
+        _cleanup_servers(server_managers)
 
     # override
     def _run_impl(self):
@@ -1196,7 +1244,7 @@ class LocalTwoPartPdfusionCaseRunner(CaseRunner):
         try:
             return self.curl_server(part0_server_manager)
         finally:
-            self._stop_servers([part1_server_manager, part0_server_manager])
+            self._stop_servers(server_managers)
 
 
 class VitSeperationCaseRunner(SeparatedCaseRunner):

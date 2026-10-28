@@ -8,8 +8,6 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import deep_gemm
-import tilelang
-import tilelang.language as T
 import torch
 import torch.nn.functional as F
 from fastsafetensors.frameworks import K
@@ -22,11 +20,21 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
-pass_configs = {
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-}
+# These kernels are retained as implementation documentation, but the correctness
+# reference below intentionally uses PyTorch. Importing TileLang can terminate the
+# pytest process on the CUDA 12.9 H20 image before an assertion is executed.
+class _ReferenceKernelDecorator:
+    @staticmethod
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+
+tilelang = _ReferenceKernelDecorator()
+T = None
+pass_configs = {}
 block_size = 128
 
 FP8 = "float8_e4m3"
@@ -109,7 +117,9 @@ def fp8_index(
         fp32 logits -> fp32 logits_sum
         fp32 logits_sum * k_s (e8m0) -> fp32 index_score
     """
-    return fp8_index_kernel(q.shape[2], q.shape[3])(q, q_s, k, k_s)
+    logits = torch.einsum("bmhd,bnd->bmnh", q.float(), k.float())
+    logits = torch.relu(logits) * q_s.float().unsqueeze(2)
+    return logits.sum(dim=-1) * k_s.float().unsqueeze(1)
 
 
 def fast_log2_ceil(x):
@@ -198,12 +208,13 @@ def act_quant(
     assert (
         x.size(-1) % block_size == 0
     ), f"Last dimension size must be divisible by block_size (block_size={block_size})"
-    N = x.size(-1)
-    y = torch.empty_like(x, dtype=torch.float8_e4m3fn)
-    s = x.new_empty(*x.size()[:-1], N // block_size, dtype=torch.float32)
-    kernel = act_quant_kernel(N, round_scale=scale_fmt is not None)
-    kernel(x.view(-1, N), y.view(-1, N), s.view(-1, N // block_size))
-    return y, s
+    grouped = x.float().reshape(*x.shape[:-1], -1, block_size)
+    amax = grouped.abs().amax(dim=-1).clamp_min(1e-4)
+    scale = amax / 448.0
+    if scale_fmt is not None:
+        scale = torch.pow(2.0, torch.ceil(torch.log2(scale)))
+    quantized = (grouped / scale.unsqueeze(-1)).clamp(-448.0, 448.0)
+    return quantized.to(torch.float8_e4m3fn).reshape_as(x), scale
 
 
 def apply_rotary_emb(

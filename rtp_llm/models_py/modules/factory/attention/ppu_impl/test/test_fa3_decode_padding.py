@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.ppu_impl.fa3_mha import (
@@ -14,7 +15,14 @@ from rtp_llm.models_py.modules.factory.attention.ppu_impl.fa3_mha import (
 )
 
 
+pytestmark = [pytest.mark.ppu, pytest.mark.PPU_ZW810E]
+
+
 class TestFA3DecodeGraphPadding(unittest.TestCase):
+    def test_registered_backends_have_public_name(self):
+        self.assertEqual(FA3DecodeImpl.NAME, "ppu_fa3")
+        self.assertEqual(FA3PrefillPagedImpl.NAME, "ppu_fa3")
+
     def test_padded_cache_lengths_use_one_token_dummy_sequences(self):
         op = object.__new__(FA3DecodeAttnOp)
         op._graph_cache_seqlens = torch.empty(4, dtype=torch.int32)
@@ -45,9 +53,7 @@ class TestFA3DecodeGraphPadding(unittest.TestCase):
         )
 
         self.assertEqual(metadata.data_ptr(), original_data_ptr)
-        torch.testing.assert_close(
-            metadata, torch.tensor([4, 5, 6], dtype=torch.int32)
-        )
+        torch.testing.assert_close(metadata, torch.tensor([4, 5, 6], dtype=torch.int32))
 
 
 class TestFA3GraphReplayLeavesBlockTableAlone(unittest.TestCase):
@@ -166,9 +172,7 @@ class TestRunnerHostBlockTableContract(unittest.TestCase):
             )
             torch.testing.assert_close(
                 view[real_bs:],
-                torch.zeros(
-                    (graph_bs - real_bs, self.MAX_BLOCKS), dtype=torch.int32
-                ),
+                torch.zeros((graph_bs - real_bs, self.MAX_BLOCKS), dtype=torch.int32),
                 msg=f"padding rows not on block 0 at real_bs={real_bs}",
             )
 

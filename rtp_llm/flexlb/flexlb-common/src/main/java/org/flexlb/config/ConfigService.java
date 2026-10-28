@@ -52,6 +52,20 @@ public class ConfigService {
     }
 
     private static String configDocument(Map<String, String> environment) {
+        for (String name :
+                new String[] {
+                    "VIT_SYNC_REQUEST_TIMEOUT_MS",
+                    "VIT_RETAIN_ALIVE_ON_TIMEOUT",
+                    "VIT_WORKER_TIMEOUT_US"
+                }) {
+            if (environment.containsKey(name)) {
+                throw new ConfigValidationException(
+                        "environment",
+                        "Removed legacy environment variable: "
+                                + name
+                                + "; configure workerRegistry.health in FLEXLB_CONFIG");
+            }
+        }
         return environment.get(FLEXLB_CONFIG_ENV);
     }
 

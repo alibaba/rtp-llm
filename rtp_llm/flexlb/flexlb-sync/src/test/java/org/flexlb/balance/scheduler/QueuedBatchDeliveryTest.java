@@ -255,11 +255,26 @@ class QueuedBatchDeliveryTest {
         InactivityDeadline originalTimer =
                 (InactivityDeadline) ReflectionTestUtils.getField(slot, "inactivityDeadline");
         slot.onInactivityDeadline(originalTimer, lastStatus + TIMEOUT_MS);
-        assertEquals(handoff + TIMEOUT_MS, slot.inactivityDeadlineAtMs().orElseThrow());
+        if (ack) {
+            assertEquals(handoff + TIMEOUT_MS, slot.inactivityDeadlineAtMs().orElseThrow());
+        } else {
+            assertTrue(slot.inactivityDeadlineAtMs().isEmpty(), "no unproved batch expiry timer");
+            assertFalse(item.future().isDone());
+        }
         assertOccupancy(1, 1);
         registry.expireInactiveRequest(slot, handoff + TIMEOUT_MS - 1);
         assertOccupancy(1, 1);
         registry.expireInactiveRequest(slot, handoff + TIMEOUT_MS);
+        if (!ack) {
+            assertOccupancy(1, 1);
+            assertFalse(item.future().isDone());
+            registry.cancelRequest(1L, 0L, CancelReason.CLIENT_CANCELLED);
+            assertOccupancy(1, 1);
+            ledger.finish(201L, item)
+                    .forEach(
+                            fact -> registry.processPrefillStatus(prefill, RoleType.PREFILL, fact));
+            DeliverySettlementTestSupport.decodeStatus(decode, 1L, true);
+        }
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(ack, item.future().get(5, TimeUnit.SECONDS).isSuccess());

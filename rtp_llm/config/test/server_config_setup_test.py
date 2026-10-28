@@ -1,5 +1,4 @@
-import contextlib
-import io
+import argparse
 import os
 import re
 import sys
@@ -7,6 +6,10 @@ import unittest
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
+
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
@@ -16,7 +19,9 @@ from rtp_llm.config.server_config_setup import (
     setup_and_configure_server,
 )
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
+from rtp_llm.server.server_args.jit_group_args import _positive_or_unlimited
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.server.server_args.util import str2bool
 from rtp_llm.start_backend_server import start_backend_server
 
 # clear=True must preserve gpu_lock isolation across Torch lazy initialization.
@@ -573,26 +578,35 @@ class GenerateConfigTest(TestCase):
                 self.assertIs(setup_args(args).jit_config.manage_jit_cache, expected)
 
         timeout_error, bool_error = "positive integer or -1", "Boolean value expected"
-        for args, env, message in (
-            (["--jit_cache_setup_timeout_s", "0"], {}, timeout_error),
-            (["--jit_cache_setup_timeout_s", "-2"], {}, timeout_error),
-            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "0"}, timeout_error),
-            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "invalid"}, timeout_error),
-            ([], {"MANAGE_JIT_CACHE": "maybe"}, bool_error),
-            # An empty value fails like every other int/str2bool arg does.
-            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": ""}, timeout_error),
-            ([], {"MANAGE_JIT_CACHE": ""}, bool_error),
+        for converter, value, message in (
+            (_positive_or_unlimited, "0", timeout_error),
+            (_positive_or_unlimited, "-2", timeout_error),
+            (_positive_or_unlimited, "invalid", timeout_error),
+            (str2bool, "maybe", bool_error),
+            (_positive_or_unlimited, "", timeout_error),
+            (str2bool, "", bool_error),
         ):
-            stderr = io.StringIO()
-            with self.subTest(args=args, env=env), patch.dict(
-                os.environ, _jit_env(**env), clear=True
-            ), contextlib.redirect_stderr(stderr), self.assertRaises(
-                SystemExit
-            ) as context:
-                setup_args(args)
-            self.assertEqual(context.exception.code, 2)
-            # Fail *because of this validator*, not from an unrelated parse error.
-            self.assertIn(message, stderr.getvalue())
+            with self.subTest(converter=converter.__name__, value=value):
+                with self.assertRaises(argparse.ArgumentTypeError) as context:
+                    converter(value)
+                self.assertIn(message, str(context.exception))
+
+        for args, env in (
+            (["--jit_cache_setup_timeout_s", "0"], {}),
+            (["--jit_cache_setup_timeout_s", "-2"], {}),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "0"}),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "invalid"}),
+            ([], {"MANAGE_JIT_CACHE": "maybe"}),
+            # An empty value fails like every other int/str2bool arg does.
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": ""}),
+            ([], {"MANAGE_JIT_CACHE": ""}),
+        ):
+            with self.subTest(args=args, env=env):
+                with patch.dict(
+                    os.environ, _jit_env(**env), clear=True
+                ), self.assertRaises(SystemExit) as context:
+                    setup_args(args)
+                self.assertEqual(context.exception.code, 2)
 
     def test_jit_config_pure_env_path_without_cli_args(self):
         """setup_args() with no argv reaches the env-only branch of the scanner.
@@ -766,7 +780,7 @@ class GenerateConfigTest(TestCase):
             setup_default_args,
         )
 
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         setup_and_configure_server(py_env_configs)
         pc = py_env_configs.parallelism_config
         self.assertEqual(pc.tp_size, 4)
@@ -802,7 +816,7 @@ class GenerateConfigTest(TestCase):
         clear=True,
     )
     def test_sp_deepep_low_latency(self):
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         setup_and_configure_server(py_env_configs)
 
         self.assertEqual(py_env_configs.moe_config.use_deepep_moe, True)
@@ -828,7 +842,7 @@ class GenerateConfigTest(TestCase):
     )
     def test_world_rank_consistent_with_env_after_setup_args(self):
         """After setup_args(), set_parallelism_config(parallelism_config) keeps world_rank from env and it is not None."""
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         set_parallelism_config(py_env_configs.parallelism_config)
         pc = py_env_configs.parallelism_config
         self.assertIsNotNone(pc.world_rank)
@@ -855,7 +869,7 @@ class GenerateConfigTest(TestCase):
         self,
     ):
         """After setup_and_configure_server(), set_parallelism_config(..., world_rank=5) assigns world_rank and derived ranks correctly."""
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         setup_and_configure_server(py_env_configs)
         set_parallelism_config(py_env_configs.parallelism_config, world_rank=5)
         pc = py_env_configs.parallelism_config

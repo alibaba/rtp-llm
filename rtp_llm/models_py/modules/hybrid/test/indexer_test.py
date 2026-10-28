@@ -3,11 +3,17 @@ from types import SimpleNamespace
 from typing import Dict, Optional
 from unittest import SkipTest, TestCase, main, mock, skipIf
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20")]
 
 device = torch.device("cuda")
 
-import deep_gemm
+try:
+    import deep_gemm
+except (ImportError, AssertionError, RuntimeError) as e:
+    pytest.skip(f"deep_gemm unavailable: {e}", allow_module_level=True)
 
 
 def check_cuda_version() -> bool:
@@ -24,20 +30,67 @@ def check_cuda_version() -> bool:
 
 CUDA_VERSION_OK = check_cuda_version()
 SKIP_REASON = "CUDA version must be >= 12.9 for this test"
-CUDA_VERSION_OK = False
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.modules.base.cuda import indexer_op as indexer_op_module
-from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
+
+try:
+    from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
+except ImportError as e:
+    pytest.skip(f"CUDA-only: {e}", allow_module_level=True)
 from rtp_llm.utils.model_weight import W
 
-# Only import these modules if CUDA version is >= 12.9
-if CUDA_VERSION_OK:
+
+def _load_indexer_test_symbols():
+    """Load H20-only implementations only when an H20 test actually runs."""
     from rtp_llm.models_py.modules.hybrid.indexer import Indexer
     from rtp_llm.models_py.modules.hybrid.test.indexer_ref import (
         IndexerRef,
         _ref_torch_transform_ragged_impl,
     )
+
+    return Indexer, IndexerRef, _ref_torch_transform_ragged_impl
+
+
+def set_seed(seed: int):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def assert_equal(
+    score: torch.Tensor,
+    indices_ref: torch.Tensor,
+    indices_our: torch.Tensor,
+    bs: int,
+    k: int,
+    seq_len: int,
+    topk_indices_offset: Optional[torch.Tensor] = None,
+    max_permit_error: int = 0,
+):
+    indices_our_cpu = indices_our.cpu().tolist()
+    indices_ref_cpu = indices_ref.cpu().tolist()
+
+    wrong_values = 0
+    for i in range(bs):
+        indices_ref_set_i = set(indices_ref_cpu[i])
+        indices_our_set_i = set(indices_our_cpu[i])
+        more = indices_our_set_i - indices_ref_set_i
+        less = indices_ref_set_i - indices_our_set_i
+        offset = topk_indices_offset[i].item() if topk_indices_offset is not None else 0
+        if len(more) > 0 or len(less) > 0:
+            # check whether more values are the same with less values
+            # if so, either one is acceptable, since their values are the same
+            more_values = sorted(score[i, idx - offset].item() for idx in more)
+            less_values = sorted(score[i, idx - offset].item() for idx in less)
+            if more_values != less_values:
+                wrong_values += len(more)
+                print(
+                    f"{bs=}, {k=}, {seq_len=}, {i=}, {more=}, {less=} failed, with {more_values=}, {less_values=}"
+                )
+        assert wrong_values <= max_permit_error, f"{wrong_values=}, {max_permit_error=}"
 
 
 class PagedMqaContextLensCompatibilityTest(TestCase):
@@ -139,47 +192,6 @@ class PagedMqaContextLensCompatibilityTest(TestCase):
         self.assertEqual(indexer_op_module._paged_mqa_context_lens_dim, 2)
 
 
-def set_seed(seed: int):
-    """Set random seed for reproducibility."""
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
-def assert_equal(
-    score: torch.Tensor,
-    indices_ref: torch.Tensor,
-    indices_our: torch.Tensor,
-    bs: int,
-    k: int,
-    seq_len: int,
-    topk_indices_offset: Optional[torch.Tensor] = None,
-    max_permit_error: int = 0,
-):
-    indices_our_cpu = indices_our.cpu().tolist()
-    indices_ref_cpu = indices_ref.cpu().tolist()
-
-    wrong_values = 0
-    for i in range(bs):
-        indices_ref_set_i = set(indices_ref_cpu[i])
-        indices_our_set_i = set(indices_our_cpu[i])
-        more = indices_our_set_i - indices_ref_set_i
-        less = indices_ref_set_i - indices_our_set_i
-        offset = topk_indices_offset[i].item() if topk_indices_offset is not None else 0
-        if len(more) > 0 or len(less) > 0:
-            # check whether more values are the same with less values
-            # if so, either one is acceptable, since their values are the same
-            more_values = sorted(score[i, idx - offset].item() for idx in more)
-            less_values = sorted(score[i, idx - offset].item() for idx in less)
-            if more_values != less_values:
-                wrong_values += len(more)
-                print(
-                    f"{bs=}, {k=}, {seq_len=}, {i=}, {more=}, {less=} failed, with {more_values=}, {less_values=}"
-                )
-        assert wrong_values <= max_permit_error, f"{wrong_values=}, {max_permit_error=}"
-
-
 class MockKVCache:
     """Mock KVCache for testing."""
 
@@ -233,17 +245,20 @@ class IndexerTest(TestCase):
         torch.set_default_device(device)
         set_seed(42)
 
-    def _create_test_config(self, hidden_size: int = 7168) -> ModelConfig:
+    def _create_test_config(
+        self, hidden_size: int = 7168, max_seq_len: int = 2048
+    ) -> ModelConfig:
         """Create a test configuration for Indexer."""
         config = ModelConfig()
         config.attn_config.head_num = 128
-        config.max_seq_len = 2048
+        config.max_seq_len = max_seq_len
         config.hidden_size = hidden_size
 
         # MLA-specific config
         config.attn_config.q_lora_rank = 1536
         config.attn_config.rope_head_dim = 64
         config.attn_config.tokens_per_block = 64
+        config.attn_config.kernel_tokens_per_block = 64
         config.attn_config.use_mla = True
 
         # Indexer-specific config
@@ -325,6 +340,9 @@ class IndexerTest(TestCase):
             attn_inputs.sequence_lengths = torch.tensor(
                 [], dtype=torch.int32, device=torch.device("cpu")
             )
+            attn_inputs.prefix_lengths = torch.zeros(
+                batch_size, dtype=torch.int32, device=torch.device("cpu")
+            )
 
             # cu_seqlens: [0, seq_len, 2*seq_len, ...]
             cu_seqlens = torch.arange(
@@ -361,8 +379,11 @@ class IndexerTest(TestCase):
                 [seq_len] * batch_size, dtype=torch.int32, device=torch.device("cpu")
             )
             attn_inputs.sequence_lengths = sequence_lengths
-            attn_inputs.input_lengths = torch.tensor(
-                [], dtype=torch.int32, device=torch.device("cpu")
+            attn_inputs.input_lengths = torch.ones(
+                batch_size, dtype=torch.int32, device=torch.device("cpu")
+            )
+            attn_inputs.prefix_lengths = torch.empty(
+                0, dtype=torch.int32, device=torch.device("cpu")
             )
 
             # In decode mode, cu_seqlens is just [0, 1, 2, ..., batch_size]
@@ -394,17 +415,15 @@ class IndexerTest(TestCase):
             attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
             attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(device)
 
-        attn_inputs.prefix_lengths = torch.zeros(
-            batch_size, dtype=torch.int32, device=torch.device("cpu")
-        )
-
         return attn_inputs
 
     def _run_indexer_forward_test(
         self, batch_size: int, seq_len: int, is_prefill: bool
     ):
         """Helper method to run full forward test."""
-        config = self._create_test_config()
+        Indexer, IndexerRef, _ = _load_indexer_test_symbols()
+        cache_seq_len = seq_len if is_prefill else seq_len + 1
+        config = self._create_test_config(max_seq_len=cache_seq_len)
         weights = self._create_test_weights(config)
 
         indexer = Indexer(
@@ -429,17 +448,12 @@ class IndexerTest(TestCase):
         fmha_params = rtp_llm_ops.prepare_sparse_mla_params(
             attn_inputs, config.attn_config.tokens_per_block
         )
-        fmha_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d.view(-1, 1),
-            config.attn_config.tokens_per_block,
-            deep_gemm.get_num_sms(),
-        )
         indexer_ref.prepare(attn_inputs)
 
         # Create KV cache
         kv_cache = MockKVCache(
             batch_size=batch_size,
-            max_seq_len=seq_len,
+            max_seq_len=cache_seq_len,
             kv_lora_rank=config.attn_config.kv_lora_rank,
             rope_head_dim=config.attn_config.rope_head_dim,
             tokens_per_block=config.attn_config.tokens_per_block,
@@ -471,7 +485,9 @@ class IndexerTest(TestCase):
             hidden_states=hidden_states.view(-1, config.hidden_size),
             q_lora=q_lora.view(-1, config.attn_config.q_lora_rank),
             kv_cache=kv_cache,
-            params=fmha_params,
+            fmha_params=fmha_params,
+            attention_inputs=attn_inputs,
+            use_fast_path=False,
         )
 
         dst_page_table_our = torch.sort(result, dim=-1).values
@@ -505,7 +521,26 @@ class IndexerTest(TestCase):
     def test_forward_decode_mode(self):
         self._run_indexer_forward_test(batch_size=2, seq_len=4096, is_prefill=False)
 
+    def test_sparse_mla_params_preserve_batch_offsets(self):
+        config = self._create_test_config(max_seq_len=64)
+        attn_inputs = self._create_attention_inputs(
+            batch_size=2, seq_len=64, is_prefill=True
+        )
+
+        fmha_params = rtp_llm_ops.prepare_sparse_mla_params(
+            attn_inputs, config.attn_config.tokens_per_block
+        )
+
+        expected = torch.cat(
+            [
+                torch.zeros(64, dtype=torch.int32, device=device),
+                torch.full((64,), 64, dtype=torch.int32, device=device),
+            ]
+        )
+        torch.testing.assert_close(fmha_params.topk_indices_offset, expected)
+
     def test_fast_topk_transform_ragged_fused(self):
+        _, _, ref_torch_transform_ragged_impl = _load_indexer_test_symbols()
         from rtp_llm.models_py.kernels.cuda.fast_topk import (
             fast_topk_transform_ragged_fused,
         )
@@ -521,7 +556,7 @@ class IndexerTest(TestCase):
         )
         row_starts = None
 
-        ref = _ref_torch_transform_ragged_impl(
+        ref = ref_torch_transform_ragged_impl(
             score=score,
             seq_len=seq_len,
             topk_indices_offset=topk_indices_offset,

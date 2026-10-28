@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Union
 
 import requests
@@ -274,6 +275,13 @@ class BatchPerfImpl(object):
             )
             results = trimmed[len(trimmed) // 2]  # use median of trimmed as base
             setattr(results, key, avg_val)  # override with trimmed average
+            # Trimming latency outliers must not discard failed requests.
+            results = replace(
+                results,
+                total_requests=sum(m.total_requests for m in measurements),
+                success_requests=sum(m.success_requests for m in measurements),
+                fail_requests=sum(m.fail_requests for m in measurements),
+            )
         else:
             # Too few runs to trim: pool every response of every run instead.
             results = analyze_results(all_measure_responses)
@@ -333,6 +341,7 @@ class BatchPerfImpl(object):
         payload = {
             "batch_size": local_batch_size,
             "mode": "decode" if self.is_decode else "prefill",
+            "require_full_batch": True,
         }
         last_error = None
         for attempt in range(1, 21):
@@ -342,9 +351,10 @@ class BatchPerfImpl(object):
                     json=payload,
                     timeout=60,
                 )
+                # Per-DP RPC failures can arrive in an HTTP 200 error body.
                 if (
                     response.status_code == 200
-                    and response.json().get("status", "ok") == "ok"
+                    and response.json().get("status") == "ok"
                 ):
                     return
                 last_error = f"{response.text}, {response.status_code}"

@@ -10,6 +10,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -33,7 +37,12 @@ class _PrefillPagedCudaGraphTestMixin:
     """Shared setup for BASE and FP8 CUDA graph tests."""
 
     def _make_inputs(
-        self, input_lengths, prefix_lengths, with_copy_params=False, max_seq_len=0
+        self,
+        input_lengths,
+        prefix_lengths,
+        with_copy_params=False,
+        max_seq_len=0,
+        active_batch_size=None,
     ):
         """Create PyAttentionInputs for prefill (single or multi batch)."""
         if isinstance(input_lengths, int):
@@ -41,6 +50,12 @@ class _PrefillPagedCudaGraphTestMixin:
             prefix_lengths = [prefix_lengths]
 
         batch_size = len(input_lengths)
+        if active_batch_size is None:
+            active_batch_size = batch_size
+        if not 0 < active_batch_size <= batch_size:
+            raise ValueError(
+                f"active_batch_size must be in [1, {batch_size}], got {active_batch_size}"
+            )
         inp = PyAttentionInputs()
         inp.is_cuda_graph = with_copy_params
         inp.is_prefill = True
@@ -78,7 +93,7 @@ class _PrefillPagedCudaGraphTestMixin:
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)
             cp = PyPrefillCudaGaphCopyParams()
             cp.cuda_graph_prefill_batch_size = torch.tensor(
-                [batch_size], dtype=torch.int32, device="cuda"
+                [active_batch_size], dtype=torch.int32, device="cuda"
             )
             cp.max_seq_len = ms
             cp.max_batch_size = batch_size
@@ -104,6 +119,12 @@ class _PrefillPagedCudaGraphTestMixin:
         if max_seq_len == 0:
             max_seq_len = max(input_lengths)
 
+        capture_input_lengths = capture_input_lengths or input_lengths
+        capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
+        if isinstance(capture_input_lengths, int):
+            capture_input_lengths = [capture_input_lengths]
+            capture_prefix_lengths = [capture_prefix_lengths]
+
         config = self._create_config(
             head_num=head_num,
             head_num_kv=head_num_kv,
@@ -111,6 +132,9 @@ class _PrefillPagedCudaGraphTestMixin:
             seq_size_per_block=PAGE_SIZE,
         )
         seq_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
+        capture_seq_lengths = [
+            p + i for p, i in zip(capture_prefix_lengths, capture_input_lengths)
+        ]
         total_q = sum(input_lengths)
         total_kv = sum(seq_lengths)
 
@@ -146,6 +170,15 @@ class _PrefillPagedCudaGraphTestMixin:
             size_per_head,
             cache_dtype,
             self.device,
+            # FlashInfer retains the captured fixed batch size. During a
+            # smaller-batch replay, inactive slots may still read their
+            # captured page metadata even though their output is discarded.
+            # Model the production cache pool by keeping every captured page
+            # address valid, rather than sizing the fixture to active rows.
+            total_pages=max(
+                sum(math.ceil(s / PAGE_SIZE) for s in seq_lengths),
+                sum(math.ceil(s / PAGE_SIZE) for s in capture_seq_lengths),
+            ),
         )
 
         # Normal path
@@ -173,8 +206,6 @@ class _PrefillPagedCudaGraphTestMixin:
         # TRT prefill backends to force this native paged implementation through
         # the real C++ runner, its shared graph pool and concurrent metadata
         # updates. Neither test enables generation-prefill graphs for MTP.
-        capture_input_lengths = capture_input_lengths or input_lengths
-        capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
         cg_init = self._make_inputs(
             capture_input_lengths, capture_prefix_lengths, True, max_seq_len
         )
@@ -182,7 +213,17 @@ class _PrefillPagedCudaGraphTestMixin:
         cg_op.prepare(cg_init)
         kv_ptr_address = cg_op.prefill_wrapper._paged_kv_indptr_buf.data_ptr()
         kv_last_address = cg_op.prefill_wrapper._paged_kv_last_page_len_buf.data_ptr()
-        cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
+        capture_batch_size = len(capture_input_lengths)
+        active_batch_size = len(input_lengths)
+        self.assertGreaterEqual(capture_batch_size, active_batch_size)
+        inactive_batch_size = capture_batch_size - active_batch_size
+        cg_replay = self._make_inputs(
+            input_lengths + [0] * inactive_batch_size,
+            prefix_lengths + [0] * inactive_batch_size,
+            True,
+            max_seq_len,
+            active_batch_size=active_batch_size,
+        )
         plan = cg_op.prefill_wrapper.plan
 
         def checked_plan(qo_indptr, kv_indptr, indices, last_page_len, *args, **kwargs):
@@ -206,6 +247,17 @@ class _PrefillPagedCudaGraphTestMixin:
 
         with patch.object(cg_op.prefill_wrapper, "plan", side_effect=checked_plan):
             cg_op.prepare(cg_replay, forbid_realloc=True)
+        self.assertEqual(cg_op.prefill_wrapper._fixed_batch_size, capture_batch_size)
+        self.assertEqual(
+            cg_op.fmha_params.decode_page_indptr_d.numel(), capture_batch_size + 1
+        )
+        self.assertEqual(
+            cg_op.fmha_params.paged_kv_last_page_len_d.numel(), capture_batch_size
+        )
+        self.assertEqual(
+            cg_op.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.item(),
+            active_batch_size,
+        )
         self.assertTrue(
             cg_replay.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.is_cuda
         )
@@ -340,6 +392,7 @@ class TestPrefillPagedCudaGraph(_PrefillPagedCudaGraphTestMixin, BaseAttentionTe
             with self.assertRaisesRegex(ValueError, "captured batch size"):
                 op._plan_prefill_wrapper(op.qo_indptr[:4])
             native_plan.assert_not_called()
+
 
 
 class TestPrefillPagedCudaGraphFP8(TestPrefillPagedCudaGraph):

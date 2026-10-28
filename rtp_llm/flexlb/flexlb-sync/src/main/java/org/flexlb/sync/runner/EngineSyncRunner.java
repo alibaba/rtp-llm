@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.config.WorkerRegistryConfig.HealthConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -59,6 +60,8 @@ public class EngineSyncRunner implements Runnable {
     private final boolean cacheFullSnapshotDebugMode;
 
     private final long statusStaleAfterUs;
+    private final long vitStatusRpcTimeoutMs;
+    private final boolean retainVitAliveOnTimeout;
 
     public EngineSyncRunner(
             String modelName,
@@ -75,7 +78,42 @@ public class EngineSyncRunner implements Runnable {
             Long syncEngineStatusInterval,
             boolean cacheFullSnapshotDebugMode,
             long statusStaleAfterUs) {
+        this(
+                modelName,
+                workerDirectory,
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                roleType,
+                cacheAwareService,
+                cacheIntervalService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                cacheFullSnapshotDebugMode,
+                statusStaleAfterUs,
+                HealthConfig.DEFAULT_VIT_STATUS_RPC_TIMEOUT_MS,
+                HealthConfig.DEFAULT_RETAIN_VIT_ALIVE_ON_TIMEOUT);
+    }
 
+    public EngineSyncRunner(
+            String modelName,
+            WorkerDirectory workerDirectory,
+            WorkerAddressService workerAddressService,
+            ExecutorService statusCheckExecutor,
+            EngineHealthReporter engineHealthReporter,
+            EngineGrpcService engineGrpcService,
+            RoleType roleType,
+            CacheAwareService cacheAwareService,
+            DynamicCacheIntervalService cacheIntervalService,
+            long syncRequestTimeoutMs,
+            LongAdder syncCount,
+            Long syncEngineStatusInterval,
+            boolean cacheFullSnapshotDebugMode,
+            long statusStaleAfterUs,
+            long vitStatusRpcTimeoutMs,
+            boolean retainVitAliveOnTimeout) {
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
@@ -94,6 +132,8 @@ public class EngineSyncRunner implements Runnable {
             throw new IllegalArgumentException("statusStaleAfterUs must be positive");
         }
         this.statusStaleAfterUs = statusStaleAfterUs;
+        this.vitStatusRpcTimeoutMs = vitStatusRpcTimeoutMs;
+        this.retainVitAliveOnTimeout = retainVitAliveOnTimeout;
     }
 
     @Override
@@ -194,7 +234,9 @@ public class EngineSyncRunner implements Runnable {
                                         engineGrpcService,
                                         syncRequestTimeoutMs,
                                         cacheAwareService,
-                                        statusCheckExecutor);
+                                        statusCheckExecutor,
+                                        vitStatusRpcTimeoutMs,
+                                        retainVitAliveOnTimeout);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
@@ -210,6 +252,10 @@ public class EngineSyncRunner implements Runnable {
                     logger.debug(
                             "Skip status check for worker: {}, previous request in progress",
                             workerIpPort);
+                }
+
+                if (roleType == RoleType.VIT) {
+                    continue;
                 }
 
                 WorkerStatus.PollLease cachePollLease = workerStatus.tryBeginCachePoll();

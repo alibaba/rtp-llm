@@ -270,8 +270,8 @@ final class DecodeState {
                             ? ReservationReleaseResult.STILL_OWNED
                             : ReservationReleaseResult.STALE;
                 }
-                case EXPIRED ->
-                        expireRequestLocked(reservation)
+                case EXPIRED, REQUEST_FENCED ->
+                        retireExactRequestLocked(reservation)
                                 ? ReservationReleaseResult.RELEASED
                                 : ReservationReleaseResult.STALE;
             };
@@ -348,7 +348,7 @@ final class DecodeState {
         return ReservationReleaseResult.RELEASED;
     }
 
-    private boolean expireRequestLocked(ReservationHandle reservation) {
+    private boolean retireExactRequestLocked(ReservationHandle reservation) {
         long requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         if (!isExactReservation(state, reservation)
@@ -358,7 +358,7 @@ final class DecodeState {
             return false;
         }
 
-        // An expired incoming request cannot retain an admission attempt.
+        // An expired or authoritatively fenced exact request cannot retain an admission attempt.
         // Other victims keep ambiguous Engine ownership until their own
         // status or inactivity deadline settles it.
         java.util.Iterator<Map.Entry<Long, EndpointPreemptionAttempt>> attempts =

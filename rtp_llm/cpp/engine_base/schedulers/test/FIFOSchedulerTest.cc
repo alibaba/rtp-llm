@@ -1188,19 +1188,20 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterMixedMod
 
     auto gated = scheduler.schedule();
     ASSERT_TRUE(gated.ok());
-    EXPECT_TRUE(gated->empty());
+    ASSERT_EQ(gated->size(), 1);
+    EXPECT_EQ(gated->front(), late_same_mode);
     EXPECT_EQ(scheduler.onflightStreams(), 1);
-    EXPECT_FALSE(late_same_mode->hasEvent(StreamEvents::CanRun));
+    EXPECT_TRUE(late_same_mode->hasEvent(StreamEvents::CanRun));
+    late_same_mode->reportEvent(StreamEvents::GenerateDone);
 
     auto batch_peer = makeStream({9, 10}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
     ASSERT_TRUE(scheduler.enqueue(batch_peer).ok());
     auto full_batch = scheduler.schedule();
     ASSERT_TRUE(full_batch.ok());
-    ASSERT_EQ(full_batch->size(), 2);
-    auto full_batch_it = full_batch->begin();
-    EXPECT_EQ(full_batch_it->get(), late_same_mode.get());
-    ++full_batch_it;
-    EXPECT_EQ(full_batch_it->get(), batch_peer.get());
+    ASSERT_EQ(full_batch->size(), 1);
+    EXPECT_EQ(full_batch->front(), batch_peer);
+    EXPECT_EQ(late_same_mode->getStatus(), StreamState::FINISHED);
+    EXPECT_TRUE(batch_peer->hasEvent(StreamEvents::CanRun));
 }
 
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsHomogeneousPositiveTailBehindBatchGate) {
@@ -1223,9 +1224,11 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsHomogeneousPositiveTailBe
 
     auto gated_tail = scheduler.schedule();
     ASSERT_TRUE(gated_tail.ok());
-    EXPECT_TRUE(gated_tail->empty());
+    ASSERT_EQ(gated_tail->size(), 1);
+    EXPECT_EQ(gated_tail->front(), tail);
     EXPECT_EQ(scheduler.onflightStreams(), 1);
-    EXPECT_FALSE(tail->hasEvent(StreamEvents::CanRun));
+    EXPECT_TRUE(tail->hasEvent(StreamEvents::CanRun));
+    EXPECT_EQ(tail->getStatus(), StreamState::RUNNING);
 }
 
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsBatchGateAfterReapingError) {
@@ -1246,36 +1249,42 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsBatchGateAfterReapingErro
         ASSERT_EQ(scheduler.waiting_streams_.size(), 2);
         const auto free_blocks_before = cache_manager->freeBlocksNum();
 
-        // The stale queue size opens the outer gate, but the error cannot count as a batch member.
+        // Reaping errors preserves cleanup; ordinary calls may publish a partial healthy batch.
         auto gated = scheduler.schedule();
         ASSERT_TRUE(gated.ok());
-        EXPECT_TRUE(gated->empty()) << "Reaping an error must not dispatch a partial homogeneous batch";
+        ASSERT_EQ(gated->size(), 1);
+        EXPECT_EQ(gated->front(), healthy);
         EXPECT_EQ(errored->getStatus(), StreamState::FINISHED);
         EXPECT_TRUE(errored->hasError());
         EXPECT_EQ(errored->statusInfo().code(), ErrorCode::CANCELLED);
-        EXPECT_EQ(healthy->getStatus(), StreamState::WAITING);
-        EXPECT_FALSE(healthy->hasEvent(StreamEvents::CanRun));
-        EXPECT_EQ(healthy->curBlocksNum(), 0);
-        EXPECT_EQ(cache_manager->freeBlocksNum(), free_blocks_before);
+        EXPECT_EQ(healthy->getStatus(), StreamState::RUNNING);
+        EXPECT_TRUE(healthy->hasEvent(StreamEvents::CanRun));
         EXPECT_FALSE(scheduler.draining_mixed_modes_);
         EXPECT_EQ(scheduler.onflightStreams(), 1);
-        ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
-        EXPECT_EQ(scheduler.waiting_streams_.front(), healthy);
+        EXPECT_TRUE(scheduler.waiting_streams_.empty());
+        healthy->reportEvent(StreamEvents::GenerateDone);
 
         auto peer = makeStream({5, 6}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
         ASSERT_TRUE(scheduler.enqueue(peer).ok());
         auto full_batch = scheduler.schedule();
         ASSERT_TRUE(full_batch.ok());
-        ASSERT_EQ(full_batch->size(), 2);
-        EXPECT_EQ(full_batch->front(), healthy);
-        EXPECT_EQ(full_batch->back(), peer);
+        ASSERT_EQ(full_batch->size(), 1);
+        EXPECT_EQ(full_batch->front(), peer);
+        EXPECT_EQ(healthy->getStatus(), StreamState::FINISHED);
         EXPECT_TRUE(scheduler.waiting_streams_.empty());
         EXPECT_FALSE(scheduler.draining_mixed_modes_);
-        EXPECT_EQ(scheduler.onflightStreams(), 2);
+        EXPECT_EQ(scheduler.onflightStreams(), 1);
         for (const auto& stream : full_batch.value()) {
             EXPECT_FALSE(stream->hasError());
             EXPECT_FALSE(stream->isContextStream());
+            stream->reportEvent(StreamEvents::GenerateDone);
         }
+        auto completed = scheduler.schedule();
+        ASSERT_TRUE(completed.ok());
+        EXPECT_TRUE(completed->empty());
+        EXPECT_EQ(healthy->curBlocksNum(), 0);
+        EXPECT_EQ(peer->curBlocksNum(), 0);
+        EXPECT_EQ(cache_manager->freeBlocksNum(), free_blocks_before);
     }
 }
 
@@ -1315,14 +1324,17 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRechecksBatchGateAfterReapingE
         }
         EXPECT_FALSE(scheduler.draining_mixed_modes_);
         EXPECT_EQ(scheduler.onflightStreams(), healthy_count);
+        ASSERT_EQ(result->size(), healthy_count);
+        vector<GenerateStreamPtr> dispatched(result->begin(), result->end());
+        for (const auto& stream : healthy) {
+            EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+            EXPECT_TRUE(stream->hasEvent(StreamEvents::CanRun));
+            EXPECT_FALSE(stream->hasError());
+        }
         if (healthy_count < 2) {
-            EXPECT_TRUE(result->empty());
-            EXPECT_EQ(cache_manager->freeBlocksNum(), free_blocks_before);
-            ASSERT_EQ(scheduler.waiting_streams_.size(), healthy_count);
+            // Complete the first ordinary partial round before admitting the original peers.
             for (const auto& stream : healthy) {
-                EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
-                EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
-                EXPECT_EQ(stream->curBlocksNum(), 0);
+                stream->reportEvent(StreamEvents::GenerateDone);
             }
             while (healthy.size() < 2) {
                 auto peer = makeStream({7, 8}, model_config, runtime_config, resource_context);
@@ -1331,15 +1343,26 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRechecksBatchGateAfterReapingE
             }
             result = scheduler.schedule();
             ASSERT_TRUE(result.ok());
+            ASSERT_EQ(result->size(), 2 - healthy_count);
+            dispatched.insert(dispatched.end(), result->begin(), result->end());
         }
-        ASSERT_EQ(result->size(), 2);
-        EXPECT_EQ(result->front(), healthy.front());
-        EXPECT_EQ(result->back(), healthy.back());
+        ASSERT_EQ(dispatched.size(), 2);
+        EXPECT_EQ(dispatched.front(), healthy.front());
+        EXPECT_EQ(dispatched.back(), healthy.back());
         EXPECT_TRUE(scheduler.waiting_streams_.empty());
         for (const auto& stream : healthy) {
-            EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+            EXPECT_TRUE(stream->hasEvent(StreamEvents::CanRun));
             EXPECT_FALSE(stream->hasError());
+            stream->reportEvent(StreamEvents::GenerateDone);
         }
+        auto completed = scheduler.schedule();
+        ASSERT_TRUE(completed.ok());
+        EXPECT_TRUE(completed->empty());
+        for (const auto& stream : healthy) {
+            EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+            EXPECT_EQ(stream->curBlocksNum(), 0);
+        }
+        EXPECT_EQ(cache_manager->freeBlocksNum(), free_blocks_before);
     }
 }
 

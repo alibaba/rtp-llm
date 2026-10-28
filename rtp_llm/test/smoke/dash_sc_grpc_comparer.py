@@ -4,29 +4,18 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import inspect
 import json
 import logging
 import os
 import struct
 import sys
 import time
-import inspect
 from hashlib import sha1
 from typing import Any, List, Optional, Tuple, Union
 
 import grpc
 from pydantic import BaseModel
-from smoke.common_def import QueryStatus, SmokeException
-from smoke.base_comparer import _asserts_cold_cache
-from smoke.normal_comparer import AuxInfo, NormalComparer
-from smoke.dash_error_policy import (
-    DASH_MAX_ATTEMPTS,
-    DASH_RETRY_BUDGET_S,
-    DASH_RETRY_INTERVAL_S,
-    DASH_TRANSIENT_STATUS_CODES,
-    should_retry_transient,
-)
-from smoke.utils import no_compare, save_response
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import ServerConfig
@@ -38,7 +27,17 @@ from rtp_llm.dash_sc import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-
+from rtp_llm.test.smoke.base_comparer import _asserts_cold_cache
+from rtp_llm.test.smoke.common_def import QueryStatus, SmokeException
+from rtp_llm.test.smoke.dash_error_policy import (
+    DASH_MAX_ATTEMPTS,
+    DASH_RETRY_BUDGET_S,
+    DASH_RETRY_INTERVAL_S,
+    DASH_TRANSIENT_STATUS_CODES,
+    should_retry_transient,
+)
+from rtp_llm.test.smoke.normal_comparer import AuxInfo, NormalComparer
+from rtp_llm.test.smoke.utils import no_compare, save_response
 
 DASH_SC_GRPC_ENDPOINT = "/__dash_sc_grpc__"
 PROMPT_MODE_RAW = "raw"
@@ -179,9 +178,7 @@ def _encode_prompt_for_smoke(
         else [{"role": "user", "content": prompt}]
     )
     _attach_tools_to_system_message(messages, tools)
-    thinking_mode = _resolve_dsv4_thinking_mode(
-        dsv4_thinking_mode, enable_thinking
-    )
+    thinking_mode = _resolve_dsv4_thinking_mode(dsv4_thinking_mode, enable_thinking)
     rendered_prompt = _load_dsv4_encoding_module(ckpt_path).encode_messages(
         messages,
         thinking_mode=thinking_mode,
@@ -189,6 +186,7 @@ def _encode_prompt_for_smoke(
         add_default_bos_token=True,
     )
     return _tokenizer_encode_to_int_list(tokenizer, rendered_prompt)
+
 
 # Default per-attempt stream timeout; a query may override it.
 DASH_SC_GRPC_TIMEOUT_SECONDS = 600.0
@@ -365,7 +363,9 @@ def _parse_infer_chunk(
                 generated = list(struct.unpack("<%di" % n, raw))
         elif out.name == "finish_reason":
             finish = decode_finish_reason(out, raw)
-        elif out.name == "prompt_token_num" and out.datatype == "INT32" and len(raw) >= 4:
+        elif (
+            out.name == "prompt_token_num" and out.datatype == "INT32" and len(raw) >= 4
+        ):
             prompt_token_num = struct.unpack("<i", raw[:4])[0]
         elif (
             out.name == "prompt_cached_token_num"
@@ -616,11 +616,17 @@ class DashScGrpcComparer(NormalComparer):
         expected_output_ids = expect.generated_ids
         if expected_output_ids is None:
             expected_output_ids = expect.output_ids
-        if expected_output_ids is not None and expected_output_ids != actual.generated_ids:
+        if (
+            expected_output_ids is not None
+            and expected_output_ids != actual.generated_ids
+        ):
             diffs.append(
                 f"output_ids:\n    expect: {expected_output_ids}\n    actual: {actual.generated_ids}"
             )
-        if expect.reasoning_ids is not None and expect.reasoning_ids != actual.reasoning_ids:
+        if (
+            expect.reasoning_ids is not None
+            and expect.reasoning_ids != actual.reasoning_ids
+        ):
             diffs.append(
                 f"reasoning_ids:\n    expect: {expect.reasoning_ids}\n    actual: {actual.reasoning_ids}"
             )
@@ -638,7 +644,9 @@ class DashScGrpcComparer(NormalComparer):
             )
         for text in expect.response_contains or []:
             if text not in actual.response:
-                diffs.append(f"response missing substring {text!r}: {actual.response!r}")
+                diffs.append(
+                    f"response missing substring {text!r}: {actual.response!r}"
+                )
         for text in expect.content_contains or []:
             if text not in actual.content:
                 diffs.append(f"content missing substring {text!r}: {actual.content!r}")
@@ -715,11 +723,17 @@ class DashScGrpcComparer(NormalComparer):
                 diffs.append("aux_info missing")
             else:
                 self._compare_aux_info(expect.aux_info, actual.aux_info, diffs)
-        if expect.finish_reason is not None and actual.finish_reason != expect.finish_reason:
+        if (
+            expect.finish_reason is not None
+            and actual.finish_reason != expect.finish_reason
+        ):
             diffs.append(
                 f"finish_reason: expect {expect.finish_reason}, actual {actual.finish_reason}"
             )
-        if expect.min_content_chars is not None and len(actual.content) < expect.min_content_chars:
+        if (
+            expect.min_content_chars is not None
+            and len(actual.content) < expect.min_content_chars
+        ):
             diffs.append(
                 f"content length {len(actual.content)} < min_content_chars {expect.min_content_chars}"
             )
@@ -755,7 +769,10 @@ class DashScGrpcComparer(NormalComparer):
                     diffs.append(
                         f"content JSON is not an object: {type(parsed_json).__name__}"
                     )
-                if expect.expected_json is not None and parsed_json != expect.expected_json:
+                if (
+                    expect.expected_json is not None
+                    and parsed_json != expect.expected_json
+                ):
                     diffs.append(
                         "content JSON not equal:\n"
                         f"    expect: {expect.expected_json}\n"
@@ -763,7 +780,9 @@ class DashScGrpcComparer(NormalComparer):
                     )
                 if isinstance(parsed_json, dict) and expect.required_json_keys:
                     missing_keys = [
-                        key for key in expect.required_json_keys if key not in parsed_json
+                        key
+                        for key in expect.required_json_keys
+                        if key not in parsed_json
                     ]
                     if missing_keys:
                         diffs.append(
@@ -878,7 +897,9 @@ class DashScGrpcComparer(NormalComparer):
             def _req_iter():
                 yield request
 
-            response_iter = stub.ModelStreamInfer(_req_iter(), timeout=configured_timeout)
+            response_iter = stub.ModelStreamInfer(
+                _req_iter(), timeout=configured_timeout
+            )
             for resp in response_iter:
                 if resp.error_message:
                     error_message = resp.error_message
@@ -902,9 +923,8 @@ class DashScGrpcComparer(NormalComparer):
                     last_prompt_token_num = ptn
                 if ptcn is not None:
                     last_prompt_cached = ptcn
-                if (
-                    query_info.stop_when_requirements_met
-                    and self._requirements_met(expected, accumulated)
+                if query_info.stop_when_requirements_met and self._requirements_met(
+                    expected, accumulated
                 ):
                     break
         finally:
@@ -1032,8 +1052,8 @@ class DashScGrpcComparer(NormalComparer):
                 input_len=last_prompt_token_num,
                 reuse_len=last_prompt_cached,
             )
-        reasoning_ids, content_ids, reasoning_content, content = self._decode_dashscope_parts(
-            accumulated, response_parameters
+        reasoning_ids, content_ids, reasoning_content, content = (
+            self._decode_dashscope_parts(accumulated, response_parameters)
         )
         actual_result = DashScGrpcResponse(
             response=self._decode(accumulated),

@@ -43,6 +43,12 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     ):
         super().__init__(config, quant_config)
 
+        if not MoriEPWrapper.is_initialized():
+            raise RuntimeError(
+                "MoriEpIntranodeRouter requires MoriEPWrapper to be initialized. "
+                "Call init_moriep_wrapper_from_config() before building the model."
+            )
+
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
@@ -53,6 +59,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         self._chunk_dispatch_ids: Optional[List[torch.Tensor]] = None
         self._chunk_recv_sizes: Optional[List[int]] = None
         self._chunk_input_sizes: Optional[List[int]] = None
+        self._chunk_routing_handles: Optional[List[Any]] = None
 
     @property
     def max_inp_tokens(self) -> int:
@@ -86,7 +93,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> ExpertForwardPayload:
-        logging.info(
+        logging.debug(
             f"[MoriEpIntranodeRouter] prepare called, tokens={a1.shape[0]}, ep_rank={self.ep_rank}"
         )
         if a1_scale is not None or a2_scale is not None:
@@ -118,8 +125,8 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
             dispatch_recv_token_num,
         ) = self.mori_buffer_wrapper.op.dispatch(a1, topk_weights, None, topk_ids)
 
-        # Cache global dispatch_ids for use in finalize()'s combine call.
-        self._dispatch_ids = dispatch_ids
+        # Combine requires this rank's original routing, not received-slot IDs.
+        self._dispatch_ids = topk_ids
 
         local_ids, local_weights = self._remap_to_local_ids(
             dispatch_ids, dispatch_weights
@@ -149,6 +156,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         self._chunk_dispatch_ids = []
         self._chunk_recv_sizes = []
         self._chunk_input_sizes = []
+        self._chunk_routing_handles = []
 
         all_dispatch_a1 = []
         all_dispatch_scale = []
@@ -167,17 +175,24 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
                 dispatch_scale,
                 dispatch_ids,
                 dispatch_recv_token_num,
+                routing,
             ) = self.mori_buffer_wrapper.op.dispatch(
-                a1[start:end], topk_weights[start:end], None, topk_ids[start:end]
+                a1[start:end],
+                topk_weights[start:end],
+                None,
+                topk_ids[start:end],
+                return_routing=True,
             )
 
-            self._chunk_dispatch_ids.append(dispatch_ids)
+            self._chunk_dispatch_ids.append(topk_ids[start:end])
+            self._chunk_routing_handles.append(routing)
             self._chunk_recv_sizes.append(dispatch_a1.shape[0])
             self._chunk_input_sizes.append(end - start)
 
-            all_dispatch_a1.append(dispatch_a1)
+            # MORI returns shared views: retain each payload before the next dispatch.
+            all_dispatch_a1.append(dispatch_a1.clone())
             if dispatch_scale is not None:
-                all_dispatch_scale.append(dispatch_scale)
+                all_dispatch_scale.append(dispatch_scale.clone())
 
             local_ids, local_weights = self._remap_to_local_ids(
                 dispatch_ids, dispatch_weights
@@ -219,8 +234,10 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
-        logging.info(
-            f"[MoriEpIntranodeRouter] finalize called, ep_rank={self.ep_rank}, chunked={self._is_chunked}"
+        logging.debug(
+            "[MoriEpIntranodeRouter] finalize called, ep_rank=%s, chunked=%s",
+            self.ep_rank,
+            self._is_chunked,
         )
         fused_out = payload.fused_expert_output
 
@@ -233,8 +250,13 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         fused_out: torch.Tensor,
         extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
-        # Use the cached global dispatch_ids for combine, not the local_ids
-        # that were set as expert_topk_ids for the fused_moe kernel.
+        # Combine uses this rank's original input routing, not received-slot IDs
+        # or the local_ids passed to the fused_moe kernel.
+        # Guard against finalize being called without a preceding successful
+        # prepare (e.g. an exception aborted prepare but finalize still runs).
+        assert (
+            self._dispatch_ids is not None
+        ), "_finalize_single called before prepare populated _dispatch_ids"
         global_dispatch_ids = self._dispatch_ids
         if global_dispatch_ids.dtype != torch.int32:
             global_dispatch_ids = global_dispatch_ids.to(torch.int32)
@@ -258,28 +280,41 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         fused_out: torch.Tensor,
         extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
+        # Guard against finalize being called without a preceding successful
+        # prepare (mirrors the _finalize_single defense).
+        assert (
+            self._chunk_dispatch_ids is not None
+            and len(self._chunk_dispatch_ids) > 0
+            and self._chunk_routing_handles is not None
+            and len(self._chunk_routing_handles) == len(self._chunk_dispatch_ids)
+        ), "_finalize_chunked called before prepare populated _chunk_dispatch_ids"
         results = []
         offset = 0
 
-        for chunk_ids, recv_size, input_size in zip(
+        for chunk_ids, recv_size, input_size, routing in zip(
             self._chunk_dispatch_ids,
             self._chunk_recv_sizes,
             self._chunk_input_sizes,
+            self._chunk_routing_handles,
         ):
             if chunk_ids.dtype != torch.int32:
                 chunk_ids = chunk_ids.to(torch.int32)
 
             chunk_out = fused_out[offset : offset + recv_size]
-            recv_x = self.mori_buffer_wrapper.op.combine(chunk_out, None, chunk_ids)[0]
+            recv_x = self.mori_buffer_wrapper.op.combine(
+                chunk_out, None, chunk_ids, routing=routing
+            )[0]
 
             if recv_x.shape[0] > input_size:
                 recv_x = recv_x[:input_size]
 
-            results.append(recv_x)
+            # The next combine reuses the same output buffer.
+            results.append(recv_x.clone())
             offset += recv_size
 
         self._chunk_dispatch_ids = None
         self._chunk_recv_sizes = None
         self._chunk_input_sizes = None
+        self._chunk_routing_handles = None
 
         return torch.cat(results, dim=0)

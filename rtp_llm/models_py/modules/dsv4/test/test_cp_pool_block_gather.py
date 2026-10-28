@@ -22,6 +22,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -63,13 +64,16 @@ def _stub_distributed():
 
 
 def _import_cp():
-    _stub_distributed()
-    spec = importlib.util.spec_from_file_location(
-        "_dsv4_cp_for_test",
-        _REPO_ROOT / "rtp_llm/models_py/modules/dsv4/cp.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # cp.py keeps its imported symbols; pytest must see real parent packages
+    # again when it sets up this module and the next collected test module.
+    with patch.dict(sys.modules):
+        _stub_distributed()
+        spec = importlib.util.spec_from_file_location(
+            "_dsv4_cp_for_test",
+            _REPO_ROOT / "rtp_llm/models_py/modules/dsv4/cp.py",
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
     return mod
 
 

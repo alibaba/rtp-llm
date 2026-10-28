@@ -25,8 +25,14 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
 )
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
-from rtp_llm.utils.base_model_datatypes import MMUrlType
+from rtp_llm.ops import (
+    MMPreprocessConfig as _CppMMPreprocessConfig,
+    MultimodalInput as _CppMultimodalInput,
+)
+from rtp_llm.multimodal.download_singleflight import (
+    DownloadSingleFlight,
+    check_download_waiter,
+)
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
@@ -83,21 +89,14 @@ def _default_request_get(url, headers, timeout=10):
 
 
 def _check_download(deadline, cancellation_event):
-    if cancellation_event is not None and cancellation_event.is_set():
-        raise concurrent.futures.CancelledError("Media download cancelled")
-    if deadline is not None and time.monotonic() >= deadline:
-        raise TimeoutError("Media download deadline expired")
-
+    check_download_waiter(deadline, cancellation_event)
 
 def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event=None):
     global REQUEST_GET
     if REQUEST_GET is None:
-        try:
-            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
+        from rtp_llm.utils.ssrf_check import safe_request_get
 
-            REQUEST_GET = safe_request_get
-        except ImportError:
-            REQUEST_GET = _default_request_get
+        REQUEST_GET = safe_request_get
 
     import requests
 
@@ -222,6 +221,46 @@ def parse_frames_pack_url(url: str):
     return images, envelope
 
 
+class MMUrlType(IntEnum):
+    DEFAULT = 0
+    IMAGE = 1
+    VIDEO = 2
+    AUDIO = 3
+    TENSOR = 4
+    IGRAPH = 5
+
+
+@dataclass
+class MMPreprocessConfig:
+    width: int = -1
+    height: int = -1
+    min_pixels: int = -1
+    max_pixels: int = -1
+    fps: int = -1
+    min_frames: int = -1
+    max_frames: int = -1
+
+
+class MultimodalInput:
+    url: str
+    mm_type: MMUrlType
+    mm_preprocess_config: MMPreprocessConfig
+    tensor: torch.Tensor
+
+    def __init__(
+        self,
+        url: str,
+        mm_type: MMUrlType = MMUrlType.DEFAULT,
+        mm_preprocess_config: Optional[MMPreprocessConfig] = None,
+        tensor: Optional[torch.Tensor] = None,
+    ):
+        self.url = url
+        self.mm_type = mm_type
+        self.mm_preprocess_config = mm_preprocess_config or MMPreprocessConfig()
+        self.tensor = tensor if tensor is not None else torch.empty(1)
+
+
+
 class IgraphItemKeyCountMismatchError(Exception):
 
     def __init__(self, requested_count: int, received_count: int, message: str = None):
@@ -269,9 +308,7 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     load_start = time.monotonic()
     try:
         if url.startswith("http") or url.startswith("https"):
-            import requests
-
-            response = requests.get(url, stream=True, headers=headers, timeout=10)
+            response = request_get(url, headers)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:
@@ -305,7 +342,7 @@ def _download_http_content(
     *,
     deadline=None,
     cancellation_event=None,
-) -> BytesIO:
+) -> bytes:
     import requests
 
     response = None
@@ -339,8 +376,7 @@ def _download_http_content(
             _validate_file_size(downloaded_bytes, max_file_size_kb)
             content.write(chunk)
         _check_download(deadline, cancellation_event)
-        content.seek(0)
-        return content
+        return content.getvalue()
     except FtRuntimeException:
         raise
     except concurrent.futures.CancelledError:
@@ -364,6 +400,37 @@ def _download_http_content(
             response.close()
 
 
+def _download_url_bytes(
+    url: str,
+    download_headers: str = "",
+    max_file_size_kb: Optional[int] = VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
+) -> bytes:
+    """Download raw bytes for *url* (HTTP/HTTPS, OSS, base64, or local path)."""
+    headers = _get_http_heads(download_headers)
+    try:
+        if url.startswith("http") or url.startswith("https"):
+            content = _download_http_content(url, headers, max_file_size_kb)
+        elif url.startswith("oss"):
+            from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
+
+            content = get_bytes_io_from_oss_path(url).getvalue()
+        elif get_base64_prefix(url) > 0:
+            content = base64.b64decode(url[get_base64_prefix(url) :])
+        else:
+            with open(url, "rb") as fh:
+                content = fh.read()
+        _validate_file_size(len(content), max_file_size_kb)
+        return content
+    except FtRuntimeException:
+        raise
+    except Exception:
+        logger.exception("failed to load multimodal content")
+        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+
+
+_url_singleflight = DownloadSingleFlight(download_executor)
+
+
 def get_bytes_io_from_url(
     url: str,
     download_headers: str = "",
@@ -372,60 +439,31 @@ def get_bytes_io_from_url(
     deadline=None,
     cancellation_event=None,
 ):
-    """Get BytesIO from URL.
+    """Get an independent BytesIO while sharing only the immutable payload.
 
-    Args:
-        url: URL to fetch from.
-        download_headers: JSON string containing HTTP headers. If empty, uses default headers.
-        max_file_size_kb: Maximum file size in KB. Content-Length is checked when
-            available, and the limit is also enforced while streaming the body.
+    A cancelled or expired waiter never cancels the shared producer. With no
+    waiter controls, the Native cache and retry behavior is unchanged.
     """
-
     _check_download(deadline, cancellation_event)
-    cached_res = url_data_cache_.check_cache(url)
-    if cached_res is None:
-        headers = _get_http_heads(download_headers)
-        load_start = time.monotonic()
-        try:
-            if url.startswith("http") or url.startswith("https"):
-                if deadline is None and cancellation_event is None:
-                    res = _download_http_content(url, headers, max_file_size_kb)
-                else:
-                    res = _download_http_content(
-                        url,
-                        headers,
-                        max_file_size_kb,
-                        deadline=deadline,
-                        cancellation_event=cancellation_event,
-                    )
-            elif url.startswith("oss"):
-                from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
-
-                res = get_bytes_io_from_oss_path(url)
-            elif get_base64_prefix(url) > 0:
-                res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
-            else:
-                # treat url as local path
-                with open(url, "rb") as fh:
-                    buf = BytesIO(fh.read())
-                res = buf
-            _check_download(deadline, cancellation_event)
-            _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
-        except (FtRuntimeException, concurrent.futures.CancelledError, TimeoutError):
-            raise
-        except Exception:
-            logger.exception("failed to load multimodal content")
-            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
-        finally:
-            _record_download_time(load_start)
-        url_data_cache_.insert_cache(url, res)
-        return res
-    else:
-        # Each caller needs an independent cursor because cache hits may be read
-        # concurrently by different preprocessing workers.
-        cached_bytes = cached_res.getvalue()
+    cached_bytes = url_data_cache_.check_cache(url)
+    if cached_bytes is not None:
         _validate_file_size(len(cached_bytes), max_file_size_kb)
         return BytesIO(cached_bytes)
+
+    load_start = time.monotonic()
+    try:
+        cached_bytes = _url_singleflight.download(
+            url,
+            lambda: _download_url_bytes(url, download_headers, max_file_size_kb),
+            url_data_cache_.check_cache,
+            url_data_cache_.insert_cache,
+            deadline=deadline,
+            cancellation_event=cancellation_event,
+        )
+        _validate_file_size(len(cached_bytes), max_file_size_kb)
+        return BytesIO(cached_bytes)
+    finally:
+        _record_download_time(load_start)
 
 
 class MMDataCache(object):
@@ -467,7 +505,7 @@ url_data_cache_ = MMDataCache(cache_size=10)
 
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
-    return MMPreprocessConfig(
+    return _CppMMPreprocessConfig(
         width=mm_process_config_pb.width,
         height=mm_process_config_pb.height,
         min_pixels=mm_process_config_pb.min_pixels,
@@ -485,11 +523,27 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
     )
 
 
+def _to_cpp_mm_preprocess_config(config):
+    if isinstance(config, MMPreprocessConfig):
+        # The Native Python construction API has the original seven fields.
+        # The real C++ constructor supplies defaults for newer main fields.
+        return _CppMMPreprocessConfig(
+            width=config.width,
+            height=config.height,
+            min_pixels=config.min_pixels,
+            max_pixels=config.max_pixels,
+            fps=config.fps,
+            min_frames=config.min_frames,
+            max_frames=config.max_frames,
+        )
+    return config
+
+
 def trans_mm_input(multimodal_inputs):
     # vit sep
     if isinstance(multimodal_inputs, MultimodalInputsPB):
         return [
-            MultimodalInput(
+            _CppMultimodalInput(
                 mm_input.multimodal_url,
                 MMUrlType(mm_input.multimodal_type),
                 trans_tensor(mm_input.multimodal_tensor),
@@ -499,12 +553,24 @@ def trans_mm_input(multimodal_inputs):
         ]
     # not sep
     elif isinstance(multimodal_inputs, list):
+        # Accept both the local Python MultimodalInput and the C++ binding
+        # (rtp_llm.ops.MultimodalInput): callers such as mm_process_engine pass
+        # the C++ type, which shares the url/mm_type/tensor/mm_preprocess_config
+        # attributes used below. Checking only the local class wrongly rejected it.
+        if not all(
+            isinstance(mm_input, (MultimodalInput, _CppMultimodalInput))
+            for mm_input in multimodal_inputs
+        ):
+            raise ValueError(
+                f"multimodal_inputs list must contain only MultimodalInput objects, "
+                f"got types {[type(x).__name__ for x in multimodal_inputs]}"
+            )
         return [
-            MultimodalInput(
+            _CppMultimodalInput(
                 mm_input.url,
                 MMUrlType(mm_input.mm_type),
                 mm_input.tensor,
-                mm_input.mm_preprocess_config,
+                _to_cpp_mm_preprocess_config(mm_input.mm_preprocess_config),
             )
             for mm_input in multimodal_inputs
         ]

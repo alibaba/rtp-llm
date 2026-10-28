@@ -8,11 +8,13 @@ This is particularly useful in testing environments where you want to use
 a specific version of flashinfer different from the system-installed one.
 """
 
+import hashlib
 import importlib.metadata
 import logging
 import os
 import re
 import shutil
+import site
 import subprocess
 import sys
 import time
@@ -79,13 +81,17 @@ def _build_variant(source_path):
     every later job on that host imports, and it does so silently, because the
     staged directory is prepended to sys.path.
 
-    Returns None when the layout is unrecognised, in which case the caller keeps
-    the old version-only key rather than guessing.
+    Returns None outside Bazel; the caller then uses the original Native
+    installation-path identity so equal package versions do not mix venvs.
     """
     for part in Path(source_path).parts:
         if part.startswith("pip_"):
             return part
     return None
+
+
+def _native_install_key(source_path):
+    return hashlib.sha256(str(Path(source_path).resolve()).encode()).hexdigest()[:16]
 
 
 def _cache_key(package_name, version, source_path):
@@ -98,7 +104,7 @@ def _cache_key(package_name, version, source_path):
     py_tag = "cp%d%d" % sys.version_info[:2]
     variant = _build_variant(source_path)
     if variant is None:
-        return "%s_python-%s-%s" % (package_name, version, py_tag)
+        variant = "native-" + _native_install_key(source_path)
     return "%s_python-%s-%s__%s" % (package_name, version, py_tag, variant)
 
 
@@ -158,7 +164,12 @@ def copy_package_with_lock(package_name, cache_dir):
         # Copy the package
         try:
             if Path(source_path).is_dir():
-                shutil.copytree(source_path, target_package_path, symlinks=True)
+                # Native wheels can contain links into their original venv.
+                # A persistent copy must remain usable after that venv is pruned.
+                preserve_links = _build_variant(source_path) is not None
+                shutil.copytree(
+                    source_path, target_package_path, symlinks=preserve_links
+                )
             else:
                 shutil.copy2(source_path, target_package_path)
 
@@ -173,7 +184,11 @@ def copy_package_with_lock(package_name, cache_dir):
                         logging.info(
                             f"[Package Copy] Copying {libs_dir_name} directory..."
                         )
-                        shutil.copytree(libs_source, libs_target, symlinks=True)
+                        shutil.copytree(
+                            libs_source,
+                            libs_target,
+                            symlinks=_build_variant(source_path) is not None,
+                        )
 
             # Verify copy
             if not target_package_path.exists():
@@ -364,14 +379,22 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
 def setup_jit_cache(cache_dir=None, packages=None):
     logging.info("[Package Setup] setup_jit_cache starting")
     bootstrap_remote_jit_dir()
-    # The workspace must be the actual FlashInfer cache directory, never HOME:
-    # on CI workers HOME transitively contains the FUSE-mounted model library,
-    # and the eviction scan below would then crawl every .git/objects fanout
-    # (measured minutes per test action at 0% GPU).
+    # Ordinary Native environments need an installation-specific initial workspace.
+    # Keep this an automatic default so the runtime manager can still scope it;
+    # an explicitly supplied FLASHINFER_WORKSPACE_BASE retains main's opt-out.
+    flashinfer_default_base = Path.home() / ".cache" / "flashinfer"
+    flashinfer_fallback_name = "flashinfer"
+    if not (os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")):
+        flashinfer_fallback_name = "flashinfer-native-" + _native_install_key(
+            sys.prefix
+        )
+        flashinfer_default_base = (
+            Path.home() / ".cache" / "rtp-native-jit" / _native_install_key(sys.prefix)
+        )
     cache_env.configure_writable_cache_env(
         "FLASHINFER_WORKSPACE_BASE",
-        Path.home() / ".cache" / "flashinfer",
-        "flashinfer",
+        flashinfer_default_base,
+        flashinfer_fallback_name,
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
     cache_env.configure_writable_cache_env(
@@ -420,10 +443,30 @@ def setup_jit_cache(cache_dir=None, packages=None):
     runfiles_dir = os.environ.get("RUNFILES_DIR")
     test_binary = sys.argv[1] if len(sys.argv) > 1 else ""
     if not runfiles_dir or not test_binary:
-        logging.warning(
-            "[Package Setup] Bazel wrapper unavailable; skip cache path injection"
+        # Native pytest starts a fresh child process from device_resource.py.
+        # PYTHONPATH is the child-process equivalent of the Bazel wrapper edit
+        # below and preserves the validated, stable JIT package locations.
+        current_pythonpath = os.environ.get("PYTHONPATH", "")
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            [*copied_paths, *([current_pythonpath] if current_pythonpath else [])]
         )
-        return None
+        # Relocating torch separates its $ORIGIN RPATHs from the NVIDIA wheels.
+        # Expose the active venv's libraries before the child imports torch.
+        nvidia_lib_dirs = [
+            str(path)
+            for site_dir in site.getsitepackages()
+            for path in sorted(Path(site_dir).glob("nvidia/*/lib"))
+            if path.is_dir()
+        ]
+        if nvidia_lib_dirs:
+            existing = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+                dict.fromkeys(path for path in [*existing, *nvidia_lib_dirs] if path)
+            )
+        logging.info(
+            "[Package Setup] Prepended cached packages to native child PYTHONPATH"
+        )
+        return copied_paths
     bazel_wrapper_path = Path(runfiles_dir) / "rtp_llm" / test_binary
     suffix = f"_new_{os.getpid()}"
     bazel_wrapper_path_new = bazel_wrapper_path.with_name(

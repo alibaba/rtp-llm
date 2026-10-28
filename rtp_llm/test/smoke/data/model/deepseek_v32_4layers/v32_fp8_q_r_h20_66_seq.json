@@ -1,0 +1,38 @@
+{
+    "model_type": "deepseek_v32",
+    "model_path": "/mnt/nas1/hf/DeepSeek-V3.2-4layer",
+    "query_result": [
+        {
+            "query": {
+                "prompt": [
+                    "hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello "
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "zag retrospectively susp瀑竿芦elpobod驹fle",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": [
+                    "hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello "
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "zag retrospectively susp瀑竿芦elpobod驹fle",
+                "finished": true
+            }
+        }
+    ]
+}

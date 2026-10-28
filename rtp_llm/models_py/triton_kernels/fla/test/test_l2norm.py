@@ -4,6 +4,11 @@
 
 import unittest
 
+import pytest
+
+# Restore the original A10 route; H20 and the AMD profile retain their coverage.
+pytestmark = pytest.mark.multi_arch_cuda
+
 import torch
 
 from rtp_llm.models_py.triton_kernels.fla.l2norm import (
@@ -106,7 +111,7 @@ class TestL2Norm(unittest.TestCase):
         batch_size, hidden_dim = 32, 512
 
         for dtype, rtol, atol in dtypes:
-            with self.subTest(dtype=dtype):
+            with self.subTest(dtype=str(dtype)):
                 torch.manual_seed(42)
 
                 # 生成随机输入数据

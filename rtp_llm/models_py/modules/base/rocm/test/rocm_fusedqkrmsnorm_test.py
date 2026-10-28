@@ -1,11 +1,14 @@
 import itertools
 from unittest import SkipTest, TestCase, main
 
+import pytest
 import torch
 from torch import dtype as _dtype
 
 from rtp_llm.models_py.modules import FusedQKRMSNorm, QKRMSNorm
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 
 class FusedQKRMSNormTest(TestCase):
@@ -74,7 +77,7 @@ class FusedQKRMSNormTest(TestCase):
                 head_num=params[1],
                 kv_head_num=params[2],
                 size_per_head=params[3],
-                dtype=params[4],
+                dtype=str(params[4]),
             ):
                 self._run_fused_qk_rmsnorm_test(*params)
 

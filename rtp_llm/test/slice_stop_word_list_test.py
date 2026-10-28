@@ -1,12 +1,15 @@
 import os
 from unittest import TestCase, main, mock
 
+import pytest
 import torch
 
 from rtp_llm.ops import PDSepConfig
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class SliceStopWordListTest(TestCase):

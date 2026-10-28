@@ -8,6 +8,10 @@ from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
 from unittest.mock import Mock
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import torch.nn.functional as F
 

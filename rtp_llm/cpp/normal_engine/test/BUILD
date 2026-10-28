@@ -1,6 +1,6 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
@@ -8,9 +8,9 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -144,3 +144,108 @@ cc_test(
         ("async", "1"),
     ]
 ]
+
+# Original Native A10 compatibility declaration; unchanged fixture/data/env/dependency contract.
+cc_library(
+    name = "mock_engine_native_a10",
+    hdrs = [
+        "MockEngine.h"
+    ],
+    srcs = [
+    ],
+    copts = test_copts,
+    deps =  [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/engine_base:weights_converter",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    alwayslink = 1,
+    visibility = ["//visibility:public"],
+)
+
+# Original Native A10 compatibility declaration; unchanged fixture/data/env/dependency contract.
+cc_test(
+    name = "normal_output_dispatcher_test_native_a10",
+    srcs = ["NormalOutputDispatcherTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 compatibility declaration; unchanged fixture/data/env/dependency contract.
+cc_test(
+    name = "batch_stream_processor_test_native_a10",
+    srcs = glob([
+        "NormalBatchStreamProcessorTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 compatibility declaration; unchanged fixture/data/env/dependency contract.
+cc_test(
+    name = "engine_test_native_a10",
+    srcs = glob([
+        "EngineTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    deps =  [
+        ":mock_engine_native_a10",
+    ] + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 compatibility declaration; unchanged fixture/data/env/dependency contract.
+cc_test(
+    name = "async_runner_test_native_a10",
+    srcs = [
+        "AsyncRunnerTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)

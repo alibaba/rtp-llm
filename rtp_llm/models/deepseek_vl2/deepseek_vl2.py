@@ -2,7 +2,6 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-from transformers import AutoTokenizer
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
@@ -21,7 +20,14 @@ class DeepSeekVLV2(BaseModel):
         config.activation_type = "gated-silu"
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            return
+            # Surface the missing path explicitly instead of returning None,
+            # which would defer the failure to an opaque assert downstream.
+            raise FileNotFoundError(
+                "DeepSeekVLV2._create_config: config.json not found at "
+                + config_path + " (ckpt_path=" + repr(ckpt_path) + "). "
+                "Verify CHECKPOINT_PATH env / model_path arg is correct "
+                "and the model dir is mounted on this host."
+            )
         with open(config_path) as reader:
             content = reader.read()
             top_config_json = json.loads(content)
@@ -31,7 +37,7 @@ class DeepSeekVLV2(BaseModel):
 
     def _create_python_model(self):
 
-        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel    
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
@@ -39,9 +45,9 @@ class DeepSeekVLV2(BaseModel):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        # Use GenericMoeModel with new config architecture
-        # attention_type is determined from model_config.attn_config.use_mla
-        self.py_model = GenericMoeModel(
+        # Use MultimodalGenericModel to inject visual features into text embeddings.
+        # GenericMoeModel (text-only) would silently drop image features.
+        self.py_model = MultimodalGenericModel(
             model_config,
             parallelism_config,
             self.weight,
@@ -141,13 +147,20 @@ class DeepSeekVLV2(BaseModel):
             "global_view_pos", "head"
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(config.ckpt_path)
-        image_id = tokenizer.encode("<image>", add_special_tokens=False)[0]
-        config.mm_related_params.special_token_ids.update(
+        config.mm_model_config.is_multimodal = True
+
+    def load_tokenizer(self) -> None:
+        super().load_tokenizer()
+        # Reuse the tokenizer that BaseModel.load_tokenizer() already initialized
+        # and augmented with special tokens. Avoid creating a second AutoTokenizer
+        # from the same path, which may not have the <image> special token added.
+        image_id = getattr(self.tokenizer, "image_token_id", None)
+        if image_id is None:
+            image_id = self.tokenizer.encode("<image>", add_special_tokens=False)[0]
+        self.model_config.mm_related_params.special_token_ids.update(
             {"ignore_token_index": -100, "image_token_index": image_id}
         )
-        config.mm_model_config.mm_sep_tokens = [[image_id]]
-        config.mm_model_config.is_multimodal = True
+        self.model_config.mm_model_config.mm_sep_tokens = [[image_id]]
 
     @staticmethod
     def get_weight_cls():

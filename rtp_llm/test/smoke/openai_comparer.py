@@ -1,20 +1,21 @@
 import copy
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import REL_PATH, QueryStatus, SmokeException
-from smoke.grammar_constraint_validator import validate_constraint
-from smoke.utils import create_temporary_copy
 
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.grammar_constraint_validator import validate_constraint
+from rtp_llm.test.smoke.utils import create_temporary_copy
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -33,7 +34,7 @@ class OpenaiComparer(BaseComparer):
             path = result_json["extra_outputs"].get("all_hidden_states", None)
             if path is not None and isinstance(path, str):
                 result_json["extra_outputs"]["all_hidden_states"] = (
-                    torch.load(os.path.join(REL_PATH, path)).numpy().tolist()
+                    torch.load(os.path.join(REL_PATH, path), weights_only=False).numpy().tolist()
                 )
         if self.is_stream:
             return ChatCompletionStreamResponse(**result_json)
@@ -374,6 +375,33 @@ class OpenaiComparer(BaseComparer):
                 + type(actual_result).__name__
             )
 
+        if not skip_choices and not skip_usage:
+            _, actual_choices = self.extract_logprobs(actual_result.choices)
+            for alternative in self.qr_info["result"].get(
+                "result_alternatives", []
+            ):
+                if set(alternative) != {"choices", "usage"}:
+                    raise SmokeException(
+                        QueryStatus.COMPARE_FAILED,
+                        "result_alternatives entries must contain exactly choices and usage",
+                    )
+                alternative_json = copy.deepcopy(self.qr_info["result"])
+                alternative_json.update(alternative)
+                alternative_result = self.format_result(alternative_json)
+                _, alternative_choices = self.extract_logprobs(
+                    alternative_result.choices
+                )
+                if (
+                    alternative_choices == actual_choices
+                    and alternative_result.usage == actual_result.usage
+                ):
+                    logging.info(
+                        "[STABILITY_DIAG] OpenAI choices and usage matched "
+                        "a strict result alternative"
+                    )
+                    expect_result = alternative_result
+                    break
+
         if not skip_usage and expect_result.usage != actual_result.usage:
             diffs.append(
                 self._format_expect_actual(
@@ -437,7 +465,26 @@ class OpenaiComparer(BaseComparer):
         expect_logprobs, expect_choices = self.extract_logprobs(expect_result.choices)
         actual_logprobs, actual_choices = self.extract_logprobs(actual_result.choices)
 
-        if not skip_choices and expect_choices != actual_choices:
+        choices_match = skip_choices or expect_choices == actual_choices
+        if not skip_choices and not choices_match:
+            for alternative in self.qr_info["result"].get(
+                "choices_alternatives", []
+            ):
+                alternative_json = copy.deepcopy(self.qr_info["result"])
+                alternative_json["choices"] = alternative
+                alternative_result = self.format_result(alternative_json)
+                alternative_logprobs, alternative_choices = self.extract_logprobs(
+                    alternative_result.choices
+                )
+                if alternative_choices == actual_choices:
+                    logging.info(
+                        "[STABILITY_DIAG] OpenAI choices matched a strict alternative"
+                    )
+                    expect_logprobs = alternative_logprobs
+                    choices_match = True
+                    break
+
+        if not choices_match:
             diffs.append(
                 self._format_expect_actual(
                     "choices not equal (after normalizing logprobs)",

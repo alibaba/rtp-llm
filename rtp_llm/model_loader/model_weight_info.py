@@ -185,6 +185,26 @@ class ModelDeployWeightInfo:
         W.post_ln_beta: "transformer.layers.{i}.post_layernorm.bias",
     }
 
+    @staticmethod
+    def _configure_legacy_fp8_ptpc(
+        model_config: "ModelConfig", hw_kernel_config: "HWKernelConfig"
+    ) -> None:
+        # The swizzleA hipBLASLt path changes TBStars 1024/2816 no-bias
+        # numerics. Mark this exact signature for the explicit CKTile fallback
+        # configured during weight loading.
+        hw_kernel_config.force_legacy_fp8_ptpc = (
+            hw_kernel_config.use_swizzleA
+            and model_config.quant_algo.isFp8PTPC()
+            and model_config.model_type == "tbstars"
+            and model_config.hidden_size == 1024
+            and model_config.inter_size == 2816
+        )
+        if hw_kernel_config.force_legacy_fp8_ptpc:
+            logging.warning(
+                "Using the explicit CKTile FP8 PTPC fallback for TBStars "
+                "hidden=1024/inter=2816"
+            )
+
     def __init__(
         self,
         model_config: "ModelConfig",
@@ -201,7 +221,9 @@ class ModelDeployWeightInfo:
         # only tensors reachable by a role-specialized execution graph.
         self.role_type = getattr(parallelism_config, "role_type", None)
 
+        self._configure_legacy_fp8_ptpc(model_config, hw_kernel_config)
         self._use_swizzleA = hw_kernel_config.use_swizzleA
+        self._force_legacy_fp8_ptpc = hw_kernel_config.force_legacy_fp8_ptpc
         self._use_qk_norm = model_config.qk_norm
         self._hidden_size = model_config.hidden_size
         # inter_size is now accessed from model config when needed, not stored
@@ -802,6 +824,7 @@ class ModelDeployWeightInfo:
             phy2log=phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
+            force_legacy_fp8_ptpc=self._force_legacy_fp8_ptpc,
             force_cpu_load_weights=force_cpu_load_weights,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
         )

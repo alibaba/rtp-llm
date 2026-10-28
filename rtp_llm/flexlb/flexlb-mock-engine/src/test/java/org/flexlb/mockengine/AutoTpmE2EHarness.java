@@ -121,6 +121,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private final Map<Integer, WorkerStatus> statusByPort = new ConcurrentHashMap<>();
     private final Map<Integer, String> ipPortByEnginePort = new ConcurrentHashMap<>();
     private final Map<Long, CompletableFuture<Void>> batchAckGates = new ConcurrentHashMap<>();
+    private final Map<Long, CompletableFuture<Void>> cancelAckGates = new ConcurrentHashMap<>();
     private final Object pumpLock = new Object();
     private ScheduledExecutorService pumpExecutor;
     private final Path tempDir;
@@ -371,7 +372,23 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                         dispatcher::tryPrepareSubmission,
                         reporter,
                         requestReporter,
-                        cancelChannel);
+                        new EngineCancelChannel() {
+                            @Override
+                            public boolean isSupported(DecodeEndpoint endpoint) {
+                                return cancelChannel.isSupported(endpoint);
+                            }
+
+                            @Override
+                            public CompletableFuture<CancelAck> cancel(
+                                    CancelTarget target, long requestId, long timeoutMs) {
+                                CompletableFuture<Void> gate = cancelAckGates.get(requestId);
+                                CompletableFuture<CancelAck> actual =
+                                        cancelChannel.cancel(target, requestId, timeoutMs);
+                                return gate == null
+                                        ? actual
+                                        : actual.thenCompose(ack -> gate.thenApply(ignored -> ack));
+                            }
+                        });
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
 
@@ -501,6 +518,19 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
         return () -> {
             if (batchAckGates.remove(requestId, gate)) {
+                gate.complete(null);
+            }
+        };
+    }
+
+    /** Delay only delivery of the actual original-Prefill Cancel result for this request. */
+    AutoCloseable holdCancelAck(long requestId) {
+        CompletableFuture<Void> gate = new CompletableFuture<>();
+        if (cancelAckGates.putIfAbsent(requestId, gate) != null) {
+            throw new IllegalStateException("Cancel ACK is already gated for request " + requestId);
+        }
+        return () -> {
+            if (cancelAckGates.remove(requestId, gate)) {
                 gate.complete(null);
             }
         };

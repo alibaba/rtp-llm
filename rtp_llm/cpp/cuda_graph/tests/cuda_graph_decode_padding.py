@@ -3,6 +3,16 @@ import os
 import unittest
 from typing import List
 
+import pytest
+
+os.environ.setdefault("LOAD_METHOD", "scratch")
+os.environ.setdefault("NOT_USE_DEFAULT_STREAM", "1")
+os.environ.setdefault("TEST_USING_DEVICE", "CUDA")
+os.environ.setdefault("HACK_LAYER_NUM", "1")
+os.environ.setdefault("ENABLE_CUDA_GRAPH_DEBUG_MODE", "1")
+
+pytestmark = [pytest.mark.H20, pytest.mark.gpu(type="H20", count=1)]
+
 import torch
 
 import rtp_llm.models
@@ -10,14 +20,14 @@ from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
 )
-from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_runner import CudaGraphRunner
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, get_typemeta
 
 
 class TestCudaGraphDecodePadding(unittest.TestCase):
-    def __init__(self, methodName: str = "runTest") -> None:
-        super().__init__(methodName)
+    def setUp(self) -> None:
+        super().setUp()
         os.environ["RESERVER_RUNTIME_MEM_MB"] = "10240"
 
         # Test parameters (can be configured)
@@ -69,6 +79,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self.max_seq_len,
             self.kernel_block_table_width,
             self.decode_capture_batch_sizes,
+            self.kv_cache.group_tags,
         )
         print(f"CUDA Graph initialized with batch sizes: 1 to {self.max_batch_size}")
 

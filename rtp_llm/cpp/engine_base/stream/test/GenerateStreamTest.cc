@@ -14,6 +14,7 @@
 #include <chrono>
 #include <future>
 #include <mutex>
+#include <stdexcept>
 #include <numeric>
 #include <thread>
 #include <vector>
@@ -98,7 +99,7 @@ public:
         return createContextStreamImpl(input_ids, runtime_config, resource_context, configure);
     }
 
-    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids, bool reserve_reusable_cache = false) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
         auto cache_config  = init_config();
@@ -119,8 +120,18 @@ public:
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
         model_config.vocab_size  = 1024;
-        auto stream              = std::make_shared<NormalGenerateStream>(
+        if (reserve_reusable_cache) {
+            model_config.attn_config.tokens_per_block = cache_config.seq_size_per_block;
+        }
+        auto stream = std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
+
+        if (reserve_reusable_cache) {
+            const auto status = stream->initKVBlock();
+            if (!status.ok()) {
+                throw std::runtime_error("failed to allocate reusable cache: " + status.ToString());
+            }
+        }
 
         return stream;
     }
@@ -530,6 +541,95 @@ TEST_F(GenerateStreamTest, pendingCompletionIsConsumerVisibleBeforeSchedulerComm
 
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
     EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
+TEST_F(GenerateStreamTest, synchronousCacheWriteWaitsForSchedulerCommit) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}, true));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    auto consumer = std::async(std::launch::async, [stream] { return stream->nextOutput(); });
+
+    EXPECT_EQ(consumer.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    waitForConsumer(consumer, stream);
+    auto finished_result = consumer.get();
+    ASSERT_FALSE(finished_result.ok());
+    EXPECT_EQ(finished_result.status().code(), ErrorCode::FINISHED);
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+
+    // The same backend must expose the published prefix to a following request.
+    auto next_input             = std::make_shared<GenerateInput>();
+    next_input->input_ids       = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
+    next_input->generate_config = std::make_shared<GenerateConfig>();
+    next_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 1024;
+    model_config.attn_config.tokens_per_block =
+        stream->resourceContext().cache_manager->cacheConfig().seq_size_per_block;
+    auto next_stream = std::make_shared<NormalGenerateStream>(
+        next_input, model_config, RuntimeConfig{}, stream->resourceContext(), nullptr);
+    ASSERT_TRUE(next_stream->initKVBlock().ok());
+    EXPECT_EQ(next_stream->reuseLength(), 2);
+}
+
+TEST_F(GenerateStreamTest, cachePublicationCompletionWaitsForDeferredRelease) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}, true));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->incPendingAsyncBookkeeping();
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    std::future<ErrorResult<GenerateOutputs>> consumer;
+    struct PendingReleaseGuard {
+        std::shared_ptr<NormalGenerateStream> stream;
+        bool                                  pending = true;
+        ~PendingReleaseGuard() {
+            finish();
+        }
+        void finish() {
+            if (pending) {
+                pending = false;
+                stream->decPendingAsyncBookkeepingAndMaybeRelease();
+            }
+        }
+    } release_guard{stream};
+    consumer = std::async(std::launch::async, [stream] { return stream->nextOutput(); });
+    EXPECT_EQ(consumer.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+    EXPECT_EQ(consumer.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    release_guard.finish();
+    waitForConsumer(consumer, stream);
+    auto finished_result = consumer.get();
+    ASSERT_FALSE(finished_result.ok());
+    EXPECT_EQ(finished_result.status().code(), ErrorCode::FINISHED);
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
+TEST_F(GenerateStreamTest, cachePublisherPreservesErrorAndRemoteHandoffPrecedence) {
+    auto builder = GenerateStreamBuilder();
+    for (bool error : {false, true}) {
+        auto stream =
+            std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}, true));
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        if (error) {
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "publisher failure");
+        } else {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+        }
+        auto result = stream->nextOutput(1);
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), error ? ErrorCode::EXECUTION_EXCEPTION : ErrorCode::FINISHED);
+        EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+    }
 }
 
 TEST_F(GenerateStreamTest, finishOrCancelPreservesPendingSuccessfulCompletion) {

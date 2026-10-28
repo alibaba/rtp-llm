@@ -1,0 +1,59 @@
+{
+  "id": "chat-",
+  "object": "chat.completion",
+  "created": 1776963755,
+  "model": "",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": " 1. 如何提高英语听力",
+        "reasoning_content": null,
+        "function_call": null,
+        "tool_calls": null,
+        "partial": false,
+        "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 17,
+    "total_tokens": 25,
+    "completion_tokens": 8,
+    "completion_tokens_details": null,
+    "prompt_tokens_details": null
+  },
+  "debug_info": null,
+  "aux_info": {
+    "cost_time": 277.039,
+    "iter_count": 8,
+    "prefix_len": 0,
+    "input_len": 17,
+    "output_len": 8,
+    "step_output_len": 8,
+    "first_token_cost_time": 166.964,
+    "wait_time": 0.0,
+    "pd_sep": false,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "softmax_probs": [],
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "role_addrs": [],
+    "aux_string": ""
+  },
+  "extra_outputs": null
+}

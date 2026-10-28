@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -204,6 +205,41 @@ private:
     std::shared_ptr<RequestBlockBuffer> buffer_;
     CacheStoreStoreDoneCallback         callback_;
     std::shared_ptr<MemoryUtil>         null_memory_util_;
+};
+
+// Settle only this fixture's delayed callback before joining its owned wait.
+// A fatal ASSERT may return before the normal completion path.
+class PublicationWaitGuard {
+public:
+    PublicationWaitGuard(CacheStoreAsyncWriter& writer,
+                         const std::shared_ptr<DelayedCacheStore>& store,
+                         std::future<void>& wait): writer_(writer), store_(store), wait_(wait) {}
+    ~PublicationWaitGuard() {
+        try {
+            if (wait_.valid() || store_->hasPendingStore()) {
+                writer_.cancelStoreCompletions(
+                    std::make_exception_ptr(std::runtime_error("test-owned publication cleanup")));
+                store_->completeStore(false);
+                if (wait_.valid()) {
+                    // DelayedCacheStore::store only records its callback and returns;
+                    // cancellation therefore unblocks the publication wait after submissions drain.
+                    wait_.wait();
+                    store_->completeStore(false);  // Release a callback registered during the drain.
+                    try {
+                        wait_.get();
+                    } catch (...) {
+                        // The original assertion/expected exception remains the test result.
+                    }
+                }
+            }
+        } catch (...) {
+            // Do not replace an active test failure during fixture teardown.
+        }
+    }
+private:
+    CacheStoreAsyncWriter& writer_;
+    std::shared_ptr<DelayedCacheStore> store_;
+    std::future<void>& wait_;
 };
 
 TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
@@ -546,7 +582,16 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager, /*cache_model_id=*/0);
     writer.init(/*track_store_completions=*/false);
     writer.write(inputs, layer_cache);
-    writer.waitAllDone();
+    std::future<void> finished;
+    PublicationWaitGuard publication_cleanup(writer, cache_store, finished);
+    finished = std::async(std::launch::async, [&writer] { writer.waitAllDone(); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!cache_store->hasPendingStore() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(cache_store->hasPendingStore());
+    EXPECT_EQ(finished.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout)
+        << "ordinary forward must not expose the cache before publication completes";
     pool->decRef(request_blocks);  // Only the pending store may keep the block alive.
     EXPECT_EQ(other_pool->freeBlocksNum(), other_free_before);
 
@@ -555,6 +600,8 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
         << "ordinary forward completion must not release an in-flight store's KV block";
 
     ASSERT_TRUE(cache_store->completeStore());
+    ASSERT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_NO_THROW(finished.get());
     EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks);
     EXPECT_EQ(other_pool->freeBlocksNum(), other_free_before);
 }
@@ -608,12 +655,19 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
     CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager);
     writer.init(tracked);
     ASSERT_NO_THROW(writer.write(inputs, layer_cache));
+    std::future<void> ordinary_finished;
+    PublicationWaitGuard publication_cleanup(writer, cache_store, ordinary_finished);
     if (tracked) {
         ASSERT_NO_THROW(writer.finishSubmissions());
         ASSERT_NE(writer.finished_store_completion_state_, nullptr);
         EXPECT_EQ(writer.finished_store_completion_state_->pending_count, 1);
     } else {
-        ASSERT_NO_THROW(writer.waitAllDone());
+        ordinary_finished = std::async(std::launch::async, [&writer] { writer.waitAllDone(); });
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!cache_store->hasPendingStore() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        EXPECT_EQ(ordinary_finished.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
     }
     ASSERT_TRUE(cache_store->hasPendingStore());
     if (tp_rank == 0) {
@@ -628,6 +682,13 @@ TEST_P(CacheStoreAsyncWriterTpTest, PublicationPinsOnlyAllocatorOwner) {
             EXPECT_NO_THROW(writer.waitStoreCompletions());
         } else {
             EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+        }
+    } else {
+        ASSERT_EQ(ordinary_finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        if (store_success) {
+            EXPECT_NO_THROW(ordinary_finished.get());
+        } else {
+            EXPECT_THROW(ordinary_finished.get(), std::runtime_error);
         }
     }
     EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks);

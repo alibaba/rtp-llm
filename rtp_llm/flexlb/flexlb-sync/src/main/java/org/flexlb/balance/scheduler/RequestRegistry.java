@@ -47,6 +47,7 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
 @Component
 public class RequestRegistry {
 
+    private final org.flexlb.balance.eviction.EngineCancelChannel engineCancelChannel;
     private final RequestCompletionPublisher completionPublisher;
     private final RequestTerminalCleanup terminalCleanup;
 
@@ -64,11 +65,20 @@ public class RequestRegistry {
 
     private final ConcurrentMap<Long, RequestSlot> requestSlots = new ConcurrentHashMap<>();
 
-    @Autowired
     public RequestRegistry(
             ConfigService configService,
             BatchSchedulerReporter reporter,
             RequestSchedulerReporter requestReporter) {
+        this(configService, reporter, requestReporter, null);
+    }
+
+    @Autowired
+    public RequestRegistry(
+            ConfigService configService,
+            BatchSchedulerReporter reporter,
+            RequestSchedulerReporter requestReporter,
+            org.flexlb.balance.eviction.EngineCancelChannel engineCancelChannel) {
+        this.engineCancelChannel = engineCancelChannel;
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.requestReporter = Objects.requireNonNull(requestReporter);
         this.expirationTimer =
@@ -351,7 +361,8 @@ public class RequestRegistry {
                                 terminalCleanup,
                                 this::exitAdmissionHandleGate,
                                 context.getConfig().isQueue(),
-                                globalQueue);
+                                globalQueue,
+                                engineCancelChannel);
                 context.setEnqueueTime(System.currentTimeMillis());
                 synchronized (slot) {
                     slot.configureInactivityTimeout(

@@ -8,6 +8,7 @@ from typing import Any, Dict, Tuple
 from unittest import TestCase, main
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -43,6 +44,8 @@ from rtp_llm.test.utils.numeric_util import (
 )
 from rtp_llm.test.utils.port_util import PortsContext
 
+
+pytestmark = [pytest.mark.gpu(type="H20_CU13", count=2)]
 
 def inplace_unique(x: torch.Tensor, num_slots: int):
     assert x.dim() == 2
@@ -1227,7 +1230,7 @@ class DeepEPTest(TestCase):
         os.environ["USE_DEEPEP_MOE"] = "1"
         os.environ["USE_DEEPEP_INTERNODE"] = "0"
         os.environ["USE_DEEPEP_LOW_LATENCY"] = "1"
-        py_env_configs: PyEnvConfigs = setup_args()
+        py_env_configs: PyEnvConfigs = setup_args(args=[])
         model_config = ModelConfig()
         model_config.attn_config.head_num = 2
         model_config.attn_config.size_per_head = 128

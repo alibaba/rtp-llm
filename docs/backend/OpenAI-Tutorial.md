@@ -13,7 +13,7 @@ python3 -m rtp_llm.start_server
 After the server starts, we provide an OpenAI client compatible chat interface. Usage examples are as follows:
 
 ``` python
-import openai # you want `pip install openai==1.3.9`
+import openai # you want `pip install --compile openai==1.3.9`
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionUserMessageParam
 openai.base_url = f"http://localhost:{int(os.environ['START_PORT'])}/"
 openai.api_key = "none"

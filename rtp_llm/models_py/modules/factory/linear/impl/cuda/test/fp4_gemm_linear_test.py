@@ -1,6 +1,11 @@
 import logging
 import os
 import unittest
+from unittest.mock import patch
+
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
 
 import torch
 import torch.nn.functional as F
@@ -18,6 +23,11 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
 
     def setUp(self):
         """Setup test environment"""
+        # Restore per-test backend environment changes after each case.
+        env_patcher = patch.dict(os.environ)
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cpu":
             self.skipTest("FP4 tests require CUDA")

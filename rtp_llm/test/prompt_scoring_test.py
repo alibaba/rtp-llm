@@ -2,11 +2,14 @@ import logging
 import os
 from unittest import TestCase, main
 
+import pytest
 import requests
 
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 logging.basicConfig(level=logging.INFO)
+
+pytestmark = [pytest.mark.manual]
 
 
 class PromptScoringTest(TestCase):

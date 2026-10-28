@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import io.grpc.Context;
@@ -16,26 +17,36 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.stream.Stream;
 
@@ -46,9 +57,12 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -1691,5 +1705,142 @@ class FlexlbServiceImplTest {
         assertTrue(
                 pvAppender.list.get(0).getFormattedMessage().contains(expected),
                 pvAppender.list.get(0).getFormattedMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"INFO, true, true", "WARN, true, false", "WARN, false, true", "OFF, false, false"})
+    void testSchedule_serializesPvOnlyWhenItsLevelIsEnabled(
+            String level, boolean success, boolean expectPv) {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(success);
+        response.setCode(success ? 200 : 500);
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        Level previousLevel = pvLogger.getLevel();
+        pvLogger.setLevel(Level.toLevel(level));
+
+        try (MockedStatic<JsonUtils> json = mockStatic(JsonUtils.class, CALLS_REAL_METHODS)) {
+            service.schedule(
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId(12346L)
+                            .build(),
+                    observer);
+
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(captor.capture());
+            verify(observer).onCompleted();
+            verify(observer, never()).onError(any());
+            assertEquals(success, captor.getValue().getSuccess());
+            assertEquals(response.getCode(), captor.getValue().getCode());
+            json.verify(
+                    () -> JsonUtils.toStringOrEmpty(any(PvLogData.class)), times(expectPv ? 1 : 0));
+            if (expectPv) {
+                assertPvContains("\"requestId\":12346");
+                assertEquals(success ? Level.INFO : Level.ERROR, pvAppender.list.get(0).getLevel());
+            } else {
+                assertTrue(pvAppender.list.isEmpty());
+            }
+        } finally {
+            pvLogger.setLevel(previousLevel);
+        }
+    }
+
+    @Test
+    void testSchedule_slowObserverDoesNotBlockRouteCompletionOrDelayLifecycleSnapshot()
+            throws Exception {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        var publication =
+                new org.flexlb.balance.scheduler.RequestSchedulerTestRuntime.PublishedResponse(
+                        701L);
+        CompletableFuture<Response> routed = publication.future();
+        when(routeService.route(any())).thenReturn(routed);
+        AtomicReference<Thread> producerThread = new AtomicReference<>();
+        AtomicReference<Thread> snapshotThread = new AtomicReference<>();
+        when(routeService.getRequestState(701L, 0))
+                .thenAnswer(
+                        invocation -> {
+                            snapshotThread.set(Thread.currentThread());
+                            return new RequestState(
+                                    701L,
+                                    RequestState.Phase.ACKNOWLEDGED,
+                                    DeliveryClaimKind.BATCH_ENQUEUE,
+                                    1001L,
+                                    10L,
+                                    20L,
+                                    "engine acknowledged batch");
+                        });
+
+        CountDownLatch observerEntered = new CountDownLatch(1);
+        CountDownLatch releaseObserver = new CountDownLatch(1);
+        CountDownLatch observerCompleted = new CountDownLatch(1);
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        AtomicReference<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> emitted =
+                new AtomicReference<>();
+        doAnswer(
+                        invocation -> {
+                            emitted.set(invocation.getArgument(0));
+                            observerEntered.countDown();
+                            releaseObserver.await();
+                            return null;
+                        })
+                .when(observer)
+                .onNext(any());
+
+        ExecutorService producer = Executors.newSingleThreadExecutor();
+        ExecutorService closer = Executors.newSingleThreadExecutor();
+        doAnswer(
+                        invocation -> {
+                            observerCompleted.countDown();
+                            return null;
+                        })
+                .when(observer)
+                .onCompleted();
+        try {
+            service.schedule(
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId(701L)
+                            .build(),
+                    observer);
+            Response response = new Response();
+            response.setSuccess(true);
+            response.setCode(200);
+            Future<?> completion =
+                    producer.submit(
+                            () -> {
+                                producerThread.set(Thread.currentThread());
+                                publication.complete(response);
+                            });
+            assertTrue(observerEntered.await(5, TimeUnit.SECONDS));
+            // The response consumer is blocked, but the scheduler producer must be free.
+            completion.get(5, TimeUnit.SECONDS);
+            org.junit.jupiter.api.Assertions.assertNotSame(
+                    producerThread.get(), snapshotThread.get());
+            assertTrue(snapshotThread.get().getName().startsWith("request-completion-publisher-"));
+            assertEquals(
+                    FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
+                    emitted.get().getLifecycle().getState());
+            assertEquals(1001L, emitted.get().getLifecycle().getBatchId());
+            Future<?> publisherClosed = closer.submit(publication::close);
+            assertFalse(
+                    publisherClosed.isDone(),
+                    "main publisher owns the blocked frontend publication");
+            releaseObserver.countDown();
+            assertTrue(observerCompleted.await(5, TimeUnit.SECONDS));
+            publisherClosed.get(5, TimeUnit.SECONDS);
+            verify(observer).onCompleted();
+            assertTrue(publisherClosed.isDone());
+        } finally {
+            releaseObserver.countDown();
+            producer.shutdown();
+            assertTrue(producer.awaitTermination(5, TimeUnit.SECONDS));
+            publication.close();
+            closer.shutdown();
+            assertTrue(closer.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 }

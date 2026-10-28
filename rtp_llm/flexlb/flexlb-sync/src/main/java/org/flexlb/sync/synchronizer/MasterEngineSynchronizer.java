@@ -139,7 +139,15 @@ public final class MasterEngineSynchronizer {
                                         .getWorkerRegistry()
                                         .getCacheStatus()
                                         .isFullSnapshotDebugMode(),
-                                statusStaleAfterUs));
+                                statusStaleAfterUs,
+                                flexlbConfig
+                                        .getWorkerRegistry()
+                                        .getHealth()
+                                        .getVitStatusRpcTimeoutMs(),
+                                flexlbConfig
+                                        .getWorkerRegistry()
+                                        .getHealth()
+                                        .isRetainVitAliveOnTimeout()));
             }
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);

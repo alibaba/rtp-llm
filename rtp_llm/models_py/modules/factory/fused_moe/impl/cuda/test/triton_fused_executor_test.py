@@ -178,7 +178,7 @@ class TritonFusedMoeExecutorTest(TestCase):
         ]
         for M, hs, E, tk, inter, dt in configs:
             with self.subTest(
-                M=M, hidden=hs, experts=E, top_k=tk, inter=inter, dtype=dt
+                M=M, hidden=hs, experts=E, top_k=tk, inter=inter, dtype=str(dt)
             ):
                 self._run_test(M, hs, E, tk, inter, dt)
 

@@ -1,11 +1,11 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -102,6 +102,23 @@ cc_test(
     ],
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+# Production gRPC error-priority contract. No sampling/RDMA data-plane operation.
+cc_test(
+    name = "mm_grpc_control_client_test",
+    srcs = ["MMGrpcControlClientTest.cc"],
+    copts = test_copts,
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_transport",
+        "@grpc//:grpc++",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    # The production transport links real CUDA Torch; match the existing transport tests.
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

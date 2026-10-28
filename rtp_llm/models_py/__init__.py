@@ -9,6 +9,22 @@ import sys
 import importlib.util
 from pathlib import Path
 
+# Keep the Native paired/installed overlay reachable through the canonical
+# package, while the public initializer owns migrated PPU registrations.
+_internal = os.path.normpath(
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "internal_source",
+        "rtp_llm",
+        "models_py",
+    )
+)
+if os.path.isdir(_internal) and _internal not in __path__:
+    __path__.append(_internal)
+del _internal
+
 _is_ppu = False
 try:
     from rtp_llm.device.device_type import DeviceType, get_device_type

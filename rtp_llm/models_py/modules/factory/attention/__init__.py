@@ -1,8 +1,9 @@
 """Attention factory module - handles different attention implementations."""
 
+import logging
+
 from rtp_llm.device.device_type import DeviceType, get_device_type
 
-# Import the factory after lists are defined to avoid circular imports
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
@@ -15,20 +16,19 @@ __all__ = [
     "AttnImplFactory",
 ]
 
-# ============================================================================
-# Device-specific Attention implementation registration
-# ============================================================================
+from rtp_llm.models_py.modules.factory.attention import attn_factory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     DECODE_MHA_IMPS,
     DECODE_MLA_IMPS,
     PREFILL_MHA_IMPS,
     PREFILL_MLA_IMPS,
 )
+from rtp_llm.models_py.modules.factory.platform_ext_loader import load_platform_extension
+
 from rtp_llm.utils.backend_registry import run_backend_registrations
 
 device_type = get_device_type()
 if device_type == DeviceType.ROCm:
-    # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplAsm,
         AiterDecodeImplNonAsm,
@@ -39,15 +39,15 @@ if device_type == DeviceType.ROCm:
         AiterPrefillImplTriton,
     )
 
-    PREFILL_MHA_IMPS.append(AiterPrefillImplTriton)
-    PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
-    PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
-    PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)
-    DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
-    DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
-    DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
+    PREFILL_MHA_IMPS.extend(
+        [AiterPrefillImplTriton, AiterPrefillImplPaged, AiterPrefillImplAsm, AiterPrefillImplNonAsm]
+    )
+    DECODE_MHA_IMPS.extend(
+        [AiterDecodeImplTriton, AiterDecodeImplAsm, AiterDecodeImplNonAsm]
+    )
 elif device_type == DeviceType.Cuda:
-    # currently append early means impl has higher priority
+    # These modules import CUDA-only packages at module scope. Keeping every
+    # import inside this branch makes non-CUDA test collection import-safe.
     from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (
         HeadWisePrefillImpl,
     )
@@ -58,11 +58,19 @@ elif device_type == DeviceType.Cuda:
         FlashAttn3PagedShortGraphImpl,
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-        PyFlashinferDecodeImpl,
         PyFlashinferHybridPrefillImpl,
         PyFlashinferPagedPrefillImpl,
         PyFlashinferPrefillImpl,
     )
+
+    try:
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+            PyFlashinferDecodeImpl,
+        )
+    except ImportError as e:
+        PyFlashinferDecodeImpl = None
+        logging.warning("Skip Python FlashInfer decode implementation: %s", e)
+
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
         FlashInferTRTLLMFMHAv2PagedPrefillImpl,
         FlashInferTRTLLMFMHAv2PrefillImpl,
@@ -88,9 +96,10 @@ elif device_type == DeviceType.Cuda:
             FlashInferTRTLLMFMHAv2PagedPrefillImpl,
         ]
     )
-    DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl])
+    DECODE_MHA_IMPS.append(FlashInferTRTLLMDecodeImpl)
     DECODE_MHA_IMPS.append(XQADecodeImpl)
-    DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
+    if PyFlashinferDecodeImpl is not None:
+        DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
 
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
         MlaFlashInferDecodeImpl,
@@ -100,7 +109,6 @@ elif device_type == DeviceType.Cuda:
     DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
     PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
-    # SparseMlaImpl requires CUDA >= 12.9 for flash_mla support
     try:
         import torch
 
@@ -115,16 +123,25 @@ elif device_type == DeviceType.Cuda:
                 )
 
                 DECODE_MLA_IMPS.append(SparseMlaImpl)
-                PREFILL_MLA_IMPS.append(SparseMlaImpl)
-                PREFILL_MLA_IMPS.append(SparseMlaCpImpl)
+                PREFILL_MLA_IMPS.extend([SparseMlaImpl, SparseMlaCpImpl])
     except (ImportError, AttributeError, ValueError):
-        pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
+        pass
 
     from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
         CPFlashInferImpl,
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
+
+extension = load_platform_extension()
+if extension and hasattr(extension, "register_attention"):
+    extension.register_attention(
+        device_type=device_type,
+        prefill_mha_imps=PREFILL_MHA_IMPS,
+        decode_mha_imps=DECODE_MHA_IMPS,
+        prefill_mla_imps=PREFILL_MLA_IMPS,
+        decode_mla_imps=DECODE_MLA_IMPS,
+    )
 elif device_type == DeviceType.Ppu:
     # PPU uses the CUDA-flavored attention implementations.
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -144,9 +161,24 @@ elif device_type == DeviceType.Ppu:
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
-else:
-    # Cpu / Yitian / ArmCpu: no accelerator attention backend to register.
-    pass
+
+
+def _validate_impl_names() -> None:
+    """Assert every registered implementation has a public backend name."""
+    for registry_name, registry in (
+        ("PREFILL_MHA_IMPS", PREFILL_MHA_IMPS),
+        ("DECODE_MHA_IMPS", DECODE_MHA_IMPS),
+        ("PREFILL_MLA_IMPS", PREFILL_MLA_IMPS),
+        ("DECODE_MLA_IMPS", DECODE_MLA_IMPS),
+    ):
+        for cls in registry:
+            if not getattr(cls, "NAME", ""):
+                raise RuntimeError(
+                    f"Impl class {cls.__module__}.{cls.__name__} registered "
+                    f"in {registry_name} has empty NAME - set a backend NAME "
+                    f"matching the help text in fmha_group_args.py, or remove "
+                    f"the class from the registry."
+                )
 
 # Out-of-tree backends registered a hook before this module existed. Ordering in
 # these lists is priority (earlier wins), so a backend inserts rather than
@@ -158,3 +190,4 @@ run_backend_registrations(
     prefill_mla_imps=PREFILL_MLA_IMPS,
     decode_mla_imps=DECODE_MLA_IMPS,
 )
+_validate_impl_names()

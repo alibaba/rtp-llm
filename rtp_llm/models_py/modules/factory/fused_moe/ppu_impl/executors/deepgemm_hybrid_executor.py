@@ -475,7 +475,7 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
             device=device,
             dtype=torch.bfloat16,
         )
-        ppu_silu_and_mul_bf16(down_input, gateup_output)
+        silu_and_mul(down_input, gateup_output)
         dispose_tensor(gateup_output)
 
         # Step 4: Down GEMM (deepgemm bf16)

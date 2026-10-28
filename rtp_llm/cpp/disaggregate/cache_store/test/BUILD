@@ -5,9 +5,9 @@ load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -67,3 +67,8 @@ cc_test(
     },
     tags = ["H20_CU13"],
 )
+
+# Preserve exact original Native platform contracts under explicit compatibility labels.
+cc_library(name='cache_store_test_base_native_a10', srcs=test_base_sources, hdrs=test_base_includes, deps=['//rtp_llm/cpp/disaggregate/cache_store:cache_store', '@com_google_googletest//:gtest', '//rtp_llm/models_py/bindings/cuda/ops:cuda_impl', '@local_config_cuda//cuda:cuda_headers', '@local_config_cuda//cuda:cudart'], visibility=['//visibility:public'])
+
+cc_test(name='cache_store_gtest_native_a10', srcs=glob(['*.cpp'], exclude=test_base_sources), deps=['//rtp_llm/cpp/disaggregate/cache_store:cache_store', ':cache_store_test_base_native_a10', '//rtp_llm/models_py/bindings/core:exec_ops_test_lib', '@com_google_googletest//:gtest', '@com_google_googletest//:gtest_main'] + device_impl_target() + cuda13_torch_link_deps, env={'CACHE_STORE_RDMA_MODE': '0', 'GPU_COUNT': '2', 'TEST_USING_DEVICE': 'CUDA'}, copts=['-fno-access-control'] + copts(), exec_properties={'gpu': 'A10', 'gpu_count': '2'}, tags=['A10'])

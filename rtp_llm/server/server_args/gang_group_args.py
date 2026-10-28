@@ -31,6 +31,14 @@ def init_gang_group_args(parser, distribute_config):
         help="GAG信息的字符串表达",
     )
     gang_group.add_argument(
+        "--leader_address",
+        env_name="LEADER_ADDRESS",
+        bind_to=(distribute_config, "leader_address"),
+        type=str,
+        default=None,
+        help="多机启动时的 leader 地址",
+    )
+    gang_group.add_argument(
         "--zone_name",
         env_name="ZONE_NAME",
         bind_to=(distribute_config, "zone_name"),

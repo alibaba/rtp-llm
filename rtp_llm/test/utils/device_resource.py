@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -14,9 +15,236 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from filelock import FileLock, Timeout
 
+GPU_LOCK_TIMEOUT_ENV = "RTP_GPU_LOCK_TIMEOUT"
+GPU_LOCK_DEFAULT_TIMEOUT = 120
+GPU_MAX_PREEXISTING_MEMORY_MB_ENV = "RTP_GPU_MAX_PREEXISTING_MEMORY_MB"
+GPU_MAX_PREEXISTING_MEMORY_MB_DEFAULT = 1024
+GPU_STATUS_ROOT = "/tmp/rtp_llm/smoke/test/gpu_status"
+GPU_GLOBAL_LOCK_FILE = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
+
+
+class GpuLockError(RuntimeError):
+    """Raised when GPU lock acquisition fails (timeout or insufficient GPUs)."""
+
+    pass
+
+
+class GpuLockTimeoutError(GpuLockError, TimeoutError):
+    """Raised when GPU lock acquisition times out (GPUs are busy)."""
+
+    pass
+
+
+class GpuInsufficientError(GpuLockError):
+    """Raised when the visible GPU count cannot satisfy the request at all."""
+
+    pass
+
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+_NVIDIA_SMI_PATHS = [
+    "nvidia-smi",
+    "/usr/local/cuda/bin/nvidia-smi",
+    "/usr/local/nvidia/bin/nvidia-smi",
+    "/usr/bin/nvidia-smi",
+]
+
+
+def _remote_session_id() -> str:
+    return os.environ.get("RTP_REMOTE_SESSION_ID", "")
+
+
+def _read_proc_environ(pid: int) -> bytes:
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+
+
+def _pid_session_id(pid: int) -> Optional[str]:
+    return _pid_env_value(pid, "RTP_REMOTE_SESSION_ID")
+
+
+def _pid_env_value(pid: int, key: str) -> Optional[str]:
+    prefix = f"{key}=".encode()
+    for entry in _read_proc_environ(pid).split(b"\0"):
+        if entry.startswith(prefix):
+            return entry.split(b"=", 1)[1].decode("utf-8", errors="replace")
+    return None
+
+
+def _session_pids(session_id: str, owner_pid: Optional[int] = None) -> List[int]:
+    if not session_id:
+        return []
+    pids: List[int] = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid == os.getpid():
+            continue
+        if _pid_session_id(pid) == session_id:
+            if owner_pid is not None and _pid_env_value(
+                pid, "RTP_DEVICE_RESOURCE_OWNER_PID"
+            ) != str(owner_pid):
+                continue
+            pids.append(pid)
+    return pids
+
+
+def _kill_process_group(pid: int, sig: int) -> None:
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+def _kill_pids(pids: List[int], sig: int) -> None:
+    for pid in sorted(set(pids)):
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+def _run_child(argv: List[str], device_resource=None) -> int:
+    """Run with inherited streams, bounded lifetime and exact session ownership."""
+    if not _IS_POSIX:
+        return subprocess.run(argv).returncode
+    session_id = _remote_session_id()
+    owner_pid = os.getpid()
+    kwargs = {"start_new_session": True}
+    if session_id:
+        env = dict(os.environ)
+        env["RTP_DEVICE_RESOURCE_OWNER_PID"] = str(owner_pid)
+        kwargs["env"] = env
+    child = subprocess.Popen(argv, **kwargs)
+    if device_resource is not None:
+        device_resource.own_test_process_group = child.pid
+    try:
+        code = _wait_for_test(child, child.pid, _watchdog_seconds())
+        return _WATCHDOG_EXIT_CODE if code is None else code
+    finally:
+        if child.poll() is None:
+            _kill_process_group(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(child.pid, signal.SIGKILL)
+        if session_id:
+            escaped = _session_pids(session_id, owner_pid=owner_pid)
+            if escaped:
+                logging.warning(
+                    "[device_resource] cleaning escaped session pids: %s", escaped
+                )
+                _kill_pids(escaped, signal.SIGTERM)
+                time.sleep(1)
+                _kill_pids(
+                    _session_pids(session_id, owner_pid=owner_pid), signal.SIGKILL
+                )
+
+
+def _detect_nvidia():
+    """Detect NVIDIA GPUs via nvidia-smi (driver-level, no torch needed).
+
+    Tries multiple known paths because Bazel sandbox workers may not
+    have nvidia-smi on PATH.  Rejects output containing "error" to avoid
+    false positives from driver wrappers when the driver is absent.
+    """
+    for smi in _NVIDIA_SMI_PATHS:
+        try:
+            result = subprocess.run(
+                [smi, "--query-gpu=name", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0:
+                continue
+            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+            if not lines:
+                continue
+            if "error" in lines[0].lower():
+                logging.info(f"nvidia-smi returned error string: {lines[0]}")
+                continue
+            return lines[0], len(lines)
+        except FileNotFoundError:
+            continue
+    return None
+
+
+def _detect_rocm():
+    """Detect AMD GPUs via rocm-smi / rocminfo."""
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "--showproductname"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode == 0:
+            gpu_names = {}
+            for line in result.stdout.strip().splitlines():
+                gpu = re.match(r"\s*GPU\[(\d+)\]\s*:", line)
+                if gpu:
+                    parts = line.split(":")
+                    if len(parts) >= 3 and parts[-1].strip():
+                        # --showproductname emits several properties per GPU.
+                        gpu_names.setdefault(gpu.group(1), parts[-1].strip())
+            if gpu_names:
+                return next(iter(gpu_names.values())), len(gpu_names)
+    except FileNotFoundError:
+        pass
+    try:
+        result = subprocess.run(
+            ["rocminfo"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode == 0:
+            names = [
+                line.split(":")[-1].strip()
+                for line in result.stdout.splitlines()
+                if "Marketing Name" in line and line.split(":")[-1].strip() != "Host"
+            ]
+            if names:
+                return names[0], len(names)
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def get_device_info():
+    """Detect GPU/accelerator name and count. NVIDIA-compatible via nvidia-smi, ROCm via rocm-smi.
+
+        No torch dependency — works in Bazel sandbox without pip packages.
+
+    Returns: (device_name, device_count) or None if no device found.
+    """
+    for detector in [_detect_nvidia, _detect_rocm]:
+        result = detector()
+        if result:
+            name, count = result
+            logging.info(f"Detected device: {name} x{count} (via {detector.__name__})")
+            return name, count
+    logging.info("No GPU/accelerator detected")
+    return None
+
 
 python_code = """
 import torch
@@ -143,13 +371,17 @@ def get_ip():
 
 
 def get_gpu_ids():
-    cuda_info = get_cuda_info()
-    logging.info(f"{cuda_info}")
+    device_info = get_device_info()
+    logging.info(f"{device_info}")
 
-    if not cuda_info:
-        return list(range(128))
-    device_name = cuda_info[0]
-    total_gpus = range(cuda_info[1])
+    if not device_info:
+        raise RuntimeError(
+            "get_gpu_ids(): no GPU/accelerator detected — "
+            "nvidia-smi / rocm-smi not found or returned no devices. "
+            "Cannot allocate GPUs."
+        )
+    device_name = device_info[0]
+    total_gpus = range(device_info[1])
 
     gpus = os.environ.get("CUDA_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES"))
     if gpus is not None:
@@ -174,7 +406,14 @@ def _nvidia_smi() -> Optional[str]:
     """
     global _nvidia_smi_path, _nvidia_smi_resolved
     if not _nvidia_smi_resolved:
-        _nvidia_smi_path = shutil.which("nvidia-smi")
+        _nvidia_smi_path = next(
+            (
+                resolved
+                for path in _NVIDIA_SMI_PATHS
+                if (resolved := shutil.which(path))
+            ),
+            None,
+        )
         _nvidia_smi_resolved = True
         if _nvidia_smi_path is None:
             logging.info(
@@ -183,61 +422,205 @@ def _nvidia_smi() -> Optional[str]:
     return _nvidia_smi_path
 
 
-def _parse_mib(text: str) -> Optional[int]:
-    """MiB value from an nvidia-smi cell, or None when it is not a number."""
-    cleaned = text.strip().replace(",", "").replace("MiB", "").strip()
-    if not cleaned or cleaned.upper() == "N/A":
-        return None
-    try:
-        return int(float(cleaned))
-    except ValueError:
-        return None
-
-
-def _memory_text(memory_mib: Optional[int]) -> str:
-    """Render a MiB count for logs, preserving "we could not tell"."""
-    return f"{memory_mib}" if memory_mib is not None else "unknown"
-
-
-def _gpu_free_memory_mib() -> int:
-    """How much GPU memory (MiB) may still be in use and count as idle.
-
-    RTP_GPU_FREE_MEMORY_MIB defaults to 1024. A negative value relaxes
-    acquisition to "no active compute processes" only, for platforms or loads
-    where the driver itself accounts for memory on an otherwise free device.
-    """
-    raw = os.environ.get("RTP_GPU_FREE_MEMORY_MIB", "1024")
-    try:
-        return int(raw)
-    except ValueError:
-        logging.warning("invalid RTP_GPU_FREE_MEMORY_MIB=%r; using 1024", raw)
-        return 1024
-
-
 class DeviceResource:
-    def __init__(self, required_gpu_count: int):
+    def __init__(self, required_gpu_count: int, timeout: Optional[int] = None):
+        """
+        Args:
+            timeout: seconds to wait for GPU locks.
+                     None uses the environment or the bounded default.
+                     Pytest fixtures should pass an explicit timeout.
+        """
         self.required_gpu_count = required_gpu_count
         self.total_gpus = get_gpu_ids()
         if required_gpu_count > len(self.total_gpus):
-            raise ValueError(
-                f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
+            raise GpuInsufficientError(
+                f"Need {required_gpu_count} GPUs but only {len(self.total_gpus)} visible "
+                f"(CUDA/HIP_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', os.environ.get('HIP_VISIBLE_DEVICES', 'unset'))})"
             )
-        self.gpu_ids: List[int] = []
+        os.makedirs(GPU_STATUS_ROOT, exist_ok=True)
+        env_timeout = os.environ.get(GPU_LOCK_TIMEOUT_ENV)
+        if timeout is not None:
+            self.timeout = timeout
+        elif env_timeout is not None:
+            self.timeout = int(env_timeout)
+        elif "RTP_GPU_ACQUIRE_TIMEOUT" in os.environ:
+            self.timeout = int(os.environ["RTP_GPU_ACQUIRE_TIMEOUT"])
+        else:
+            self.timeout = GPU_LOCK_DEFAULT_TIMEOUT if _remote_session_id() else 1800
+        self.gpu_ids: List[str] = []
         self.candidate_groups: Optional[List[List[int]]] = None
         self.gpu_locks = ExitStack()
-        self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
-        self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"
-        # Bound the wait for a GPU group. Unbounded, a test that can never
-        # assemble its group -- e.g. required_gpu_count equal to the node's card
-        # count, where any co-tenant blocks it -- silently consumes the whole
-        # bazel test timeout (7200s in CI) and reports "timed out" with no hint
-        # that it never got a device.
-        self.acquire_timeout = int(os.environ.get("RTP_GPU_ACQUIRE_TIMEOUT", 1800))
-        # pid -- and, because the test is started with start_new_session=True,
-        # also pgid and sid -- of the test process started by main(). Cleanup
-        # may only ever signal processes of this group: anything else on the
-        # device belongs to a co-tenant and must be left alone.
+        self.global_lock_file = GPU_GLOBAL_LOCK_FILE
+        self.gpu_status_root_path = GPU_STATUS_ROOT
+        self._gpu_bad_until: Dict[str, float] = {}
+        self.bad_gpu_cooldown_s = 30
+        self._lock_start_idx = 0
         self.own_test_process_group: Optional[int] = None
+
+    @property
+    def acquire_timeout(self):
+        return self.timeout
+
+    @acquire_timeout.setter
+    def acquire_timeout(self, value):
+        self.timeout = value
+
+    def _get_gpu_pids(self, gpu_id: str) -> Optional[List[int]]:
+        """PIDs of compute processes on a physical GPU, or None if unknowable."""
+        rows = self._query_compute_apps(gpu_id, "pid")
+        if rows is None:
+            return None
+        try:
+            return [int(row[0]) for row in rows if row]
+        except (ValueError, IndexError):
+            logging.warning("unexpected nvidia-smi pid output for gpu %s", gpu_id)
+            return None
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        """Probe process existence without signalling it."""
+        if sys.platform.startswith("linux"):
+            return os.path.exists(f"/proc/{pid}")
+        try:
+            os.getpgid(pid)
+            return True
+        except (OSError, AttributeError):
+            return False
+
+    def _has_zombie_gpu_contexts(self, gpu_id: str) -> bool:
+        """Whether this GPU should be considered unusable.
+
+        Covers two cases: dead processes still holding memory (the driver
+        sometimes fails to reclaim after a SIGKILL, leaving contexts that survive
+        until a reset), and a device we cannot query at all -- treated as bad, so
+        a degraded GPU is skipped rather than handed out repeatedly.
+
+        "Cannot query" only means anything where nvidia-smi exists. On PPU and
+        ROCm workers it never does, and treating that as a zombie rejected all 16
+        PPUs in run 69752178, so no device could be locked and every PPU smoke
+        test failed at the acquisition bound with nothing actually held.
+        """
+        if _nvidia_smi() is None:
+            return False
+        pids = self._get_gpu_pids(gpu_id)
+        if pids is None:
+            logging.warning("gpu %s is not queryable; treating as unusable", gpu_id)
+            return True
+        if not pids:
+            return False
+        return all(not self._pid_alive(p) for p in pids)
+
+    def _has_non_session_live_cuda_pids(self, gpu_id: str) -> bool:
+        """Return True when a remotely locked GPU already has other live CUDA PIDs."""
+        session_id = _remote_session_id()
+        if not session_id:
+            return False
+        pids = self._get_gpu_pids(gpu_id)
+        if pids is None:
+            return _nvidia_smi() is not None
+        for pid in pids:
+            if not self._pid_alive(pid):
+                continue
+            pid_session = _pid_session_id(pid)
+            if pid_session != session_id:
+                logging.error(
+                    "GPU %s has non-session live CUDA pid=%s session=%s while current session=%s",
+                    gpu_id,
+                    pid,
+                    pid_session or "unset",
+                    session_id,
+                )
+                return True
+        return False
+
+    def _has_excess_preexisting_memory(self, gpu_id: str) -> bool:
+        """Detect remote GPU users hidden by the worker's PID namespace."""
+        if not _remote_session_id():
+            return False
+        limit_mb = int(
+            os.environ.get(
+                GPU_MAX_PREEXISTING_MEMORY_MB_ENV,
+                str(GPU_MAX_PREEXISTING_MEMORY_MB_DEFAULT),
+            )
+        )
+        for smi in _NVIDIA_SMI_PATHS:
+            try:
+                result = subprocess.run(
+                    [
+                        smi,
+                        "--query-gpu=memory.used",
+                        "--format=csv,noheader,nounits",
+                        f"--id={gpu_id}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            except FileNotFoundError:
+                continue
+            if result.returncode != 0:
+                continue
+            try:
+                used_mb = int(result.stdout.strip().splitlines()[0])
+            except (IndexError, ValueError):
+                return False
+            if used_mb > limit_mb:
+                logging.error(
+                    "GPU %s already uses %s MiB before session start (limit=%s MiB)",
+                    gpu_id,
+                    used_mb,
+                    limit_mb,
+                )
+                return True
+            return False
+        return False
+
+    def _check_gpu_usable(self) -> bool:
+        """Return False if any locked GPU has zombie CUDA contexts. Never kills processes.
+
+        NOTE on Docker PID namespaces: nvidia-smi reports host-namespace PIDs,
+        while /proc/<pid> and os.kill() operate in the container namespace.
+        This means _pid_alive() may return False for a host PID that is actually
+        alive (just invisible from inside the container), or True for a
+        completely unrelated container-local process.  We only use this check
+        to detect the worst case — zombie GPU contexts where memory is
+        permanently leaked.  False positives (skipping a usable GPU) are
+        harmless; false negatives are caught by file locks.
+        """
+        for gpu_id in self.gpu_ids:
+            if self._has_zombie_gpu_contexts(str(gpu_id)):
+                logging.warning(
+                    "GPU %s has zombie contexts (dead PIDs still hold memory), skipping",
+                    gpu_id,
+                )
+                return False
+        return True
+
+    def _iter_gpu_ids(self):
+        """Yield GPU IDs starting from _lock_start_idx, wrapping around.
+
+        This distributes lock attempts across GPUs so multiple concurrent
+        DeviceResource instances don't all contend for GPU 0 first.
+        """
+        n = len(self.total_gpus)
+        for i in range(n):
+            yield self.total_gpus[(self._lock_start_idx + i) % n]
+        self._lock_start_idx = (self._lock_start_idx + 1) % n
+
+    def _locked_gpu_ids(self) -> List[int]:
+        """Visible GPUs currently held by someone else, for diagnostics only."""
+        held = []
+        for id in self.total_gpus:
+            probe = FileLock(f"{self.gpu_status_root_path}/{id}")
+            try:
+                with probe.acquire(timeout=0):
+                    pass
+            except Timeout:
+                held.append(id)
+            except Exception:
+                pass
+        return held
 
     def _query_compute_apps(
         self, gpu_id: str, columns: str
@@ -252,7 +635,7 @@ class DeviceResource:
         try:
             result = subprocess.run(
                 [
-                    "nvidia-smi",
+                    _nvidia_smi() or "nvidia-smi",
                     f"--query-compute-apps={columns}",
                     "--format=csv,noheader,nounits",
                     f"--id={gpu_id}",
@@ -279,17 +662,6 @@ class DeviceResource:
             return None
         except Exception as e:
             logging.warning("nvidia-smi query failed for gpu %s: %s", gpu_id, e)
-            return None
-
-    def _get_gpu_pids(self, gpu_id: str) -> Optional[List[int]]:
-        """PIDs of compute processes on a physical GPU, or None if unknowable."""
-        rows = self._query_compute_apps(gpu_id, "pid")
-        if rows is None:
-            return None
-        try:
-            return [int(row[0]) for row in rows if row]
-        except (ValueError, IndexError):
-            logging.warning("unexpected nvidia-smi pid output for gpu %s", gpu_id)
             return None
 
     def _get_gpu_compute_apps(
@@ -327,7 +699,7 @@ class DeviceResource:
         try:
             result = subprocess.run(
                 [
-                    "nvidia-smi",
+                    _nvidia_smi() or "nvidia-smi",
                     "--query-gpu=memory.used",
                     "--format=csv,noheader,nounits",
                     "-i",
@@ -358,11 +730,6 @@ class DeviceResource:
             logging.warning("nvidia-smi memory query failed for gpu %s: %s", gpu_id, e)
             return None
 
-    @staticmethod
-    def _pid_alive(pid: int) -> bool:
-        """Check if a process is alive by probing /proc/<pid>."""
-        return os.path.exists(f"/proc/{pid}")
-
     def _pid_in_test_process_group(self, pid: int) -> bool:
         """Whether pid is the test process or shares its group/session.
 
@@ -380,7 +747,10 @@ class DeviceResource:
             with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as stat:
                 contents = stat.read()
         except OSError:
-            return False
+            try:
+                return os.getpgid(pid) == group or os.getsid(pid) == group
+            except (OSError, AttributeError):
+                return False
         # comm may itself contain spaces or parentheses; rsplit skips to the
         # fields that follow the closing one. After comm: state(3) ppid(4)
         # pgrp(5) session(6).
@@ -418,6 +788,9 @@ class DeviceResource:
             problems.append(f"gpu={gpu_id} compute-apps query failed")
             return "; ".join(problems)
         for pid, memory_mib in apps:
+            session_id = _remote_session_id()
+            if session_id and _pid_session_id(pid) == session_id:
+                continue
             if not self._pid_alive(pid):
                 logging.warning("zombie context: gpu=%s pid=%s", gpu_id, pid)
                 problems.append(f"gpu={gpu_id} zombie-context pid={pid}")
@@ -470,29 +843,6 @@ class DeviceResource:
             except Exception as e:
                 parts.append(f"gpu{gpu_id}: unreadable ({e})")
         return "; ".join(parts)
-
-    def _has_zombie_gpu_contexts(self, gpu_id: str) -> bool:
-        """Whether this GPU should be considered unusable.
-
-        Covers two cases: dead processes still holding memory (the driver
-        sometimes fails to reclaim after a SIGKILL, leaving contexts that survive
-        until a reset), and a device we cannot query at all -- treated as bad, so
-        a degraded GPU is skipped rather than handed out repeatedly.
-
-        "Cannot query" only means anything where nvidia-smi exists. On PPU and
-        ROCm workers it never does, and treating that as a zombie rejected all 16
-        PPUs in run 69752178, so no device could be locked and every PPU smoke
-        test failed at the acquisition bound with nothing actually held.
-        """
-        if _nvidia_smi() is None:
-            return False
-        pids = self._get_gpu_pids(gpu_id)
-        if pids is None:
-            logging.warning("gpu %s is not queryable; treating as unusable", gpu_id)
-            return True
-        if not pids:
-            return False
-        return all(not self._pid_alive(p) for p in pids)
 
     @staticmethod
     def _signal_own_process(
@@ -576,32 +926,39 @@ class DeviceResource:
         )
         return False
 
-    def _locked_gpu_ids(self) -> List[int]:
-        """Visible GPUs currently held by someone else, for diagnostics only."""
-        held = []
-        for id in self.total_gpus:
-            probe = FileLock(f"{self.gpu_status_root_path}/{id}")
-            try:
-                with probe.acquire(timeout=0):
-                    pass
-            except Timeout:
-                held.append(id)
-            except Exception:
-                pass
-        return held
-
     def _lock_gpus(self):
         candidate_groups = self._candidate_gpu_groups()
+        preexisting_memory_seen = False
         with ExitStack() as stack:
+            now = time.time()
             for group in candidate_groups:
                 gpu_ids = []
                 with ExitStack() as group_stack:
                     for id in group:
+                        if self._gpu_bad_until.get(str(id), 0) > now:
+                            logging.info(f"skip GPU {id}: temporary cooldown")
+                            break
+                        if self._has_zombie_gpu_contexts(str(id)):
+                            logging.info(
+                                f"skip GPU {id}: zombie CUDA contexts detected"
+                            )
+                            break
                         lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
                         try:
                             group_stack.enter_context(lock_device.acquire(timeout=0))
                         except Timeout as _:
                             logging.info(f"lock device {id} failed")
+                            break
+                        if self._has_non_session_live_cuda_pids(str(id)):
+                            logging.info(
+                                "skip GPU %s: non-session CUDA process detected", id
+                            )
+                            break
+                        if self._has_excess_preexisting_memory(str(id)):
+                            preexisting_memory_seen = True
+                            logging.info(
+                                "skip GPU %s: pre-existing memory exceeds limit", id
+                            )
                             break
                         if self._has_zombie_gpu_contexts(str(id)):
                             logging.info(
@@ -610,28 +967,25 @@ class DeviceResource:
                             break
                         gpu_ids.append(str(id))
                         logging.info(f"{get_ip()} lock device {id} done")
-                    if len(gpu_ids) != self.required_gpu_count:
-                        continue
-                    # The file locks only prove no other wrapper claims the
-                    # group; nvidia-smi must agree the cards are really idle.
-                    # Release a dirty group here and try the next candidate:
-                    # returning it to the caller would first-fit this same
-                    # dirty card on every retry and starve the clean ones
-                    # behind it (observed: six sm12x tests each burned their
-                    # 1800s acquire budget re-locking a busy gpu0 while
-                    # gpu1-7 sat idle).
-                    problems = self._gpu_group_idle_problems(gpu_ids)
-                    if problems:
-                        logging.warning(
-                            f"GPUs {gpu_ids} are not truly idle "
-                            f"({'; '.join(problems)}); trying next group"
-                        )
-                        continue
-                    logging.info(f"use gpus:[{gpu_ids}]")
-                    stack.enter_context(group_stack.pop_all())
-                    self.gpu_locks = stack.pop_all()
-                    self.gpu_ids = gpu_ids
-                    return True
+                    if len(gpu_ids) == self.required_gpu_count:
+                        problems = self._gpu_group_idle_problems(gpu_ids)
+                        if problems:
+                            logging.warning(
+                                "GPUs %s are not truly idle (%s); trying next group",
+                                gpu_ids,
+                                "; ".join(problems),
+                            )
+                            continue
+                        logging.info(f"use gpus:[{gpu_ids}]")
+                        stack.enter_context(group_stack.pop_all())
+                        self.gpu_locks = stack.pop_all()
+                        self.gpu_ids = gpu_ids
+                        return True
+        if preexisting_memory_seen:
+            raise GpuLockTimeoutError(
+                "GPU lock unavailable: all candidate groups have pre-existing "
+                "memory allocations"
+            )
         return False
 
     def _candidate_gpu_groups(self) -> List[List[int]]:
@@ -699,71 +1053,116 @@ class DeviceResource:
             return []
 
     def __enter__(self):
+        started = time.time()
+        deadline = started + self.timeout if self.timeout is not None else None
+        next_report = started + 60
         logging.info(
-            f"waiting for gpu count:[{self.required_gpu_count}] "
-            f"of {len(self.total_gpus)} visible, timeout={self.acquire_timeout}s"
+            "waiting for %s of %s visible GPUs, timeout=%s",
+            self.required_gpu_count,
+            len(self.total_gpus),
+            self.timeout,
         )
-        deadline = time.time() + self.acquire_timeout
-        next_report = time.time() + 60
         while True:
+            locked = False
             with FileLock(self.global_lock_file):
                 try:
-                    if self._lock_gpus():
-                        problems = self._gpu_group_idle_problems(self.gpu_ids)
-                        if not problems:
-                            break
-                        # The lock is ours, nvidia-smi disagrees. Release the
-                        # group instead of "cleaning" it: whatever holds the
-                        # memory is a live process of someone else, and killing
-                        # it here is how neighbours used to lose their GPUs.
-                        logging.warning(
-                            f"GPUs {self.gpu_ids} are not truly idle "
-                            f"({'; '.join(problems)}); releasing and retrying"
-                        )
-                        self.gpu_ids = []
-                        self.gpu_locks.close()
+                    locked = self._lock_gpus()
+                except (GpuLockError, GpuInsufficientError):
+                    raise
                 except Exception:
                     logging.warning(f"{traceback.format_exc()}")
-            now = time.time()
-            if now >= deadline:
-                raise TimeoutError(
-                    f"could not acquire {self.required_gpu_count} of "
-                    f"{len(self.total_gpus)} visible GPUs within "
-                    f"{self.acquire_timeout}s; gpu state: "
-                    f"{self._gpu_state_snapshot()}. Waiting longer would just "
-                    f"burn the bazel test timeout and report a timeout with no "
-                    f"cause. Set RTP_GPU_ACQUIRE_TIMEOUT to change the budget."
+            if locked:
+                problems = self._gpu_group_idle_problems(self.gpu_ids)
+                if not problems:
+                    break
+                logging.warning(
+                    "GPUs %s are not truly idle (%s); releasing and retrying",
+                    self.gpu_ids,
+                    "; ".join(problems),
                 )
+                for gid in self.gpu_ids:
+                    self._gpu_bad_until[gid] = time.time() + self.bad_gpu_cooldown_s
+                self.gpu_ids = []
+                self.gpu_locks.close()
+            if deadline is not None and time.time() >= deadline:
+                raise GpuLockTimeoutError(
+                    f"GPU lock timed out after {self.timeout}s: "
+                    f"need {self.required_gpu_count} GPUs from {self.total_gpus}; "
+                    f"gpu state: {self._gpu_state_snapshot()}"
+                )
+            now = time.time()
             if now >= next_report:
                 logging.info(
-                    f"still waiting for {self.required_gpu_count} GPUs after "
-                    f"{int(now - (deadline - self.acquire_timeout))}s; "
-                    f"held: {sorted(self._locked_gpu_ids())}"
+                    "still waiting for %s GPUs after %ss; held: %s",
+                    self.required_gpu_count,
+                    int(now - started),
+                    self._locked_gpu_ids(),
                 )
                 next_report = now + 60
             time.sleep(1)
         return self
 
     def __exit__(self, *args: Any):
-        self._ensure_gpus_released()
         with FileLock(self.global_lock_file):
             logging.info(f"release gpu:{self.gpu_ids}")
-            self.gpu_ids = []
-            self.gpu_locks.close()
+            try:
+                if self.own_test_process_group is not None:
+                    self._ensure_gpus_released()
+            finally:
+                self.gpu_ids = []
+                self.gpu_locks.close()
             logging.info("release done")
 
 
-# The acquire timeout only bounds the wait for devices. A test that owns its
-# GPUs used to run with no bound at all: a silent hang (observed:
-# test_prefill_workspace and test_mtp_hidden_buffer each held four cards for
-# 1.5-2h+, and test_embedding_tp4 sat in [Sched] for 4647s) only ended when the
-# lane's bazel timeout killed the whole job. The watchdog below bounds the test
-# itself and names the node and cards that were stuck.
+def _get_visible_devices_env(device_name: str) -> str:
+    """Return the env var name for device visibility control."""
+    if "308" in device_name or "MI3" in device_name:
+        return "HIP_VISIBLE_DEVICES"
+    return "CUDA_VISIBLE_DEVICES"
+
+
+def _get_required_gpu_count(device_available: bool = True) -> int:
+    gpu_count_env = os.environ.get("GPU_COUNT", os.environ.get("WORLD_SIZE"))
+    if gpu_count_env is not None:
+        return int(gpu_count_env)
+    return 1 if device_available else 0
+
 
 _WATCHDOG_EXIT_CODE = 70
 _WATCHDOG_SIGNAL_GRACE_SECONDS = 30
 _WATCHDOG_POLL_SECONDS = 0.5
 _IS_POSIX = os.name == "posix"
+
+
+def _parse_mib(text: str) -> Optional[int]:
+    """MiB value from an nvidia-smi cell, or None when it is not a number."""
+    cleaned = text.strip().replace(",", "").replace("MiB", "").strip()
+    if not cleaned or cleaned.upper() == "N/A":
+        return None
+    try:
+        return int(float(cleaned))
+    except ValueError:
+        return None
+
+
+def _memory_text(memory_mib: Optional[int]) -> str:
+    """Render a MiB count for logs, preserving "we could not tell"."""
+    return f"{memory_mib}" if memory_mib is not None else "unknown"
+
+
+def _gpu_free_memory_mib() -> int:
+    """How much GPU memory (MiB) may still be in use and count as idle.
+
+    RTP_GPU_FREE_MEMORY_MIB defaults to 1024. A negative value relaxes
+    acquisition to "no active compute processes" only, for platforms or loads
+    where the driver itself accounts for memory on an otherwise free device.
+    """
+    raw = os.environ.get("RTP_GPU_FREE_MEMORY_MIB", "1024")
+    try:
+        return int(raw)
+    except ValueError:
+        logging.warning("invalid RTP_GPU_FREE_MEMORY_MIB=%r; using 1024", raw)
+        return 1024
 
 
 def _watchdog_seconds() -> int:
@@ -959,63 +1358,45 @@ def _wait_for_test(proc, pgid: int, watchdog: int) -> Optional[int]:
 
 
 def _run_test_command(device_resource: Optional[DeviceResource] = None) -> int:
-    command = sys.argv[1:]
-    if not _IS_POSIX:
-        # Process groups, killpg and SIGUSR1 are POSIX-only. Keep the legacy
-        # path elsewhere so the wrapper still runs, just without a watchdog.
-        result = subprocess.run(command)
-        logging.info("exitcode: %d", result.returncode)
-        return result.returncode
-
-    _log_test_placement()
-    watchdog = _watchdog_seconds()
-    logging.info(
-        "running test: %s (RTP_TEST_WATCHDOG_SECONDS=%s)",
-        " ".join(command),
-        watchdog if watchdog > 0 else "disabled",
-    )
-    # start_new_session: the test leads its own process group, so the watchdog
-    # can kill the test *and everything it spawned* -- a hung helper process
-    # must not survive the wrapper and keep holding the cards.
-    proc = subprocess.Popen(command, start_new_session=True)
-    if device_resource is not None:
-        # Remember which processes are ours: GPU cleanup must never signal a
-        # co-tenant's process, only the test and what it spawned.
-        device_resource.own_test_process_group = proc.pid
-    code = _wait_for_test(proc, proc.pid, watchdog)
-    if code is None:
-        return _WATCHDOG_EXIT_CODE
-    logging.info("exitcode: %d", code)
-    return code
+    if os.environ.get("GPU_COUNT") != "0":
+        _log_test_placement()
+    return _run_child(sys.argv[1:], device_resource)
 
 
 def main():
-    # CPU-only targets must not initialize CUDA or acquire GPU locks.
+    # Explicit CPU targets must not probe devices or initialize a GPU runtime.
     if os.environ.get("GPU_COUNT") == "0":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         os.environ["HIP_VISIBLE_DEVICES"] = ""
         return _run_test_command()
-
-    cuda_info = get_cuda_info()
-    if not cuda_info:
-        logging.info("no gpu, continue")
+    device_info = get_device_info()
+    require_count = _get_required_gpu_count(device_available=device_info is not None)
+    if device_info is None:
+        if require_count > 0:
+            raise RuntimeError(
+                f"[device_resource] GPU_COUNT={require_count} requested but no GPU detected "
+                "(nvidia-smi / rocm-smi not found or returned no devices)"
+            )
+        logging.warning(
+            "[device_resource] no GPU detected, running without GPU isolation"
+        )
         return _run_test_command()
-
-    try:
-        from jit_sys_path_setup import setup_jit_cache
-    except ModuleNotFoundError:
-        from rtp_llm.test.utils.jit_sys_path_setup import setup_jit_cache
-
-    setup_jit_cache()
-
-    device_name, _ = cuda_info
-    require_count = int(os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1")))
+    if require_count == 0:
+        return _run_test_command()
+    device_name, _ = device_info
+    env_name = _get_visible_devices_env(device_name)
     with DeviceResource(require_count) as gpu_resource:
-        if "308" in device_name:
-            env_name = "HIP_VISIBLE_DEVICES"
-        else:
-            env_name = "CUDA_VISIBLE_DEVICES"
         os.environ[env_name] = ",".join(gpu_resource.gpu_ids)
+        sys.stderr.write(
+            f"[device_resource] {env_name}={os.environ[env_name]} "
+            f"locked={gpu_resource.gpu_ids} pid={os.getpid()}\n"
+        )
+        sys.stderr.flush()
+        try:
+            from jit_sys_path_setup import setup_jit_cache
+        except ModuleNotFoundError:
+            from rtp_llm.test.utils.jit_sys_path_setup import setup_jit_cache
+        setup_jit_cache()
         return _run_test_command(gpu_resource)
 
 

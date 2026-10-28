@@ -2,11 +2,14 @@ import json
 import unittest
 from unittest import SkipTest, mock
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
+
+pytestmark = [pytest.mark.gpu(type="MI308X")]
 
 try:
     import aiter
@@ -231,6 +234,50 @@ class RocmFp8PTPCLinearDispatchTest(unittest.TestCase):
                 f"expected ~{expected_scale:.1f}) for M={M},N={N},K={K}",
             )
 
+    def _run_tbstars_cktile_fallback(self, M, N, K):
+        from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
+        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
+            RocmFp8PTPCLinearReference,
+        )
+
+        input_bf16 = torch.randn(M, K, dtype=torch.bfloat16, device=self.device)
+        weight_bf16 = torch.randn(N, K, dtype=torch.bfloat16, device=self.device)
+        weight_q, weight_scales = rocm_per_token_quant_fp8(weight_bf16)
+
+        # Match PerChannelFp8Weight: checkpoint-contiguous [N, K] storage is
+        # exposed to Linear as a [K, N] reshape without transposing the data.
+        weight_for_init = weight_q.reshape(K, N)
+        linear = RocmFp8PTPCLinearReference(
+            weight=weight_for_init,
+            weight_scales=weight_scales.T.contiguous(),
+            bias=None,
+        )
+        output_1 = linear(input_bf16)
+        output_2 = linear(input_bf16)
+
+        input_q, input_scales = rocm_per_token_quant_fp8(input_bf16)
+        baseline = torch.matmul(
+            input_q.to(torch.float32) * input_scales,
+            weight_q.to(torch.float32).T * weight_scales.T.to(torch.float32),
+        ).to(input_bf16.dtype)
+
+        self.assertEqual(output_1.shape, (M, N))
+        self.assertFalse(torch.isnan(output_1).any())
+        self.assertFalse(torch.isinf(output_1).any())
+        torch.testing.assert_close(output_1, output_2, atol=1e-3, rtol=0)
+        torch.testing.assert_close(output_1, baseline, atol=5e-2, rtol=5e-2)
+
+        zero_input = torch.zeros_like(input_bf16[:1])
+        zero_output = linear(zero_input)
+        self.assertFalse(torch.isnan(zero_output).any())
+        self.assertFalse(torch.isinf(zero_output).any())
+
+    def test_tbstars_projection_shapes_match_cktile_fallback(self):
+        """TBStars projections use explicit CKTile with its required layout."""
+        self._run_tbstars_cktile_fallback(M=32, N=2816, K=1024)
+        self._run_tbstars_cktile_fallback(M=32, N=5632, K=1024)
+        self._run_tbstars_cktile_fallback(M=32, N=1024, K=2816)
+
     # --- default path boundary tests ---
     def test_decode_small_m(self):
         """M=32, N=1024, K=256 -> default (protects decode)."""
@@ -308,6 +355,7 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
         from rtp_llm.models_py.modules.factory import LinearFactory
         from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import (
             RocmFp8PTPCLinearNoSwizzle,
+            RocmFp8PTPCLinearReference,
             RocmFp8PTPCLinearWithSwizzle,
         )
         from rtp_llm.ops import HWKernelConfig
@@ -321,6 +369,7 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
         original_strategies = list(LinearFactory._strategies)
         try:
             LinearFactory.clear()
+            LinearFactory.register(RocmFp8PTPCLinearReference)
             LinearFactory.register(RocmFp8PTPCLinearWithSwizzle)
             LinearFactory.register(RocmFp8PTPCLinearNoSwizzle)
 
@@ -330,6 +379,16 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
                 weight_with_swizzle, self.bias, scale_b, quant_config, hw_config
             )
             self.assertIsInstance(linear, RocmFp8PTPCLinearWithSwizzle)
+
+            hw_config.force_legacy_fp8_ptpc = True
+            linear = LinearFactory.create_linear(
+                weight_q.reshape(self.hidden_size, self.output_size),
+                self.bias,
+                scale_b,
+                quant_config,
+                hw_config,
+            )
+            self.assertIsInstance(linear, RocmFp8PTPCLinearReference)
 
             hw_config = HWKernelConfig()
             hw_config.use_swizzleA = False
@@ -474,9 +533,8 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
                     "scaleA": input_scales.float(),
                     "scaleB": linear.weight_scales,
                     "bpreshuffle": True,
+                    "use_gelu": epilogue == "bias_gelu",
                 }
-                if epilogue == "bias_gelu":
-                    kwargs["use_gelu"] = True
                 default = aiter.hipb_mm(input_q, linear.weight, -1, **kwargs)
                 # Different valid hipBLASLt reduction orders can round a tiny
                 # fraction of BF16 outputs to adjacent representable values.

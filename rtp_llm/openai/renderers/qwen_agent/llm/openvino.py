@@ -57,7 +57,7 @@ class OpenVINO(BaseTextChatModel):
             raise ImportError(
                 "Could not import optimum-intel python package for openvino. "
                 "Please install it with: "
-                "pip install -U 'optimum[openvino]'"
+                "pip install --compile -U 'optimum[openvino]'"
             ) from e
         try:
             from transformers import AutoConfig, AutoTokenizer
@@ -65,7 +65,7 @@ class OpenVINO(BaseTextChatModel):
             raise ImportError(
                 "Could not import transformers python package for openvino. "
                 "Please install it with: "
-                "pip install -U 'transformers'"
+                "pip install --compile -U 'transformers'"
             ) from e
 
         self.ov_model = OVModelForCausalLM.from_pretrained(

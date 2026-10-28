@@ -113,8 +113,10 @@ class WhitelistMetricsFilterConfigTest {
                     meter);
         }
         Meter.Id inflightBatch = registry.counter("flexlb.app.flexlb.inflight.batch.count").getId();
+        Meter.Id nonCritical = registry.counter("flexlb.grpc.server.executor.queue.size").getId();
         Meter.Id jvm = registry.counter("jvm.test.metric").getId();
         assertEquals(MeterFilterReply.DENY, filter.accept(inflightBatch));
+        assertEquals(MeterFilterReply.DENY, filter.accept(nonCritical));
         assertEquals(MeterFilterReply.NEUTRAL, filter.accept(jvm));
         assertEquals(
                 6,

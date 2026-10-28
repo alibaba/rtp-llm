@@ -24,11 +24,18 @@ class TestExpiredLockFile(unittest.TestCase):
                 self.assertEqual(data["pid"], os.getpid())
                 self.assertAlmostEqual(time.time(), data["timestamp"], delta=1)
 
-    def test_lock_file_cleanup(self):
+    def test_lock_file_release(self):
         lock_file = self.test_dir / "port_8080.lock"
         with ExpiredLockFile(lock_file, 8080):
             self.assertTrue(lock_file.exists())
-        self.assertFalse(lock_file.exists())
+            lock_inode = lock_file.stat().st_ino
+        self.assertTrue(lock_file.exists())
+        self.assertEqual(lock_file.stat().st_ino, lock_inode)
+
+        # The persistent path must be reusable after the flock is released.
+        with ExpiredLockFile(lock_file, 8080):
+            self.assertTrue(lock_file.exists())
+            self.assertEqual(lock_file.stat().st_ino, lock_inode)
 
     def test_concurrent_locks(self):
         lock_file = self.test_dir / "port_8080.lock"
@@ -161,7 +168,8 @@ class TestPortManager(unittest.TestCase):
             )
 
         self.port_manager.cleanup_stale_locks()
-        self.assertFalse(lock_file.exists())
+        self.assertTrue(lock_file.exists())
+        self.assertEqual(lock_file.read_text(), "")
 
 
 class TestPortsContext(unittest.TestCase):
@@ -184,8 +192,9 @@ class TestPortsContext(unittest.TestCase):
             lock_file = self.test_dir / f"port_{first_port}.lock"
             self.assertTrue(lock_file.exists())
 
-        # exit context, lock file should be released
-        self.assertFalse(lock_file.exists())
+        # Exiting the context releases the flock while retaining the stable inode.
+        with ExpiredLockFile(lock_file, first_port):
+            self.assertTrue(lock_file.exists())
 
     def test_concurrent_access(self):
         """test the case that concurrent allocates ports without conflict"""
@@ -237,9 +246,10 @@ class TestPortsContext(unittest.TestCase):
                 )
                 raise TestException("simulate exception raised")
         except TestException:
-            self.assertFalse(
-                all((self.test_dir / f"port_{port}.lock").exists() for port in ports)
-            )
+            for port in ports_obtained:
+                lock_file = self.test_dir / f"port_{port}.lock"
+                with ExpiredLockFile(lock_file, port):
+                    self.assertTrue(lock_file.exists())
 
     def test_multiple_contexts(self):
         """test multiple embedded PortsContext"""

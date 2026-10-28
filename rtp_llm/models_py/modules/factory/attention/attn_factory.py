@@ -23,7 +23,6 @@ from rtp_llm.ops.fused_rope_kvcache_op import DecodeRopeContractError
 from rtp_llm.utils.model_weight import W
 
 AttentionImpl = Union[FMHAImplBase, MlaImplBase]
-AttentionImplFactory = Callable[..., AttentionImpl]
 
 
 def _normalize_cuda_graph_selection_mode(
@@ -79,7 +78,6 @@ FLASHINFER_TRTLLM_GEN_IMPLS = {
     "FlashInferTRTLLMDecodeImpl",
 }
 
-
 def get_mla_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -97,29 +95,33 @@ def get_mla_impl(
     )
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
-    for impl in mla_impls:
+    candidates = _select_attn_impls(mla_impls, fmha_config, attn_inputs.is_prefill)
+    for impl in candidates:
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
             continue
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue
-
         cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
-        # TODO: support fast path for cp prefill
+        # Short-circuit before touching cu_kv_seqlens when CP is enabled to avoid
+        # an unnecessary GPU->CPU sync on the hot prefill routing path.
+        cp_enabled = (
+            parallelism_config is not None
+            and parallelism_config.prefill_cp_config.is_enabled()
+        )
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item()
-            <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
-            )
+            and not cp_enabled
+            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
         )
 
+        # Check parallelism config support (e.g. CP filtering). The fast path is
+        # never taken when CP is enabled, so it bypasses this check (matches
+        # upstream's "support fast path for cp prefill").
         if not use_fast_path and not impl.support_parallelism_config(
             parallelism_config
         ):
             continue
-
         # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
             logging.debug(
@@ -158,66 +160,188 @@ def get_mla_impl(
     raise Exception("can not find mla type")
 
 
-def _is_fmha_impl_disabled(
-    impl_class_name: str, fmha_config: Optional[FMHAConfig]
-) -> bool:
-    """Check if a FMHA implementation is disabled in fmha_config.
+def _get_effective_backends(fmha_config: FMHAConfig, is_prefill: bool) -> List[str]:
+    """Resolve the effective attn_backend list for the given stage.
 
-    Args:
-        impl_class_name: The implementation class name
-        fmha_config: The FMHA config, if None, assume not disabled
+    Priority: prefill/decode override > global attn_backend.
+    Returns a list of backend NAMEs (possibly ["auto"] or ["none"]).
 
-    Returns:
-        True if the FMHA implementation is disabled, False otherwise
+    Supports comma-separated ordered lists, e.g. "xqa,flashinfer" means
+    try xqa first, then flashinfer. Each candidate's support() is still checked.
+    """
+    raw = ""
+    if is_prefill and fmha_config.prefill_attn_backend:
+        raw = fmha_config.prefill_attn_backend
+    elif not is_prefill and fmha_config.decode_attn_backend:
+        raw = fmha_config.decode_attn_backend
+    else:
+        raw = fmha_config.attn_backend
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _expand_flashinfer_alias(names: set) -> set:
+    """Expand the flashinfer alias in both directions so that the public alias
+    "flashinfer" and the canonical NAME "py_flashinfer" are treated
+    interchangeably in blocklists / known-name sets. Returns a new set."""
+    expanded = set(names)
+    if "flashinfer" in expanded:
+        expanded.add("py_flashinfer")
+    if "py_flashinfer" in expanded:
+        expanded.add("flashinfer")
+    return expanded
+
+
+def _get_blocked_backends(fmha_config: FMHAConfig) -> set:
+    if not fmha_config.disable_attn_backends:
+        return set()
+    blocked = {s.strip() for s in fmha_config.disable_attn_backends.split(",") if s.strip()}
+    # Expand alias so the blocklist works in both auto and explicit backend modes.
+    return _expand_flashinfer_alias(blocked)
+
+
+def _blocklist_known_names() -> set:
+    """Valid names for the GLOBAL disable_attn_backends blocklist.
+
+    disable_attn_backends applies to both prefill and decode AND to both the MHA
+    and MLA registries, so its validity is the UNION of all four registries (plus
+    the pseudo/alias names). Validating a global blocklist against only the
+    current stage's / current attention-type's registry would wrongly reject a
+    name that is valid for another stage or for MLA (e.g. rejecting "sparse_mla"
+    during an MHA call, or a decode-only name during a prefill call).
+    """
+    names = {
+        getattr(impl, "NAME", None)
+        for impl in (
+            *PREFILL_MHA_IMPS,
+            *DECODE_MHA_IMPS,
+            *PREFILL_MLA_IMPS,
+            *DECODE_MLA_IMPS,
+        )
+    }
+    names.discard(None)
+    return _expand_flashinfer_alias(names | {"auto", "none", "flashinfer"})
+
+
+def _select_attn_impls(
+    impls: List[type],
+    fmha_config: Optional[FMHAConfig],
+    is_prefill: bool,
+) -> List[type]:
+    """Resolve which attention impl classes to try, in priority order.
+
+    Shared by the MHA and MLA registries so both honor the same backend config:
+      - ``attn_backend`` / ``prefill_attn_backend`` / ``decode_attn_backend``
+        (comma-separated ordered lists),
+      - ``attn_backend=none`` (disables attention -> raises),
+      - the global ``disable_attn_backends`` blocklist,
+      - validation of explicit / blocked backend names.
+
+    Returns the ordered list of candidate impl classes (blocklist already
+    applied). ``auto`` mode preserves registration order and lets callers apply
+    any additional per-impl gating (e.g. MHA legacy flags). Callers keep their
+    own instantiation/support logic.
     """
     if fmha_config is None:
-        return False
+        backends = ["auto"]
+        blocked = set()
+    else:
+        backends = _get_effective_backends(fmha_config, is_prefill)
+        blocked = _get_blocked_backends(fmha_config)
 
-    # XQA implementations
+    if backends == ["none"]:
+        raise Exception("Attention is disabled (attn_backend=none)")
+
+    # Build registry metadata for the passed-in registry (MHA or MLA).
+    registered_names = set()
+    name_to_impls: Dict[str, List[type]] = {}
+    for impl in impls:
+        name = getattr(impl, "NAME", None)
+        if name:
+            registered_names.add(name)
+            name_to_impls.setdefault(name, []).append(impl)
+
+    # Public alias: "flashinfer" refers to the Python FlashInfer backend (MHA only).
+    if "py_flashinfer" in registered_names:
+        name_to_impls.setdefault("flashinfer", []).extend(
+            name_to_impls.get("py_flashinfer", [])
+        )
+    blocked = _expand_flashinfer_alias(blocked)
+
+    # Explicit attn_backend names are validated against THIS registry (selecting
+    # an MHA-only backend for an MLA model, or vice versa, should fail loudly).
+    known_names = registered_names | {"auto", "none", "flashinfer"}
+    for backend_name in backends:
+        if backend_name not in known_names:
+            raise ValueError(
+                f"Unknown attention backend {backend_name!r}. "
+                f"Registered backends: {sorted(registered_names)}"
+            )
+    # disable_attn_backends is GLOBAL: validate against the union of all registries.
+    blocklist_known_names = _blocklist_known_names()
+    for blocked_name in blocked:
+        if blocked_name not in blocklist_known_names:
+            raise ValueError(
+                f"Unknown attention backend in disable_attn_backends: {blocked_name!r}. "
+                f"Valid backends: {sorted(blocklist_known_names)}"
+            )
+
+    if backends == ["auto"]:
+        return [
+            impl
+            for impl in impls
+            if not (getattr(impl, "NAME", None) and getattr(impl, "NAME") in blocked)
+        ]
+    # Explicit backend list: iterate in user-specified order, resolving each name
+    # to its impl(s) and skipping blocked names.
+    candidates: List[type] = []
+    for backend_name in backends:
+        if backend_name in blocked:
+            continue
+        resolved_name = "py_flashinfer" if backend_name == "flashinfer" else backend_name
+        candidates.extend(name_to_impls.get(resolved_name, []))
+    return candidates
+
+
+def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> bool:
+    """Legacy boolean flag check. Only called when effective_backend == "auto"."""
+    # Global FMHA switch: when false, disable all MHA implementations.
+    if not fmha_config.enable_fmha:
+        return True
+    impl_class_name = impl_class.__name__
     if "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
-    # FlashInfer TRT-LLM FMHA v2 implementations
-    elif impl_class_name == "FlashInferTRTLLMFMHAv2PrefillImpl":
-        return not fmha_config.enable_flashinfer_trt_fmha_v2
-    elif impl_class_name == "FlashInferTRTLLMFMHAv2PagedPrefillImpl":
-        return not fmha_config.enable_paged_flashinfer_trt_fmha_v2
-    # FlashInfer TRT-LLM Gen implementations (SM100)
-    elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
-        return not fmha_config.enable_flashinfer_trtllm_gen
-    # FlashInfer native Hybrid Prefill
+    elif impl_class_name in {"TRTMHAImpl", "FlashInferTRTLLMFMHAv2PrefillImpl"}:
+        return not fmha_config.enable_trt_fmha or not fmha_config.enable_open_source_fmha
+    elif impl_class_name in {
+        "TRTPagedMHAImpl",
+        "FlashInferTRTLLMFMHAv2PagedPrefillImpl",
+    }:
+        return not fmha_config.enable_paged_trt_fmha or not fmha_config.enable_open_source_fmha
     elif impl_class_name == "PyFlashinferHybridPrefillImpl":
         return (
             fmha_config.disable_flashinfer_hybrid_prefill
-            or fmha_config.disable_flashinfer_native
+            or fmha_config.disable_flash_infer
         )
-    # FlashInfer native implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
-        return fmha_config.disable_flashinfer_native
-    # Generation-prefill Triton PA reads the shuffled K/V layout produced by the ASM
-    # RoPE+KV writer, so both switches are part of this backend's contract.
+        return fmha_config.disable_flash_infer
     elif impl_class_name == "AiterPrefillImplTriton":
         return not (fmha_config.use_triton_pa and fmha_config.use_asm_pa)
-    # Aiter ASM / CK paged prefill.
+    elif "AiterDecodeImplAsm" in impl_class_name:
+        if fmha_config.use_triton_pa:
+            return True
+        return not fmha_config.use_asm_pa
     elif (
         "AiterPrefillImplAsm" in impl_class_name
         or "AiterPrefillImplPaged" in impl_class_name
     ):
         return not fmha_config.use_asm_pa
-    # Aiter ASM decode — disabled when triton PA is enabled (triton PA takes priority)
-    elif "AiterDecodeImplAsm" in impl_class_name:
-        if fmha_config.use_triton_pa:
-            return True
-        return not fmha_config.use_asm_pa
-    # Aiter Non-ASM implementations
     elif (
         "AiterPrefillImplNonAsm" in impl_class_name
         or "AiterDecodeImplNonAsm" in impl_class_name
     ):
         return not fmha_config.use_aiter_pa
-    # Aiter Triton implementations
     elif "AiterDecodeImplTriton" in impl_class_name:
         return not fmha_config.use_triton_pa
-    # Default: not disabled
     return False
 
 
@@ -237,7 +361,6 @@ def get_fmha_impl(
     )
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
-
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     strict_impl_selection = False
     if get_device_type() == DeviceType.ROCm:
@@ -249,15 +372,18 @@ def get_fmha_impl(
             attn_configs, attn_inputs, fmha_config
         )
 
-    for impl in mha_impls:
-        # Check if this FMHA implementation is disabled before creating instance
-        impl_class_name = impl.__name__
+    # Shared backend resolution (attn_backend / overrides / none / blocklist +
+    # name validation). Returns candidate impls in priority order.
+    is_auto = fmha_config is None or _get_effective_backends(
+        fmha_config, attn_inputs.is_prefill
+    ) == ["auto"]
+    candidates = _select_attn_impls(mha_impls, fmha_config, attn_inputs.is_prefill)
 
+    for impl in candidates:
+        impl_class_name = impl.__name__
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
             continue
-
-        # Skip if this FMHA implementation is disabled in config
-        if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+        if is_auto and fmha_config and _is_fmha_impl_disabled_legacy(impl, fmha_config):
             continue
 
         # Check support before creating instance
@@ -299,6 +425,7 @@ def get_fmha_impl(
             return instance
         if _matches_cuda_graph_selection_mode(instance, selection_mode):
             return instance
+
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
@@ -321,7 +448,13 @@ class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 
     # FMHA implementation registry - maps attention_type to impl method
-    FMHA_IMPL_REGISTRY: Dict[str, AttentionImplFactory] = {
+    FMHA_IMPL_REGISTRY: Dict[
+        str,
+        Callable[
+            [AttentionConfigs, ModelWeights, PyAttentionInputs, Optional[FMHAConfig]],
+            Union[FMHAImplBase, MlaImplBase],
+        ],
+    ] = {
         "mha": get_fmha_impl,
         "mla": get_mla_impl,
     }
@@ -355,11 +488,17 @@ class AttnImplFactory(object):
             parallelism_config,
             cuda_graph_selection_mode,
         )
-        logging.debug(f"get fmha impl: {type(instance).__name__}")
+        logging.info(
+            "Selected attention implementation: type=%s stage=%s cuda_graph=%s impl=%s",
+            key_str,
+            "prefill" if attn_inputs.is_prefill else "decode",
+            is_cuda_graph,
+            type(instance).__name__,
+        )
         return instance
 
     @classmethod
-    def get_fmha_impl_method(cls, attention_type: str) -> AttentionImplFactory:
+    def get_fmha_impl_method(cls, attention_type: str) -> str:
         """
         Get the appropriate FMHA implementation method based on attention_type.
 

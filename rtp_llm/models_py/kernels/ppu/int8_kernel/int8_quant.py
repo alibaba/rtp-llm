@@ -22,8 +22,8 @@ def _per_token_quant_int8_kernel(
     x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask, other=0.0).to(tl.float32)
     absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
     scale = absmax / 127.0
-    x_q = tl.clamp((x / absmax) * 127.0, -128.0, 127.0)
-    x_q = tldevice.round(x_q).to(tl.int8)
+    x_q = tl.clamp(tldevice.div_rn(x, scale), -128.0, 127.0)
+    x_q = tldevice.float2int_rn(x_q).to(tl.int8)
     tl.store(xq_ptr + row_id * stride_xq + cols, x_q, mask=mask)
     tl.store(scale_ptr + row_id, scale)
 
@@ -72,8 +72,8 @@ def _per_token_quant_int8_masked_kernel(
     x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask, other=0.0).to(tl.float32)
     absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
     scale = absmax / 127.0
-    x_q = tl.clamp((x / absmax) * 127.0, -128.0, 127.0)
-    x_q = tldevice.round(x_q).to(tl.int8)
+    x_q = tl.clamp(tldevice.div_rn(x, scale), -128.0, 127.0)
+    x_q = tldevice.float2int_rn(x_q).to(tl.int8)
     tl.store(xq_ptr + row_id * stride_xq + cols, x_q, mask=cols < n_cols)
     tl.store(scale_ptr + row_id, scale)
 

@@ -5,9 +5,9 @@ load("//bazel:device_defs.bzl",
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -261,4 +261,138 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "local_rpc_server_test_native_a10",
+    srcs = ["LocalRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "query_converter_test_native_a10",
+    srcs = [
+        "QueryConverterTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/models:logits_processor",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "broadcast_manager_test_native_a10",
+    srcs = [
+        "BroadcastManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "@havenask//aios/autil:net",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "prefill_rpc_server_test_native_a10",
+    srcs = ["PrefillRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "decode_rpc_server_test_native_a10",
+    srcs = ["DecodeRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
+    env = {},
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "response_buffer_test_native_a10",
+    srcs = [
+        "ResponseBufferTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "prefill_batch_rpc_server_test_native_a10",
+    srcs = [
+        "PrefillBatchRpcServerTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "rpc_writer_cancellation_test_native_a10",
+    srcs = [
+        "RpcWriterCancellationTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Original Native A10 route; current adopted source API providers are explicit.
+cc_test(
+    name = "rpc_server_runtime_meta_test_native_a10",
+    srcs = [
+        "RpcServerRuntimeMetaTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
 )

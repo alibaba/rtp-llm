@@ -2,6 +2,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
 
 # to wrapper target relate with different system config
 load("@pip_cpu_torch//:requirements.bzl", requirement_cpu = "requirement")
+load("@pip_cuda12_arm_torch//:requirements.bzl", requirement_cuda12_arm = "requirement")
 load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
@@ -93,6 +94,7 @@ def requirement(names):
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
+                "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -201,46 +203,56 @@ def cuda13_x86_test_gpu():
     """
     return "SM103_TEST"
 
-def torch_deps():
-    deps = select({
-        "@rtp_llm//:using_ppu": ["@torch_2.11_py312_ppu//:torch_api", "@torch_2.11_py312_ppu//:torch", "@torch_2.11_py312_ppu//:torch_libs"],
-        "@rtp_llm//:using_rocm": [
-            "@torch_rocm//:torch_api",
-            "@torch_rocm//:torch",
-            "@torch_rocm//:torch_libs",
-        ],
-        "@rtp_llm//:using_arm": [
-            "@torch_2.3_py310_cpu_aarch64//:torch_api",
-            "@torch_2.3_py310_cpu_aarch64//:torch",
-            "@torch_2.3_py310_cpu_aarch64//:torch_libs",
-        ],
-        "@rtp_llm//:using_cuda13_arm": [
-            "@torch_2.11_py310_cuda-aarch64//:torch_api",
-            "@torch_2.11_py310_cuda-aarch64//:torch",
-            "@torch_2.11_py310_cuda-aarch64//:torch_libs",
-        ],
-        "@rtp_llm//:cuda_pre_12_9": [
-            "@torch_2.6_py310_cuda//:torch_api",
-            "@torch_2.6_py310_cuda//:torch",
-            "@torch_2.6_py310_cuda//:torch_libs",
-        ],
-        "@rtp_llm//:using_cuda13_x86": [
-            "@torch_2.11_py310_cuda//:torch_api",
-            "@torch_2.11_py310_cuda//:torch",
-            "@torch_2.11_py310_cuda//:torch_libs",
-        ],
-        "@rtp_llm//:using_cuda12_9_x86": [
-            "@torch_2.8_py310_cuda//:torch_api",
-            "@torch_2.8_py310_cuda//:torch",
-            "@torch_2.8_py310_cuda//:torch_libs",
-        ],
-        "//conditions:default": [
-            "@torch_2.1_py310_cpu//:torch_api",
-            "@torch_2.1_py310_cpu//:torch",
-            "@torch_2.1_py310_cpu//:torch_libs",
-        ],
+def cuda13_test_exec_properties(gpu_count = 1):
+    """GPU test pools; internal builds override CUDA13 pool names."""
+    return select({
+        "@rtp_llm//:using_cuda13_arm": {"gpu": "SM100_ARM", "gpu_count": str(gpu_count)},
+        "@rtp_llm//:using_cuda13_x86": {"gpu": "SM100_X86", "gpu_count": str(gpu_count)},
+        "@rtp_llm//:using_cuda12_arm": {"gpu": "SM100_ARM", "gpu_count": str(gpu_count)},
+        "//conditions:default": {"gpu": "A10", "gpu_count": str(gpu_count)},
     })
-    return deps
+
+def torch_archive_aliases():
+    """Expose actual main archive CcInfo through the shared @torch labels."""
+    for target in ["torch_api", "torch", "torch_libs"]:
+        native.alias(
+            name = target,
+            actual = select({
+                "@rtp_llm//:using_ppu": "@torch_2.11_py312_ppu//:" + target,
+                "@rtp_llm//:using_rocm": "@torch_rocm//:" + target,
+                "@rtp_llm//:using_arm": "@torch_2.3_py310_cpu_aarch64//:" + target,
+                "@rtp_llm//:using_cuda13_arm": "@torch_2.11_py310_cuda-aarch64//:" + target,
+                "@rtp_llm//:cuda_pre_12_9": "@torch_2.6_py310_cuda//:" + target,
+                "@rtp_llm//:using_cuda13_x86": "@torch_2.11_py310_cuda//:" + target,
+                "@rtp_llm//:using_cuda12_9_x86": "@torch_2.8_py310_cuda//:" + target,
+                "//conditions:default": "@torch_2.1_py310_cpu//:" + target,
+            }),
+            # OSS has no CUDA 12 ARM archive; paired builds use the internal map.
+            # CUDA 13 ARM is the more specific supported condition.
+            target_compatible_with = select({
+                "@rtp_llm//:using_cuda13_arm": [],
+                "@rtp_llm//:using_cuda12_arm": ["@platforms//:incompatible"],
+                "//conditions:default": [],
+            }),
+            visibility = ["//visibility:public"],
+        )
+
+def torch_deps():
+    """Torch cc deps; same as //bazel:defs.bzl."""
+    return [
+        "@torch//:torch_api",
+        "@torch//:torch",
+        "@torch//:torch_libs",
+    ]
+
+def flashinfer_deps():
+    native.alias(
+        name = "flashinfer",
+        actual = select({
+            "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
+            "//conditions:default": "@flashinfer_cpp//:flashinfer",
+        })
+    )
 
 def cuda_register():
     native.alias(

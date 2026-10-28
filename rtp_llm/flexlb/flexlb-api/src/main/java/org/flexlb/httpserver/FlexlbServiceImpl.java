@@ -840,6 +840,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             lifecycle.getState().name(),
                             response.getRealMasterHost(),
                             System.currentTimeMillis());
+            if (data.isSuccess() ? !pvLogger.isInfoEnabled() : !pvLogger.isErrorEnabled()) {
+                return;
+            }
             String json = JsonUtils.toStringOrEmpty(data);
             if (json.isEmpty()) {
                 Logger.warn("Failed to serialize PV log: request_id={}", ctx.getRequestId());

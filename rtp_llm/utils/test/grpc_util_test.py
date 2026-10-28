@@ -45,5 +45,14 @@ class GrpcUtilTensorTest(unittest.TestCase):
             trans_tensor(tensor)
 
 
+    def test_none_round_trip_uses_empty_float32_tensor(self):
+        message = trans_from_tensor(None)
+        self.assertEqual(message, TensorPB())
+        restored = trans_tensor(message)
+        self.assertEqual(restored.shape, (0,))
+        self.assertEqual(restored.dtype, torch.float32)
+        self.assertEqual(restored.numel(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

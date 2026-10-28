@@ -17,6 +17,7 @@ import math
 import os
 import unittest
 
+import pytest
 import torch
 import triton
 import triton.language as tl
@@ -25,6 +26,9 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     _fwd_kernel_ep_scatter_1,
     ep_scatter,
 )
+
+# Retain A10 coverage and restore the original H20 kernel validation.
+pytestmark = pytest.mark.multi_arch_cuda
 
 
 def align_up(n: int, alignment: int = 128) -> int:
@@ -362,6 +366,7 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
             running += c
         return ref
 
+    @pytest.mark.manual
     @unittest.skipUnless(
         os.environ.get("RTP_LLM_EP_SCATTER_POISON_DIAG"),
         "poison diagnostic is opt-in: set RTP_LLM_EP_SCATTER_POISON_DIAG=1",

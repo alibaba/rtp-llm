@@ -1,9 +1,8 @@
 """Dash-SC gRPC grammar-admission smoke with a real xgrammar compiler.
 
-Run with Bazelisk::
+Run from an installed Python-native package::
 
-    bazelisk run //rtp_llm/dash_sc:grammar_validation_smoke -- \
-        --ckpt_path=/path/to/model
+    rtp-llm-grammar-validation-smoke --ckpt_path=/path/to/model
 
 The smoke starts an in-process ``grpc.aio`` server, sends requests through the
 generated Dash-SC stub, and uses a fake inference backend so the measured time

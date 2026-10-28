@@ -1,6 +1,8 @@
 import pickle
 import unittest
 
+import pytest
+
 from rtp_llm.ops import (
     GrammarConfig,
     HWKernelConfig,
@@ -140,6 +142,7 @@ class PDSepConfigPickleTest(unittest.TestCase):
             pickle.loads(pickle.dumps(_InvalidTypePDSepConfig()))
 
 
+@pytest.mark.H20
 class GrammarConfigPickleTest(unittest.TestCase):
     def test_current_format_round_trip(self):
         config = GrammarConfig()
@@ -213,6 +216,7 @@ class GrammarConfigPickleTest(unittest.TestCase):
                 config.__setstate__(state)
 
 
+@pytest.mark.H20
 class HWKernelConfigPickleTest(unittest.TestCase):
     def test_current_format_round_trip(self):
         config = HWKernelConfig()
@@ -232,6 +236,11 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.decode_capture_batch_sizes = [2, 7]
         config.disable_dpc_random = True
         config.rocm_disable_custom_ag = True
+        config.force_legacy_fp8_ptpc = True
+
+        state = config.__getstate__()
+        self.assertEqual(len(state), 17)
+        self.assertIs(state[16], True)
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -253,6 +262,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
         self.assertTrue(restored.disable_dpc_random)
         self.assertTrue(restored.rocm_disable_custom_ag)
+        self.assertTrue(restored.force_legacy_fp8_ptpc)
 
     def test_legacy_14_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
@@ -266,11 +276,28 @@ class HWKernelConfigPickleTest(unittest.TestCase):
             HWKernelConfig().generation_prefill_capture_token_buckets,
         )
 
+    def test_native_15_tuple_retains_legacy_fp8_flag(self):
+        legacy_state = _LegacyHWKernelConfig().__reduce__()[2]
+        config = _new_hw_kernel_config()
+        config.__setstate__(legacy_state + (True,))
+        self.assertTrue(config.force_legacy_fp8_ptpc)
+        self.assertEqual(config.generation_prefill_cuda_graph_max_requests, 1)
+        self.assertEqual(config.generation_prefill_capture_token_buckets, [])
+
+    def test_main_16_tuple_retains_generation_prefill_fields(self):
+        legacy_state = _LegacyHWKernelConfig().__reduce__()[2]
+        config = _new_hw_kernel_config()
+        config.__setstate__(legacy_state + (5, [32, 64, 96]))
+        self.assertFalse(config.force_legacy_fp8_ptpc)
+        self.assertEqual(config.generation_prefill_cuda_graph_max_requests, 5)
+        self.assertEqual(config.generation_prefill_capture_token_buckets, [32, 64, 96])
+
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (15, 17, 18):
-            with self.subTest(size=size), self.assertRaisesRegex(
-                RuntimeError, "Invalid state"
-            ):
+        # Keep every original malformed sample. Native's 15/17-field layouts
+        # are supported, but tuple(range(size)) still has invalid field types.
+        for size in (13, 15, 17, 18, 19):
+            error = "HWKernelConfig unpickle error" if size in (15, 17) else "Invalid state"
+            with self.subTest(size=size), self.assertRaisesRegex(RuntimeError, error):
                 config = _new_hw_kernel_config()
                 config.__setstate__(tuple(range(size)))
 

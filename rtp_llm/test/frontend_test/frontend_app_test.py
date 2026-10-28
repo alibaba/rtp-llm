@@ -6,11 +6,14 @@ import time
 import traceback
 import unittest
 
+import pytest
 import requests
 
 from rtp_llm.ops import RoleType
 from rtp_llm.start_frontend_server import start_frontend_server
 from rtp_llm.test.utils.port_util import PortsContext
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class FrontendAppTest(unittest.TestCase):
@@ -23,7 +26,7 @@ class FrontendAppTest(unittest.TestCase):
         """Test that FrontendApp can start successfully."""
         # Setup args and configure server (same as start_server.py main())
         # Keep only script name
-        py_env_configs = setup_args()
+        py_env_configs = setup_args(args=[])
         py_env_configs.role_config.role_type = RoleType.FRONTEND
         # Override with test-specific settings.
         # Never hardcode start_port: the test runs on shared CI workers where
@@ -46,6 +49,7 @@ class FrontendAppTest(unittest.TestCase):
         self.addCleanup(ports_ctx.__exit__, None, None, None)
         py_env_configs.server_config.start_port = ports[0]
         # Enable fake process mode to avoid loading actual model
+        py_env_configs.model_args.model_type = "fake_model"
         py_env_configs.profiling_debug_logging_config.debug_start_fake_process = 1
 
         # Setup and configure server (same as start_server.py main())
@@ -144,4 +148,5 @@ class FrontendAppTest(unittest.TestCase):
 
 if __name__ == "__main__":
     print(f"LD_LIBRARY_PATH: {os.environ['LD_LIBRARY_PATH']}")
+if __name__ == "__main__":
     unittest.main()

@@ -11,25 +11,25 @@ __all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'Acti
 class ActivationType:
     """
     Members:
-    
+
       Gelu
-    
+
       Relu
-    
+
       Silu
-    
+
       Swiglu
-    
+
       Geglu
-    
+
       Identity
-    
+
       GeluNoneApproximate
-    
+
       GeGluNoneApproximate
-    
+
       Sigmoid
-    
+
       InvalidType
     """
     GeGluNoneApproximate: typing.ClassVar[ActivationType]  # value = <ActivationType.GeGluNoneApproximate: 7>
@@ -124,17 +124,17 @@ class BatchDecodeSchedulerConfig:
 class CPRotateMethod:
     """
     Members:
-    
+
       DISABLED
-    
+
       ALL_GATHER
-    
+
       ALL_GATHER_WITH_OVERLAP
-    
+
       ALLTOALL
-    
+
       PREFILL_CP
-    
+
       UNKNOWN
     """
     ALLTOALL: typing.ClassVar[CPRotateMethod]  # value = <CPRotateMethod.ALLTOALL: 3>
@@ -214,49 +214,49 @@ class ConcurrencyConfig:
 class DataType:
     """
     Members:
-    
+
       TYPE_INVALID
-    
+
       TYPE_BOOL
-    
+
       TYPE_UINT8
-    
+
       TYPE_UINT16
-    
+
       TYPE_UINT32
-    
+
       TYPE_UINT64
-    
+
       TYPE_INT8
-    
+
       TYPE_INT16
-    
+
       TYPE_INT32
-    
+
       TYPE_INT64
-    
+
       TYPE_FP16
-    
+
       TYPE_FP32
-    
+
       TYPE_FP64
-    
+
       TYPE_BYTES
-    
+
       TYPE_BF16
-    
+
       TYPE_FP8_E4M3
-    
+
       TYPE_STR
-    
+
       TYPE_VOID
-    
+
       TYPE_QINT8
-    
+
       TYPE_INT4X2
-    
+
       TYPE_QINT4X2
-    
+
       TYPE_QFP8_E4M3
     """
     TYPE_BF16: typing.ClassVar[DataType]  # value = <DataType.TYPE_BF16: 14>
@@ -354,13 +354,13 @@ class EPLBConfig:
 class EplbMode:
     """
     Members:
-    
+
       NONE
-    
+
       STATS
-    
+
       EPLB
-    
+
       ALL
     """
     ALL: typing.ClassVar[EplbMode]  # value = <EplbMode.ALL: 3>
@@ -438,14 +438,16 @@ class GrammarConfig:
 
 class FMHAConfig:
     absorb_opt_len: int
+    attn_backend: str
+    prefill_attn_backend: str
+    decode_attn_backend: str
+    disable_attn_backends: str
+    disable_flash_infer: bool
     disable_flashinfer_hybrid_prefill: bool
-    disable_flashinfer_native: bool
-    enable_flashinfer_trtllm_gen: bool
-    enable_flashinfer_trt_fmha_v2: bool
+    enable_trt_fmha: bool
     enable_fmha: bool
     enable_open_source_fmha: bool
-    enable_paged_flashinfer_trt_fmha_v2: bool
-    enable_paged_open_source_fmha: bool
+    enable_paged_trt_fmha: bool
     enable_xqa: bool
     use_aiter_pa: bool
     use_asm_pa: bool
@@ -461,45 +463,45 @@ class FMHAConfig:
 class FMHAType:
     """
     Members:
-    
+
       FLASH_INFER
-    
+
       NONE
-    
+
       OPEN_SOURCE
-    
+
       PAGED_OPEN_SOURCE
-    
+
       PAGED_FLASHINFER_TRT_FMHA_V2
-    
+
       FLASHINFER_TRT_FMHA_V2
-    
+
       XQA
-    
+
       AITER_PREFILL
-    
+
       AITER_ASM_PREFILL
 
       AITER_PAGED_PREFILL
 
       AITER_DECODE
-    
+
       AITER_ASM_DECODE
 
       AITER_TRITON_DECODE
 
       PY_FLASHINFER_PREFILL_PAGED
-    
+
       PY_FLASHINFER_PREFILL_RAGGED
-    
+
       PY_FLASHINFER_DECODE
-    
+
       CP_FLASH_INFER
-    
+
       FLASHINFER_MLA_PREFILL
-    
+
       FLASHINFER_MLA_DECODE
-    
+
       SPARSE_FLASHMLA
 
       CP_SPARSE_FLASHMLA
@@ -692,11 +694,11 @@ class HybridAttentionConfig:
 class HybridAttentionType:
     """
     Members:
-    
+
       NONE
-    
+
       LINEAR
-    
+
       SLIDING_WINDOW
     """
     LINEAR: typing.ClassVar[HybridAttentionType]  # value = <HybridAttentionType.LINEAR: 1>
@@ -832,9 +834,9 @@ class KVCacheConfig:
 class KvCacheDataType:
     """
     Members:
-    
+
       BASE
-    
+
       FP8
     """
     BASE: typing.ClassVar[KvCacheDataType]  # value = <KvCacheDataType.BASE: 0>
@@ -869,11 +871,11 @@ class KvCacheDataType:
 class LayerNormType:
     """
     Members:
-    
+
       pre_layernorm
-    
+
       post_layernorm
-    
+
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, LayerNormType]]  # value = {'pre_layernorm': <LayerNormType.pre_layernorm: 0>, 'post_layernorm': <LayerNormType.post_layernorm: 1>, 'invalid_type': <LayerNormType.invalid_type: 2>}
@@ -960,13 +962,13 @@ class MiscellaneousConfig:
 class MlaOpsType:
     """
     Members:
-    
+
       AUTO
-    
+
       MHA
-    
+
       FLASH_INFER
-    
+
       FLASH_MLA
     """
     AUTO: typing.ClassVar[MlaOpsType]  # value = <MlaOpsType.AUTO: 0>
@@ -1264,15 +1266,15 @@ class NcclCommConfig:
 class NormType:
     """
     Members:
-    
+
       layernorm
-    
+
       rmsnorm
-    
+
       alphanorm
-    
+
       add_bias
-    
+
       invalid_type
     """
     __members__: typing.ClassVar[dict[str, NormType]]  # value = {'layernorm': <NormType.layernorm: 0>, 'rmsnorm': <NormType.rmsnorm: 1>, 'alphanorm': <NormType.alphanorm: 2>, 'add_bias': <NormType.add_bias: 3>, 'invalid_type': <NormType.invalid_type: 4>}
@@ -1465,27 +1467,27 @@ class QuantAlgo:
 class QuantMethod:
     """
     Members:
-    
+
       None
-    
+
       WeightOnlyPerCol
-    
+
       GptQ
-    
+
       Awq
-    
+
       SmoothQuant
-    
+
       OmniQuant
-    
+
       PerTensorQuant
-    
+
       FP8Quant
-    
+
       FP8PTPC
-    
+
       W4A8INT4PTPC
-    
+
       ModelOptFP4
 
       QuarkMXFP4
@@ -1498,7 +1500,8 @@ class QuantMethod:
     GptQ: typing.ClassVar[QuantMethod]  # value = <QuantMethod.GptQ: 2>
     ModelOptFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.ModelOptFP4: 10>
     QuarkMXFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.QuarkMXFP4: 11>
-    None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
+    # Runtime keyword member: QuantMethod.__members__["None"].
+    # None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
     OmniQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.OmniQuant: 5>
     PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
     SmoothQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.SmoothQuant: 4>
@@ -1540,15 +1543,15 @@ class RoleSpecialTokens:
 class RoleType:
     """
     Members:
-    
+
       PDFUSION
-    
+
       PREFILL
-    
+
       DECODE
-    
+
       VIT
-    
+
       FRONTEND
     """
     DECODE: typing.ClassVar[RoleType]  # value = <RoleType.DECODE: 2>
@@ -1623,21 +1626,21 @@ class RopeConfig:
 class RopeStyle:
     """
     Members:
-    
+
       No
-    
+
       Base
-    
+
       Glm2
-    
+
       DynamicNTK
-    
+
       QwenDynamicNTK
-    
+
       Yarn
-    
+
       Llama3
-    
+
       Mrope
     """
     Base: typing.ClassVar[RopeStyle]  # value = <RopeStyle.Base: 1>
@@ -1741,17 +1744,17 @@ class SpeculativeExecutionConfig:
 class SpeculativeType:
     """
     Members:
-    
+
       NONE
-    
+
       VANILLA
-    
+
       MTP
-    
+
       EAGLE3
-    
+
       EAGLE
-    
+
       DETERMINISTIC
     """
     DETERMINISTIC: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.DETERMINISTIC: 5>
@@ -1790,23 +1793,23 @@ class SpeculativeType:
 class TaskType:
     """
     Members:
-    
+
       DENSE_EMBEDDING
-    
+
       ALL_EMBEDDING
-    
+
       SPARSE_EMBEDDING
-    
+
       COLBERT_EMBEDDING
-    
+
       LANGUAGE_MODEL
-    
+
       SEQ_CLASSIFICATION
-    
+
       RERANKER
-    
+
       LINEAR_SOFTMAX
-    
+
       BGE_M3
     """
     ALL_EMBEDDING: typing.ClassVar[TaskType]  # value = <TaskType.ALL_EMBEDDING: 1>
@@ -1858,11 +1861,11 @@ class VitConfig:
 class VitSeparation:
     """
     Members:
-    
+
       VIT_SEPARATION_LOCAL
-    
+
       VIT_SEPARATION_ROLE
-    
+
       VIT_SEPARATION_REMOTE
     """
     VIT_SEPARATION_LOCAL: typing.ClassVar[VitSeparation]  # value = <VitSeparation.VIT_SEPARATION_LOCAL: 0>

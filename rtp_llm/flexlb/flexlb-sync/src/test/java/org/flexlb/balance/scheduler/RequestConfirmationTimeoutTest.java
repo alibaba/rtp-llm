@@ -53,7 +53,16 @@ class RequestConfirmationTimeoutTest {
         when(service.loadBalanceConfig()).thenReturn(config);
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
-        var requests = new RequestRegistry(service, reporter, requestReporter);
+        var cancelProof =
+                new java.util.concurrent.CompletableFuture<
+                        org.flexlb.balance.eviction.EngineCancelChannel.CancelAck>();
+        var cancelChannel = mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
+        when(cancelChannel.cancel(
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(cancelProof);
+        var requests = new RequestRegistry(service, reporter, requestReporter, cancelChannel);
         var projector = new EndpointEventProjector(requests);
         var endpoints =
                 new EndpointRegistry(
@@ -174,10 +183,22 @@ class RequestConfirmationTimeoutTest {
                                 slot, "inactivityExpiresAtMsLocked"));
             }
 
-            // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.
+            if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
+                assertFalse(future.isDone());
+                assertEquals(1, requests.liveRequestCount());
+                assertEquals(16L, decode.routingView().inflightHardKv());
+                assertEquals(32L, decode.routingView().inflightExpectedKv());
+                assertEquals(1, decode.routingView().engineCapacityUsed());
+                cancelProof.complete(
+                        org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_FENCED);
+            }
+            // AUTOMATIC_TIMER remains the original direct-route timer scenario.
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(
-                    RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
+            RequestState.Phase expected =
+                    waiting == ConfirmationWait.UNCERTAIN_REPLY
+                            ? RequestState.Phase.FAILED
+                            : RequestState.Phase.TIMED_OUT;
+            assertEquals(expected, requests.getRequestState(REQUEST_ID, 0L).state());
             assertEquals(0, requests.liveRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, prefill.getLocallyOwnedRequestCount());
@@ -200,8 +221,7 @@ class RequestConfirmationTimeoutTest {
                     prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
             requests.processDecodeStatus(
                     decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
-            assertEquals(
-                    RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
+            assertEquals(expected, requests.getRequestState(REQUEST_ID, 0L).state());
             assertEquals(0, requests.liveRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, decode.routingView().engineCapacityUsed());

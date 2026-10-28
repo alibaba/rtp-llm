@@ -1,10 +1,11 @@
 import itertools
-from typing import Optional, Tuple
+import random
 from unittest import TestCase, main
 
+import pytest
 import torch
-from torch import dtype as _dtype
 
+pytestmark = [pytest.mark.gpu(type="H20")]
 from rtp_llm.models_py.modules.factory.fused_moe.utils.common import (
     moe_kernel_quantize_input,
 )
@@ -14,7 +15,17 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 
 import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
+
+def _ordered_fp8_codes(values: torch.Tensor) -> torch.Tensor:
+    """Map finite E4M3 bit patterns to monotonically increasing integer codes."""
+    if not torch.isfinite(values.float()).all().item():
+        raise AssertionError("FP8 comparison requires finite values")
+    raw = values.contiguous().view(torch.uint8)
+    return torch.where(
+        (raw & 0x80).bool(),
+        torch.bitwise_not(raw),
+        raw | 0x80,
+    ).to(torch.int16)
 
 
 class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
@@ -24,9 +35,9 @@ class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
-            self.fail("CUDA is required by this dedicated SM100 target")
-        if torch.cuda.get_device_capability()[0] != 10:
-            self.fail("SM100 is required by this dedicated SM100 target")
+            self.fail("CUDA is required for this GPU test")
+        random.seed(42)
+        torch.manual_seed(42)
         torch.set_default_device("cuda")
 
     def ref_silu_mul_quant_no_fused(self, input_x, expert_num_tokens):
@@ -35,6 +46,14 @@ class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
 
         output = torch.empty((E * T, H2 // 2), dtype=input_x.dtype)
         silu_and_mul(output, input_x)
+        q_x, q_s = moe_kernel_quantize_input(output, None, torch.float8_e4m3fn, True)
+        return q_x, q_s
+
+    def ref_silu_mul_quant_float32(self, input_x):
+        E, T, H2 = input_x.shape
+        values, gates = input_x.float().chunk(2, dim=-1)
+        output = torch.nn.functional.silu(gates) * values
+        output = output.view(E * T, H2 // 2)
         q_x, q_s = moe_kernel_quantize_input(output, None, torch.float8_e4m3fn, True)
         return q_x, q_s
 
@@ -59,13 +78,42 @@ class FusedSiluMulPerTokenQuantBatchedTest(TestCase):
         expert_num_tokens[0] = 0
         expert_num_tokens[1] = max_num_tokens
 
-        ref_q_out, ref_q_scale = self.ref_silu_mul_quant_no_fused(x, expert_num_tokens)
+        ref_q_out, ref_q_scale = self.ref_silu_mul_quant_float32(x)
         ref_q_out = ref_q_out.view(num_experts, max_num_tokens, -1)
         ref_q_scale = ref_q_scale.view(num_experts, max_num_tokens, -1)
 
         q_out, q_scale = self.fused_silu_mul_quant_batched(x, expert_num_tokens)
         q_out = q_out.view(num_experts, max_num_tokens, -1)
         q_scale = q_scale.view(num_experts, max_num_tokens, -1)
+        for i in range(num_experts):
+            n = int(expert_num_tokens[i].item())
+            if n == 0:
+                continue
+            self.assertTrue(
+                torch.allclose(
+                    ref_q_scale[i, :n].float(),
+                    q_scale[i, :n].float(),
+                    atol=1e-5,
+                    rtol=1e-5,
+                ),
+                f"q_scale mismatch at expert {i}",
+            )
+            # PyTorch and Triton may round to opposite neighbors at an exact
+            # E4M3 bin boundary. Accept only that one-ULP ambiguity; larger
+            # differences remain a hard failure.
+            ref_codes = _ordered_fp8_codes(ref_q_out[i, :n])
+            actual_codes = _ordered_fp8_codes(q_out[i, :n])
+            code_distance = torch.abs(actual_codes - ref_codes)
+            self.assertLessEqual(
+                int(code_distance.max().item()),
+                1,
+                f"q_out differs by more than one E4M3 value at expert {i}",
+            )
+
+        # Also retain the original comparison against the unfused BF16 path.
+        ref_q_out, ref_q_scale = self.ref_silu_mul_quant_no_fused(x, expert_num_tokens)
+        ref_q_out = ref_q_out.view(num_experts, max_num_tokens, -1)
+        ref_q_scale = ref_q_scale.view(num_experts, max_num_tokens, -1)
         for expert, count in enumerate(expert_num_tokens.cpu().tolist()):
             if count == 0:
                 continue

@@ -74,6 +74,7 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
             scaleB=None,
             scaleOut=None,
             bpreshuffle=True,
+            use_gelu=False,
         )
         
 class RocmF16LinearNoSwizzle(RocmF16LinearBase):
@@ -109,4 +110,5 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
             scaleB=None,
             scaleOut=None,
             bpreshuffle=False,
+            use_gelu=False,
         )

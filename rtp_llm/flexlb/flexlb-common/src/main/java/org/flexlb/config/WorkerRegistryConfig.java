@@ -13,10 +13,15 @@ public final class WorkerRegistryConfig {
     @Getter
     @Setter
     public static final class HealthConfig {
+        public static final long DEFAULT_VIT_STATUS_RPC_TIMEOUT_MS = 2000;
+        public static final boolean DEFAULT_RETAIN_VIT_ALIVE_ON_TIMEOUT = true;
+
         private long statusPollIntervalMs = 20;
         private long statusRpcTimeoutMs = 5000;
         private long statusStaleAfterMs = 10_000;
         private long cleanupIntervalMs = 3000;
+        private long vitStatusRpcTimeoutMs = DEFAULT_VIT_STATUS_RPC_TIMEOUT_MS;
+        private boolean retainVitAliveOnTimeout = DEFAULT_RETAIN_VIT_ALIVE_ON_TIMEOUT;
     }
 
     @Getter

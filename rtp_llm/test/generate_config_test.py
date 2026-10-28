@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
 
+import pytest
 from transformers import AutoTokenizer
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -32,6 +33,8 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class GenerateConfigTest(TestCase):
@@ -361,8 +364,6 @@ class OpenaiGenerateConfigTest(TestCase):
         )
         self.tokenizer = QWenTokenizer(
             os.path.join(self.test_data_path, "qwen_7b/tokenizer/qwen.tiktoken"),
-            *args,
-            **kwargs,
         )
 
     def _extract_openai_generation_config(

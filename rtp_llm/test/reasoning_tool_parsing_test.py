@@ -2,6 +2,7 @@ from typing import Optional
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import pytest
 import torch
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
@@ -25,6 +26,8 @@ from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
     ReasoningParser,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 
 
 class ProcessReasoningAndToolCallsTest(IsolatedAsyncioTestCase):

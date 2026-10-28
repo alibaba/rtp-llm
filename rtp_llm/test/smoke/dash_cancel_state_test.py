@@ -1,6 +1,6 @@
 import unittest
 
-from dash_cancel_state import classify_dash_cancel
+from rtp_llm.test.smoke.dash_cancel_state import classify_dash_cancel
 
 
 class DashCancelStateTest(unittest.TestCase):

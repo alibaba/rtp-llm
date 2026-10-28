@@ -1,7 +1,14 @@
-load("@arch_config//:arch_select.bzl", "cuda_register", "torch_deps")
+load("@arch_config//:arch_select.bzl", "cuda_register", "flashinfer_deps", "torch_deps")
 load("//:def.bzl", "copts", "cuda_copts")
 
 cuda_register()
+flashinfer_deps()
+
+cc_library(
+    name = "flashinfer_runtime",
+    deps = [":flashinfer"],
+    visibility = ["//visibility:public"],
+)
 
 # exec_ctx_fwd provides ExecOps.h header + transitive deps for all platforms.
 # The actual method implementations are linked via gpu_base (CUDA) or exec_ctx_rocm (ROCm).

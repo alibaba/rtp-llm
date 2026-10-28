@@ -162,18 +162,26 @@ class GrammarTokenizerInfoTest(unittest.TestCase):
         self.assertEqual(vocab_size, 6)
 
     def test_native_serializer_accepts_raw_bytes_vocab(self):
-        runfiles_root = Path(os.environ["TEST_SRCDIR"])
-        workspace = os.environ["TEST_WORKSPACE"]
-        extension_path = runfiles_root / workspace / "libth_grammar_tokenizer_info.so"
-        spec = importlib.util.spec_from_file_location(
-            "libth_grammar_tokenizer_info", extension_path
-        )
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        if "TEST_SRCDIR" in os.environ:
+            runfiles_root = Path(os.environ["TEST_SRCDIR"])
+            workspace = os.environ["TEST_WORKSPACE"]
+            extension_path = (
+                runfiles_root / workspace / "libth_grammar_tokenizer_info.so"
+            )
+            spec = importlib.util.spec_from_file_location(
+                "libth_grammar_tokenizer_info", extension_path
+            )
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            serializer = module.serialize_grammar_tokenizer_info
+        else:
+            from rtp_llm.ops import serialize_grammar_tokenizer_info
 
-        result = module.serialize_grammar_tokenizer_info(
+            serializer = serialize_grammar_tokenizer_info
+
+        result = serializer(
             [b"+", b"\xa1", b"\xe6\x88\x91"],
             '{"vocab_size":3,"stop_token_ids":[0],"vocab_type":"RAW",'
             '"add_prefix_space":false}',

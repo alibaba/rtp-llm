@@ -204,3 +204,13 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+# Shared media download lifecycle; no model server is started by this module.
+py_test(
+    name = "download_singleflight_test",
+    srcs = ["download_singleflight_test.py"],
+    deps = [
+        "//rtp_llm:multimodal",
+        "//rtp_llm:testlib_lite",
+    ],
+)

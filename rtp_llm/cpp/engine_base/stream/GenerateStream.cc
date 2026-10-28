@@ -256,6 +256,11 @@ void GenerateStream::releaseResource() {
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
+        if (stream_cache_resource_->isResourceReleased()) {
+            // A last async-bookkeeping worker can publish reusable cache after
+            // the scheduler committed FINISHED. Wake its response consumer.
+            consumer_cv_->notify_all();
+        }
     }
 }
 
@@ -1024,9 +1029,22 @@ ErrorInfo GenerateStream::statusInfoWithoutLock() const {
 }
 
 bool GenerateStream::consumerFinishedWithoutLock() const {
-    // Consumer completion includes pending GenerateDone, but lifecycle commit and
-    // resource release remain scheduler-owned through moveToNext().
-    return hasEventWithoutLock(StreamEvents::NeedRemoteGenerate) || generate_status_->checkFinished();
+    if (hasEventWithoutLock(StreamEvents::NeedRemoteGenerate)) {
+        return true;
+    }
+
+    // Device-tier reuse is published by terminal resource release. A response
+    // owning reusable device blocks must wait for that publication, including
+    // release deferred to the last MTP bookkeeping worker. Empty/nonpublishing
+    // streams retain pending-GenerateDone visibility. Lower-tier stores retain
+    // their separate asynchronous completion contract.
+    const bool publishes_device_cache = need_release_resource_ && resourceContext().cache_manager
+                                        && stream_cache_resource_->curBlocksNum() > 0
+                                        && stream_cache_resource_->storeTarget() == Tier::DEVICE;
+    if (publishes_device_cache) {
+        return getStatus() == StreamState::FINISHED && stream_cache_resource_->isResourceReleased();
+    }
+    return generate_status_->checkFinished();
 }
 
 bool GenerateStream::consumerReadyWithoutLock() const {

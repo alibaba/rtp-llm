@@ -1,11 +1,13 @@
 import copy
+import importlib
 from typing import Any, Dict, Optional
 
-import aiter
 import torch
-from aiter.fused_moe import fused_moe
 
 from rtp_llm.device.device_impl import is_gfx950
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.aiter_compat import (
+    configure_aiter_moe_sorting,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -25,6 +27,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.utils.model_weight import W
+
+configure_aiter_moe_sorting()
+aiter = importlib.import_module("aiter")
+fused_moe = importlib.import_module("aiter.fused_moe").fused_moe
 
 
 def _moe_activation_type(activation: str) -> aiter.ActivationType:

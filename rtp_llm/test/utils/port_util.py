@@ -79,9 +79,14 @@ class ExpiredLockFile:
             "ttl": self.ttl,
         }
 
-        self.fd = open(self.path, "w")
+        # Keep a stable inode for each port. Opening with "w" before taking the
+        # lock can truncate another owner's metadata, and unlinking the file on
+        # release allows contenders to lock different inodes for the same port.
+        self.fd = open(self.path, "a+")
         try:
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.fd.seek(0)
+            self.fd.truncate()
             json.dump(metadata, self.fd)
             self.fd.flush()
             return self
@@ -93,10 +98,7 @@ class ExpiredLockFile:
         if self.fd:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
             self.fd.close()
-            try:
-                self.path.unlink()
-            except OSError:
-                pass
+            self.fd = None
 
 
 DEFAULT_PORT_RANGE_START = 10000
@@ -112,21 +114,23 @@ class PortManager:
         logging.info(f"port_range: {self.port_range} lock: {self.lock_dir}")
 
     def cleanup_stale_locks(self):
-        """clean up the potential stale lock files"""
+        """clean up stale metadata while preserving each lock file's inode"""
         current_time = time.time()
         for lock_file in self.lock_dir.glob("port_*.lock"):
             try:
-                with open(lock_file) as f:
+                with open(lock_file, "r+") as f:
                     try:
                         # try to lock the lock-file
                         fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                         try:
                             metadata = json.load(f)
                             if current_time - metadata["timestamp"] > metadata["ttl"]:
-                                lock_file.unlink()
+                                f.seek(0)
+                                f.truncate()
                         except (json.JSONDecodeError, KeyError):
-                            # remove the lock-file directly if json format error
-                            lock_file.unlink()
+                            # An unlocked empty/malformed file is safe to reuse.
+                            f.seek(0)
+                            f.truncate()
                         finally:
                             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                     except (IOError, OSError):

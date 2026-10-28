@@ -49,6 +49,9 @@ ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* 
 
 ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb) {
     try {
+        if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
+        }
         auto hashes = getMultimodalFeatureHash(mm_emb);
         memcpy(token_ids, hashes.data_ptr<int32_t>(), hashes.nbytes());
     } catch (const std::exception& error) {

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import logging
 import os
 from typing import List
@@ -145,6 +149,13 @@ def chunk_gated_delta_rule_ref(
     return o, S
 
 
+@pytest.mark.parametrize(
+    "H,D,mask_p,cu_seqlens,dtype",
+    [
+        pytest.param(4, 64, 0, [0, 15], torch.bfloat16, id="short_seq"),
+        pytest.param(4, 64, 0, [0, 256, 500, 1000], torch.bfloat16, id="multi_seg"),
+    ],
+)
 def test_chunk_varlen(
     H: int,
     D: int,
@@ -215,6 +226,14 @@ def test_chunk_varlen(
     assert_close("o", ref, tri, 0.005)
     # tri_ht is V-first (N, H, V, K); transpose back to compare with K-first ref_ht.
     assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 0.005)
+
+
+@pytest.mark.gpu(type="MI308X")
+@pytest.mark.parametrize(
+    "cu_seqlens", [[0, 15], [0, 256, 500, 1000]], ids=["short_seq", "multi_seg"]
+)
+def test_chunk_varlen_fp32_state(cu_seqlens):
+    test_chunk_varlen(4, 64, 0, cu_seqlens, torch.bfloat16, torch.float32)
 
 
 if __name__ == "__main__":

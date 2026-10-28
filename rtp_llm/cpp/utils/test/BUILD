@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
@@ -40,6 +40,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "A10"},
 
 )
 
@@ -54,6 +55,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "A10"},
 )
 
 cc_test(
@@ -69,6 +71,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "A10"},
 )
 
 cc_test(
@@ -81,6 +84,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {"gpu": "A10"},
 )
 
 cc_test(
@@ -90,6 +94,14 @@ cc_test(
     ],
     copts = copts(),
     deps = google_test_deps + ["//rtp_llm/cpp/utils:device_pin"],
+    env = {
+        "GPU_COUNT": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {
+        "gpu": "A10",
+        "gpu_count": "1",
+    },
 )
 
 cc_test(

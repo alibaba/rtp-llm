@@ -5,8 +5,11 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+# The original Bazel target runs these 30 methods on A10.
+pytestmark = [pytest.mark.gpu(type="A10")]
 from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
@@ -61,8 +64,10 @@ class _RecordingDevice:
         self.sentinel_kernel = torch.full((1, 1), 7, dtype=torch.int32)
         self.sentinel_scale = torch.full((1, 1), 9, dtype=torch.int32)
 
-    def maybe_rewrite_weight_by_key(self, key, tensor, use_swizzle_a=None):
-        del key, use_swizzle_a
+    def maybe_rewrite_weight_by_key(
+        self, key, tensor, use_swizzle_a=None, force_legacy_fp8_ptpc=False
+    ):
+        del key, use_swizzle_a, force_legacy_fp8_ptpc
         return tensor
 
     def convert_fp8_weight_params(self, kernel, scale):

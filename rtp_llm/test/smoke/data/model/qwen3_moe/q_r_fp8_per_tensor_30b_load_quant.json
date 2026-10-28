@@ -13,7 +13,7 @@
                 }
             },
             "result": {
-                "response": "\n\nI'm trying to run this code, but I get the error: NameError: name 'screen\\_manager' is not",
+                "response": "\n\nI'm trying to run this code, but I'm getting an error that says \"NameError: name 'screen\\_manager",
                 "finished": true
             }
         }

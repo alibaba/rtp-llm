@@ -8,9 +8,9 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "autil/StackTracer.h"
 #include "autil/EnvUtil.h"
 #include <algorithm>
@@ -474,6 +474,26 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         }
 
         if (request_blocks->getBlocksCount() > 0) {
+            // Direct callers retain the synchronous publication contract. The
+            // async writer supplies a registrar and drains at the consumer boundary.
+            if (!register_store_completion) {
+                auto store_context = cache_store->storeBuffers({request_blocks}, 5000);
+                if (store_context) {
+                    store_context->waitDone();
+                }
+                if (!store_context || !store_context->success()) {
+                    const auto error = store_context ? store_context->getErrorInfoString() : "null store context";
+                    RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d "
+                                        "tag=%s error=%s buffer={%s}",
+                                        static_cast<long>(request_id),
+                                        cache_model_id,
+                                        layer_kv.layer_id,
+                                        layer_kv.tag.c_str(),
+                                        error.c_str(),
+                                        request_blocks->debugInfo().c_str());
+                }
+                continue;
+            }
             CacheStoreCompletionCallback store_completion;
             if (register_store_completion) {
                 store_completion =

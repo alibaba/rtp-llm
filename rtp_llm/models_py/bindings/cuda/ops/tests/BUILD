@@ -1,11 +1,11 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -70,6 +70,8 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps + [
+        "//3rdparty/flashinfer:flashinfer",
+        "//rtp_llm/models_py/bindings/cuda/ops:flashinfer_runtime",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ],
     exec_properties = {"gpu": "L20_CU13"},
@@ -104,7 +106,8 @@ cc_test(
     tags = ["L20_CU13"],
 )
 
-# Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/
+# Aliases: compiled CudaGraph test binding at //rtp_llm/cpp/cuda_graph/tests/.
+# Its Python drivers run under pytest/uv rather than Bazel py_test.
 alias(
     name = "test_cuda_graph_runner_libs",
     actual = "//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner_libs",
@@ -114,29 +117,5 @@ alias(
 alias(
     name = "test_cuda_graph_runner",
     actual = "//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "cuda_graph_test_utils",
-    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_test_utils",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "cuda_graph_decode_padding",
-    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_decode_padding",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "cuda_graph_prefill",
-    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_prefill",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "cuda_graph_copy_kernel_test",
-    actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_copy_kernel_test",
     visibility = ["//visibility:public"],
 )

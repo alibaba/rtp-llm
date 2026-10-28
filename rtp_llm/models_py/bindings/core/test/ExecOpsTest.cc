@@ -12,6 +12,9 @@
 #endif
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -35,13 +38,15 @@ public:
         std::unordered_map<std::string, BlockRecord> blocks;
         std::vector<std::string>                     block_keys;
     };
-    std::vector<StoreRecord> records;
-    bool                     store_success            = true;
-    CacheStoreErrorCode      store_error              = CacheStoreErrorCode::None;
-    bool                     throw_on_store           = false;
-    bool                     duplicate_store_callback = false;
-    bool                     load_success             = true;
-    CacheStoreErrorCode      load_error               = CacheStoreErrorCode::None;
+    std::vector<StoreRecord>          records;
+    bool                              store_success = true;
+    CacheStoreErrorCode                store_error = CacheStoreErrorCode::None;
+    bool                              throw_on_store = false;
+    bool                              duplicate_store_callback = false;
+    bool                              load_success = true;
+    CacheStoreErrorCode                load_error = CacheStoreErrorCode::None;
+    int                               store_callback_delay_ms = 0;
+    std::shared_ptr<std::atomic_bool> store_callback_finished = std::make_shared<std::atomic_bool>(false);
 
     void store(const std::shared_ptr<rtp_llm::RequestBlockBuffer>& buf,
                rtp_llm::CacheStoreStoreDoneCallback                cb) override {
@@ -56,7 +61,22 @@ public:
         if (throw_on_store) {
             throw std::runtime_error("synchronous store failure");
         }
-        if (cb) {
+        if (cb && store_callback_delay_ms > 0) {
+            const auto delay_ms = store_callback_delay_ms;
+            const auto finished = store_callback_finished;
+            std::thread(
+                [cb = std::move(cb), delay_ms, success = store_success, error = store_error, finished,
+                 duplicate = duplicate_store_callback]() mutable {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+                    finished->store(true, std::memory_order_release);
+                    cb(success, error);
+                    if (duplicate) {
+                        cb(success, error);
+                    }
+                })
+                .detach();
+        } else if (cb) {
+            store_callback_finished->store(true, std::memory_order_release);
             cb(store_success, store_error);
             if (duplicate_store_callback) {
                 cb(store_success, store_error);
@@ -87,8 +107,11 @@ public:
     }
 
     std::shared_ptr<rtp_llm::StoreContext>
-    storeBuffers(const std::vector<std::shared_ptr<rtp_llm::RequestBlockBuffer>>&, int64_t) override {
-        return nullptr;
+    storeBuffers(const std::vector<std::shared_ptr<rtp_llm::RequestBlockBuffer>>& buffers,
+                 int64_t                                                          timeout_ms) override {
+        auto context = std::make_shared<rtp_llm::StoreContext>(shared_from_this());
+        context->store(buffers, timeout_ms);
+        return context;
     }
 
     std::shared_ptr<rtp_llm::RemoteStoreTask>
@@ -1264,6 +1287,31 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_LinearGroup) {
         << "Hybrid cache-store must write opaque kv_ keys even when use_opaque_kv_cache_store=false";
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStoreWaitsForPublishCallback) {
+    auto cache_store                     = std::make_shared<MockCacheStore>();
+    cache_store->store_callback_delay_ms = 100;
+    auto inputs = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);
+    auto config = makeCacheConfig(/*tokens_per_block=*/2,
+                                 /*physical_kv_stride=*/64,
+                                 /*physical_scale_stride=*/0,
+                                 /*block_num=*/3,
+                                 "linear",
+                                 /*layer_id=*/0,
+                                 defaultCacheGroupPolicy(CacheGroupType::LINEAR));
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({3, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 2;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "linear";
+
+    ASSERT_NO_THROW(runtimeWriteCacheStore(
+        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
+    EXPECT_TRUE(cache_store->store_callback_finished->load(std::memory_order_acquire));
+}
+
+// Layer 1 maps to group 1 (FULL).
+// CacheGroupType::FULL means all blocks are transferred;
+// with total_blocks = 3, exactly 3 opaque kv entries should reach the mock store.
 TEST_F(ExecOpsTest, testWriteCacheStoreTag_FullGroup) {
     auto                    cache_store = std::make_shared<MockCacheStore>();
     auto                    inputs      = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);

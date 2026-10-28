@@ -1,4 +1,4 @@
-load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu", "torch_deps")
+load("@arch_config//:arch_select.bzl", "cuda13_test_exec_properties", "cuda13_x86_test_gpu", "torch_deps")
 load("//:def.bzl", "copts")
 load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
 
@@ -222,7 +222,7 @@ py_test(
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
-    ],
+    ] + [":cuda_graph_test_runner"],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -269,7 +269,7 @@ py_test(
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
-    ],
+    ] + [":cuda_graph_test_runner"],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -310,6 +310,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
+        ":cuda_graph_test_runner",
         "//rtp_llm/test/model_test/test_util",
     ],
     env = {
@@ -317,4 +318,62 @@ py_test(
     },
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+# Original Native CUDA13 replay pool contract; main arm/x86 labels remain separate.
+cuda13_cc_test(
+    name = "cuda_graph_replay_retry_integration_test",
+    srcs = ["cuda_graph_replay_retry_integration_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "//rtp_llm/cpp/utils:torch_cuda_oom",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    exec_properties = cuda13_test_exec_properties(),
+    target_compatible_with = select({
+        "//:using_cuda13_arm": [],
+        "//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    timeout = "short",
+    tags = ["native_cuda13_compat"],
+)
+
+# Original complete Native A10/CUDA12 route; the main L20 rule is retained unchanged.
+cc_test(
+    name = "combo_position_ids_validation_test_native_a10",
+    srcs = ["combo_position_ids_validation_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    exec_properties = {'gpu':'A10'},
+    tags = ["A10"],
+)
+
+# Native normal pytest owns automatic ROCm discovery; retain this original manual rule.
+py_test(
+    name = "cuda_graph_copy_kernel_test_rocm_native_manual",
+    main = "cuda_graph_copy_kernel_test.py",
+    srcs = ["cuda_graph_copy_kernel_test.py"],
+    data = ["//:th_transformer"],
+    deps = ["//rtp_llm/test/model_test/test_util:test_util"],
+    env = {
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "ROCM",
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+    },
+    tags = ["manual", "rocm"],  # Collected automatically by py_ut_amd.
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+# Supply the existing lazy facade and its actual shared library in Bazel runfiles.
+py_library(
+    name = "cuda_graph_test_runner",
+    srcs = ["cuda_graph_test_runner.py"],
+    data = [":test_cuda_graph_runner"],
+    imports = ["."],
+    visibility = ["//visibility:public"],
 )

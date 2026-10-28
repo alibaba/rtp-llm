@@ -181,11 +181,15 @@ class FtRuntimeException(Exception):
         self,
         exception_type: ExceptionType,
         message: str,
+        rtp_error_code: int | None = None,
         admission_reject_reason: AdmissionRejectReason = (
             AdmissionRejectReason.UNSPECIFIED
         ),
     ):
         self.exception_type = exception_type
+        self.rtp_error_code = int(
+            exception_type if rtp_error_code is None else rtp_error_code
+        )
         self.message = message
         self.admission_reject_reason = AdmissionRejectReason(admission_reject_reason)
         super().__init__(self.message)
@@ -194,5 +198,6 @@ class FtRuntimeException(Exception):
         return self.__class__, (
             self.exception_type,
             self.message,
+            self.rtp_error_code,
             self.admission_reject_reason,
         )

@@ -1674,12 +1674,19 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     }
 
     const int64_t max_blocks = max_kernel_block_table_width_;
-    // kv_cache_kernel_block_id_device [batch_size, block_num]
-    inputs.attention_inputs.kv_cache_kernel_block_id_device =
-        torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
-
-    inputs.attention_inputs.kv_cache_kernel_block_id =
-        torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+    if (!kv_cache_group_tags_.empty()) {
+        // kv_cache_kernel_block_id_device [batch_size, block_num]
+        inputs.attention_inputs.kv_cache_kernel_block_id_device =
+            torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+        inputs.attention_inputs.kv_cache_kernel_block_id =
+            torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+    } else {
+        // Embedding prefill graphs have no cache layout. Keep tensors defined so
+        // graph setup can slice/copy them uniformly without selecting a paged backend.
+        inputs.attention_inputs.kv_cache_kernel_block_id_device =
+            torch::empty({0}, options_cuda_int32_);
+        inputs.attention_inputs.kv_cache_kernel_block_id = torch::empty({0}, options_cpu_int32_).pin_memory();
+    }
 
     // Target verify keeps multi-token attention geometry while selecting
     // graphs by batch.

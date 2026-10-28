@@ -17,7 +17,10 @@ import unittest
 
 logging.basicConfig(level=logging.INFO)
 
+import pytest
 import torch
+
+pytestmark = [pytest.mark.gpu(type="H20", count=4)]
 
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,

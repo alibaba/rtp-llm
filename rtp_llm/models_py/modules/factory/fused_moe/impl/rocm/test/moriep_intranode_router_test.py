@@ -30,8 +30,10 @@ import sys
 import time
 import types
 import unittest
+from contextlib import ExitStack
 from typing import Any, List, Optional, Tuple
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -335,7 +337,10 @@ def _cleanup_dist() -> None:
 
 
 def _init_moriep_shmem_and_wrapper(
-    mori_cfg: Any, mori_mod: Any, shmem_group_name: str = "default"
+    mori_cfg: Any,
+    mori_mod: Any,
+    shmem_cleanup: ExitStack,
+    shmem_group_name: str = "default",
 ) -> None:
     assert dist.is_initialized()
     rank = dist.get_rank()
@@ -348,6 +353,9 @@ def _init_moriep_shmem_and_wrapper(
         "after _register_process_group, before mori.shmem.shmem_torch_process_group_init",
     )
     mori_mod.shmem.shmem_torch_process_group_init(shmem_group_name)
+    # Finalizing uninitialized Mori state aborts and hides the original error.
+    if hasattr(mori_mod.shmem, "shmem_finalize"):
+        shmem_cleanup.callback(mori_mod.shmem.shmem_finalize)
     _moriep_log(
         rank,
         "after shmem_torch_process_group_init, before barrier #2 (sync before EpDispatchCombineOp)",
@@ -400,6 +408,7 @@ def worker_function(
     dist_port: int,
 ):
     mori_mod: Any = None
+    shmem_cleanup = ExitStack()
     _moriep_log(rank, "worker started")
     _moriep_log(rank, "before _ensure_moriep_symbols_loaded (importlib moriep_wrapper)")
     _ensure_moriep_symbols_loaded()
@@ -427,7 +436,9 @@ def worker_function(
             mori_mod=mori_mod,
         )
         _moriep_log(rank, "calling _init_moriep_shmem_and_wrapper")
-        _init_moriep_shmem_and_wrapper(mori_cfg, mori_mod, shmem_group_name="default")
+        _init_moriep_shmem_and_wrapper(
+            mori_cfg, mori_mod, shmem_cleanup, shmem_group_name="default"
+        )
 
         _moriep_log(rank, "MoriEPWrapper.get_instance()")
         wrapper = MoriEPWrapper.get_instance()
@@ -494,16 +505,17 @@ def worker_function(
             if inst is not None:
                 inst.reset_op()
             MoriEPWrapper.reset()
-        if (
-            mori_mod is not None
-            and hasattr(mori_mod, "shmem")
-            and hasattr(mori_mod.shmem, "shmem_finalize")
-        ):
-            mori_mod.shmem.shmem_finalize()
+        shmem_cleanup.close()
         _cleanup_dist()
 
 
-def test_single(world_size: int, dist_port: int):
+def test_single(
+    world_size: int,
+    dist_port: int,
+    *,
+    token_num_aligned: Optional[int] = None,
+    max_tokens_on_rank: Optional[int] = None,
+):
     _moriep_log(
         None,
         f"[parent] test_single world_size={world_size} dist_port={dist_port} pid={os.getpid()}",
@@ -511,9 +523,11 @@ def test_single(world_size: int, dist_port: int):
     # 各 rank 必须使用相同 token 数：Ep dispatch/combine 为全体 rank 集体通信，
     # 若部分 rank assert 失败先进入 cleanup barrier，其余 rank 仍卡在下一轮 collective → 死锁。
     # 且 ref_a2=a1*world_size 的恒等检查仅在各 rank 对称 token 时成立。
-    token_num_aligned = random.randint(4, 12) // 4 * 4
+    if token_num_aligned is None:
+        token_num_aligned = random.randint(4, 12) // 4 * 4
     token_num_per_rank = [token_num_aligned] * world_size
-    max_tokens_on_rank = token_num_aligned
+    if max_tokens_on_rank is None:
+        max_tokens_on_rank = token_num_aligned
     _moriep_log(
         None,
         f"[parent] token_num_per_rank={token_num_per_rank} (same per rank) max_tokens_on_rank={max_tokens_on_rank}",
@@ -575,6 +589,7 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
         if max_gpu_count < 2:
             self.skipTest(f"Need at least 2 GPUs, got {max_gpu_count}")
 
+    @pytest.mark.gpu(type="MI308X_ROCM7", count=2)
     def test_world_size_2(self):
         self._check_skip()
         max_gpu_count, _ = _gpu_count_without_parent_cuda_init()
@@ -583,6 +598,7 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
         mp.set_start_method("spawn", force=True)
         test_single(world_size=2, dist_port=_get_free_port())
 
+    @pytest.mark.gpu(type="MI308X_ROCM7", count=4)
     def test_world_size_4(self):
         if _MAX_GPUS > 0 and _MAX_GPUS < 4:
             self.skipTest(f"MORIEP_TEST_MAX_GPUS={_MAX_GPUS}, skipping 4-GPU test")
@@ -592,6 +608,18 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
             self.skipTest("Need at least 4 GPUs")
         mp.set_start_method("spawn", force=True)
         test_single(world_size=4, dist_port=_get_free_port())
+
+    @pytest.mark.gpu(type="MI308X_ROCM7", count=2)
+    def test_short_tail_multichunk(self):
+        self._check_skip()
+        mp.set_start_method("spawn", force=True)
+        # Distinct random data in 8+8+4 tokens exposes routing and shared-view reuse.
+        test_single(
+            world_size=2,
+            dist_port=_get_free_port(),
+            token_num_aligned=20,
+            max_tokens_on_rank=8,
+        )
 
 
 if __name__ == "__main__":

@@ -131,11 +131,16 @@ class RequestSlotTerminalSettlementTest {
         assertTrue(slot.updatePreemption(claim, outcome));
         slot.cancelRequest(7L, CancelReason.CLIENT_CANCELLED);
         var inactivity = mock(ExpirationTimer.InactivityDeadline.class);
-        assertTrue(slot.installInactivityDeadline(inactivity));
+        assertFalse(slot.installInactivityDeadline(inactivity));
 
         slot.onInactivityDeadline(
                 inactivity,
                 RequestLifecycleTestSupport.<Long>inspect(slot, "inactivityExpiresAtMsLocked"));
+        assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(slot, "isTerminalRecordLocked"));
+        assertFalse(claim.isFinished());
+        assertSame(f.item(), slot.activeItem());
+        slot.processDecodeStatus(
+                f.item().decodeEp(), DecodeEndpoint.WorkerStatusFact.terminal(RESERVATION, 0L));
         RequestState ended = slot.snapshot();
         assertEquals(RequestState.Phase.CANCELLED, ended.state());
         assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "isTerminalRecordLocked"));
@@ -151,8 +156,9 @@ class RequestSlotTerminalSettlementTest {
                 f.item().decodeEp(), DecodeEndpoint.WorkerStatusFact.terminal(RESERVATION, 0L));
         slot.onInactivityDeadline(inactivity, Long.MAX_VALUE);
         assertEquals(ended, slot.snapshot());
-        verify(f.item().decodeEp()).release(RESERVATION, DecodeEndpoint.ReleaseReason.EXPIRED);
-        verify(f.item().prefillEp()).expireCommittedItem(f.item());
+        verify(f.item().decodeEp(), never())
+                .release(RESERVATION, DecodeEndpoint.ReleaseReason.EXPIRED);
+        verify(f.item().prefillEp(), never()).expireCommittedItem(f.item());
     }
 
     @Test

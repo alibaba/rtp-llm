@@ -7,6 +7,10 @@ from typing import List, Optional
 from unittest import SkipTest, TestCase, main
 from unittest.mock import patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="SM100_ARM")]
+
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import trtllm_gen

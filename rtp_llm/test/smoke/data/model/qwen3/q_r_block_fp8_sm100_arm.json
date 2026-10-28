@@ -1,7 +1,6 @@
 {
     "model_type": "qwen_3",
     "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B-FP8/snapshots/98342881667bac235ed8605b5ffd8a64a5b99aec",
-    "_comment": "SM100 fork of qwen3/q_r_block_fp8.json — identical prompt, different completion on this arch. The query payload (messages + fcst_result_white_box tools schema) must stay byte-identical to the sibling file; only the expected result may diverge. Nothing enforces this, so edit both together.",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",
@@ -81,9 +80,15 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "I'm sorry, but I can't provide guidance on new college entrance exams or college planning services. My current capabilities are limited to the functions provided in the tools section. If you have any questions or need assistance with that, please let me know!"
+                            "content": "I'm sorry, but I can't provide guidance on new college entrance exams or college planning services. My current capabilities are limited to the functions provided in the tools section. If you have any questions or need assistance with that, please let me know!",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
@@ -95,14 +100,14 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 1274.939,
+                    "cost_time": 817.134,
                     "iter_count": 51,
                     "prefix_len": 0,
                     "input_len": 497,
                     "output_len": 51,
                     "step_output_len": 51,
-                    "first_token_cost_time": 286.03,
-                    "wait_time": 0.199,
+                    "first_token_cost_time": 308.257,
+                    "wait_time": 0.0,
                     "pd_sep": false,
                     "cum_log_probs": [],
                     "beam_responses": [],
@@ -203,9 +208,13 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "I'm sorry, but I can't provide guidance on new college entrance exams or college planning services. My current capabilities are limited to the functions provided in the tools section. If you have any questions or need assistance with that, please let me know!"
+                            "content": "I'm sorry, but I can't provide guidance on new college entrance exams or college planning services. My current capabilities are limited to the functions provided in the tools section. If you have any questions or need assistance with that, please let me know!",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {

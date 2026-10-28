@@ -7,6 +7,8 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PlacementKey;
@@ -189,7 +191,8 @@ public abstract class FlexLBMockTestBase {
                         configService,
                         dispatcher::tryPrepareSubmission,
                         reporter,
-                        createRequestSchedulerReporter());
+                        createRequestSchedulerReporter(),
+                        createEngineCancelChannel());
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
 
@@ -625,5 +628,27 @@ public abstract class FlexLBMockTestBase {
         status.setGroup("test-group");
         status.setRequestId(requestId);
         return status;
+    }
+
+    protected boolean ownsRequestGeneration(long requestId) {
+        return schedulerRuntime.ownsRequestGeneration(requestId);
+    }
+
+    protected EngineCancelChannel createEngineCancelChannel() {
+        return new UnsupportedCancelStub();
+    }
+
+    /** Test-local fail-closed cancel transport for fixtures without preemption. */
+    private static final class UnsupportedCancelStub implements EngineCancelChannel {
+        @Override
+        public boolean isSupported(DecodeEndpoint endpoint) {
+            return false;
+        }
+
+        @Override
+        public CompletableFuture<CancelAck> cancel(
+                CancelTarget target, long requestId, long timeoutMs) {
+            return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
+        }
     }
 }

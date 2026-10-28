@@ -7,6 +7,10 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,

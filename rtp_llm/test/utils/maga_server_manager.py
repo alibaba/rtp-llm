@@ -5,6 +5,7 @@ import os
 import random
 import shlex
 import signal as signal_mod
+import site
 import socket
 import subprocess
 import sys
@@ -29,21 +30,44 @@ LOG_PATH = "LOG_PATH"
 long_live_port_locks = []
 
 
+def _resolve_server_python(current_env: Dict[str, str]) -> str:
+    server_python = current_env.get(
+        "RTP_SERVER_PYTHON", current_env.get("RTP_PYTHON_BIN", sys.executable)
+    )
+
+    if server_python != sys.executable and sys.prefix != sys.base_prefix:
+        venv_site_packages = [
+            path
+            for path in site.getsitepackages()
+            if path == sys.prefix or path.startswith(sys.prefix + os.sep)
+        ]
+        python_path = current_env.get("PYTHONPATH", "")
+        current_env["PYTHONPATH"] = os.pathsep.join(
+            path for path in (python_path, *venv_site_packages) if path
+        )
+        logging.info(
+            "Appended native venv site-packages for server Python: %s",
+            venv_site_packages,
+        )
+
+    return server_python
+
+
 class MagaServerManager(object):
     def __init__(
         self,
-        env_args: Optional[Dict[str, Any]] = {},
+        env_args: Optional[Dict[str, Any]] = None,
         port: Optional[str] = None,
-        device_ids: List[int] = [],
+        device_ids: Optional[List[int]] = None,
         role_name: str = "main",
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
         health_check_path: str = "/health",
     ):
         self._username = os.getenv("USER")
-        self._env_args = env_args
+        self._env_args = env_args if env_args is not None else {}
         self._log_file = None
-        self._device_ids = device_ids
+        self._device_ids = device_ids if device_ids is not None else []
         self._server_process = None
         self._role_name = role_name
         self._file_stream = None
@@ -169,11 +193,31 @@ class MagaServerManager(object):
             if v is not None:
                 current_env[k] = v
 
+        # Ensure LD_LIBRARY_PATH includes torch libs and rtp_llm libs
+        import torch
+
+        torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+        rtp_llm_libs = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "libs"
+        )
+        extra_ld_paths = [
+            torch_lib,
+            rtp_llm_libs,
+            "/usr/local/cuda/lib64",
+            "/usr/local/cuda/extras/CUPTI/lib64",
+        ]
+        existing_ld = current_env.get("LD_LIBRARY_PATH", "")
+        current_env["LD_LIBRARY_PATH"] = ":".join(
+            extra_ld_paths + ([existing_ld] if existing_ld else [])
+        )
+
         if model_type is not None:
             current_env[MODEL_TYPE] = model_type
         if model_path is not None:
             current_env[CHECKPOINT_PATH] = model_path
-        current_env[LOG_PATH] = role_log_name
+        bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+        role_log_path = os.path.join(bazel_outputs_dir, role_log_name)
+        current_env[LOG_PATH] = role_log_path
 
         effective_tok = tokenizer_path if tokenizer_path is not None else model_path
         if effective_tok is not None:
@@ -182,6 +226,11 @@ class MagaServerManager(object):
             current_env[LORA_INFO] = json.dumps(lora_infos)
         if ptuning_path is not None:
             current_env[PTUNING_PATH] = ptuning_path
+
+        # Remove PYTEST_CURRENT_TEST so the server subprocess's setup_args()
+        # parses its own CLI arguments (--task_type, --port, etc.) instead of
+        # discarding them via the "running under pytest" guard.
+        current_env.pop("PYTEST_CURRENT_TEST", None)
 
         current_env["START_PORT"] = str(self._port)
         if self._device_ids:
@@ -209,15 +258,17 @@ class MagaServerManager(object):
                 environ=current_env,
             )
 
-        bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-        cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
+        # Use MAGA_SERVER_WORK_DIR if set; otherwise default to CWD (not
+        # bazel_outputs_dir which may point to _rtp_test_outputs/ — a
+        # subdirectory that does not contain the rtp_llm package).
+        cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", os.getcwd())
         # 创建一个文件来存储子进程的日志
         self._log_file = (
             f"{bazel_outputs_dir}/{role_log_name}/{self._process_file_name}"
         )
         logging.info(f"日志文件:{self._log_file}")
         if log_to_file:
-            os.makedirs(f"{bazel_outputs_dir}/{role_log_name}/", exist_ok=True)
+            os.makedirs(role_log_path, exist_ok=True)
             self._log_file = (
                 f"{bazel_outputs_dir}/{role_log_name}/{self._process_file_name}"
             )
@@ -251,9 +302,10 @@ class MagaServerManager(object):
             self._role_name,
             current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
         )
-        python_bin = os.environ.get("RTP_PYTHON_BIN", sys.executable)
+        server_python = _resolve_server_python(current_env)
+        logging.info("[%s] server Python: %s", self._role_name, server_python)
         p = subprocess.Popen(
-            [python_bin, "-m", "rtp_llm.start_server"] + parsed_args,
+            [server_python, "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,
@@ -446,7 +498,7 @@ class MagaServerManager(object):
     def print_process_log(self, max_lines: int = 0):
         """Print server process log. If max_lines > 0, only print last N lines."""
         if self._log_file is None:
-            return
+            return ""
         if self._file_stream is not None:
             try:
                 self._file_stream.flush()
@@ -500,3 +552,47 @@ class MagaServerManager(object):
             logging.warning("=" * 80)
         except Exception as e:
             logging.warning(f"Failed to read log file {self._log_file}: {e}")
+            return ""
+
+    def read_process_log(self, max_lines: int = 0, max_chars: int = 0) -> str:
+        """Read a server log tail for diagnostics and test reports."""
+        if self._log_file is None or not os.path.exists(self._log_file):
+            return ""
+        try:
+            if self._file_stream is not None:
+                self._file_stream.flush()
+            with open(self._log_file, "r") as stream:
+                if max_lines > 0:
+                    tail = collections.deque(maxlen=max_lines)
+                    total = 0
+                    for line in stream:
+                        tail.append(line)
+                        total += 1
+                    content = "".join(tail)
+                    if total > max_lines:
+                        content = (
+                            f"... ({total - max_lines} lines truncated)\n" + content
+                        )
+                elif max_chars > 0:
+                    content = ""
+                    total_chars = 0
+                    while chunk := stream.read(65536):
+                        total_chars += len(chunk)
+                        content = (content + chunk)[-max_chars:]
+                    if total_chars > max_chars:
+                        content = (
+                            f"... ({total_chars - max_chars} chars truncated)\n"
+                            + content
+                        )
+                    return content
+                else:
+                    content = stream.read()
+            if max_chars > 0 and len(content) > max_chars:
+                content = (
+                    f"... ({len(content) - max_chars} chars truncated)\n"
+                    + content[-max_chars:]
+                )
+            return content
+        except Exception as error:
+            logging.warning("Failed to read log file %s: %s", self._log_file, error)
+            return ""

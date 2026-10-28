@@ -30,7 +30,11 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
     [ "$root" = "/" ] && break
 done
 
-base_paths=(/opt/rh/gcc-toolset-12/root/usr/lib64 /usr/local/cuda/lib64 /opt/conda310/lib /usr/local/nvidia/lib64 /usr/lib64)
+runtime_python_lib=/opt/conda310/lib
+if [ -d /usr/local/PPU_SDK ]; then
+    runtime_python_lib=/opt/conda312/lib
+fi
+base_paths=(/opt/rh/gcc-toolset-12/root/usr/lib64 /usr/local/cuda/lib64 "$runtime_python_lib" /usr/local/nvidia/lib64 /usr/lib64)
 prefix="$(IFS=:; echo "${base_paths[*]}")"
 if [ "${#wheel_lib_dirs[@]}" -gt 0 ]; then
     prefix="$(IFS=:; echo "${wheel_lib_dirs[*]}"):$prefix"

@@ -651,6 +651,8 @@ class FA3DecodeImpl:
     styles) with FA3 attention.
     """
 
+    NAME = "ppu_fa3"
+
     # The shared factory probes this capability before calling the constructor.
     accepts_fmha_config = False
 
@@ -780,6 +782,8 @@ class FA3DecodeImpl:
 
 class FA3PrefillPagedImpl:
     """FMHAImplBase-compatible FA3 paged prefill implementation for PPU."""
+
+    NAME = "ppu_fa3"
 
     # The shared factory probes this capability before calling the constructor.
     accepts_fmha_config = False

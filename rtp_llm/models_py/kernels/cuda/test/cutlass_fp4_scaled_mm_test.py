@@ -1,12 +1,22 @@
 import pytest
 import torch
-from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
-    cutlass_scaled_fp4_mm_wrapper,
-    scaled_fp4_quant_wrapper,
-)
-from flashinfer import fp4_quantize
 
-skip_condition = torch.cuda.get_device_capability() < (10, 0)
+try:
+    from flashinfer import fp4_quantize
+
+    from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
+        cutlass_scaled_fp4_mm_wrapper,
+        scaled_fp4_quant_wrapper,
+    )
+except (ImportError, RuntimeError) as e:
+    pytest.skip(f"FP4 CUDA stack unavailable: {e}", allow_module_level=True)
+
+pytestmark = [pytest.mark.manual]
+
+try:
+    skip_condition = torch.cuda.get_device_capability() < (10, 0)
+except Exception as e:
+    pytest.skip(f"CUDA capability unavailable: {e}", allow_module_level=True)
 
 DTYPES = [torch.float16, torch.bfloat16]
 # m, n, k
@@ -67,13 +77,13 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
 def adapt_fp4_quantize_scale(sf: torch.Tensor, m: int, k: int) -> torch.Tensor:
     """
     Adapt fp4_quantize output scale factors to cutlass_scaled_fp4_mm expected format.
-    
+
     Args:
         sf: Scale factors from fp4_quantize, shape (-1, k // 16), dtype uint8
             In swizzled layout, this is already padded to (rounded_m, rounded_k) internally
         m: Original tensor height
         k: Original tensor width (before packing)
-    
+
     Returns:
         Adapted scale factors, shape (rounded_m, rounded_k), dtype float8_e4m3fn
     """
@@ -81,12 +91,12 @@ def adapt_fp4_quantize_scale(sf: torch.Tensor, m: int, k: int) -> torch.Tensor:
     rounded_m = ((m + 128 - 1) // 128) * 128
     scale_k = k // block_size
     rounded_k = ((scale_k + 4 - 1) // 4) * 4
-    
+
     # fp4_quantize with swizzled layout returns scale as (-1, k // 16)
     # The first dimension is already rounded_m for swizzled layout
     # Convert uint8 to float8_e4m3fn first
     sf_fp8 = sf.view(torch.float8_e4m3fn)
-    
+
     # Reshape to ensure correct dimensions
     if sf_fp8.dim() == 1:
         # If flat, reshape to (rounded_m, rounded_k) for swizzled layout
@@ -96,16 +106,14 @@ def adapt_fp4_quantize_scale(sf: torch.Tensor, m: int, k: int) -> torch.Tensor:
         # If shape is (m, k // 16), pad to (rounded_m, rounded_k)
         if current_m < rounded_m or current_k < rounded_k:
             sf_padded = torch.zeros(
-                (rounded_m, rounded_k), 
-                dtype=sf_fp8.dtype, 
-                device=sf_fp8.device
+                (rounded_m, rounded_k), dtype=sf_fp8.dtype, device=sf_fp8.device
             )
             sf_padded[:current_m, :current_k] = sf_fp8
             return sf_padded
         else:
             # Already correct size, return as is
             return sf_fp8[:rounded_m, :rounded_k]
-    
+
     return sf_fp8
 
 

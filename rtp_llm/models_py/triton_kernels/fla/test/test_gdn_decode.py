@@ -7,6 +7,7 @@ import random
 from typing import List
 
 import torch
+import pytest
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
@@ -163,6 +164,15 @@ def _run_fused_recurrent_continuous_batching(
             ].transpose(-1, -2)
     assert_close("ht", ref_ht, tri_ht, 0.005)
     return tri.detach().clone(), ssm_cache.detach().clone()
+
+
+@pytest.mark.gpu(type="MI308X")
+@pytest.mark.parametrize("B", [1, 2, 4, 8, 16, 32, 64])
+@pytest.mark.parametrize("S", [1, 2, 4])
+def test_fused_recurrent_continuous_batching(B, S):
+    _run_fused_recurrent_continuous_batching(
+        B, S, 16, 32, 128, 1, 0.1, torch.bfloat16
+    )
 
 
 def test_fused_recurrent_narrow_block_map_view():

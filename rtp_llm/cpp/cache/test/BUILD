@@ -3,9 +3,9 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-cc_import(
+alias(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    actual = "@torch//:torch",
 )
 
 cuda13_torch_link_deps = select({
@@ -89,7 +89,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    env = {},
+    env = {"GPU_COUNT": "0"},
 )
 
 cc_test(
@@ -101,7 +101,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    env = {},
+    env = {"GPU_COUNT": "0"},
 )
 
 cc_test(
@@ -116,7 +116,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    env = {},
+    env = {"GPU_COUNT": "0"},
 )
 
 cc_test(
@@ -131,7 +131,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    env = {},
+    env = {"GPU_COUNT": "0"},
 )
 
 cc_test(
@@ -146,7 +146,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    env = {},
+    env = {"GPU_COUNT": "0"},
 )
 
 cc_library(

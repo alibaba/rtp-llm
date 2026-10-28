@@ -1,5 +1,24 @@
 import importlib
+import os as _os
 from typing import Any, Dict
+
+# Phase-25 namespace merge: extend `rtp_llm.models.__path__` with the sibling
+# internal_source/rtp_llm/models tree so internal models (tbstars, flot,
+# mixtbstars, vision_bert, video_logics, etc.) are reachable as
+# `rtp_llm.models.X` without the `internal_source.` prefix.
+_internal_dir = _os.path.normpath(
+    _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "..",
+        "..",
+        "internal_source",
+        "rtp_llm",
+        "models",
+    )
+)
+if _os.path.isdir(_internal_dir) and _internal_dir not in __path__:
+    __path__.append(_internal_dir)
+del _os, _internal_dir
 
 from rtp_llm.model_factory_register import ensure_all_models_registered
 

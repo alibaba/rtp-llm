@@ -115,4 +115,5 @@ cc_test(
         "@havenask//aios/network/arpc:arpc",
     ],
     copts = ["-fno-access-control",],
+    exec_properties = {"gpu": "A10"},
 )

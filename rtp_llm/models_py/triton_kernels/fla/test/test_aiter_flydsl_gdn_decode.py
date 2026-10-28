@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 import torch
+import pytest
 
 from rtp_llm.models_py.triton_kernels.fla import aiter_flydsl_gdn_decode as adapter
 from rtp_llm.models_py.triton_kernels.fla import utils as fla_utils
@@ -258,6 +259,7 @@ def _flydsl_decode(q, k, v, a, b, A_log, dt_bias, state, block_map, lengths):
     return output, read_indices, write_indices
 
 
+@pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
 class FlaEnvironmentFlagTest(unittest.TestCase):
     def test_env_flag_parses_true_false_and_default_values(self):
         for value in ("1", "true", "TRUE", "on", "yes"):
@@ -281,6 +283,7 @@ class FlaEnvironmentFlagTest(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "A CUDA/HIP device is required")
+@pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
 class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)
@@ -764,6 +767,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
 
         self.assertIn("not validated AMD CDNA3/gfx942", reason)
 
+    @pytest.mark.gpu(type="H20")
     @unittest.skipIf(torch.version.hip is not None, "NVIDIA-only dispatch guard")
     def test_real_nvidia_device_rejects_aiter_dispatch(self):
         valid = _make_decode_inputs()
@@ -984,6 +988,7 @@ class AiterFlydslGdnDecodeCommonTest(unittest.TestCase):
     torch.version.hip is not None and torch.cuda.is_available(),
     "AITER FlyDSL numerical tests require ROCm",
 )
+@pytest.mark.gpu(type="MI308X")
 class AiterFlydslGdnDecodeRocmTest(unittest.TestCase):
     def setUp(self):
         _reset_adapter_process_state(self)

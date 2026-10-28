@@ -1,3 +1,4 @@
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -13,7 +14,7 @@ py_test(
 py_test(
     name = "fp8_ptpc_linear_test",
     srcs = ["fp8_ptpc_linear_test.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + [requirement_gpu_rocm("pytest")],
     timeout = "eternal",
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},

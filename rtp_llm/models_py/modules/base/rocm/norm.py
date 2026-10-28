@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import layernorm2d_fwd_with_add as layernorm2d_fwd_with_add
-from aiter import rms_norm, rmsnorm2d_fwd_opus, rmsnorm2d_fwd_with_add_opus
+from aiter import rms_norm, rmsnorm, rmsnorm2d_fwd_opus, rmsnorm2d_fwd_with_add_opus
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
 
@@ -68,6 +68,21 @@ class RMSNorm(BaseNorm):
             return rmsnorm2d_fwd_opus(
                 hidden_states, self.weight.data, self.variance_epsilon
             )
+        if (
+            hidden_states.dim() == 2
+            and hidden_states.element_size() == 2
+            and hidden_states.shape[-1] <= 8192
+        ):
+            output = torch.empty_like(hidden_states)
+            # AITER 0.1.21's torch custom-op bridge drops trailing defaults.
+            rmsnorm(
+                output,
+                hidden_states,
+                self.weight.data,
+                self.variance_epsilon,
+                False,
+            )
+            return output
         return rms_norm(hidden_states, self.weight.data, self.variance_epsilon)
 
 

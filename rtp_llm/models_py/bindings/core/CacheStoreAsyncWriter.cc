@@ -141,9 +141,11 @@ void CacheStoreAsyncWriter::init(bool track_store_completions) {
         std::lock_guard<std::mutex> ex_lock(exception_mutex_);
         stored_exception_ = nullptr;
     }
-    active_store_completion_state_ = track_store_completions ? std::make_shared<StoreCompletionState>() : nullptr;
-    active_cache_store_            = cache_manager_ ? cache_manager_->getCacheStore() : nullptr;
-    state_                         = State::RUNNING;
+    active_cache_store_ = cache_manager_ ? cache_manager_->getCacheStore() : nullptr;
+    // Ordinary forwards publish before returning; tracked MTP cycles may wait at the executor barrier.
+    active_store_completion_state_ =
+        (track_store_completions || active_cache_store_) ? std::make_shared<StoreCompletionState>() : nullptr;
+    state_ = State::RUNNING;
 }
 
 // Enqueue a task to the background thread pool. Must be in RUNNING state.

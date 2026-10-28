@@ -53,7 +53,23 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     prepareBatchSubmission,
             BatchSchedulerReporter batchReporter,
             RequestSchedulerReporter requestReporter) {
-        this.lifecycle = new RequestRegistry(configService, batchReporter, requestReporter);
+        this(
+                configService,
+                prepareBatchSubmission,
+                batchReporter,
+                requestReporter,
+                org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
+    }
+
+    public RequestSchedulerTestRuntime(
+            ConfigService configService,
+            Supplier<CapacityBoundary.Attempt<BatchDeliveryStrategy.PreparedSubmission>>
+                    prepareBatchSubmission,
+            BatchSchedulerReporter batchReporter,
+            RequestSchedulerReporter requestReporter,
+            org.flexlb.balance.eviction.EngineCancelChannel cancelChannel) {
+        this.lifecycle =
+                new RequestRegistry(configService, batchReporter, requestReporter, cancelChannel);
         this.endpointEvents = new EndpointEventProjector(lifecycle);
         DispatcherConfig dispatcher =
                 Objects.requireNonNull(
@@ -85,8 +101,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         new org.flexlb.sync.status.WorkerDirectory(registry),
                         configService,
                         lifecycle);
-        var cancelChannel =
-                org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
         var preemption =
                 new org.flexlb.balance.eviction.DecodePreemptionCoordinator(
                         cancelChannel, lifecycle);
@@ -107,6 +121,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.runtime =
                 new SchedulerRuntime(
                         lifecycle, registry, batchReporter, requestReporter, scheduler);
+    }
+
+    public boolean ownsRequestGeneration(long requestId) {
+        RequestSlot slot = lifecycle.requestSlot(requestId);
+        return slot != null && slot.isLiveGeneration();
     }
 
     public RequestRegistry requestRegistry() {
@@ -311,5 +330,45 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         ModelMetaConfig meta = org.mockito.Mockito.mock(ModelMetaConfig.class);
         org.mockito.Mockito.when(meta.requiredRoles()).thenReturn(List.of());
         return meta;
+    }
+
+    /** Exercises the real main publisher, not an external CompletableFuture.complete call. */
+    public static final class PublishedResponse implements AutoCloseable {
+        private final RequestCompletionPublisher publisher =
+                new RequestCompletionPublisher(1, null);
+        private final RequestSlot slot;
+
+        public PublishedResponse(long requestId) {
+            var context = new org.flexlb.dao.BalanceContext(new org.flexlb.config.FlexlbConfig());
+            var request = new org.flexlb.dao.loadbalance.Request();
+            request.setRequestId(requestId);
+            context.setRequest(request);
+            slot = new RequestSlot(publisher, context, null, null, () -> {});
+        }
+
+        public java.util.concurrent.CompletableFuture<org.flexlb.dao.loadbalance.Response>
+                future() {
+            return slot.future();
+        }
+
+        public void complete(org.flexlb.dao.loadbalance.Response response) {
+            var permit =
+                    publisher.tryReservePublication(slot, RequestSlot.PublicationKind.DELIVERY);
+            permit.claim();
+            publisher.submit(
+                    new RequestCompletionPublisher.SelectedPublication(
+                            permit,
+                            slot.future(),
+                            true,
+                            RequestCompletionPublisher.ResponseCompletion.RESPONSE,
+                            response,
+                            null,
+                            false));
+        }
+
+        @Override
+        public void close() {
+            publisher.close();
+        }
     }
 }

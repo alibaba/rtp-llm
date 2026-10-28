@@ -1,13 +1,16 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -15,6 +18,7 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -22,6 +26,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.LongAdder;
@@ -88,6 +93,100 @@ class EngineSyncRunnerTest {
                         syncEngineStatusInterval,
                         false,
                         STATUS_STALE_AFTER_US);
+    }
+
+    @Test
+    void should_apply_configured_vit_policy_to_scheduled_status_polls() {
+        FlexlbConfig config =
+                ConfigService.parse(
+                        """
+                {"requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2.0}},
+                 "workerRegistry":{"health":{
+                    "statusRpcTimeoutMs":20,
+                    "vitStatusRpcTimeoutMs":1000,
+                    "retainVitAliveOnTimeout":false,
+                    "statusStaleAfterMs":2000
+                }}}
+                """);
+        ConfigService service = Mockito.mock(ConfigService.class);
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(service);
+        WorkerDirectory directory = new WorkerDirectory(registry);
+        WorkerHost host = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
+                .thenReturn(List.of(host));
+        var response =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRole(RoleType.VIT.getCode())
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                        .setStatusVersion(1L)
+                        .setAlive(true)
+                        .build();
+        when(engineGrpcService.getWorkerStatusAsync(
+                        Mockito.anyString(),
+                        Mockito.anyInt(),
+                        Mockito.anyLong(),
+                        Mockito.anyLong(),
+                        any(RoleType.class)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(response),
+                        CompletableFuture.failedFuture(
+                                Status.DEADLINE_EXCEEDED.asRuntimeException()));
+        Mockito.doAnswer(
+                        call -> {
+                            call.getArgument(0, Runnable.class).run();
+                            return CompletableFuture.completedFuture(null);
+                        })
+                .when(statusCheckExecutor)
+                .submit(any(Runnable.class));
+        Mockito.doAnswer(
+                        call -> {
+                            call.getArgument(0, Runnable.class).run();
+                            return null;
+                        })
+                .when(statusCheckExecutor)
+                .execute(any(Runnable.class));
+        var health = config.getWorkerRegistry().getHealth();
+        EngineSyncRunner runner =
+                new EngineSyncRunner(
+                        modelName,
+                        directory,
+                        workerAddressService,
+                        statusCheckExecutor,
+                        engineHealthReporter,
+                        engineGrpcService,
+                        RoleType.VIT,
+                        localKvCacheAwareManager,
+                        cacheIntervalService,
+                        health.getStatusRpcTimeoutMs(),
+                        syncCount,
+                        syncEngineStatusInterval,
+                        false,
+                        health.getStatusStaleAfterMs() * 1000L,
+                        health.getVitStatusRpcTimeoutMs(),
+                        health.isRetainVitAliveOnTimeout());
+        try {
+            runner.run();
+            WorkerStatus status = directory.statusSnapshot(RoleType.VIT).get(host.getIpPort());
+            assertNotNull(registry.get(RoleType.VIT, host.getIpPort()));
+            runner.run();
+            runner.run();
+            assertTrue(status.isActiveGeneration());
+            runner.run();
+
+            assertFalse(status.isActiveGeneration());
+            assertNull(registry.get(RoleType.VIT, host.getIpPort()));
+            assertFalse(directory.isCurrentStatus(RoleType.VIT, host.getIpPort(), status));
+            verify(engineGrpcService, times(4))
+                    .getWorkerStatusAsync(
+                            Mockito.eq("127.0.0.1"),
+                            Mockito.eq(8081),
+                            Mockito.anyLong(),
+                            Mockito.eq(1000L),
+                            Mockito.eq(RoleType.VIT));
+            verify(statusCheckExecutor, times(4)).submit(any(Runnable.class));
+        } finally {
+            registry.close();
+        }
     }
 
     @Test
@@ -352,6 +451,60 @@ class EngineSyncRunnerTest {
 
         verify(engineHealthReporter)
                 .reportRunningLoadVariance(modelName, RoleType.PREFILL.toString(), 200.0);
+    }
+
+    @Test
+    void should_submit_only_worker_status_check_for_vit() {
+        WorkerHost host = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
+                .thenReturn(List.of(host));
+
+        createRunner(RoleType.VIT).run();
+
+        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor).submit(taskCaptor.capture());
+        assertTrue(taskCaptor.getValue() instanceof GrpcWorkerStatusRunner);
+        WorkerStatus workerStatus =
+                workerDirectory.statusSnapshot(RoleType.VIT).get(host.getIpPort());
+        WorkerStatus.PollLease cacheLease = workerStatus.tryBeginCachePoll();
+        assertNotNull(cacheLease);
+        cacheLease.close();
+    }
+
+    @Test
+    void should_submit_worker_and_cache_status_checks_for_prefill() {
+        WorkerHost host = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(host));
+
+        createRunner(RoleType.PREFILL).run();
+
+        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor, times(2)).submit(taskCaptor.capture());
+        assertTrue(
+                taskCaptor.getAllValues().stream()
+                        .anyMatch(GrpcWorkerStatusRunner.class::isInstance));
+        assertTrue(
+                taskCaptor.getAllValues().stream()
+                        .anyMatch(GrpcCacheStatusCheckRunner.class::isInstance));
+    }
+
+    private EngineSyncRunner createRunner(RoleType actualRoleType) {
+        return new EngineSyncRunner(
+                modelName,
+                workerDirectory,
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                actualRoleType,
+                localKvCacheAwareManager,
+                cacheIntervalService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                false,
+                STATUS_STALE_AFTER_US);
     }
 
     private EngineSyncRunner varianceRunner(WorkerDirectory directory) {

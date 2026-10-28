@@ -1,3 +1,4 @@
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("@arch_config//:arch_select.bzl", "requirement")
 load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
 
@@ -141,7 +142,7 @@ py_test(
         "//rtp_llm:config",
         "//rtp_llm:lora",
         "//rtp_llm:utils",
-    ],
+    ] + [requirement_gpu_rocm("pytest")],
     data = ["//rtp_llm/utils/test:testdata"],
     env = {"RTP_LLM_REQUIRE_ACCELERATOR": "1"},
     tags = ["rocm"],
@@ -279,6 +280,17 @@ py_test(
     ],
 )
 
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='process_manager_test_native_a10', srcs=['process_manager_test.py'], deps=['//rtp_llm:utils'], data=['//:th_transformer', '//:th_transformer_config', '//:rtp_compute_ops'], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='grpc_host_channel_pool_test_native_a10', srcs=['grpc_host_channel_pool_test.py'], deps=['//rtp_llm:utils', ':grpcio'], data=['//:th_transformer', '//:th_transformer_config', '//:rtp_compute_ops'], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='oom_diag_test_native_a10', srcs=['oom_diag_test.py'], deps=['//rtp_llm:utils'], data=['//:th_transformer', '//:th_transformer_config', '//:rtp_compute_ops'], exec_properties={'gpu': 'A10'}, tags=['A10'])
+
+# Original Native A10 rule; main declaration above is retained.
+py_test(name='duplicated_kv_test_native_a10', srcs=['duplicated_kv_test.py'], deps=['//rtp_llm:utils', '//rtp_llm:fastapi', '//rtp_llm:_ft_pickler'], data=['//:th_transformer', '//:th_transformer_config', '//:rtp_compute_ops'], exec_properties={'gpu': 'A10'}, tags=['A10'])
 py_test(
     name = "ppu_entrypoint_test",
     srcs = ["ppu_entrypoint_test.py"],

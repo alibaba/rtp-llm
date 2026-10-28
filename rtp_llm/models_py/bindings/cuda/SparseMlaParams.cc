@@ -137,7 +137,7 @@ void SparseMlaParams::fillParamsInternal(bool                 is_prefill,
             for (int j = 0; j < input_len; ++j) {
                 const int32_t seq_len_value     = kv_len - input_len + 1 + j;
                 expanded_seq_lens_ptr[offset]   = seq_len_value;
-                topk_indices_offset_ptr[offset] = 0;
+                topk_indices_offset_ptr[offset] = k_offset;
                 ks_ptr[offset]                  = k_offset;
                 ke_ptr[offset]                  = k_offset + seq_len_value;
                 offset += 1;

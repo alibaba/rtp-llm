@@ -13,9 +13,11 @@ import torch
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.cpp.cuda_graph.tests.single_group_kv_cache import (
+    SingleGroupKVCacheAdapter,
+)
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops.compute_ops import PyModelInputs, get_scalar_type, init_exec_ctx
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 

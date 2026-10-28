@@ -169,7 +169,9 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     if any(symbol not in _deep_gemm_impl_new_map for symbol in symbols):
         raise ValueError(f"Invalid symbols: {symbols}")
     if all(
-        getattr(globals(), symbol_impl, None) is not None
+        # globals() is a dict: use .get(), not getattr() (which inspects dict
+        # attributes and would always return None, defeating this guard).
+        globals().get(symbol_impl) is not None
         for symbol_impl in symbol_impls
     ):
         # already initialized
@@ -178,22 +180,33 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
         # deep_gemm is not available
         return
 
-    import deep_gemm
+    try:
+        import deep_gemm
+    except (ImportError, AssertionError, RuntimeError, OSError) as e:
+        # deep_gemm found by find_spec but fails to import
+        # (e.g. CUDA_HOME not set, missing shared libs)
+        import logging
+
+        logging.debug("deep_gemm import failed: %s", e)
+        return
 
     # resolve symbols
     for i, symbol in enumerate(symbols):
         symbol_impl = symbol_impls[i]
-        try:
-            globals()[symbol_impl] = resolve_symbol(
-                deep_gemm,
-                _deep_gemm_impl_new_map[symbol],
-                _deep_gemm_impl_old_map[symbol],
-            )
-        except AttributeError:
-            raise RuntimeError(
-                f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and "
-                f"{_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
-            )
+        # resolve_symbol returns None (never raises) when neither the new nor the
+        # legacy symbol exists, so check the return value explicitly.
+        resolved = resolve_symbol(
+            deep_gemm,
+            _deep_gemm_impl_new_map[symbol],
+            _deep_gemm_impl_old_map[symbol],
+        )
+        if resolved is None:
+            # DeepGEMM builds are architecture-specific. Older A10/H20 wheels
+            # do not export the SM100 FP4 symbols, but their FP8/BF16 kernels
+            # remain usable. Keep unavailable implementations as None so the
+            # corresponding wrapper fails only if that kernel is actually used.
+            continue
+        globals()[symbol_impl] = resolved
 
 
 def _lazy_init_deep_gemm_once():

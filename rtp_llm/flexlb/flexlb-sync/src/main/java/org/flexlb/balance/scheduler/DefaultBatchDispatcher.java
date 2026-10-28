@@ -685,11 +685,13 @@ public class DefaultBatchDispatcher {
                                                 prefillIp,
                                                 prefillGrpcPort,
                                                 cause.getMessage());
-                                        // Once the asynchronous RPC is invoked, no
-                                        // transport status proves the server did not
-                                        // accept the request. Reconcile every transport
-                                        // failure through the Engine-side request-id fence.
-                                        markUncertain(items, batchId, cause, observer);
+                                        if (cause
+                                                instanceof EngineGrpcClient.BatchNotSentException) {
+                                            failItems(items, batchId, cause, observer);
+                                        } else {
+                                            // A status alone cannot prove non-delivery.
+                                            markUncertain(items, batchId, cause, observer);
+                                        }
                                     } else if (response == null) {
                                         markUncertain(
                                                 items,
@@ -741,7 +743,12 @@ public class DefaultBatchDispatcher {
             BiConsumer<ScheduledRequest, DeliveryResult> observer) {
         for (ScheduledRequest item : items) {
             try {
-                observer.accept(item, DeliveryResult.uncertain(error));
+                observer.accept(
+                        item,
+                        io.grpc.Status.fromThrowable(error).getCode()
+                                        == io.grpc.Status.Code.DEADLINE_EXCEEDED
+                                ? DeliveryResult.timedOut(error)
+                                : DeliveryResult.uncertain(error));
             } catch (Throwable callbackFailure) {
                 Logger.error(
                         "Dispatch-uncertain callback failed request_id={} batch_id={}",

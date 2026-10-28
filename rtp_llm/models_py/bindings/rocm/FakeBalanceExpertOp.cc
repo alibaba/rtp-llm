@@ -18,6 +18,9 @@ void fake_balance_expert_op(at::Tensor& expert_ids,
     TORCH_CHECK(expert_ids.dim() == 2, "expert_ids must be a 2D tensor");
     TORCH_CHECK(expert_scales.dim() == 2, "expert_scales must be a 2D tensor");
     TORCH_CHECK(expert_ids.sizes() == expert_scales.sizes(), "expert_ids and expert_scales must have the same shape");
+    TORCH_CHECK(expert_scales.scalar_type() == torch::kFloat32,
+                "expert_scales must be float32, got ",
+                expert_scales.dtype().name());
 
     int         size   = static_cast<int>(expert_ids.numel());
     hipStream_t stream = reinterpret_cast<hipStream_t>(hip_stream);

@@ -3,6 +3,11 @@ import math
 import random
 import unittest
 
+import pytest
+
+# Restore the original A10 route while retaining H20 coverage.
+pytestmark = pytest.mark.multi_arch_cuda
+
 import torch
 import torch.nn.functional as F
 

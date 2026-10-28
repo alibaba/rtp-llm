@@ -11,9 +11,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 
+@pytest.mark.gpu(type="H20")
 class TestQwen3NextQkvzBaFusion(unittest.TestCase):
     """Validates fusion correctness against the 2-GEMM baseline."""
 
@@ -32,7 +34,10 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         fake_impl = SimpleNamespace(
             _is_gfx950=lambda: False,
             py_env_configs=SimpleNamespace(
-                py_hw_kernel_config=SimpleNamespace(use_swizzleA=True)
+                py_hw_kernel_config=SimpleNamespace(
+                    force_legacy_fp8_ptpc=False,
+                    use_swizzleA=True,
+                ),
             ),
         )
         aligned_ba = torch.randn(2048, 16, dtype=torch.bfloat16, device=self.device)
@@ -401,6 +406,7 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         self.assertEqual(len(ba_calls), 1, "fallback must build in_proj_ba once")
         return hw, ba_calls[0].kwargs.get("hw_kernel_config")
 
+    @pytest.mark.gpu(type="MI308X")
     @unittest.skipUnless(
         torch.version.hip is not None,
         "ROCm-only BA swizzle dispatch",
@@ -415,6 +421,7 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
             "unaligned BA must pass hw_kernel_config=None (NoSwizzle dispatch)",
         )
 
+    @pytest.mark.gpu(type="MI308X")
     @unittest.skipUnless(
         torch.version.hip is not None,
         "ROCm-only BA swizzle dispatch",

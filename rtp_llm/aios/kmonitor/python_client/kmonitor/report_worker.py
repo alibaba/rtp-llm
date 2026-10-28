@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import traceback
-from threading import Lock, Thread
+from threading import Event, Lock, Thread, current_thread
 from typing import Dict, List
 
 from rtp_llm.aios.kmonitor.python_client.flume.pyflume import FlumeClient
@@ -35,6 +35,8 @@ class ReportWorker(object):
         self.metrics: Dict[str, MetricBase] = {}
         self.metric_lock: Lock = Lock()
         self.started = False
+        self._stop_event = Event()
+        self._report_thread = None
         if HippoHelper.is_hippo_env():
             self.flume = FlumeClient(
                 _ReportWorker__REPORT_HOST,
@@ -106,21 +108,29 @@ class ReportWorker(object):
 
     def report_cycle(self) -> None:
         try:
-            while self.started:
-                time.sleep(_ReportWorker__REPORT_INTERVAL_SECOND)
+            while not self._stop_event.wait(_ReportWorker__REPORT_INTERVAL_SECOND):
                 self.do_report()
         except Exception as e:
             logging.error(f"kmonitor report thread error: {e} {traceback.format_exc()}")
+        self.started = False
         logging.warn("kmonitor report process exited.")
 
     def start(self) -> None:
+        if self.started:
+            return
         self.started = True
-        report_thread = Thread(target=self.report_cycle)
-        report_thread.daemon = True
-        report_thread.start()
+        self._stop_event.clear()
+        self._report_thread = Thread(target=self.report_cycle)
+        self._report_thread.daemon = True
+        self._report_thread.start()
 
     def stop(self) -> None:
         self.started = False
+        self._stop_event.set()
+        report_thread = self._report_thread
+        if report_thread is not None and report_thread is not current_thread():
+            report_thread.join(timeout=_ReportWorker__REPORT_INTERVAL_SECOND + 1)
+        self._report_thread = None
 
 
 report_worker = ReportWorker()

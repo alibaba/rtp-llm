@@ -60,8 +60,8 @@ def _silu_and_mul_masked_per_token_quant_int8_kernel(
 
         absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
         output_s = absmax / 127.0
-        output_q = tl.clamp(gate_up / output_s, -128.0, 127.0)
-        output_q = tldevice.round(output_q).to(tl.int8)
+        output_q = tl.clamp(tldevice.div_rn(gate_up, output_s), -128.0, 127.0)
+        output_q = tldevice.float2int_rn(output_q).to(tl.int8)
 
         tl.store(
             output_ptr_offs + token_index * stride_output_1,

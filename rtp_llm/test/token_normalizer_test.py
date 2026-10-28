@@ -12,6 +12,10 @@ import os
 import unittest
 from unittest.mock import Mock
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import TokenNormalizer
 
 

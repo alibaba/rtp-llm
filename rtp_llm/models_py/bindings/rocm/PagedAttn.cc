@@ -132,6 +132,20 @@ forward_param PagedAttnDecodeOp::forward(const torch::Tensor&                   
 }
 
 void registerPagedAttnDecodeOp(py::module& m) {
+    // Register forward_param struct
+    py::class_<forward_param>(m, "forward_param")
+        .def_readwrite("out", &forward_param::out)
+        .def_readwrite("exp_sums", &forward_param::exp_sums)
+        .def_readwrite("max_logits", &forward_param::max_logits)
+        .def_readwrite("tmp_out", &forward_param::tmp_out)
+        .def_readwrite("query", &forward_param::query)
+        .def_readwrite("num_kv_heads", &forward_param::num_kv_heads)
+        .def_readwrite("scale", &forward_param::scale)
+        .def_readwrite("context_lens", &forward_param::context_lens)
+        .def_readwrite("block_size", &forward_param::block_size)
+        .def_readwrite("max_seq_len", &forward_param::max_seq_len)
+        .def_readwrite("partition_size", &forward_param::partition_size);
+
     py::class_<PagedAttnDecodeOp>(m, "PagedAttnDecodeOp")
         .def(py::init<const AttentionConfigs&, int, int64_t, const FMHAConfig&>(),
              py::arg("attn_configs"),
@@ -150,20 +164,6 @@ void registerPagedAttnDecodeOp(py::module& m) {
              py::arg("kv_cache"),
              py::arg("params"),
              "Perform the forward pass of decoder self attention");
-
-    // Register forward_param struct
-    py::class_<forward_param>(m, "forward_param")
-        .def_readwrite("out", &forward_param::out)
-        .def_readwrite("exp_sums", &forward_param::exp_sums)
-        .def_readwrite("max_logits", &forward_param::max_logits)
-        .def_readwrite("tmp_out", &forward_param::tmp_out)
-        .def_readwrite("query", &forward_param::query)
-        .def_readwrite("num_kv_heads", &forward_param::num_kv_heads)
-        .def_readwrite("scale", &forward_param::scale)
-        .def_readwrite("context_lens", &forward_param::context_lens)
-        .def_readwrite("block_size", &forward_param::block_size)
-        .def_readwrite("max_seq_len", &forward_param::max_seq_len)
-        .def_readwrite("partition_size", &forward_param::partition_size);
 
     // Add atrex paged_attention_atrex binding
     m.def("paged_attention_atrex",

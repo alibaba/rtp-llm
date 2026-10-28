@@ -9,7 +9,6 @@ py_test (
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
-
 py_test (
     name = "moe_ep_reorder_test",
     srcs = ["moe_ep_reorder_test.py"],
@@ -26,4 +25,3 @@ py_test (
     ],
     exec_properties = {"gpu": "L20_CU13"},
 )
-

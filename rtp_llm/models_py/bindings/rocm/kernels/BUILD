@@ -1,5 +1,5 @@
 load("//:def.bzl", "rocm_copts", "any_cuda_copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@rtp_llm//bazel:defs.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm:__subpackages__"])
 
 rocm_deps = [

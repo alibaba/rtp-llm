@@ -4,6 +4,8 @@
 This is intentionally a runnable smoke, not a unit test. It posts real HTTP SSE
 requests to a live frontend and fails on engine error packets, the old fake KV
 allocation wording, or non-JSON final content.
+
+Run it from an installed package with ``rtp-llm-json-format-smoke``.
 """
 
 from __future__ import annotations

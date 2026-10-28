@@ -1,5 +1,9 @@
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
     streaming_parse_result_to_tool_calls,
 )

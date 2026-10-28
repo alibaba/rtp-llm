@@ -13,6 +13,10 @@ import os
 from unittest import SkipTest, TestCase, main, skipIf
 from unittest.mock import patch
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import (

@@ -20,7 +20,7 @@ def rpm_library(
         lib_path=None,
         rpms=None,
         static_lib=None,
-        static_libs=[], # multi static libs, do not add to cc_library, provide .a filegroup
+        static_libs=[],  # multi static libs, do not add to cc_library, provide .a filegroup
         shared_lib=None,
         shared_libs=[],
         bins=[],
@@ -30,11 +30,11 @@ def rpm_library(
         header_only=False,
         tags={},
         **kwargs):
-    hdrs = [ "include/" + hdr for hdr in hdrs ]
+    hdrs = ["include/" + hdr for hdr in hdrs]
     outs = [] + hdrs
     if static_lib:
         outs.append(static_lib)
-    if shared_lib :
+    if shared_lib:
         outs.append(shared_lib)
     if not rpms:
         rpms = ["@" + name + "//file:file"]
@@ -46,7 +46,6 @@ def rpm_library(
         else:
             bash_cmd += "&& cp -rf " + include_path + "/* ../$(@D)/include"
     if len(static_libs) > 0:
-        # extract all .a files to its own directory in case .o file conflict, and ar them together to target .a file.
         bash_cmd += "&& for a in " + " ".join(static_libs) + "; do d=$${a%.a} && mkdir $$d && cd $$d && ar x ../" + lib_path + "$$a && cd -; done && ar rc ../$(@D)/" + static_lib + " */*.o"
     elif static_lib:
         bash_cmd += "&& cp -L " + lib_path + "/*.a" + " ../$(@D)/"
@@ -113,7 +112,7 @@ def rpm_library(
         )
     else:
         import_target = name + "_import"
-        alwayslink = static_lib!=None
+        alwayslink = static_lib != None
         native.cc_import(
             name = import_target,
             static_library = static_lib,
@@ -290,4 +289,61 @@ def _read_release_version_impl(repository_ctx):
 read_release_version = repository_rule(
     implementation = _read_release_version_impl,
     attrs = {},
+)
+
+def _torch_repo_impl(ctx):
+    provider = ctx.os.environ.get("RTP_TORCH_PROVIDER", "native")
+    if provider == "hermetic":
+        # Alias the real pinned archive targets without importing host Torch.
+        ctx.file("BUILD", 'load("@arch_config//:arch_select.bzl", "torch_archive_aliases")\ntorch_archive_aliases()\n')
+        return
+    if provider != "native":
+        fail("RTP_TORCH_PROVIDER must be native or hermetic, got: " + provider)
+    torch_path = ctx.os.environ.get("TORCH_ROOT")
+    if not torch_path:
+        # Explicit environment and active Native venvs take priority over the
+        # default image interpreter configured by .bazelrc.
+        python_bin = ctx.os.environ.get("PYTHON_BIN_PATH")
+        if not python_bin:
+            virtual_env = ctx.os.environ.get("VIRTUAL_ENV")
+            if virtual_env:
+                python_bin = virtual_env + "/bin/python3"
+        if not python_bin:
+            active_python = ctx.which("python3")
+            if active_python and ctx.path(str(active_python.dirname.dirname) + "/pyvenv.cfg").exists:
+                python_bin = str(active_python)
+        if not python_bin:
+            python_bin = "/opt/conda310/bin/python3"
+            if not ctx.path(python_bin).exists:
+                python_bin = "python3"
+        result = ctx.execute([python_bin, "-c", "import torch; print(torch.__path__[0])"])
+        if result.return_code == 0:
+            torch_path = result.stdout.strip()
+        if not torch_path:
+            fail("TORCH_ROOT environment variable is not set and torch could not be " +
+                 "auto-detected via " + python_bin + ". " +
+                 "Run 'pip install --compile -e .' first (setup.py generates .torch_bazelrc), " +
+                 "or set TORCH_ROOT manually to your torch installation path.\n" +
+                 "Interpreter exit code: " + str(result.return_code) +
+                 "\nstdout:\n" + result.stdout + "\nstderr:\n" + result.stderr)
+
+    if not ctx.path(torch_path).exists:
+        fail("TORCH_ROOT path does not exist: " + torch_path)
+
+    ctx.file("BUILD", ctx.read(ctx.attr.build_file))
+    ctx.symlink(torch_path, "torch")
+    # CUDA 13 wheels install NVSHMEM beside torch in the same environment.
+    nvidia_path = ctx.path(str(ctx.path(torch_path).dirname) + "/nvidia")
+    if nvidia_path.exists:
+        ctx.symlink(nvidia_path, "nvidia")
+    torch_libs_path = ctx.path(str(ctx.path(torch_path).dirname) + "/torch.libs")
+    if torch_libs_path.exists:
+        ctx.symlink(torch_libs_path, "torch.libs")
+
+torch_local_repository = repository_rule(
+    implementation = _torch_repo_impl,
+    attrs = {
+        "build_file": attr.label(mandatory = True, allow_single_file = True),
+    },
+    environ = ["TORCH_ROOT", "PYTHON_BIN_PATH", "VIRTUAL_ENV", "PATH", "RTP_TORCH_PROVIDER"],
 )

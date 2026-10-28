@@ -261,6 +261,7 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
     When ssm_states is provided, the kernel also writes RTP SSM block cache
     state directly. Without ssm_states it runs the same fused no-store path.
     """
+    _validate_flydsl_chunk_gdn_inputs(q=q, k=k, v=v, beta=beta)
     if not is_flydsl_chunk_gdn_enabled():
         raise RuntimeError(
             "chunk_gated_delta_rule_flydsl_with_cache_store requires USE_FLYDSL=1 "
@@ -274,6 +275,16 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
         )
+    # Avoid GPU sync in the hot path: only validate cu_seqlens when it is on CPU.
+    # GPU-side cu_seqlens are assumed to come from code that already validated input
+    # lengths on the host (e.g., NormalModelInputGatherer).
+    if cu_seqlens is not None and not cu_seqlens.is_cuda:
+        seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        if (seq_lengths <= 0).any():
+            raise ValueError(
+                "FlyDSL chunk GDN requires all sequence lengths > 0, "
+                f"but got min length {seq_lengths.min().item()}."
+            )
     if cu_seqlens is not None and initial_state is not None:
         expected_states = len(cu_seqlens) - 1
         if initial_state.shape[0] != expected_states:
@@ -286,7 +297,6 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
     # megakernel itself hard-codes T.bf16 for the in-LDS beta pipeline
     # (flydsl_chunk_gdn_mi308x.py: lds_beta is T.bf16, buffer_load_bf16_or_zero
     # for beta), so we cast to bf16 only when launching the megakernel below.
-    _validate_flydsl_chunk_gdn_inputs(q=q, k=k, v=v, beta=beta)
     _, _, H, V = v.shape
     K = k.shape[-1]
     if ssm_states is not None:

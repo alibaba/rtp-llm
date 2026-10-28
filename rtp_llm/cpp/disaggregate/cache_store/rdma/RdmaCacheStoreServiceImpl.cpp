@@ -114,7 +114,7 @@ void RdmaCacheStoreServiceImpl::transferImpl(::google::protobuf::RpcController* 
 
     auto context = std::make_shared<CacheTransferServiceImplContext>(
         request, response, done, local_blocks, remote_blocks, locked_block_buffer_manager_, memory_util_, connection);
-        
+
     int block_count = local_blocks.size();
     int total_block_size = block_count > 0 ? local_blocks[0]->len * block_count : 0;
     auto collector = std::make_shared<CacheStoreTransferMetricsCollector>(metrics_reporter_, block_count, total_block_size);

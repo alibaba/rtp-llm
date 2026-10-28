@@ -1,4 +1,19 @@
+import argparse
+import warnings
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+class _DeprecatedFmhaFlag(argparse.Action):
+    """No-op action that emits a deprecation warning when the flag is used."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        warnings.warn(
+            f"{option_string} is deprecated and will be removed in a future release. "
+            f"Use --attn_backend / --disable_attn_backends instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 def init_fmha_group_args(parser, fmha_config):
@@ -6,6 +21,49 @@ def init_fmha_group_args(parser, fmha_config):
     # FMHA
     ##############################################################################################################
     fmha_group = parser.add_argument_group("FMHA")
+
+    # New string-based attention backend selection
+    fmha_group.add_argument(
+        "--attn_backend",
+        env_name="ATTN_BACKEND",
+        bind_to=(fmha_config, "attn_backend"),
+        type=str,
+        default="auto",
+        help="Attention backend selection. 'auto' = priority-ordered auto-selection (default). "
+        "'none' = disable all attention. Or a specific backend name: "
+        "trt, trt_paged, flashinfer, py_flashinfer, py_flashinfer_paged, xqa, "
+        "trtllm_gen, trtllm_spec, headwise, headwise_fp8, fa3_paged_short_graph, "
+        "aiter_asm, aiter, aiter_triton, aiter_paged, cp_flashinfer, "
+        "flashinfer_mla, sparse_mla, ppu_fa3.",
+    )
+    fmha_group.add_argument(
+        "--prefill_attn_backend",
+        env_name="PREFILL_ATTN_BACKEND",
+        bind_to=(fmha_config, "prefill_attn_backend"),
+        type=str,
+        default="",
+        help="Override attention backend for prefill stage (including chunked prefill "
+        "and speculative verify). Empty = use --attn_backend.",
+    )
+    fmha_group.add_argument(
+        "--decode_attn_backend",
+        env_name="DECODE_ATTN_BACKEND",
+        bind_to=(fmha_config, "decode_attn_backend"),
+        type=str,
+        default="",
+        help="Override attention backend for decode stage. Empty = use --attn_backend.",
+    )
+    fmha_group.add_argument(
+        "--disable_attn_backends",
+        env_name="DISABLE_ATTN_BACKENDS",
+        bind_to=(fmha_config, "disable_attn_backends"),
+        type=str,
+        default="",
+        help="Comma-separated list of attention backend NAMEs to disable. "
+        "Example: --disable_attn_backends=flashinfer,xqa",
+    )
+
+    # Legacy boolean flags (kept for backward compatibility)
     fmha_group.add_argument(
         "--enable_fmha",
         env_name="ENABLE_FMHA",
@@ -15,28 +73,20 @@ def init_fmha_group_args(parser, fmha_config):
         help="控制是否启用Fused Multi-Head Attention (FMHA) 功能。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
-        "--enable_flashinfer_trtllm_gen",
-        env_name="ENABLE_FLASHINFER_TRTLLM_GEN",
-        bind_to=(fmha_config, "enable_flashinfer_trtllm_gen"),
+        "--enable_trt_fmha",
+        env_name="ENABLE_TRT_FMHA",
+        bind_to=(fmha_config, "enable_trt_fmha"),
         type=str2bool,
         default=True,
-        help="控制是否启用FlashInfer TRT-LLM Gen Attention实现。支持SM100。可选值: True (启用), False (禁用)。",
+        help="控制是否启用经TensorRT(V2版本)优化的FMHA功能。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
-        "--enable_flashinfer_trt_fmha_v2",
-        env_name="ENABLE_FLASHINFER_TRT_FMHA_V2",
-        bind_to=(fmha_config, "enable_flashinfer_trt_fmha_v2"),
+        "--enable_paged_trt_fmha",
+        env_name="ENABLE_PAGED_TRT_FMHA",
+        bind_to=(fmha_config, "enable_paged_trt_fmha"),
         type=str2bool,
         default=True,
-        help="控制是否启用FlashInfer TRT-LLM FMHA v2连续Prefill。支持SM90和SM12x。可选值: True (启用), False (禁用)。",
-    )
-    fmha_group.add_argument(
-        "--enable_paged_flashinfer_trt_fmha_v2",
-        env_name="ENABLE_PAGED_FLASHINFER_TRT_FMHA_V2",
-        bind_to=(fmha_config, "enable_paged_flashinfer_trt_fmha_v2"),
-        type=str2bool,
-        default=True,
-        help="控制是否启用FlashInfer TRT-LLM FMHA v2 Paged Prefill。支持SM90和SM12x。可选值: True (启用), False (禁用)。",
+        help="控制是否启用Paged TensorRT FMHA功能。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
         "--enable_open_source_fmha",
@@ -47,20 +97,12 @@ def init_fmha_group_args(parser, fmha_config):
         help="控制是否启用开源版本的FMHA实现。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
-        "--enable_paged_open_source_fmha",
-        env_name="ENABLE_PAGED_OPEN_SOURCE_FMHA",
-        bind_to=(fmha_config, "enable_paged_open_source_fmha"),
-        type=str2bool,
-        default=True,
-        help="控制是否启用Paged开源版本的FMHA实现。可选值: True (启用), False (禁用)。",
-    )
-    fmha_group.add_argument(
-        "--disable_flashinfer_native",
-        env_name="DISABLE_FLASHINFER_NATIVE",
-        bind_to=(fmha_config, "disable_flashinfer_native"),
+        "--disable_flash_infer",
+        env_name="DISABLE_FLASH_INFER",
+        bind_to=(fmha_config, "disable_flash_infer"),
         type=str2bool,
         default=False,
-        help="控制是否禁用FlashInfer Native Attention实现。True表示禁用，False表示启用。",
+        help="控制是否禁用FlashInfer Attention机制。设置为 True 启用, False 禁用。",
     )
     fmha_group.add_argument(
         "--disable_flashinfer_hybrid_prefill",
@@ -109,4 +151,28 @@ def init_fmha_group_args(parser, fmha_config):
         type=int,
         default=1024,
         help="控制命中reuse cache后，走absorb attn的最大q_len",
+    )
+
+    # Deprecated flags — kept for backward compatibility, ignored at runtime.
+    # Will be removed in a future release.
+    fmha_group.add_argument(
+        "--enable_paged_open_source_fmha",
+        action=_DeprecatedFmhaFlag,
+        nargs="?",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    fmha_group.add_argument(
+        "--enable_trtv1_fmha",
+        action=_DeprecatedFmhaFlag,
+        nargs="?",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    fmha_group.add_argument(
+        "--disable_flashinfer_native",
+        action=_DeprecatedFmhaFlag,
+        nargs="?",
+        default=None,
+        help=argparse.SUPPRESS,
     )

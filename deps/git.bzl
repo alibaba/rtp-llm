@@ -6,6 +6,21 @@ load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file"
 def clean_dep(dep):
     return str(Label(dep))
 
+def rules_python_deps():
+    """Register the pinned patched API before transitive dependency fallbacks."""
+    if not native.existing_rule("rules_python"):
+        git_repository(
+            name = "rules_python",
+            remote = "https://github.com/bazelbuild/rules_python.git",
+            commit = "084b877c98b580839ceab2b071b02fc6768f3de6",
+            patches = [
+                "@rtp_llm//patches/rules_python:0001-add-extra-data.patch",
+                "@rtp_llm//patches/rules_python:0002-remove-import-from-rules_cc.patch",
+                "@rtp_llm//patches/rules_python:0001-xx.patch",
+                "@rtp_llm//patches/rules_python:0003-package-wheel-patches.patch",
+            ],
+        )
+
 def git_deps():
     git_repository(
         name = "rules_cc",
@@ -13,17 +28,7 @@ def git_deps():
         commit = "1477dbab59b401daa94acedbeaefe79bf9112167",
     )
 
-    git_repository(
-        name = "rules_python",
-        remote = "https://github.com/bazelbuild/rules_python.git",
-        commit = "084b877c98b580839ceab2b071b02fc6768f3de6",
-        patches = [
-            "@rtp_llm//patches/rules_python:0001-add-extra-data.patch",
-            "@rtp_llm//patches/rules_python:0002-remove-import-from-rules_cc.patch",
-            "@rtp_llm//patches/rules_python:0001-xx.patch",
-            "@rtp_llm//patches/rules_python:0003-package-wheel-patches.patch",
-        ],
-    )
+    rules_python_deps()
 
     new_git_repository(
         name = "cutlass_h_moe",
@@ -226,4 +231,67 @@ def git_deps():
     native.bind(
         name = "zlib",
         actual = "@zlib_archive//:zlib",
+    )
+
+    new_git_repository(
+        name = "cutlass",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "80243e0b8c644f281e2beb0c20fe78cf7b267061",
+        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
+    )
+
+    new_git_repository(
+        name = "cutlass3.6",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "cc3c29a81a140f7b97045718fb88eb0664c37bd7",
+        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
+        patches = ["@rtp_llm//3rdparty/cutlass:0001-cuda12.4-compat.patch"],
+    )
+
+    new_git_repository(
+        name = "cutlass3.6_cu13",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "b84e9802d84b16bcb4e92338fcf0a04785df9236",
+        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
+    )
+
+    new_git_repository(
+        name = "flashinfer_cpp",
+        remote = "https://github.com/flashinfer-ai/flashinfer.git",
+        commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
+        build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer.BUILD")),
+        patches = [
+            "@rtp_llm//3rdparty/flashinfer:0001-fix-compile.patch",
+            "@rtp_llm//3rdparty/flashinfer:0002-dispatch-group-size.patch",
+            "@rtp_llm//3rdparty/flashinfer:0003-tanh-compatibility.patch",
+            "@rtp_llm//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
+            "@rtp_llm//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
+            "@rtp_llm//3rdparty/flashinfer:0007-fix-nan.patch",
+            "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
+            "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
+            "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
+        ],
+    )
+
+    new_git_repository(
+        name = "flashinfer_cpp_cu13",
+        remote = "https://github.com/flashinfer-ai/flashinfer.git",
+        commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
+        build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer_cu13.BUILD")),
+        patches = [
+            "@rtp_llm//3rdparty/flashinfer:0001-fix-compile.patch",
+            "@rtp_llm//3rdparty/flashinfer:0002-dispatch-group-size.patch",
+            "@rtp_llm//3rdparty/flashinfer:0003-tanh-compatibility.patch",
+            "@rtp_llm//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
+            "@rtp_llm//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
+            "@rtp_llm//3rdparty/flashinfer:0007-fix-nan.patch",
+            "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
+            "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
+            "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
+            "@rtp_llm//3rdparty/flashinfer:0011-cuda13-cub-compat.patch",
+            "@rtp_llm//3rdparty/flashinfer:0012-pymoduledef-missing-fields.patch",
+            "@rtp_llm//3rdparty/flashinfer:0013-cuda13-kernel-visibility-scheduler.patch",
+            "@rtp_llm//3rdparty/flashinfer:0014-cuda13-kernel-visibility-decode.patch",
+            "@rtp_llm//3rdparty/flashinfer:0015-cuda13-occupancy-skip.patch",
+        ],
     )

@@ -151,12 +151,20 @@ class RequestInactivityTest {
         assertLiveAndCharged();
 
         registry.expireInactiveRequest(slot, handedOffAtMs + TIMEOUT_MS);
-        assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
-        assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
+        assertLiveAndCharged();
+        assertFalse(item.future().isDone(), "a missing callback is still an unproved sent batch");
 
-        // A late delivery acknowledgement must not resurrect the expired request.
+        // A real late ACK can confirm this same live claim; it does not release ownership.
         claim.complete(DeliveryResult.delivered());
-        assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
+        assertTrue(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
+        assertLiveAndCharged();
+        registry.processDecodeStatus(
+                decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
+        assertEquals(0, registry.liveRequestCount());
+        assertEquals(
+                RequestState.Phase.COMPLETED, registry.getRequestState(REQUEST_ID, 0L).state());
+        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.EXPIRED));
+        verify(prefill, never()).expireCommittedItem(any());
     }
 
     @ParameterizedTest
@@ -168,8 +176,20 @@ class RequestInactivityTest {
         claim.complete(new DeliveryResult(outcome, new IllegalStateException("reply was lost")));
         assertLiveAndCharged();
         registry.expireInactiveRequest(slot, handedOffAtMs + TIMEOUT_MS);
-        assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
+        assertLiveAndCharged();
+        assertFalse(
+                item.future().isDone(), "silence is not proof that EnqueueBatch did not execute");
+        registry.processDecodeStatus(
+                decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 42L));
+        assertEquals(0, registry.liveRequestCount());
+        assertEquals(
+                outcome == DeliveryResult.Status.TIMED_OUT
+                        ? RequestState.Phase.TIMED_OUT
+                        : RequestState.Phase.FAILED,
+                registry.getRequestState(REQUEST_ID, 0L).state());
         assertFalse(item.future().get(1L, TimeUnit.SECONDS).isSuccess());
+        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.EXPIRED));
+        verify(prefill, never()).expireCommittedItem(any());
     }
 
     @Test
@@ -187,9 +207,16 @@ class RequestInactivityTest {
                             slot, "requireCancellationFirstCauseLocked"));
         }
         registry.expireInactiveRequest(slot, handedOffAtMs + TIMEOUT_MS);
-        assertExpiredAndReleased(RequestState.Phase.CANCELLED);
+        assertLiveAndCharged();
         registry.expireInactiveRequest(slot, registeredAtMs + 2L * TIMEOUT_MS);
-        assertExpiredAndReleased(RequestState.Phase.CANCELLED);
+        assertLiveAndCharged();
+        registry.processDecodeStatus(
+                decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
+        assertEquals(0, registry.liveRequestCount());
+        assertEquals(
+                RequestState.Phase.CANCELLED, registry.getRequestState(REQUEST_ID, 0L).state());
+        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.EXPIRED));
+        verify(prefill, never()).expireCommittedItem(any());
     }
 
     @ParameterizedTest
@@ -263,7 +290,14 @@ class RequestInactivityTest {
                             slot, "requestInactiveLocked", lateStatusAt));
         }
         registry.expireInactiveRequest(slot, lateStatusAt);
-        assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
+        assertLiveAndCharged();
+        assertFalse(item.future().isDone());
+        registry.processDecodeStatus(
+                decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 42L));
+        assertEquals(0, registry.liveRequestCount());
+        assertEquals(RequestState.Phase.FAILED, registry.getRequestState(REQUEST_ID, 0L).state());
+        verify(decode, never()).release(any(), eq(DecodeEndpoint.ReleaseReason.EXPIRED));
+        verify(prefill, never()).expireCommittedItem(any());
     }
 
     @ParameterizedTest

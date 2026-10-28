@@ -935,18 +935,25 @@ class TestOfflineAnalyze(unittest.TestCase):
 
             async def fake_send_one(session, prompt, output_len):
                 await asyncio.sleep(0)
+                fake_send_one.completed += 1
+                if fake_send_one.completed == 3:
+                    clock.perf_counter.return_value = 111.0
                 return {"aux_info": [{"input_len": 1, "output_len": output_len}]}
 
+            fake_send_one.completed = 0
             runner._status_sampler = fake_status_sampler
             runner._send_one = fake_send_one
 
             with patch.object(
                 offline_runner.aiohttp, "ClientSession", FakeClientSession
-            ):
+            ), patch.object(offline_runner, "time", wraps=time) as clock:
+                # Advance the dispatch clock on completion, independently of
+                # thread scheduling latency on a busy remote worker.
+                clock.perf_counter.return_value = 100.0
                 return await runner._dispatch(
                     FakeGenerator(),
                     concurrency_limit=2,
-                    duration_s=0.01,
+                    duration_s=10,
                     drain_timeout_s=1,
                 )
 
@@ -1104,16 +1111,17 @@ class TestOfflineAnalyze(unittest.TestCase):
             async def hold_first_request(session, prompt, output_len):
                 while not second_prompt_generated.is_set():
                     await asyncio.sleep(0)
-                await asyncio.sleep(0.05)
+                clock.perf_counter.return_value = 111.0
                 return {"aux_info": [{"input_len": 1, "output_len": output_len}]}
 
             runner._status_sampler = fake_status_sampler
             runner._send_one = hold_first_request
             with patch.object(
                 offline_runner.aiohttp, "ClientSession", FakeClientSession
-            ):
+            ), patch.object(offline_runner, "time", wraps=time) as clock:
+                clock.perf_counter.return_value = 100.0
                 result = await runner._dispatch(
-                    gen, concurrency_limit=1, duration_s=0.02, drain_timeout_s=1
+                    gen, concurrency_limit=1, duration_s=10, drain_timeout_s=1
                 )
             dumped_ids = [
                 json.loads(line)["id"] for line in dump_file.getvalue().splitlines()

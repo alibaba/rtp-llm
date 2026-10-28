@@ -276,6 +276,11 @@ class DeliverySettlementTest {
     void terminalCleanupFailureDoesNotScheduleBackgroundRetry() throws Exception {
         Member member = member(61L, 61L);
         ledger.commit(61L, List.of(member.item()));
+        // A matching Engine status is positive execution evidence; silence before it is not.
+        member.slot()
+                .processDecodeStatus(
+                        member.item().decodeEp(),
+                        DecodeEndpoint.WorkerStatusFact.active(member.item().decodeReservation()));
         doThrow(new IllegalStateException("injected expiry cleanup failure"))
                 .when(prefill)
                 .expireCommittedItem(member.item());

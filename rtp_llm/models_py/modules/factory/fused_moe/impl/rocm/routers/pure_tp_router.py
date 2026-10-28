@@ -1,7 +1,6 @@
 from abc import abstractmethod
 from typing import Any, Optional, Tuple
 
-import aiter
 import torch
 
 from rtp_llm.device.device_impl import is_gfx950

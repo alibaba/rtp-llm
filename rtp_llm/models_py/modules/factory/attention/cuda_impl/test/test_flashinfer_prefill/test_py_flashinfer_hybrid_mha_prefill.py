@@ -3,6 +3,7 @@ import unittest
 from typing import List
 from unittest import mock
 
+import pytest
 import torch
 from flashinfer.cascade import merge_state
 from flashinfer.prefill import single_prefill_with_kv_cache
@@ -18,6 +19,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
+
+
+pytestmark = pytest.mark.multi_arch_cuda
 
 
 class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
@@ -524,18 +528,29 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
 class TestHybridPrefillDisableGating(unittest.TestCase):
     def test_disable_gating(self):
         config = FMHAConfig()
-        impl_name = PyFlashinferHybridPrefillImpl.__name__
 
         config.disable_flashinfer_hybrid_prefill = False
-        config.disable_flashinfer_native = False
-        self.assertFalse(attn_factory._is_fmha_impl_disabled(impl_name, config))
+        config.disable_flash_infer = False
+        self.assertFalse(
+            attn_factory._is_fmha_impl_disabled_legacy(
+                PyFlashinferHybridPrefillImpl, config
+            )
+        )
 
         config.disable_flashinfer_hybrid_prefill = True
-        self.assertTrue(attn_factory._is_fmha_impl_disabled(impl_name, config))
+        self.assertTrue(
+            attn_factory._is_fmha_impl_disabled_legacy(
+                PyFlashinferHybridPrefillImpl, config
+            )
+        )
 
         config.disable_flashinfer_hybrid_prefill = False
-        config.disable_flashinfer_native = True
-        self.assertTrue(attn_factory._is_fmha_impl_disabled(impl_name, config))
+        config.disable_flash_infer = True
+        self.assertTrue(
+            attn_factory._is_fmha_impl_disabled_legacy(
+                PyFlashinferHybridPrefillImpl, config
+            )
+        )
 
 
 class TestHybridPrefillSupport(unittest.TestCase):

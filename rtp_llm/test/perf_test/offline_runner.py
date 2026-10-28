@@ -804,6 +804,10 @@ class OfflineRunner:
                 except asyncio.TimeoutError:
                     break
 
+                if time.perf_counter() >= deadline:
+                    sem.release()
+                    break
+
                 if isinstance(gen, WorkloadGenerator):
                     gen.commit(prepared)
                 submit_time = time.perf_counter()

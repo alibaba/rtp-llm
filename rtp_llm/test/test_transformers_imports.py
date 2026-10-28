@@ -11,8 +11,12 @@ import importlib
 import json
 import os
 import unittest
+from pathlib import Path
 
 import rtp_llm.frontend.tokenizer_factory.tokenizers  # triggers compat shims
+import transformers
+from tokenizers import Tokenizer, models
+from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 SCAN_SUBDIRS = [
     "rtp_llm/models",
@@ -38,7 +42,9 @@ EXCLUDE_DIRS = {"__pycache__", "3rdparty"}
 
 
 def _find_workspace_root():
-    srcdir = os.environ["TEST_SRCDIR"]
+    srcdir = os.environ.get("TEST_SRCDIR")
+    if not srcdir:
+        return str(Path(__file__).resolve().parents[2])
     workspace = os.environ.get("TEST_WORKSPACE", "")
     return os.path.join(srcdir, workspace)
 
@@ -131,6 +137,41 @@ def _check_imports(imports):
 
 
 class TestTransformersImports(unittest.TestCase):
+
+    def test_legacy_tbstars_fast_tokenizer_gets_byte_level_pretokenizer(self):
+        if int(transformers.__version__.split(".", 1)[0]) != 5:
+            self.skipTest("compatibility shim is specific to transformers 5")
+
+        class FlotTokenizerFast(PreTrainedTokenizerFast):
+            pass
+
+        FlotTokenizerFast.__module__ = (
+            "internal_source.rtp_llm.tokenizers.tokenization_flot_fast"
+        )
+        backend = Tokenizer(models.WordLevel({"<unk>": 0}, unk_token="<unk>"))
+        self.assertIsNone(backend.pre_tokenizer)
+
+        tokenizer = FlotTokenizerFast(
+            tokenizer_object=backend,
+            unk_token="<unk>",
+            add_prefix_space=True,
+        )
+
+        state = json.loads(tokenizer.backend_tokenizer.pre_tokenizer.__getstate__())
+        self.assertEqual(state["type"], "ByteLevel")
+        self.assertTrue(state["add_prefix_space"])
+
+    def test_unrelated_fast_tokenizer_keeps_missing_pretokenizer(self):
+        class UnrelatedFastTokenizer(PreTrainedTokenizerFast):
+            pass
+
+        backend = Tokenizer(models.WordLevel({"<unk>": 0}, unk_token="<unk>"))
+        tokenizer = UnrelatedFastTokenizer(
+            tokenizer_object=backend,
+            unk_token="<unk>",
+        )
+
+        self.assertIsNone(tokenizer.backend_tokenizer.pre_tokenizer)
 
     def test_source_imports(self):
         root = _find_workspace_root()

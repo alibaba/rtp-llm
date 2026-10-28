@@ -1,3 +1,4 @@
+import inspect
 import logging
 from dataclasses import dataclass
 from functools import cache
@@ -24,6 +25,18 @@ def _get_fused_rope_kvcache():
     from rtp_kernel import fused_rope_kvcache
 
     return fused_rope_kvcache
+
+
+@cache
+def _prefill_position_ids_arg() -> str:
+    fn = _get_fused_rope_kvcache().prefill_fused_rope_kvcache
+    return "position_ids" if "position_ids" in inspect.signature(fn).parameters else "cp_position_ids"
+
+
+@cache
+def _decode_has_cu_seqlens() -> bool:
+    fn = _get_fused_rope_kvcache().decode_fused_rope_kvcache
+    return "cu_seqlens" in inspect.signature(fn).parameters
 
 
 @dataclass
@@ -66,10 +79,13 @@ class FusedRopeKVCachePrefillOpBase:
         kv_cache_offset = self.prepare_kv_cache_offset(attn_inputs)
         kv_cache_offset_h = None  # not used
 
-        # CP remaps explicit position IDs alongside the local token shard. Keep
-        # them for models such as Qwen3-VL whose mRoPE positions have three axes;
-        # shuffle indices are only a fallback for models without position IDs.
-        position_ids = select_prefill_position_ids(attn_inputs)
+        # The older ARM rtp-kernel ABI only accepts CP shuffle indices here.
+        if _prefill_position_ids_arg() == "position_ids":
+            position_ids = select_prefill_position_ids(attn_inputs)
+        elif attn_inputs.context_parallel_info is not None:
+            position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
+        else:
+            position_ids = None
 
         return FusedRopeAttnParams(
             kv_cache_offset,
@@ -128,7 +144,7 @@ class FusedRopeKVCachePrefillOpBase:
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
             ),
             padding_offset=params.padding_offset,
-            position_ids=params.position_ids,
+            **{_prefill_position_ids_arg(): params.position_ids},
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,
@@ -326,16 +342,23 @@ class FusedRopeKVCacheDecodeOp:
             )
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
+        decode_args = [qkv]
+        if _decode_has_cu_seqlens():
+            decode_args.extend([params.position_ids, params.sequence_lengths])
+        else:
+            decode_args.append(params.sequence_lengths)
+        decode_args.extend(
+            [
+                params.sequence_lengths.size(0),
+                self.attn_configs.head_num,
+                self.attn_configs.kv_head_num,
+                self.attn_configs.size_per_head,
+                kv_cache.kv_cache_base,
+                params.kv_cache_offset,
+            ]
+        )
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
-            qkv,
-            params.position_ids,
-            params.sequence_lengths,
-            params.sequence_lengths.size(0),
-            self.attn_configs.head_num,
-            self.attn_configs.kv_head_num,
-            self.attn_configs.size_per_head,
-            kv_cache.kv_cache_base,
-            params.kv_cache_offset,
+            *decode_args,
             tokens_per_block=self.attn_configs.kernel_tokens_per_block,
             store_kv=False,
             kv_cache_scale=self._get_kv_scale(kv_cache),

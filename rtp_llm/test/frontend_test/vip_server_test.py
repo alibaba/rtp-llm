@@ -1,6 +1,10 @@
 import time
 import unittest
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="A10")]
+
 from rtp_llm.server.host_service import VipServerWrapper
 
 

@@ -2,17 +2,24 @@ import asyncio
 import gc
 import importlib
 import json
+import logging
+import os
 import struct
 import sys
+import unittest
+from contextlib import contextmanager
 from enum import Enum
+from typing import AsyncGenerator
+from unittest import TestCase, main
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# Mock the ops module to avoid CUDA dependency in this unit test
-# This MUST be at the very top before any other imports, even before unittest
-mock_ops = MagicMock()
-mock_comm = MagicMock()
-mock_nccl_op = MagicMock()
-mock_compute_ops = MagicMock()
+import torch
+import grpc
+from grpc import StatusCode
+
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
+from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
 
 
 class _FakeRoleType(Enum):
@@ -23,64 +30,67 @@ class _FakeRoleType(Enum):
     FRONTEND = 4
 
 
-mock_comm.nccl_op = mock_nccl_op
-mock_ops.comm = mock_comm
-mock_ops.compute_ops = mock_compute_ops
-mock_ops.RoleType = _FakeRoleType
-sys.modules["rtp_llm.ops"] = mock_ops
-sys.modules["rtp_llm.ops.comm"] = mock_comm
-sys.modules["rtp_llm.ops.compute_ops"] = mock_compute_ops
-sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
+def _mocked_ops_modules():
+    mock_ops = MagicMock()
+    mock_comm = MagicMock()
+    mock_nccl_op = MagicMock()
+    mock_compute_ops = MagicMock()
+    mock_comm.nccl_op = mock_nccl_op
+    mock_ops.comm = mock_comm
+    mock_ops.compute_ops = mock_compute_ops
+    mock_ops.RoleType = _FakeRoleType
+    return {
+        "rtp_llm.ops": mock_ops,
+        "rtp_llm.ops.comm": mock_comm,
+        "rtp_llm.ops.compute_ops": mock_compute_ops,
+        "rtp_llm.ops.comm.nccl_op": mock_nccl_op,
+    }
 
-import logging
-import os
-import unittest
-from typing import AsyncGenerator
-from unittest import TestCase, main
 
-import grpc
-import torch
-from grpc import StatusCode
+@contextmanager
+def _scoped_mocked_ops_modules():
+    mocked = _mocked_ops_modules()
+    missing = object()
+    previous = {name: sys.modules.get(name, missing) for name in mocked}
+    sys.modules.update(mocked)
+    try:
+        yield
+    finally:
+        for name, module in previous.items():
+            if module is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import (
-    GenerateConfig,
-    RoleAddr,
-    RoleType,
-    ThinkingMode,
-)
-from rtp_llm.config.log_config import setup_logging
-from rtp_llm.config.response_format_compiler import ReasoningFormat
-from rtp_llm.cpp.model_rpc.model_rpc_client import (
-    ModelRpcClient,
-    StreamState,
-    _engine_reported_finished,
-    _record_client_span_latency,
-    _record_client_span_usage,
-    _request_completed_normally,
-    _settle_client_span_after_rpc,
-    _trans_rpc_error_code,
-    trans_input,
-    trans_output,
-)
-from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
-    BatchGenerateOutputsPB,
-    ErrorCodePB,
-    ErrorDetailsPB,
-    GenerateConfigPB,
-    GenerateInputPB,
-    GenerateOutputsPB,
-    RoleAddrPB,
-    TensorPB,
-)
-from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
-from rtp_llm.utils.base_model_datatypes import (
-    BatchedTerminalOutputs,
-    GenerateInput,
-    GenerateOutputs,
-    RequestInfo,
-)
+# These imports need lightweight ops symbols, but the replacements must not leak
+# into pytest's later package setup. A leaked MagicMock makes pytest interpret
+# ``mock.pytest_plugins`` as a plugin declaration for every collected test.
+with _scoped_mocked_ops_modules():
+    from rtp_llm.config.generate_config import (
+        GenerateConfig,
+        RoleAddr,
+        RoleType,
+        ThinkingMode,
+    )
+    from rtp_llm.config.log_config import setup_logging
+    from rtp_llm.config.response_format_compiler import ReasoningFormat
+    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+        BatchGenerateOutputsPB,
+        ErrorCodePB,
+        ErrorDetailsPB,
+        GenerateConfigPB,
+        GenerateInputPB,
+        GenerateOutputsPB,
+        RoleAddrPB,
+        TensorPB,
+    )
+    from rtp_llm.utils.base_model_datatypes import (
+        BatchedTerminalOutputs,
+        GenerateInput,
+        GenerateOutputs,
+        RequestInfo,
+    )
+
 from rtp_llm.utils.grpc_util import trans_tensor
 
 
@@ -126,25 +136,64 @@ class FakeStub:
         yield outputs_pb3
 
 
-class FakeModelRpcClient(ModelRpcClient):
+def _load_model_rpc_symbols():
+    module_name = "rtp_llm.cpp.model_rpc.model_rpc_client"
+    with _scoped_mocked_ops_modules():
+        module = importlib.import_module(module_name)
+    return (
+        module.ModelRpcClient,
+        module.StreamState,
+        module.trans_input,
+        module.trans_output,
+        module._engine_reported_finished,
+        module._record_client_span_latency,
+        module._record_client_span_usage,
+        module._request_completed_normally,
+        module._settle_client_span_after_rpc,
+        module._trans_rpc_error_code,
+    )
+
+
+(
+    ModelRpcClient,
+    StreamState,
+    trans_input,
+    trans_output,
+    _engine_reported_finished,
+    _record_client_span_latency,
+    _record_client_span_usage,
+    _request_completed_normally,
+    _settle_client_span_after_rpc,
+    _trans_rpc_error_code,
+) = _load_model_rpc_symbols()
+
+
+class FakeModelRpcClient:
     def __init__(self):
+        self._stream_state_cls = StreamState
+        self._trans_input = trans_input
+        self._trans_output = trans_output
+
+        class _LocalFakeModelRpcClient(ModelRpcClient):
+            pass
+
         # Call parent __init__ with minimal required parameters
-        super().__init__(
+        self._inner_client = _LocalFakeModelRpcClient(
             [],  # addresses: empty list for fake client
             {},  # client_config: empty dict for fake client
             0,  # max_rpc_timeout_ms
             False,  # decode_entrance
         )
-        self.stub = FakeStub()
+        self._inner_client.stub = FakeStub()
 
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        input_pb = trans_input(input_py)
-        stream_state = StreamState()
+        input_pb = self._trans_input(input_py)
+        stream_state = self._stream_state_cls()
 
-        async for response_pb in self.stub.GenerateStreamCall(input_pb):
-            yield trans_output(input_py, response_pb, stream_state)
+        async for response_pb in self._inner_client.stub.GenerateStreamCall(input_pb):
+            yield self._trans_output(input_py, response_pb, stream_state)
 
 
 class _FakeResponseIterator:
@@ -1248,26 +1297,27 @@ class ModelRpcClientTest(TestCase):
                     expected_status,
                 )
 
-    @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()
         generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False)
         input = GenerateInput(
+            request_id=1,
             token_ids=torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]),
+            mm_inputs=[],
             generate_config=generate_config,
         )
         res = asyncio.run(self._run(client, input))
         self.assertEqual(len(res), 3)
-        self.assertEqual(list(res[0].output_ids.shape), [1, 1])
-        self.assertEqual(res[0].output_ids.tolist(), [[0]])
+        self.assertEqual(list(res[0].output_ids.shape), [1])
+        self.assertEqual(res[0].output_ids.tolist(), [0])
         self.assertEqual(res[0].finished, False)
-        self.assertEqual(res[0].aux_info.iter_count, 2)
+        self.assertEqual(res[0].aux_info.iter_count, 1)
         self.assertEqual(res[0].aux_info.output_len, 1)
 
-        self.assertEqual(list(res[1].output_ids.shape), [1, 2])
-        self.assertEqual(res[1].output_ids.tolist(), [[0, 1]])
+        self.assertEqual(list(res[1].output_ids.shape), [2])
+        self.assertEqual(res[1].output_ids.tolist(), [0, 1])
         self.assertEqual(res[1].finished, False)
-        self.assertEqual(res[1].aux_info.iter_count, 3)
+        self.assertEqual(res[1].aux_info.iter_count, 2)
         self.assertEqual(res[1].aux_info.output_len, 2)
 
         self.assertEqual(res[2].finished, True)

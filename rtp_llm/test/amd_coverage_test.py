@@ -1,0 +1,179 @@
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from rtp_llm.test.amd_coverage import (
+    AMD_GTEST_ADAPTER,
+    AMD_GTEST_CASES,
+    AMD_TARGETS,
+    route_amd_items,
+    validate_amd_coverage,
+)
+
+# Keep the original broad-profile parameter identities. The new source obligation
+# is checked inside those existing cases rather than adding unrelated SM8x cases.
+_SHORT_TAIL = next(
+    target
+    for target in AMD_TARGETS
+    if target.name == "moriep_intranode_router_test_short_tail_2gpu"
+)
+_BASELINE_TARGETS = tuple(target for target in AMD_TARGETS if target != _SHORT_TAIL)
+
+
+def _baseline_nodeids():
+    return (
+        [
+            target.path + "::" + (target.case or "test_case")
+            for target in _BASELINE_TARGETS
+        ]
+        + [
+            AMD_GTEST_ADAPTER + f"::test_rocm_beam_search_gtest[{case}]"
+            for case in AMD_GTEST_CASES
+        ]
+        + [_SHORT_TAIL.path + "::" + _SHORT_TAIL.case]
+    )
+
+
+@pytest.mark.parametrize("missing", range(52))
+def test_missing_baseline_target_cannot_be_replaced_by_unrelated_cases(missing):
+    nodeids = _baseline_nodeids()
+    assert len(nodeids) == 53  # Original 52 obligations plus the short-tail method.
+    if missing == 0:
+        with pytest.raises(ValueError, match=_SHORT_TAIL.name):
+            validate_amd_coverage(nodeids[:-1])
+    validate_amd_coverage(nodeids)
+    nodeids.pop(missing)
+    nodeids.extend(f"other.py::test_other[{i}]" for i in range(300))
+    with pytest.raises(ValueError, match="AMD baseline coverage missing"):
+        validate_amd_coverage(nodeids)
+
+
+@pytest.mark.parametrize("target", _BASELINE_TARGETS, ids=lambda target: target.name)
+def test_amd_route_preserves_multicard_requirements(target):
+    markers = [pytest.mark.gpu(type="H20")]
+    item = SimpleNamespace(
+        nodeid=target.path + "::" + (target.case or "test_case"),
+        add_marker=lambda marker, append: (
+            markers.append(marker) if append else markers.insert(0, marker)
+        ),
+    )
+    route_amd_items([item])
+    assert markers[0].kwargs == {"type": "MI308X", "count": target.gpu_count}
+    assert markers[1].kwargs == {"type": "H20"}
+
+    if target.name == "moriep_intranode_router_test_2gpu":
+        assert _SHORT_TAIL.gpu_count == 2
+        item.nodeid = (
+            _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::" + _SHORT_TAIL.case
+        )
+        markers[:] = [pytest.mark.gpu(type="MI308X_ROCM7", count=2)]
+        route_amd_items([item])
+        assert markers[0].kwargs == {"type": "MI308X", "count": 2}
+        assert markers[1].kwargs == {"type": "MI308X_ROCM7", "count": 2}
+        assert [entry.name for entry in AMD_TARGETS if entry.matches(item.nodeid)] == [
+            _SHORT_TAIL.name
+        ]
+        item.nodeid = (
+            _SHORT_TAIL.path + "::MoriEpIntranodeRouterTest::test_unregistered"
+        )
+        markers[:] = [pytest.mark.gpu(type="MI308X_ROCM7", count=2)]
+        route_amd_items([item])
+        assert len(markers) == 1
+
+
+def test_mainline_graph_replay_target_receives_four_gpus():
+    target = next(t for t in AMD_TARGETS if t.name == "test_trt_allreduce_graph_replay")
+    assert target.gpu_count == 4
+
+
+def test_nvidia_dispatch_guard_keeps_cuda_route():
+    nodeid = (
+        "rtp_llm/models_py/triton_kernels/fla/test/test_aiter_flydsl_gdn_decode.py"
+        "::AiterFlydslGdnDecodeCommonTest::test_real_nvidia_device_rejects_aiter_dispatch"
+    )
+    markers = [pytest.mark.gpu(type="H20")]
+    item = SimpleNamespace(
+        nodeid=nodeid,
+        add_marker=lambda marker, append: markers.insert(0, marker),
+    )
+    route_amd_items([item])
+    assert len(markers) == 1
+    assert markers[0].kwargs == {"type": "H20"}
+    assert not any(target.matches(nodeid) for target in AMD_TARGETS)
+
+
+def test_isolated_native_binding_inherits_torch_and_existing_library_paths(monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "pywrapped_adapter",
+        root
+        / "rtp_llm/cpp/models/test/pywrapped_model_cache_store_integration_test.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/existing/rocm/lib")
+    paths = module._native_test_env()["LD_LIBRARY_PATH"].split(":")
+    assert str(Path(module.torch.__file__).resolve().parent / "lib") in paths
+    assert str(root / "rtp_llm/libs") in paths
+    assert str(root / "rtp_llm/libs/test") in paths
+    assert "/existing/rocm/lib" in paths
+
+
+@pytest.mark.parametrize(
+    "xml,exitcode",
+    [
+        ("<testsuites/>", 0),
+        (
+            '<testsuites><testcase classname="RocmBeamSearchOpTest" name="simpleTest" status="notrun" result="suppressed"/></testsuites>',
+            0,
+        ),
+        (
+            '<testsuites><testcase classname="RocmBeamSearchOpTest" name="simpleTest" status="run" result="completed"><skipped/></testcase></testsuites>',
+            0,
+        ),
+        (
+            '<testsuites><testcase classname="RocmBeamSearchOpTest" name="wrongCase" status="run" result="completed"/></testsuites>',
+            0,
+        ),
+        (
+            '<testsuites><testcase classname="RocmBeamSearchOpTest" name="simpleTest" status="run" result="completed"/></testsuites>',
+            1,
+        ),
+    ],
+)
+def test_gtest_adapter_rejects_zero_skipped_wrong_or_failed_case(
+    tmp_path, monkeypatch, xml, exitcode
+):
+    adapter = _load_adapter()
+    binary = tmp_path / "binary"
+    binary.touch()
+    monkeypatch.setattr(adapter, "_BINARY", binary)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/existing/rocm/lib")
+
+    def run(args, **kwargs):
+        assert args[1] == "--gtest_filter=RocmBeamSearchOpTest.simpleTest"
+        library_paths = kwargs["env"]["LD_LIBRARY_PATH"].split(":")
+        assert (
+            str(Path(adapter.torch.__file__).resolve().parent / "lib") in library_paths
+        )
+        assert str(binary.parent.parent) in library_paths
+        assert "/existing/rocm/lib" in library_paths
+        assert kwargs["env"]["RTP_LLM_TEST_DATA_DIR"] == str(tmp_path.resolve())
+        Path(args[2].removeprefix("--gtest_output=xml:")).write_text(xml)
+        return SimpleNamespace(returncode=exitcode, stdout="gtest output", stderr="")
+
+    monkeypatch.setattr(adapter.subprocess, "run", run)
+    with pytest.raises(AssertionError):
+        adapter.test_rocm_beam_search_gtest(AMD_GTEST_CASES[0], tmp_path)
+
+
+def _load_adapter():
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "beam_search_adapter", root / AMD_GTEST_ADAPTER
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

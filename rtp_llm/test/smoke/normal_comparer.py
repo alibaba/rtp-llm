@@ -5,10 +5,9 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel, ValidationError
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
-from smoke.comparison_utils import integer_within_tolerance
-from smoke.utils import create_temporary_copy, save_hidden_states, save_logits
+from rtp_llm.test.smoke.base_comparer import BaseComparer
+from rtp_llm.test.smoke.common_def import ABS_PATH, REL_PATH, QueryStatus, SmokeException
+from rtp_llm.test.smoke.utils import create_temporary_copy, save_hidden_states, save_logits
 
 from rtp_llm.config.generate_config import GenerateConfig
 
@@ -158,6 +157,11 @@ class NormalComparer(BaseComparer):
                 )
             if query_info.generate_config.return_incremental:
                 chunks = [json.loads(chunk.decode("utf-8")[5:]) for chunk in res[:-1]]
+                if not chunks:
+                    raise SmokeException(
+                        QueryStatus.VISIT_FAILED,
+                        "Streaming response chunks are empty but return_incremental is True",
+                    )
                 res = {
                     "response": "".join(chunk["response"] for chunk in chunks),
                     "aux_info": chunks[-1]["aux_info"],
@@ -401,6 +405,7 @@ class NormalComparer(BaseComparer):
 
         # 普通字段直接比较
         for field in [
+            "iter_count",
             "input_len",
             "prefix_len",
             "reuse_len",
@@ -426,25 +431,6 @@ class NormalComparer(BaseComparer):
             expect_val = getattr(expect_aux, field)
             actual_val = getattr(actual_aux, field)
             check_equal(field, expect_val, actual_val)
-
-        if expect_aux.iter_count is not None:
-            tolerance = expect_aux.iter_count_tolerance or 0
-            actual_iter_count = actual_aux.iter_count
-            try:
-                iter_count_matches = integer_within_tolerance(
-                    expect_aux.iter_count, actual_iter_count, tolerance
-                )
-            except ValueError as error:
-                diffs.append(f"{prefix}aux_info.iter_count_tolerance: {error}")
-            else:
-                if not iter_count_matches:
-                    lower = expect_aux.iter_count - tolerance
-                    upper = expect_aux.iter_count + tolerance
-                    diffs.append(
-                        f"{prefix}aux_info.iter_count:\n"
-                        f"    expect: {expect_aux.iter_count} (allowed range: [{lower}, {upper}])\n"
-                        f"    actual:  {repr(actual_iter_count)}"
-                    )
 
         check_equal(
             "beam_responses", expect_aux.beam_responses, actual_aux.beam_responses

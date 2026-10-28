@@ -376,6 +376,7 @@ std::vector<RoleAddr> QueryConverter::getRoleAddrs(const GenerateConfigPB* confi
     return role_addrs;
 }
 
+
 torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
     return TensorPbConvert::pbToTorch(tensor_pb);
 }

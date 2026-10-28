@@ -9,20 +9,41 @@ import multiprocessing as mp
 import unittest
 from unittest import mock
 
+import pytest
+
 logging.basicConfig(level=logging.INFO)
+
+from rtp_llm.device.device_type import is_cuda
+
+# Hard platform gate: allocate_shared_buffer is a CUDA-only pybind binding
+# (defined in models_py/bindings/cuda/UserBuffersOp.cc). The chained import
+# from rtp_llm.models_py.distributed.user_buffers can raise ImportError OR
+# AttributeError depending on how the missing symbol surfaces — short-circuit
+# here on non-CUDA platforms.
+if not is_cuda():
+    pytest.skip(
+        "user_buffers_test requires CUDA IPC (allocate_shared_buffer is "
+        "a NVIDIA-only binding)",
+        allow_module_level=True,
+    )
 
 import torch
 import torch.distributed as dist
 
-from rtp_llm.models_py.distributed.collective_torch import (
-    destroy_distributed_environment,
-    init_distributed_environment,
-    init_user_buffers_environment,
-)
-from rtp_llm.models_py.distributed.user_buffers import (
-    UserBufferCommunicator,
-    get_user_buffers_communicator,
-)
+try:
+    from rtp_llm.models_py.distributed.collective_torch import (
+        destroy_distributed_environment,
+        init_distributed_environment,
+        init_user_buffers_environment,
+    )
+    from rtp_llm.models_py.distributed.user_buffers import (
+        UserBufferCommunicator,
+        get_user_buffers_communicator,
+    )
+except (ImportError, AttributeError) as e:
+    pytest.skip(
+        f"CUDA-only (allocate_shared_buffer unavailable): {e}", allow_module_level=True
+    )
 from rtp_llm.ops import (
     CPRotateMethod,
     NcclCommConfig,
@@ -30,6 +51,8 @@ from rtp_llm.ops import (
     PrefillCPConfig,
 )
 from rtp_llm.test.utils.port_util import PortManager
+
+pytestmark = [pytest.mark.gpu(type="H20", count=4)]
 
 BUFFER_SIZE = 128 * 1024 * 1024
 NCCL_PORT_COUNT = 12
@@ -169,11 +192,7 @@ class TestUserBufferCommunicator(unittest.TestCase):
         if not torch.cuda.is_available():
             self.skipTest("CUDA not available")
 
-        # Set spawn method for multiprocessing
-        try:
-            mp.set_start_method("spawn", force=True)
-        except RuntimeError:
-            pass  # Already set
+        self._mp_ctx = mp.get_context("spawn")
         self.port_manager = PortManager()
 
     def _run_multi_process_test(self, worker_func, world_size: int, test_name: str):
@@ -183,11 +202,11 @@ class TestUserBufferCommunicator(unittest.TestCase):
 
         ports, locks = self.port_manager.get_consecutive_ports(NCCL_PORT_COUNT)
         master_port = ports[0]
+        processes = []
 
         try:
-            processes = []
             for rank in range(world_size):
-                p = mp.Process(
+                p = self._mp_ctx.Process(
                     target=worker_func,
                     args=(rank, world_size, master_port),
                     name=f"rank-{rank}",
@@ -216,6 +235,9 @@ class TestUserBufferCommunicator(unittest.TestCase):
                 if p.is_alive():
                     p.terminate()
                     p.join(timeout=10)
+                    if p.is_alive():
+                        p.kill()
+                        p.join(timeout=5)
             # Release port locks
             for lock in locks:
                 lock.__exit__(None, None, None)

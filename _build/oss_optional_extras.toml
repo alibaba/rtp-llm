@@ -1,0 +1,127 @@
+# Extracted from pyproject.toml — read by setup.py get_merged_optional_dependencies.
+[project.optional-dependencies]
+
+# CUDA 13 dependencies match this repository's mainline platform requirements.
+cuda13 = [
+    "torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+    "torchvision @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+    "triton==3.6.0",
+    "tilelang==0.1.9",
+    "deep_gemm @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0%2B122e18b.cu132-cp310-cp310-linux_x86_64.whl#sha256=5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080",
+    "flash_mla @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
+    "rtp_kernel @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd20eb.cu132-cp310-cp310-linux_x86_64.whl#sha256=84ecc314ba00b98653a5808de79b5e3bb58445fa288737019ecee96345510ffb",
+    "fast_safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
+    "fastsafetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+    "safetensors==0.7.0",
+    "mysql-connector-python",
+    "tabulate==0.9.0",
+]
+
+cuda13_arm = [
+    "torch @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+    "torchvision @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+    "mysql-connector-python",
+    "deep_gemm @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_gb300/deep_gemm-2.5.0%2B6053f00-cp310-cp310-linux_aarch64.whl",
+    "flash_mla @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl",
+    "rtp_kernel @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0608/arm_pkg/rtp_kernel-0.1.0%2Bcu13.fb4b4ab-cp310-cp310-linux_aarch64.whl",
+    "fastsafetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
+    "fast_safetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+    "tilelang @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
+    "z3_solver @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl",
+    "tile_kernels @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/arm_pkg/tile_kernels-0.1.dev0%2Bali.git36d9e45-py3-none-any.whl",
+    "safetensors==0.7.0",
+    "tabulate==0.9.0",
+]
+
+cuda12 = [
+    "pynvml",
+    "torch==2.6.0+cu126",
+    "torchvision==0.21.0+cu126",
+    "flash_attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/flash_attn-2.7.4.post1%2Bcu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl",
+    "flashinfer-python==0.2.5",
+    "apache-tvm-ffi==0.1.10",
+    "tensorrt==10.3.0",
+    "tensorrt-cu12-bindings==10.3.0",
+    "tensorrt-cu12-libs==10.3.0",
+    "auto_gptq",
+    "autoawq>=0.2.9",
+    "datasets==3.1.0",
+    "deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_ep-1.2.1%2B29d31c0-cp310-cp310-linux_x86_64.whl",
+    "deep_gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu126/deep_gemm-2.2.0%2B9b680f4-cp310-cp310-linux_x86_64.whl",
+    "nvidia-nvshmem-cu12==3.4.5",
+]
+
+rocm = [
+    "torch @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl",
+    "torchvision @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torchvision/torchvision-0.24.0%2Brocm7.2.0.gitb919bd0c-cp310-cp310-linux_x86_64.whl",
+    "triton @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl",
+    "triton-kernels @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl",
+    "pyrsmi==0.2.0",
+    "pyyaml==6.0.2",
+    # Use mainline's fixed AITER artifact and its declared FlyDSL dependency.
+    # Keep the artifact hash from deps/http.bzl and the ROCm lockfile.
+    "amd-aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl#sha256=47840027132b1caf0e0985a8376d3e6d24f31c994983482378a5caf46ad6c50f",
+    # Match the prebuilt AITER tensor registry and the Bazel ROCm lockfile.
+    # pybind11 3.1 uses a different internals ABI for newly JIT-built modules.
+    "pybind11==3.0.1",
+    # FLA kernels import FlyDSL directly, so do not rely on AITER to install it
+    # transitively.
+    "flydsl==0.3.4.1",
+    # Build the pinned official MORI v1.2.4 source on the worker.
+    "amd-mori @ git+https://github.com/ROCm/mori.git@f39fa765e897c95995957d0518908cc982a88fc2",
+]
+
+cuda12_arm = [
+    "torch @ https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
+    "torchvision @ https://download.pytorch.org/whl/cu128/torchvision-0.24.0-cp310-cp310-manylinux_2_28_aarch64.whl",
+    "mysql-connector-python",
+    "flashinfer-python==0.2.5",
+    "fast_hadamard_transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
+    "flash_mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B47c35a7-cp310-cp310-linux_aarch64.whl",
+]
+
+cuda12_9 = [
+    "pynvml",
+    "torch @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+    "torchvision @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl",
+    "flash_attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl",
+    "flash_attn_3 @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl",
+    "fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl",
+    "fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl",
+    "deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl",
+    "deep_gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl",
+    # flashinfer 0.6.6 vanilla — aligned with OSS main `deps/requirements_lock_torch_gpu_cuda12_9.txt`.
+    # Previously 0.6.0+mla384 (DeepSeek-MLA pruned fork) lacked SM89 head_dim=64
+    # AOT kernels and had different kernel impls than vanilla 0.6.6 — caused
+    # PR 537 sm8x_basic SIGABRT and h20 smoke COMPARE_FAILED on next_pd /
+    # mla_cp_pd / moe_w4a8_int4 etc. (run 39159691).
+    "flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_python-0.6.6-py3-none-any.whl",
+    "flashinfer-jit-cache @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_jit_cache-0.6.6-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260319/flashinfer_cubin-0.6.6-py3-none-any.whl",
+    "flash_mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl",
+    "fast_hadamard_transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl",
+    # This build includes sm_120a cubins for fused rope/KV-cache kernels.
+    "rtp_kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260612/rtp_kernel-0.1.0%2B125c29e5-cp310-cp310-linux_x86_64.whl",
+    "tensorrt==10.3.0",
+    "tensorrt-cu12-bindings==10.3.0",
+    "tensorrt_cu12_libs @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/tensorrt_cu12_libs-10.3.0-py2.py3-none-manylinux_2_17_x86_64.whl",
+    "auto_gptq",
+    "autoawq",
+    "apache-tvm-ffi==0.1.10",
+    "datasets==3.1.0",
+    "mysql-connector-python",
+    "sqlglot @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/sqlglot-19.8.4.dev4-py3-none-any.whl",
+    "tabulate==0.9.0",
+    # tilelang ==0.1.6 — aligned with OSS main lock; >=0.1.8 was resolving to
+    # 0.1.9 (PyPI) which differs from main.
+    "tilelang==0.1.6",
+]
+
+# dev and docs extras moved to pyproject.toml [project.optional-dependencies] —
+# uv pip install --compile-bytecode -e .[dev] reads PEP 621 metadata directly and silently drops
+# extras declared only via setup.py extras_require. GPU extras stay here
+# because they carry internal-only pin URLs.
+
+all = [
+    "rtp-llm[cuda12,dev,docs]",
+]

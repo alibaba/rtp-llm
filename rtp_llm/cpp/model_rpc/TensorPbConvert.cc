@@ -36,7 +36,7 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
             break;
         }
         default:
-            throw std::runtime_error("Unsupported data type.");
+            throw std::runtime_error("Unsupported TensorPB data type.");
     }
 
     if (shape.empty() && payload->empty()) {
@@ -52,6 +52,9 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
         if (unsigned_dim > 0 && numel > std::numeric_limits<size_t>::max() / unsigned_dim) {
             throw std::runtime_error("TensorPB element count overflows.");
         }
+        if (unsigned_dim > 0 && numel > static_cast<size_t>(std::numeric_limits<int64_t>::max()) / unsigned_dim) {
+            throw std::runtime_error("TensorPB element count exceeds the tensor index range.");
+        }
         numel *= unsigned_dim;
     }
     if (element_size > 0 && numel > std::numeric_limits<size_t>::max() / element_size) {
@@ -60,6 +63,9 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     const size_t expected_bytes = numel * element_size;
     if (payload->size() != expected_bytes) {
         throw std::runtime_error("TensorPB payload size does not match shape and dtype.");
+    }
+    if (numel == 0) {
+        return torch::empty(shape, torch::TensorOptions().dtype(scalar_type));
     }
 
     void* data_ptr = const_cast<char*>(payload->data());
@@ -87,7 +93,11 @@ void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor
     for (auto dim : shape) {
         tensor_pb->add_shape(dim);
     }
-    torch::Tensor contiguous_tensor = tensor.contiguous();
+    // Make contiguous on-device, then copy to CPU before reading data_ptr():
+    // a CUDA tensor's data_ptr() points to device memory and cannot be
+    // serialized directly. Doing contiguous() first keeps the D2H copy a single
+    // contiguous transfer; .to(kCPU) is a no-op when already on CPU.
+    torch::Tensor contiguous_tensor = tensor.contiguous().to(torch::kCPU);
     switch (tensor.dtype().toScalarType()) {
         case torch::kFloat32: {
             size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);

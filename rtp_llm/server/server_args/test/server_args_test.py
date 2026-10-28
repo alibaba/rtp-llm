@@ -428,6 +428,30 @@ class ServerArgsPyEnvConfigsTest(TestCase):
 
 
 class ServerArgsSetTest(TestCase):
+
+    def test_deprecated_disable_flashinfer_native_is_accepted(self):
+        sys.argv = ["prog", "--disable_flashinfer_native", "1"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertWarnsRegex(
+            DeprecationWarning, "--disable_flashinfer_native is deprecated"
+        ):
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.fmha_config.attn_backend, "auto")
+
+    def test_leader_address_env_is_bound_to_distribute_config(self):
+        os.environ["LEADER_ADDRESS"] = "10.0.0.5"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.distribute_config.leader_address, "10.0.0.5")
     def setUp(self):
         self._environ_backup = os.environ.copy()
         self._argv_backup = sys.argv.copy()
@@ -754,7 +778,29 @@ class ServerArgsSetTest(TestCase):
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        # Preserve each original argument/value as explicit rejection coverage:
+        # these active boolean selectors were removed by the Native API.
+        for flag in (
+            "--enable_flashinfer_trtllm_gen",
+            "--enable_flashinfer_trt_fmha_v2",
+            "--enable_paged_flashinfer_trt_fmha_v2",
+        ):
+            index = sys.argv.index(flag)
+            value = sys.argv[index + 1]
+            with self.subTest(removed_flag=flag, value=value), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    rtp_llm.server.server_args.server_args.setup_args([flag, value])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("unrecognized arguments", stderr.getvalue())
+                self.assertIn(flag, stderr.getvalue())
+            del sys.argv[index : index + 2]
+
+        with self.assertWarnsRegex(
+            DeprecationWarning, "--disable_flashinfer_native is deprecated"
+        ):
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
 
         # Verify model_args
         self.assertEqual(py_env_configs.model_args.model_type, "llama")
@@ -814,10 +860,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
 
         # Verify fmha_config
-        self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trtllm_gen)
-        self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trt_fmha_v2)
-        self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
-        self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
+        self.assertEqual(py_env_configs.fmha_config.attn_backend, "auto")
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
         self.assertEqual(
             py_env_configs.py_hw_kernel_config.generation_prefill_cuda_graph_max_requests,

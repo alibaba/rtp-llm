@@ -119,6 +119,12 @@ class RequestResourceAccountingTest {
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
             f.assertHandedOff();
             f.expire();
+            f.assertHandedOff();
+            // Silence cannot release a sent owner. Apply real endpoint terminal reports.
+            applyStatus(
+                    f.prefill,
+                    status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task(ID)), TOTAL_KV));
+            f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
             f.assertEmpty();
             f.assertCapacityReusable();
         }
@@ -239,6 +245,11 @@ class RequestResourceAccountingTest {
             DeliveryClaim oldClaim = f.handoff();
             var oldReservation = f.reservation;
             f.expire();
+            f.assertHandedOff();
+            applyStatus(
+                    f.prefill,
+                    status(RoleType.PREFILL, 2L, Map.of(), Map.of("101", task(ID)), TOTAL_KV));
+            f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
             f.assertEmpty();
             var replacementRef = new AtomicReference<DecodeEndpoint.ReservationHandle>();
             RequestLifecycleTestSupport.awaitCondition(

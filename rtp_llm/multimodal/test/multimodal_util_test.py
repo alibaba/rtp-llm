@@ -6,7 +6,10 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
+
+pytestmark = [pytest.mark.gpu(type="A10")]
 from PIL import Image
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -72,6 +75,42 @@ class TestMultiModalUtil(unittest.TestCase):
 
         self.assertEqual(config.fps, 2)
         self.assertEqual(config.max_long_side_pixel, 1008)
+
+    def test_native_python_input_converts_to_real_cpp_config(self):
+        import torch
+
+        from rtp_llm.multimodal import multimodal_util as util
+        from rtp_llm.ops import MultimodalInput as CppMultimodalInput
+
+        tensor = torch.ones(2, 3)
+        config = util.MMPreprocessConfig(32, 48, 64, 128, 2, 3, 7)
+        inp = util.MultimodalInput("local://image", util.MMUrlType.IMAGE, config, tensor)
+        converted = util.trans_mm_input([inp])[0]
+        self.assertIsInstance(converted, CppMultimodalInput)
+        self.assertEqual(converted.url, inp.url)
+        self.assertEqual(converted.mm_type, int(util.MMUrlType.IMAGE))
+        torch.testing.assert_close(converted.tensor, tensor)
+        for field in ("width", "height", "min_pixels", "max_pixels", "fps", "min_frames", "max_frames"):
+            with self.subTest(field=field):
+                self.assertEqual(getattr(converted.mm_preprocess_config, field), getattr(config, field))
+        self.assertEqual(converted.mm_preprocess_config.crop_positions, [])
+        self.assertEqual(converted.mm_preprocess_config.mm_timeout_ms, -1)
+        self.assertEqual(converted.mm_preprocess_config.max_long_side_pixel, -1)
+
+    def test_main_cpp_input_keeps_all_preprocess_fields(self):
+        import torch
+
+        from rtp_llm.multimodal import multimodal_util as util
+        from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+
+        config = MMPreprocessConfig(crop_positions=[0.25, 0.5], mm_timeout_ms=1200,
+                                    max_long_side_pixel=1008)
+        inp = MultimodalInput("local://image", int(util.MMUrlType.IMAGE), torch.ones(1), config)
+        converted = util.trans_mm_input([inp])[0]
+        self.assertIsInstance(converted, MultimodalInput)
+        self.assertEqual(converted.mm_preprocess_config.crop_positions, [0.25, 0.5])
+        self.assertEqual(converted.mm_preprocess_config.mm_timeout_ms, 1200)
+        self.assertEqual(converted.mm_preprocess_config.max_long_side_pixel, 1008)
 
     def test_base64(self):
         buffer = io.BytesIO()
@@ -282,7 +321,7 @@ class TestMultiModalUtil(unittest.TestCase):
 
         def slow_download(*args):
             time.sleep(0.01)
-            return io.BytesIO(b"payload")
+            return b"payload"
 
         with patch.object(
             url_data_cache_, "check_cache", return_value=None
@@ -295,7 +334,7 @@ class TestMultiModalUtil(unittest.TestCase):
         self.assertGreaterEqual(timing.elapsed_ms, 5.0)
 
         with patch.object(
-            url_data_cache_, "check_cache", return_value=io.BytesIO(b"payload")
+            url_data_cache_, "check_cache", return_value=b"payload"
         ):
             with collect_download_timing() as cache_timing:
                 get_bytes_io_from_url("https://example.com/cached")

@@ -1,4 +1,3 @@
-import copy
 from typing import Any, List
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -67,8 +66,9 @@ class QwenVLRenderer(QwenRenderer):
         return PromptWithMMInput(prompt=prompt, urls=images)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        messages = copy.deepcopy(request.messages)
-        prompt_and_mm_input = self._render_messages(messages)
+        # _render_messages only reads request.messages and builds new dicts/lists,
+        # so a deepcopy is unnecessary.
+        prompt_and_mm_input = self._render_messages(request.messages)
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
         return RenderedInputs(
             input_ids=input_ids,
@@ -125,6 +125,10 @@ class Qwen2VLRenderer(QwenRenderer):
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
                             )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                            )
                         now_content.append(
                             {"type": "image", "image": content_part.image_url.url}
                         )
@@ -135,6 +139,10 @@ class Qwen2VLRenderer(QwenRenderer):
                         if content_part.preprocess_config:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
+                            )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
                             )
                         now_content.append(
                             {"type": "video", "video": content_part.video_url.url}
@@ -183,9 +191,7 @@ class Qwen2VLRenderer(QwenRenderer):
         request_chat_template_kwargs = request.get_chat_template_kwargs()
         if request_chat_template_kwargs is not None:
             chat_template_kwargs.update(request_chat_template_kwargs)
-        prompt = self.tokenizer.apply_chat_template(
-            final_messages, **chat_template_kwargs
-        )
+        prompt = self.tokenizer.apply_chat_template(final_messages, **chat_template_kwargs)
 
         return PromptWithMMInput(
             prompt=prompt,
@@ -195,7 +201,8 @@ class Qwen2VLRenderer(QwenRenderer):
         )
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        messages = copy.deepcopy(request.messages)
+        # _render_messages only reads request.messages and builds new dicts/lists,
+        # so a deepcopy is unnecessary.
         prompt_and_mm_input = self._render_messages(
             request,
             request.extra_configs.add_vision_id if request.extra_configs else True,

@@ -56,8 +56,13 @@ def _fwd_kernel_ep_scatter_1(
     tokens_per_expert = ((tokens_per_expert + ALIGN_M - 1) // ALIGN_M) * ALIGN_M
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
     tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
-    cur_expert_start = tl.load(expert_start_loc + cur_expert).to(tl.int64)
-    cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
+    expert_mask = offset_cumsum == cur_expert
+    cur_expert_start = tl.sum(
+        tl.where(expert_mask, cumsum, tl.zeros_like(cumsum))
+    ).to(tl.int64)
+    cur_expert_token_num = tl.sum(
+        tl.where(expert_mask, tokens_per_expert, tl.zeros_like(tokens_per_expert))
+    )
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E).to(tl.int64)
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):

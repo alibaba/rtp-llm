@@ -315,61 +315,36 @@ class IndexerDecodeV4Op:
             kv_padded = kv_indexer.contiguous()
 
         k_flat = kv_padded.view(-1, D)  # [B*T_padded, D]
-        k_fp8, k_scale = sgl_per_token_group_quant_fp8(
-            k_flat,
-            group_size=self.block_size,
-            eps=1e-4,
-            column_major_scales=False,
-            scale_tma_aligned=False,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
-        )
-        # k_scale is [B*T_padded, D//group_size] either int32 (ue8m0) or fp32.
-        # Pack each token as: [data fp8 (D bytes)] || [scale fp32 per group].
         scales_per_token = D // self.block_size  # 1 for D=128, group=128
         head_dim_with_sf = D + scales_per_token * 4  # bytes per token
 
-        # Build [num_blocks, blocksize, 1, head_dim_with_sf] uint8 cache.
+        # Use the production cache writer so the ephemeral cache has the exact
+        # block layout consumed by DeepGEMM: all FP8 K bytes first, followed by
+        # the per-token FP32 scales. A logical per-token [K | scale] copy would
+        # produce the same shape but the wrong physical byte layout.
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         num_blocks = B * num_blocks_per_req
         kv_cache_u8 = torch.zeros(
-            (num_blocks, block_kv, 1, head_dim_with_sf),
+            (num_blocks, block_kv, head_dim_with_sf),
             dtype=torch.uint8,
             device=device,
         )
-        # Reshape data: per block of block_kv tokens.
-        k_fp8_blk = (
-            k_fp8.view(B, num_blocks_per_req, block_kv, D)
-            .view(
-                num_blocks,
-                block_kv,
-                D,
-            )
-            .view(torch.uint8)
+        slot_mapping = torch.arange(
+            B * T_padded,
+            dtype=torch.int64,
+            device=device,
         )
-        kv_cache_u8[:, :, 0, :D] = k_fp8_blk
-
-        # Scale: k_scale is shape [B*T_padded, scales_per_token].
-        if self.scale_fmt == "ue8m0":
-            # int32 packed scales -> view as 4 bytes each.
-            k_scale_u8 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_u8.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
-            )
-            # scales_per_token * 4 bytes per token.
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
-            )
-        else:
-            k_scale_f32 = k_scale.view(
-                B, num_blocks_per_req, block_kv, scales_per_token
-            ).contiguous()
-            k_scale_u8 = k_scale_f32.view(num_blocks, block_kv, scales_per_token).view(
-                torch.uint8
-            )
-            kv_cache_u8[:, :, 0, D:].copy_(
-                k_scale_u8.view(num_blocks, block_kv, scales_per_token * 4),
-            )
+        rtp_llm_ops.indexer_k_quant_and_cache(
+            k_flat,
+            kv_cache_u8,
+            slot_mapping,
+            self.block_size,
+            self.scale_fmt,
+        )
+        kv_cache_u8 = kv_cache_u8.view(
+            num_blocks, block_kv, 1, head_dim_with_sf
+        )
 
         # ---- block_table: one block-row per request, listing its blocks --
         block_table = torch.arange(

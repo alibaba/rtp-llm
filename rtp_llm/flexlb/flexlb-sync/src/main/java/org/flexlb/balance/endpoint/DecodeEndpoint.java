@@ -124,7 +124,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         LOCAL_ROLLBACK,
         COUNTERPART_FINISHED,
         NOT_SENT,
-        EXPIRED
+        EXPIRED,
+        REQUEST_FENCED
     }
 
     public enum ReservationReleaseResult {

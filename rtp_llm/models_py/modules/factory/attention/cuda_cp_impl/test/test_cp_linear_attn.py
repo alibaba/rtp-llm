@@ -13,6 +13,7 @@ import unittest
 from typing import List
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.test.cp_test_utils import (
@@ -142,6 +143,12 @@ class TestCPLinearAttnIndexMath(unittest.TestCase):
         self.assertEqual(sorted(all_indices), list(range(total)))
 
 
+# Restore the original BUILD intent (pre-pytest migration commit 5bc9f0cf3 lost
+# `exec_properties={'gpu': 'H20'}`). The Qwen3NextGatedDeltaNet impl was only
+# numerically validated on H20; on sm8x A10 the CP vs non-CP outputs diverge by
+# max_diff~160. Pinning to H20 via the gpu marker routes this class to sm9x
+# (`py_ut_sm9x` markexpr `H20 and ...`) and excludes it from sm8x.
+@pytest.mark.gpu(type="H20")
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestCPLinearAttnForward(unittest.TestCase):
     """Verify that CP GatedDeltaNet forward matches non-CP reference on a single GPU."""

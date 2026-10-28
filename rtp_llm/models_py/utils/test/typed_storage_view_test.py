@@ -8,12 +8,6 @@ import torch
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 
 
-def decode_scalar_from_bytes(data: bytes, dtype: torch.dtype):
-    raw = torch.tensor(list(data), dtype=torch.uint8)
-    scalar = raw.view(dtype)[0]
-    return scalar.item()
-
-
 class LinearCacheConverterTest(TestCase):
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -42,18 +36,26 @@ class LinearCacheConverterTest(TestCase):
             * LinearCacheConverter.dtype_size_bytes(base_tensor.dtype)
         )
         target_item_size = LinearCacheConverter.dtype_size_bytes(view_tensor.dtype)
-        for index in torch.cartesian_prod(
-            *[torch.arange(dim, dtype=torch.int64) for dim in view_tensor.shape]
-        ):
-            logical_index = tuple(int(x) for x in index.tolist())
-            byte_offset = base_offset_bytes + storage_offset_bytes
-            for dim, idx in enumerate(logical_index):
-                byte_offset += idx * stride_bytes[dim]
-            expected = decode_scalar_from_bytes(
-                bytes(raw[byte_offset : byte_offset + target_item_size].tolist()),
-                view_tensor.dtype,
-            )
-            self.assertEqual(view_tensor[logical_index].item(), expected)
+        # Gather every scalar's bytes independently of the view under test,
+        # then compare on CPU without millions of device synchronizations.
+        offsets = torch.full(
+            view_tensor.shape,
+            base_offset_bytes + storage_offset_bytes,
+            dtype=torch.int64,
+            device="cpu",
+        )
+        for dim, stride in enumerate(stride_bytes):
+            shape = [1] * view_tensor.ndim
+            shape[dim] = view_tensor.shape[dim]
+            offsets += torch.arange(
+                view_tensor.shape[dim], dtype=torch.int64, device="cpu"
+            ).reshape(shape) * stride
+        byte_indices = offsets.reshape(-1, 1) + torch.arange(
+            target_item_size, device="cpu"
+        )
+        expected = raw[byte_indices].contiguous().view(view_tensor.dtype)
+        actual = view_tensor.cpu().reshape(-1)
+        self.assertTrue(torch.equal(actual.float(), expected.reshape(-1).float()))
 
     def test_gpu_linear_cache_converter(self) -> None:
         block_num = 4

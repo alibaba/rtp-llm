@@ -11,13 +11,15 @@ _HAS_RTP_KERNEL_FP8 = False
 
 try:
     from flash_attn_interface import flash_attn_varlen_func
+
     _HAS_FLASH_ATTN_3 = True
 except ImportError as e:
     logging.warning(f"flash_attn_interface not found: {e}")
 
 try:
-    from rtp_kernel.sparse_attention_fp8 import BatchPrefillWithSparseAttentionFP8
     from rtp_kernel.kvcache import kvcache_extract_prefill
+    from rtp_kernel.sparse_attention_fp8 import BatchPrefillWithSparseAttentionFP8
+
     _HAS_RTP_KERNEL_FP8 = True
 except ImportError as e:
     logging.warning(f"rtp_kernel FP8 modules not found: {e}")
@@ -48,7 +50,9 @@ def _headwise_prefill_fp8_runtime_ready(attn_inputs) -> bool:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
     except (AttributeError, TypeError, ValueError):
         return False
-    return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
+    return (major, minor) >= (12, 8) and getattr(
+        attn_inputs, "headwise_config", None
+    ) is not None
 
 
 @dataclass
@@ -68,7 +72,9 @@ class HeadWiseFP8PrefillAttnOp:
     """
 
     def __init__(
-        self, attn_configs: AttentionConfigs, parallelism_config: ParallelismConfig,
+        self,
+        attn_configs: AttentionConfigs,
+        parallelism_config: ParallelismConfig,
         headwise_config: Optional[dict] = None,
     ) -> None:
         self.rank = parallelism_config.tp_rank
@@ -103,7 +109,9 @@ class HeadWiseFP8PrefillAttnOp:
         if not (_HAS_FLASH_ATTN_3 and _HAS_RTP_KERNEL_FP8):
             return False
         major, minor = map(int, torch.version.cuda.split(".")[:2])
-        return (major, minor) >= (12, 8) and getattr(attn_inputs, 'headwise_config', None) is not None
+        return (major, minor) >= (12, 8) and getattr(
+            attn_inputs, "headwise_config", None
+        ) is not None
 
     def _get_headwise_config(self, layer_idx: int):
         cached = self._headwise_cache.get(layer_idx)
@@ -117,8 +125,12 @@ class HeadWiseFP8PrefillAttnOp:
                 f"[HeadWiseFP8] layer_idx={layer_idx} not found in headwise_config, "
                 f"falling back to all-retrieval heads"
             )
-            self.retrieval_heads = torch.ones(self.head_num, dtype=torch.bool, device="cuda")
-            self.non_retrieval_heads = torch.zeros(self.head_num, dtype=torch.bool, device="cuda")
+            self.retrieval_heads = torch.ones(
+                self.head_num, dtype=torch.bool, device="cuda"
+            )
+            self.non_retrieval_heads = torch.zeros(
+                self.head_num, dtype=torch.bool, device="cuda"
+            )
         else:
             start = self.head_num * self.rank
             end = start + self.head_num
@@ -131,7 +143,10 @@ class HeadWiseFP8PrefillAttnOp:
             self.non_retrieval_heads = current_rank_weights == 0
             self.retrieval_heads = current_rank_weights == 1
 
-        self._headwise_cache[layer_idx] = (self.retrieval_heads, self.non_retrieval_heads)
+        self._headwise_cache[layer_idx] = (
+            self.retrieval_heads,
+            self.non_retrieval_heads,
+        )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> None:
         self.input_lengths = attn_inputs.input_lengths
@@ -188,12 +203,19 @@ class HeadWiseFP8PrefillAttnOp:
 
             if item.use_headwise:
                 res = self._apply_headwise(
-                    q, k_cache_hnd, v_cache_hnd,
-                    item, q_len=q_len, kv_len=item.kv_len,
+                    q,
+                    k_cache_hnd,
+                    v_cache_hnd,
+                    item,
+                    q_len=q_len,
+                    kv_len=item.kv_len,
                 )
             else:
                 res = self._run_full_attention(
-                    q, k_cache_hnd, v_cache_hnd, item,
+                    q,
+                    k_cache_hnd,
+                    v_cache_hnd,
+                    item,
                 )
 
             output[offset : offset + q_len] = res
@@ -223,16 +245,27 @@ class HeadWiseFP8PrefillAttnOp:
         block_tables = item.kv_indices.unsqueeze(0).to(torch.int32)
 
         k_ext = torch.zeros(
-            item.kv_len, self.head_num_kv, self.size_per_head,
-            dtype=fp8_dtype, device=device,
+            item.kv_len,
+            self.head_num_kv,
+            self.size_per_head,
+            dtype=fp8_dtype,
+            device=device,
         )
         v_ext = torch.zeros(
-            item.kv_len, self.head_num_kv, self.size_per_head,
-            dtype=fp8_dtype, device=device,
+            item.kv_len,
+            self.head_num_kv,
+            self.size_per_head,
+            dtype=fp8_dtype,
+            device=device,
         )
         kvcache_extract_prefill(
-            k_cache_hnd, v_cache_hnd, seq_lens, block_tables,
-            k_ext, v_ext, self.paged_size,
+            k_cache_hnd,
+            v_cache_hnd,
+            seq_lens,
+            block_tables,
+            k_ext,
+            v_ext,
+            self.paged_size,
         )
         return k_ext, v_ext
 
@@ -253,7 +286,9 @@ class HeadWiseFP8PrefillAttnOp:
         cu_k = torch.tensor([0, item.kv_len], dtype=torch.int32, device=q.device)
 
         out = flash_attn_varlen_func(
-            q_fp8, k_ext, v_ext,
+            q_fp8,
+            k_ext,
+            v_ext,
             cu_seqlens_q=cu_q,
             cu_seqlens_k=cu_k,
             max_seqlen_q=item.q_len,
@@ -297,7 +332,9 @@ class HeadWiseFP8PrefillAttnOp:
             cu_k = torch.tensor([0, kv_len], dtype=torch.int32, device=q.device)
 
             ret_out = flash_attn_varlen_func(
-                retrieval_q, k_ext, v_ext,
+                retrieval_q,
+                k_ext,
+                v_ext,
                 cu_seqlens_q=cu_q,
                 cu_seqlens_k=cu_k,
                 max_seqlen_q=q_len,
@@ -340,6 +377,7 @@ class HeadWiseFP8PrefillAttnOp:
 
 
 class HeadWiseFP8PrefillImpl(FMHAImplBase):
+    NAME = "headwise_fp8"
 
     def __init__(
         self,
@@ -348,8 +386,10 @@ class HeadWiseFP8PrefillImpl(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        headwise_config = getattr(attn_inputs, 'headwise_config', None)
-        self.fmha_impl = HeadWiseFP8PrefillAttnOp(attn_configs, parallelism_config, headwise_config)
+        headwise_config = getattr(attn_inputs, "headwise_config", None)
+        self.fmha_impl = HeadWiseFP8PrefillAttnOp(
+            attn_configs, parallelism_config, headwise_config
+        )
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
         self.attn_configs = attn_configs
 

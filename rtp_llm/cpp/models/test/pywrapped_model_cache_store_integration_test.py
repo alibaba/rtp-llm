@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import gc
 import importlib
@@ -11,9 +13,12 @@ import tempfile
 import types
 import unittest
 import weakref
+from functools import wraps
+from pathlib import Path
 from typing import Any, ClassVar, Optional, cast
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from rtp_llm.config.cuda_graph import GenerationPrefillCudaGraphUnsupportedBackend
@@ -45,35 +50,117 @@ def _install_single_rank_rocm_graph_capture_stub() -> None:
     sys.modules["rtp_llm.models_py.distributed.rocm_rccl"] = rocm_rccl
 
 
-if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-    _install_single_rank_rocm_graph_capture_stub()
+_TEST_LIB_DIR = Path(__file__).resolve().parents[3] / "libs" / "test"
+_extension = None
+_IN_NATIVE_TEST = False
+PyModelInputs = None
+PyModelOutputs = None
+run_generation_prefill_capture_scenario = None
+run_dirty_generation_prefill_capture_scenario = None
+run_scenario = None
+clear_comm_ops = None
+close_capture_publisher_without_gil = None
+destroy_cpu_tp_broadcaster = None
+flush_capture_publisher_without_close = None
+init_cpu_tp_broadcaster = None
+initialize_capture_publisher_with_core_dump = None
+register_comm_ops = None
+run_tp_sync_model_inputs_scenario = None
 
-_extension = importlib.import_module(
-    "rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test"
-)
 _skip_rocm_context_parallel = unittest.skipIf(
     os.environ.get("TEST_USING_DEVICE") == "ROCM",
     "context parallel is not supported on ROCm",
 )
-PyModelInputs = _extension.PyModelInputs
-PyModelOutputs = _extension.PyModelOutputs
-run_generation_prefill_capture_scenario = (
-    _extension.run_generation_prefill_capture_scenario
-)
-run_dirty_generation_prefill_capture_scenario = (
-    _extension.run_dirty_generation_prefill_capture_scenario
-)
-run_scenario = _extension.run_scenario
-clear_comm_ops = _extension.clear_comm_ops
-close_capture_publisher_without_gil = _extension.close_capture_publisher_without_gil
-destroy_cpu_tp_broadcaster = _extension.destroy_cpu_tp_broadcaster
-flush_capture_publisher_without_close = _extension.flush_capture_publisher_without_close
-init_cpu_tp_broadcaster = _extension.init_cpu_tp_broadcaster
-initialize_capture_publisher_with_core_dump = (
-    _extension.initialize_capture_publisher_with_core_dump
-)
-register_comm_ops = _extension.register_comm_ops
-run_tp_sync_model_inputs_scenario = _extension.run_tp_sync_model_inputs_scenario
+
+
+def _load_native_test_binding() -> None:
+    global _extension, PyModelInputs, PyModelOutputs, run_scenario
+    global run_generation_prefill_capture_scenario, run_dirty_generation_prefill_capture_scenario
+    global clear_comm_ops, close_capture_publisher_without_gil, destroy_cpu_tp_broadcaster
+    global flush_capture_publisher_without_close, init_cpu_tp_broadcaster
+    global initialize_capture_publisher_with_core_dump, register_comm_ops
+    global run_tp_sync_model_inputs_scenario
+    if _extension is not None:
+        return
+    if str(_TEST_LIB_DIR) not in sys.path:
+        sys.path.insert(0, str(_TEST_LIB_DIR))
+    if torch.version.hip:
+        _install_single_rank_rocm_graph_capture_stub()
+    extension = importlib.import_module(
+        "libth_pywrapped_model_cache_store_integration_test"
+    )
+    PyModelInputs = extension.PyModelInputs
+    PyModelOutputs = extension.PyModelOutputs
+    run_scenario = extension.run_scenario
+    run_generation_prefill_capture_scenario = extension.run_generation_prefill_capture_scenario
+    run_dirty_generation_prefill_capture_scenario = extension.run_dirty_generation_prefill_capture_scenario
+    clear_comm_ops = extension.clear_comm_ops
+    close_capture_publisher_without_gil = extension.close_capture_publisher_without_gil
+    destroy_cpu_tp_broadcaster = extension.destroy_cpu_tp_broadcaster
+    flush_capture_publisher_without_close = extension.flush_capture_publisher_without_close
+    init_cpu_tp_broadcaster = extension.init_cpu_tp_broadcaster
+    initialize_capture_publisher_with_core_dump = extension.initialize_capture_publisher_with_core_dump
+    register_comm_ops = extension.register_comm_ops
+    run_tp_sync_model_inputs_scenario = extension.run_tp_sync_model_inputs_scenario
+    _extension = extension
+
+
+def _native_test_env():
+    env = dict(os.environ)
+    library_dirs = [
+        str(Path(torch.__file__).resolve().parent / "lib"),
+        str(_TEST_LIB_DIR.parent),
+        str(_TEST_LIB_DIR),
+    ]
+    if env.get("LD_LIBRARY_PATH"):
+        library_dirs.append(env["LD_LIBRARY_PATH"])
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(library_dirs)
+    return env
+
+
+def _isolated_native_test(method, *, graph_capture=False):
+    @wraps(method)
+    def run(self):
+        if _IN_NATIVE_TEST:
+            return method(self)
+        env = _native_test_env()
+        if graph_capture:
+            env.update(
+                ENABLE_CUDA_GRAPH_DEBUG_MODE="1",
+                NOT_USE_DEFAULT_STREAM="1",
+                TEST_USING_DEVICE="ROCM" if torch.version.hip else "CUDA",
+                RTP_LLM_RUN_PYWRAPPED_DIRTY_CAPTURE_TEST="1",
+            )
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--native-test", method.__name__],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        self.assertEqual(
+            completed.returncode, 0,
+            f"isolated native test failed\n{completed.stdout}\n{completed.stderr}",
+        )
+    run._native_isolated = True
+    return run
+
+
+def _isolated_graph_test(method):
+    return _isolated_native_test(method, graph_capture=True)
+
+
+def _run_native_scenario_in_process(scenario: str) -> dict:
+    _load_native_test_binding()
+    model = CacheStoreForwardModel()
+    result = run_scenario(model, scenario)
+    return {
+        "result": result,
+        "forward_calls": model.forward_calls,
+        "micro_batch_calls": model.micro_batch_calls,
+        "seen_input_lengths": model.seen_input_lengths,
+    }
+
 
 _KMONITOR_GAUGE = 0
 _KMONITOR_QPS = 3
@@ -784,6 +871,7 @@ _TP_SYNC_CAPTURE_FLAGS = [(True, True), (False, True), (True, False), (False, Fa
 
 
 def _run_tp_sync_uds_rank(tp_rank: int, base_path: str) -> None:
+    _load_native_test_binding()
     _register_no_collectives()
     try:
         init_cpu_tp_broadcaster(tp_rank, 4, base_path)
@@ -799,6 +887,7 @@ def _run_tp_sync_uds_rank(tp_rank: int, base_path: str) -> None:
 
 class TpSyncModelInputsIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
+        _load_native_test_binding()
         self.addCleanup(clear_comm_ops)
         _register_no_collectives()
 
@@ -967,6 +1056,8 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_graph_test
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -1043,6 +1134,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertTrue(store.flushed)
         self.assertTrue(store.closed)
 
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_graph_test
     def test_clean_generation_prefill_capture_failure_fails_init_without_cache_allocation(
         self,
     ) -> None:
@@ -1061,6 +1154,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_during"], result["available_before"])
         self.assertEqual(result["available_after"], result["available_before"])
 
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_graph_test
     def test_unsupported_generation_prefill_backend_fails_init_without_cache_allocation(
         self,
     ) -> None:
@@ -1076,6 +1171,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_during"], result["available_before"])
         self.assertEqual(result["available_after"], result["available_before"])
 
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_graph_test
     def test_late_constructor_failure_destroys_clean_graphs_without_cache_allocation(
         self,
     ) -> None:
@@ -1094,6 +1191,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["available_during"], result["available_before"])
         self.assertEqual(result["available_after"], result["available_before"])
 
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_graph_test
     def test_dirty_generation_prefill_capture_does_not_retain_cache_manager(
         self,
     ) -> None:
@@ -1186,6 +1285,13 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(result["records"], [])
 
     def setUp(self) -> None:
+        # The isolated child runs the original fixture and every assertion.
+        # Do not load duplicate pybind types or install fixtures in its parent.
+        if not _IN_NATIVE_TEST and getattr(
+            getattr(self, self._testMethodName), "_native_isolated", False
+        ):
+            return
+        _load_native_test_binding()
         previous_torchspec_modules = _install_fake_torchspec_modules()
         self.addCleanup(_restore_torchspec_modules, previous_torchspec_modules)
         _FakeEagleMooncakeStore.instances.clear()
@@ -1261,6 +1367,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             else:
                 self.assertEqual(metric_types[name], _KMONITOR_GAUGE)
 
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_native_test
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")
@@ -1382,6 +1490,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(model.forward_calls, 1)
         self.assertEqual(len(result["records"]), 3)
 
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_native_test
     def test_micro_batch_slices_request_metadata_with_block_rows(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "micro_batch")
@@ -1411,6 +1521,49 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         for block in record["blocks"]
                     )
                 )
+
+    @pytest.mark.gpu(type="H20")
+    @_isolated_native_test
+    def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
+        execution = _run_native_scenario_in_process("cp_actual_lengths_rank1")
+        result = execution["result"]
+
+        self.assertEqual(execution["seen_input_lengths"], [[4]])
+        self.assertEqual(len(result["records"]), 2)
+        blocks = _blocks_by_key(result)
+        full_blocks = {
+            key: block for key, block in blocks.items() if "_tag_full" in key
+        }
+        linear_blocks = {
+            key: block for key, block in blocks.items() if "_tag_linear" in key
+        }
+        self.assertEqual(len(full_blocks), 3)
+        self.assertEqual(len(linear_blocks), 6)
+        self.assertEqual(
+            sorted(
+                block["address"] - result["base_addresses"]["full"]
+                for block in full_blocks.values()
+            ),
+            [16, 32, 48],
+        )
+        self.assertEqual(
+            sorted(
+                block["address"] - result["base_addresses"]["linear"]
+                for block in linear_blocks.values()
+            ),
+            [72, 96, 120, 144, 168, 192],
+        )
+        self.assertEqual({block["length"] for block in full_blocks.values()}, {16})
+        self.assertEqual({block["length"] for block in linear_blocks.values()}, {24})
+        for token_key in range(3101, 3107):
+            self.assertTrue(
+                any(f"_token_id_str_{token_key}_" in key for key in linear_blocks)
+            )
+        for token_key in (3102, 3104, 3106):
+            self.assertTrue(
+                any(f"_token_id_str_{token_key}_" in key for key in full_blocks)
+            )
+
 
     @_skip_rocm_context_parallel
     def test_context_parallel_publishes_original_lengths_to_every_tag(self) -> None:
@@ -1565,6 +1718,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertFalse(result["fake_physical_defined"])
         self.assertFalse(result["fake_kernel_defined"])
 
+    @pytest.mark.gpu(type="MI308X" if torch.version.hip else "H20")
+    @_isolated_native_test
     def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "mtp_sub_config")
@@ -3562,6 +3717,9 @@ class ForwardModel(SuccessfulGenerationPrefillCaptureModel):
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
 class CustomOutputPostLayersTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _load_native_test_binding()
+
     def run_case(self, handler, indexes=(1, 4), python_norm=True):
         return _extension.run_post_layers(
             ForwardModel(),
@@ -3623,4 +3781,11 @@ class CustomOutputPostLayersTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 3 and sys.argv[1] in ("--native-test", "--native-graph-test"):
+        _IN_NATIVE_TEST = True
+        _load_native_test_binding()
+        suite = unittest.TestSuite([PyWrappedModelCacheStoreIntegrationTest(sys.argv[2])])
+        result = unittest.TextTestRunner().run(suite)
+        sys.exit(0 if result.wasSuccessful() and result.testsRun == 1 and not result.skipped else 1)
+    else:
+        unittest.main()

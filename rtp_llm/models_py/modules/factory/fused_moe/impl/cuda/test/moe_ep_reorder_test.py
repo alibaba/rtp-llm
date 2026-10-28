@@ -4,6 +4,10 @@ import random
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
 
+import pytest
+
+pytestmark = [pytest.mark.gpu(type="H20")]
+
 import torch
 import torch.nn.functional as F
 from torch import dtype as _dtype
@@ -12,6 +16,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
     post_reorder_triton_kernel,
 )
+
 
 class MoeReorderTest(TestCase):
     DTYPES = [torch.bfloat16, torch.float16]
@@ -263,7 +268,7 @@ class MoeReorderTest(TestCase):
                 num_expert=params[1],
                 hidden_dim=params[2],
                 top_k=params[3],
-                dtype=params[4],
+                dtype=str(params[4]),
                 ep_size=params[5],
             ):
                 top_k, num_expert = params[3], params[1]

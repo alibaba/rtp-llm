@@ -141,22 +141,24 @@ enum class FMHAType {
 };
 
 struct FMHAConfig {
-    bool enable_fmha                         = true;
-    bool enable_flashinfer_trtllm_gen        = true;
-    bool enable_flashinfer_trt_fmha_v2       = true;
-    bool enable_paged_flashinfer_trt_fmha_v2 = true;
-    bool enable_open_source_fmha             = true;
-    bool enable_paged_open_source_fmha       = true;
-    bool disable_flashinfer_native           = false;
-    bool disable_flashinfer_hybrid_prefill   = true;
-    bool enable_xqa                          = true;
-    bool use_aiter_pa                        = true;
-    bool use_asm_pa                          = true;
-    // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
-    // refactor. Set to true to select Triton for decode and no-prefix prefill;
-    // the latter is the ROCm generation-prefill graph-capable backend.
-    bool        use_triton_pa  = false;
-    int64_t     absorb_opt_len = 1024;
+    // Native explicit backend selection remains the first dispatch decision.
+    std::string attn_backend = "auto";
+    std::string prefill_attn_backend = "";
+    std::string decode_attn_backend = "";
+    std::string disable_attn_backends = "";
+
+    bool enable_fmha = true;
+    bool enable_trt_fmha = true;
+    bool enable_paged_trt_fmha = true;
+    bool enable_open_source_fmha = true;
+    bool disable_flash_infer = false;
+    bool disable_flashinfer_hybrid_prefill = true;
+    bool enable_xqa = true;
+    bool use_aiter_pa = true;
+    bool use_asm_pa = true;
+    // Triton PA covers decode and graph-capable no-prefix generation prefill.
+    bool use_triton_pa = false;
+    int64_t absorb_opt_len = 1024;
     std::string to_string() const;
 };
 
@@ -300,6 +302,7 @@ struct HWKernelConfig {
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
     bool        use_swizzleA                 = false;
+    bool        force_legacy_fp8_ptpc        = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
     // Generation-prefill graph is enabled only when the CUDA graph master

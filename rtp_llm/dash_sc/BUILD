@@ -70,18 +70,3 @@ py_library(
         "//rtp_llm:utils",
     ],
 )
-
-py_binary(
-    name = "json_format_e2e_smoke",
-    srcs = ["json_format_e2e_smoke.py"],
-    main = "json_format_e2e_smoke.py",
-    visibility = ["//visibility:public"],
-)
-
-py_binary(
-    name = "grammar_validation_smoke",
-    srcs = ["grammar_validation_smoke.py"],
-    main = "grammar_validation_smoke.py",
-    visibility = ["//visibility:public"],
-    deps = ["//rtp_llm:testlib"],
-)
