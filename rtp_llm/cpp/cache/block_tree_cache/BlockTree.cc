@@ -188,6 +188,18 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
         const MultiNodeResource published{group_set_id, tier, {{node, resource.getBlocks(tier)}}};
         group_sets_[group_set_id]->referenceBlocks(published, BlockTreeRefType::CACHE);
     };
+    auto can_replace_with_device = [](const GroupSet& group_set, const GroupSetResource& resource) {
+        if (!resource.isValidSteadyState() || resource.transfer_detached) {
+            return false;
+        }
+        if (resource.hasTier(Tier::HOST)) {
+            return group_set.hostPool() && group_set.hostPool()->canReclaimCacheBlock(resource.host_block);
+        }
+        if (resource.hasTier(Tier::DISK)) {
+            return group_set.diskPool() && group_set.diskPool()->canReclaimCacheBlock(resource.disk_block);
+        }
+        return false;
+    };
 
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         CacheKeyType key = cache_keys[i];
@@ -207,7 +219,8 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 RTP_LLM_LOG_WARNING("resident insert stopped at busy prefix: key_index=%zu key=%ld", i, key);
                 break;
             }
-            bool full_path_ready = true;
+            bool                full_path_ready = true;
+            std::vector<size_t> replacement_group_set_ids;
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
                 if (group_sets_[group_set_id]->groupType() != CacheGroupType::FULL) {
                     continue;
@@ -219,7 +232,11 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 const GroupSetResource& existing  = child->group_set_resources[group_set_id];
                 const bool              can_reuse = existing.isValidSteadyState() && existing.hasCompleteDeviceValue();
                 const bool              can_adopt = existing.is_removable();
-                if (!can_reuse && !can_adopt) {
+                const bool              can_replace = can_replace_with_device(*group_sets_[group_set_id], existing);
+                if (can_replace) {
+                    replacement_group_set_ids.push_back(group_set_id);
+                }
+                if (!can_reuse && !can_adopt && !can_replace) {
                     result.hard_stop = BlockTreeInsertHardStopInfo{existing.getTopTier(), existing.transfer_state};
                     RTP_LLM_LOG_WARNING("event=block_tree_insert_hard_stop key_index=%zu key=%ld "
                                         "group_set_id=%zu existing_tier=%s transfer_state=%d serving_tiers=%zu",
@@ -256,14 +273,26 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 GroupSetResource&       existing      = current->group_set_resources[group_set_id];
                 const GroupSetResource& incoming      = incoming_resources[group_set_id];
                 const Tier              incoming_tier = incoming.getTopTier();
-                if (!existing.is_empty() || existing.transfer_state != GroupSetTransferState::IDLE
-                    || incoming_tier == Tier::NONE) {
+                const bool              replace =
+                    std::find(replacement_group_set_ids.begin(), replacement_group_set_ids.end(), group_set_id)
+                    != replacement_group_set_ids.end();
+                if ((!replace && !existing.is_removable()) || incoming_tier == Tier::NONE) {
                     continue;
                 }
+                const Tier previous_tier   = existing.getTopTier();
+                const auto previous_blocks = existing.getBlocks(previous_tier);
+                // Incoming DEVICE data is already computed; replace ownership without a transfer.
+                publishTier(current, group_set_id, incoming, incoming_tier);
+                if (replace) {
+                    existing.evictFromTier(previous_tier);
+                }
                 existing.setBlocks(incoming_tier, incoming.getBlocks(incoming_tier));
+                if (replace) {
+                    group_sets_[group_set_id]->unreferenceBlocks(
+                        {group_set_id, previous_tier, {{current, previous_blocks}}}, BlockTreeRefType::CACHE);
+                }
                 existing.transfer_state = GroupSetTransferState::IDLE;
                 existing.candidate_meta = {};
-                publishTier(current, group_set_id, existing, incoming_tier);
                 ++result.accepted_resource_count;
                 adopted_group_set_ids.push_back(group_set_id);
             }

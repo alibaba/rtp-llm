@@ -864,8 +864,15 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     auto env               = FullSWAEnvironment::create(options);
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
-    // An older request can still hold valid GPU blocks after the cache is demoted.
+    env->releaseRequestRefs();
     env->demoteAll(Tier::DEVICE);
+    ASSERT_TRUE(env->allResourcesAtTier(Tier::HOST));
+    // A different request owns independent GPU allocations for reinserting the same keys.
+    std::vector<block_tree_cache_test::MultiNodeBlocks> replacement_blocks;
+    for (const auto& group : env->groups) {
+        replacement_blocks.push_back(block_tree_cache_test::allocateDeviceBlocksForTest(*group, env->keys.size()));
+        ASSERT_EQ(replacement_blocks.back().size(), env->keys.size());
+    }
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -906,7 +913,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     for (size_t i = 0; i < env->keys.size(); ++i) {
         std::vector<GroupSetResource> resources(env->groups.size());
         for (size_t group = 0; group < env->groups.size(); ++group) {
-            resources[group].device_blocks = env->request_blocks[group][i];
+            resources[group].device_blocks = replacement_blocks[group][i];
         }
         replacement_resources.push_back(std::move(resources));
     }
@@ -926,7 +933,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
         const auto& pools = env->groups[group]->devicePools();
         for (size_t i = 0; i < env->keys.size(); ++i) {
             for (size_t member = 0; member < pools.size(); ++member) {
-                EXPECT_EQ(pools[member]->refCount(env->request_blocks[group][i][member]), i < 2 ? 2u : 1u);
+                EXPECT_EQ(pools[member]->refCount(replacement_blocks[group][i][member]), i < 2 ? 2u : 1u);
             }
         }
     }
@@ -949,7 +956,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     EXPECT_EQ(matched.matched_device_blocks, env->keys.size());
     env->releaseMatch(matched);
     for (size_t group = 0; group < env->groups.size(); ++group) {
-        for (const auto& blocks : env->request_blocks[group]) {
+        for (const auto& blocks : replacement_blocks[group]) {
             for (size_t member = 0; member < blocks.size(); ++member) {
                 EXPECT_EQ(env->groups[group]->devicePools()[member]->refCount(blocks[member]), 2u);
             }
@@ -957,7 +964,9 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     }
     releaseTargets(owner_refs);
     releaseTargets(child_refs);
-    env->releaseRequestRefs();
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*env->groups[group], replacement_blocks[group]);
+    }
     env->reclaimAll();
     env->expectFullyReclaimed();
 }
