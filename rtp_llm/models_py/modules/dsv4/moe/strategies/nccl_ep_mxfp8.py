@@ -477,6 +477,10 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
             }
             self._eager_counts_state = state
         stream = state["stream"]
+        # Buffers are allocated on the caller stream and may reuse storage
+        # still touched by queued metadata kernels. Order the side-stream write
+        # after those uses before launching the gather (even for a fresh fill).
+        stream.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(stream):
             state["dev_in"].fill_(int(local_rows))
             torch.distributed.all_gather_into_tensor(
