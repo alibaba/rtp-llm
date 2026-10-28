@@ -14,7 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 class VisionGraphCache:
-    def __init__(self, visual, enabled=None, max_entries=None, max_patches=None):
+    def __init__(
+        self,
+        visual,
+        enabled=None,
+        max_entries=None,
+        max_patches=None,
+        allow_multi_media=None,
+        max_cached_bytes=None,
+    ):
         self.visual = visual
         self.enabled = (
             (os.environ.get("QWEN35_VIT_CUDA_GRAPH", "1") == "1")
@@ -31,16 +39,77 @@ class VisionGraphCache:
             if max_patches is None
             else max_patches
         )
-        if self.max_entries < 0 or self.max_patches < 0:
+        self.allow_multi_media = (
+            os.environ.get("QWEN35_VIT_GRAPH_MULTI_MEDIA", "0") == "1"
+            if allow_multi_media is None
+            else allow_multi_media
+        )
+        # A retained-memory budget is mandatory for the experimental packed
+        # path. Zero preserves the existing single-media behavior, not an
+        # unbounded packed-graph cache. max_patches still limits each capture.
+        self.max_cached_bytes = (
+            int(os.environ.get("QWEN35_VIT_GRAPH_MAX_CACHED_BYTES", "0"))
+            if max_cached_bytes is None
+            else max_cached_bytes
+        )
+        if min(self.max_entries, self.max_patches, self.max_cached_bytes) < 0:
             raise ValueError("vision graph limits must be non-negative")
         self._lock = threading.Lock()
         self._entries = OrderedDict()
         self._seen = OrderedDict()
+        self._entry_bytes = {}
         self._stats = dict(hit=0, miss=0, capture=0, fallback=0)
 
     def stats(self):
         with self._lock:
-            return dict(self._stats, entries=len(self._entries))
+            return dict(
+                self._stats,
+                entries=len(self._entries),
+                cached_bytes=(
+                    sum(self._entry_bytes.values()) if self.max_cached_bytes else None
+                ),
+                max_cached_bytes=self.max_cached_bytes,
+            )
+
+    @staticmethod
+    def _tensor_storage_bytes(*values):
+        storages = {}
+
+        def visit(value):
+            if isinstance(value, torch.Tensor) and value.is_cuda:
+                storage = value.untyped_storage()
+                storages[(value.device, storage.data_ptr())] = storage.nbytes()
+            elif isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, (tuple, list)):
+                for item in value:
+                    visit(item)
+
+        for value in values:
+            visit(value)
+        return sum(storages.values())
+
+    @staticmethod
+    def _graph_pool_bytes(graph, device):
+        # Count reserved private-pool segments, not just live output tensors:
+        # intermediate activations remain reserved for subsequent replays.
+        pool = tuple(graph.pool())
+        segments = [
+            s
+            for s in torch.cuda.memory_snapshot()
+            if s["device"] == device.index
+            and tuple(s.get("segment_pool_id", ())) == pool
+        ]
+        if not segments:
+            raise RuntimeError("CUDA graph private-pool memory accounting unavailable")
+        return sum(s["total_size"] for s in segments)
+
+    def _evict_oldest(self):
+        signature, victim = self._entries.popitem(last=False)
+        # Do not release captured storage while replay/clone is in flight.
+        victim[-1].synchronize()
+        self._entry_bytes.pop(signature, None)
 
     def _report(self, event):
         self._stats[event] += 1
@@ -69,7 +138,14 @@ class VisionGraphCache:
             return self.visual(pixels, grid_thw=grid, **kwargs).pooler_output
 
         # Count every explicit bypass so eager-only workloads remain visible.
-        if not self.enabled or not self.max_entries or grid.shape[0] != 1:
+        if (
+            not self.enabled
+            or not self.max_entries
+            or (
+                grid.shape[0] != 1
+                and not (self.allow_multi_media and self.max_cached_bytes > 0)
+            )
+        ):
             with self._lock:
                 self._report("fallback")
             return eager()
@@ -110,6 +186,14 @@ class VisionGraphCache:
                     self._seen[signature] = -1
                     self._report("fallback")
                     return eager()
+                if self.max_cached_bytes and (
+                    self._tensor_storage_bytes(metadata)
+                    + pixels.numel() * pixels.element_size()
+                    > self.max_cached_bytes
+                ):
+                    self._seen[signature] = -1
+                    self._report("fallback")
+                    return eager()
                 stream = torch.cuda.current_stream(pixels.device)
                 capture_stream = torch.cuda.Stream(device=pixels.device)
                 capture_stream.wait_stream(stream)
@@ -140,11 +224,34 @@ class VisionGraphCache:
                 event = torch.cuda.Event()
                 event.record(capture_stream)
                 entry = (graph, static_input, output, metadata, event)
+                entry_bytes = 0
+                if self.max_cached_bytes:
+                    try:
+                        entry_bytes = self._graph_pool_bytes(graph, pixels.device)
+                    except RuntimeError:
+                        # A runtime without private-pool accounting must not
+                        # keep an unaccounted graph alive during eager fallback.
+                        event.synchronize()
+                        graph.reset()
+                        del entry, graph, static_input, output, metadata
+                        raise
+                    entry_bytes += self._tensor_storage_bytes(static_input, metadata)
+                    if entry_bytes > self.max_cached_bytes:
+                        event.synchronize()
+                        graph.reset()
+                        del entry, graph, static_input, output, metadata
+                        self._seen[signature] = -1
+                        self._report("fallback")
+                        return eager()
+                    while self._entries and (
+                        sum(self._entry_bytes.values()) + entry_bytes
+                        > self.max_cached_bytes
+                    ):
+                        self._evict_oldest()
                 self._entries[signature] = entry
+                self._entry_bytes[signature] = entry_bytes
                 while len(self._entries) > self.max_entries:
-                    _, victim = self._entries.popitem(last=False)
-                    # Do not release captured storage while replay/clone is in flight.
-                    victim[-1].synchronize()
+                    self._evict_oldest()
                 self._report("capture")
                 return self._replay(entry, pixels)
             except RuntimeError as error:

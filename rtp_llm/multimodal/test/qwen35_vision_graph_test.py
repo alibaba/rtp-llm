@@ -109,6 +109,8 @@ class VisionGraphTest(unittest.TestCase):
         self.assertEqual(cache.stats()["entries"], 0)
         with self.assertRaises(ValueError):
             VisionGraphCache(vision, max_entries=-1)
+        with self.assertRaises(ValueError):
+            VisionGraphCache(vision, max_cached_bytes=-1)
 
     def test_capture_error_checks_are_scoped_to_vit_thread(self):
         # Exercise the production capture branch without requiring a GPU.
@@ -211,6 +213,97 @@ class VisionGraphTest(unittest.TestCase):
         self.assertTrue(torch.equal(replayed, vision(changed, grid).pooler_output))
         self.assertTrue(torch.equal(first, expected))
         self.assertEqual(cache.stats()["hit"], 1)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_packed_graph_requires_budget_and_preserves_order_and_ownership(self):
+        vision = TinyVision("cuda")
+        pixels = torch.randn(16, 8, device="cuda")
+        grid = torch.tensor([[1, 2, 4], [1, 4, 2]])
+        unbounded = VisionGraphCache(vision, allow_multi_media=True)
+        unbounded.run(pixels, grid)
+        unbounded.run(pixels, grid)
+        self.assertEqual(unbounded.stats()["capture"], 0)
+        cache = VisionGraphCache(
+            vision, allow_multi_media=True, max_cached_bytes=64 << 20
+        )
+        expected = vision(pixels, grid).pooler_output
+        cache.run(pixels, grid)
+        first = cache.run(pixels, grid)
+        cache.run(pixels * 2, grid)
+        self.assertTrue(torch.equal(first, expected))
+        self.assertEqual(cache.stats()["capture"], 1)
+        self.assertEqual(cache.stats()["hit"], 1)
+        self.assertGreater(
+            cache.stats()["cached_bytes"], pixels.numel() * pixels.element_size()
+        )
+        self.assertLessEqual(cache.stats()["cached_bytes"], 64 << 20)
+        # Same shape and same total patches, but a different ordered grid.
+        reversed_grid = grid.flip(0)
+        cache.run(pixels, reversed_grid)
+        second = cache.run(pixels, reversed_grid)
+        self.assertTrue(
+            torch.equal(second, vision(pixels, reversed_grid).pooler_output)
+        )
+        self.assertEqual(cache.stats()["capture"], 2)
+        self.assertTrue(torch.equal(first, expected))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_graph_memory_budget_falls_back_and_evicts(self):
+        vision = TinyVision("cuda")
+        pixels, grid = torch.ones(16, 8, device="cuda"), torch.tensor([[1, 4, 4]])
+        cache = VisionGraphCache(vision, max_cached_bytes=1)
+        cache.run(pixels, grid)
+        result = cache.run(pixels, grid)
+        self.assertTrue(torch.equal(result, vision(pixels, grid).pooler_output))
+        self.assertEqual(cache.stats()["entries"], 0)
+        self.assertEqual(cache.stats()["cached_bytes"], 0)
+        cache = VisionGraphCache(vision, max_cached_bytes=64 << 20)
+        cache.run(pixels, grid)
+        first = cache.run(pixels, grid)
+        self.assertEqual(cache.stats()["capture"], 1)
+        # Permit one graph's retained bytes, but not two.
+        cache.max_cached_bytes = cache.stats()["cached_bytes"]
+        other = torch.tensor([[1, 2, 8]])
+        cache.run(pixels, other)
+        cache.run(pixels, other)
+        self.assertEqual(cache.stats()["entries"], 1)
+        self.assertEqual(cache.stats()["capture"], 2)
+        self.assertLessEqual(cache.stats()["cached_bytes"], cache.max_cached_bytes)
+        self.assertTrue(torch.equal(first, vision(pixels, grid).pooler_output))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_captured_graph_rejected_when_pool_exceeds_budget(self):
+        vision = TinyVision("cuda")
+        pixels, grid = torch.ones(16, 8, device="cuda"), torch.tensor([[1, 4, 4]])
+        # Input fits; CUDA private-pool reserved segments do not.
+        cache = VisionGraphCache(vision, enabled=True, max_cached_bytes=1024)
+        for _ in range(3):
+            self.assertTrue(
+                torch.equal(cache.run(pixels, grid), vision(pixels, grid).pooler_output)
+            )
+        self.assertEqual(cache.stats()["capture"], 0)
+        self.assertEqual(cache.stats()["entries"], 0)
+        self.assertEqual(cache.stats()["cached_bytes"], 0)
+        self.assertEqual(cache.stats()["fallback"], 2)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_unavailable_graph_pool_accounting_falls_back(self):
+        vision = TinyVision("cuda")
+        pixels, grid = torch.ones(16, 8, device="cuda"), torch.tensor([[1, 4, 4]])
+        cache = VisionGraphCache(vision, enabled=True, max_cached_bytes=64 << 20)
+        with mock.patch.object(
+            cache, "_graph_pool_bytes", side_effect=RuntimeError("no pool metadata")
+        ) as counter:
+            for _ in range(3):
+                self.assertTrue(
+                    torch.equal(
+                        cache.run(pixels, grid), vision(pixels, grid).pooler_output
+                    )
+                )
+        self.assertEqual(counter.call_count, 1)
+        self.assertEqual(cache.stats()["entries"], 0)
+        self.assertEqual(cache.stats()["cached_bytes"], 0)
+        self.assertEqual(cache.stats()["fallback"], 2)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_replay_isolation_exact_grid_and_eviction(self):

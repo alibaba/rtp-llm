@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections.abc import Iterable
 from functools import lru_cache, partial
 from typing import Callable
@@ -110,9 +111,13 @@ def _use_dense_fa4(query, lengths):
     )
 
 
-def _fa4_vision_attention(query, key, value, cu_seqlens, lengths, scaling):
+def _fa4_vision_attention(
+    query, key, value, cu_seqlens, lengths, scaling, *, use_dense=None
+):
     # Keep equal-size frame/image segments independent in the dense scheduler.
-    if _use_dense_fa4(query, lengths):
+    if use_dense is None:
+        use_dense = _use_dense_fa4(query, lengths)
+    if use_dense:
         batch_shape = (len(lengths), lengths[0])
         output = _dense_flash_attention_backend()(
             query.view(*batch_shape, *query.shape[-2:]),
@@ -470,20 +475,48 @@ class VisionAttention(nn.Module):
         self.scale = scale
         self.backend = "auto"
 
-    def forward(self, query, key, value, cu_seqlens, max_seqlen, sequence_lengths=None):
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        cu_seqlens,
+        max_seqlen,
+        sequence_lengths=None,
+        attention_plan=None,
+    ):
         batch_size = query.shape[0]
         q, k, v = [
             einops.rearrange(t, "b s h d -> (b s) h d") for t in (query, key, value)
         ]
-        backend = _select_attention_backend(q, self.backend)
+        backend = (
+            _select_attention_backend(q, self.backend)
+            if attention_plan is None
+            else attention_plan[0]
+        )
         self.last_backend = backend
-        max_len = int(max_seqlen.item())
+        max_len = (
+            int(max_seqlen.item()) if attention_plan is None else attention_plan[2]
+        )
         if backend == "fa4":
             lengths = sequence_lengths
             if lengths is None:
                 lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).cpu().tolist()
-            self.last_layout = "dense" if _use_dense_fa4(q, lengths) else "varlen"
-            output = _fa4_vision_attention(q, k, v, cu_seqlens, lengths, self.scale)
+            dense = (
+                _use_dense_fa4(q, lengths)
+                if attention_plan is None
+                else attention_plan[1]
+            )
+            self.last_layout = "dense" if dense else "varlen"
+            output = _fa4_vision_attention(
+                q,
+                k,
+                v,
+                cu_seqlens,
+                lengths,
+                self.scale,
+                use_dense=None if attention_plan is None else dense,
+            )
             if isinstance(output, tuple):
                 output = output[0]
         elif backend == "flash_attention_2":
@@ -670,6 +703,7 @@ class Qwen3_5MoeVisionAttention(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         sequence_lengths: tuple[int, ...] | None,
+        attention_plan=None,
     ) -> torch.Tensor:
         self.attn.backend = getattr(self.config, "vit_attention_backend", "auto")
         # [s, b, c] --> [s, b, head * 3 * head_dim]
@@ -713,6 +747,7 @@ class Qwen3_5MoeVisionAttention(nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            attention_plan=attention_plan,
         )
 
         context_layer = einops.rearrange(
@@ -721,6 +756,25 @@ class Qwen3_5MoeVisionAttention(nn.Module):
 
         output, _ = self.proj(context_layer)
         return output
+
+
+def _add_residual_reusing_branch(residual, branch):
+    """Reuse an owned inference output, never the caller's residual storage.
+
+    Keep the original add order and BF16/FP16 rounding. In particular this is
+    not fused LayerNorm: the following native LayerNorm remains unchanged.
+    """
+    if (
+        not torch.is_grad_enabled()
+        and branch.is_cuda
+        and branch.is_contiguous()
+        and branch.shape == residual.shape
+        and branch.dtype == residual.dtype
+        and branch.device == residual.device
+        and not torch._C._overlaps(residual, branch)
+    ):
+        return torch.add(residual, branch, out=branch)
+    return residual + branch
 
 
 class Qwen3_5MoeVisionBlock(nn.Module):
@@ -735,6 +789,10 @@ class Qwen3_5MoeVisionBlock(nn.Module):
     ):
         dim = config.hidden_size
         super().__init__()
+        # Experimental until full-output and idle-host performance A/B pass.
+        self.reuse_residual_output = (
+            os.environ.get("QWEN35_VIT_REUSE_RESIDUAL_OUTPUT", "0") == "1"
+        )
         if norm_layer is None:
             norm_layer = partial(Qwen3_5MoeVisionLayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
@@ -758,17 +816,29 @@ class Qwen3_5MoeVisionBlock(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         sequence_lengths: tuple[int, ...] | None,
+        attention_plan=None,
     ) -> torch.Tensor:
-        x = x + self.attn(
+        branch = self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            attention_plan=attention_plan,
         )
-
-        x = x + self.mlp(self.norm2(x))
+        x = (
+            _add_residual_reusing_branch(x, branch)
+            if self.reuse_residual_output
+            else x + branch
+        )
+        del branch
+        branch = self.mlp(self.norm2(x))
+        x = (
+            _add_residual_reusing_branch(x, branch)
+            if self.reuse_residual_output
+            else x + branch
+        )
         return x
 
 
@@ -881,6 +951,9 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         prefix: str = "",
     ) -> None:
         super().__init__(config)
+        self.hoist_attention_dispatch = (
+            os.environ.get("QWEN35_VIT_HOIST_ATTN_DISPATCH", "0") == "1"
+        )
         if quant_config is not None:
             raise ValueError("This ViT port supports unquantized vision weights")
         self.hidden_size = config.hidden_size
@@ -1157,6 +1230,24 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         hidden_states = hidden_states + pos_embeds
         hidden_states = hidden_states.unsqueeze(1)
 
+        # All encoder blocks share the same device, dtype, heads and segments.
+        # Resolve CPU-only dispatch once, retaining direct-block fallbacks.
+        attention_plan = None
+        lengths = encoder_metadata.get("sequence_lengths")
+        if self.hoist_attention_dispatch and lengths is not None:
+            query_shape = hidden_states.view(
+                -1, self.num_heads, self.hidden_size // self.num_heads
+            )
+            backend = _select_attention_backend(
+                query_shape, getattr(self.config, "vit_attention_backend", "auto")
+            )
+            attention_plan = (
+                backend,
+                backend == "fa4" and _use_dense_fa4(query_shape, lengths),
+                int(encoder_metadata["max_seqlen"].item()),
+            )
+            del query_shape
+
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
@@ -1166,6 +1257,7 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
                 rotary_pos_emb_sin=encoder_metadata["rotary_pos_emb_sin"],
                 max_seqlen=encoder_metadata["max_seqlen"],
                 sequence_lengths=encoder_metadata.get("sequence_lengths"),
+                attention_plan=attention_plan,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)

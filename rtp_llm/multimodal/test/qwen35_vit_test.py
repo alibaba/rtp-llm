@@ -67,6 +67,119 @@ class Qwen35VitTest(unittest.TestCase):
         model.load_weights(checkpoint.items())
         return model.eval()
 
+    def test_residual_reuse_preserves_autograd_and_broadcast_fallback(self):
+        x = torch.randn(7, 1, 32, requires_grad=True)
+        actual = vit._add_residual_reusing_branch(x, x * 2)
+        actual.sum().backward()
+        torch.testing.assert_close(x.grad, torch.full_like(x, 3), atol=0, rtol=0)
+        with torch.no_grad():
+            bias = torch.randn(32)
+            torch.testing.assert_close(
+                vit._add_residual_reusing_branch(x, bias), x + bias, atol=0, rtol=0
+            )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @torch.inference_mode()
+    def test_residual_reuse_is_bitwise_and_does_not_mutate_input(self):
+        for dtype in (torch.float16, torch.bfloat16, torch.float32):
+            with self.subTest(dtype=dtype):
+                x = torch.randn(351, 1, 1152, device="cuda", dtype=dtype)
+                before = x.clone()
+                branch = torch.randn_like(x)
+                expected = x + branch
+                actual = vit._add_residual_reusing_branch(x, branch)
+                self.assertEqual(actual.data_ptr(), branch.data_ptr())
+                self.assertTrue(
+                    torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+                )
+                self.assertTrue(torch.equal(x, before))
+                # Even a same-storage view must not turn into an in-place add.
+                view = x.view_as(x)
+                actual = vit._add_residual_reusing_branch(x, view)
+                self.assertNotEqual(actual.data_ptr(), x.data_ptr())
+                self.assertTrue(torch.equal(x, before))
+                self.assertTrue(torch.equal(actual, before + before))
+                strided = torch.randn(351, 1, 2304, device="cuda", dtype=dtype)[
+                    ..., ::2
+                ]
+                expected = x + strided
+                actual = vit._add_residual_reusing_branch(x, strided)
+                self.assertNotEqual(actual.data_ptr(), strided.data_ptr())
+                self.assertTrue(torch.equal(actual, expected))
+
+    @torch.inference_mode()
+    def test_hoisted_sdpa_dispatch_matches_direct_layers(self):
+        model = self.make_model()
+        pixels = torch.randn(72, 24)
+        grid = torch.tensor([[2, 4, 6], [1, 6, 4]])
+        with patch.object(vit, "HAS_TRITON", False):
+            model.hoist_attention_dispatch = False
+            expected = model(pixels, grid)
+            model.hoist_attention_dispatch = True
+            with patch.object(
+                vit, "_select_attention_backend", wraps=vit._select_attention_backend
+            ) as select:
+                actual = model(pixels, grid)
+            self.assertEqual(select.call_count, 1)
+            self.assertTrue(torch.equal(actual.pooler_output, expected.pooler_output))
+            self.assertTrue(
+                torch.equal(actual.last_hidden_state, expected.last_hidden_state)
+            )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @torch.inference_mode()
+    def test_dense_fa4_hoist_and_residual_reuse_are_bitwise(self):
+        if (
+            torch.cuda.get_device_capability() != (10, 3)
+            or vit._flash_attention_backends()[0] is None
+        ):
+            self.skipTest("requires SM103 FA4 dense backend")
+        config = Qwen3_5MoeVisionConfig(
+            depth=2,
+            hidden_size=1152,
+            num_heads=16,
+            intermediate_size=4304,
+            patch_size=16,
+            temporal_patch_size=2,
+            num_position_embeddings=2304,
+            out_hidden_size=128,
+        )
+        config.vit_attention_backend = "fa4"
+        model = self.make_model(config).to(device="cuda", dtype=torch.bfloat16)
+        pixels = torch.randn(7040, 1536, device="cuda", dtype=torch.bfloat16)
+        grid = torch.tensor([[1, 44, 80], [1, 44, 80]])
+        model.hoist_attention_dispatch = False
+        for block in model.blocks:
+            block.reuse_residual_output = False
+        expected = model(pixels, grid)
+        for reuse, hoist in ((True, False), (False, True), (True, True)):
+            with self.subTest(reuse=reuse, hoist=hoist):
+                model.hoist_attention_dispatch = hoist
+                for block in model.blocks:
+                    block.reuse_residual_output = reuse
+                with patch.object(
+                    vit,
+                    "_select_attention_backend",
+                    wraps=vit._select_attention_backend,
+                ) as select:
+                    actual = model(pixels, grid)
+                self.assertEqual(select.call_count, 1 if hoist else 2)
+                self.assertTrue(
+                    torch.equal(
+                        actual.pooler_output.view(torch.uint8),
+                        expected.pooler_output.view(torch.uint8),
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(
+                        actual.last_hidden_state.view(torch.uint8),
+                        expected.last_hidden_state.view(torch.uint8),
+                    )
+                )
+                self.assertEqual(
+                    {b.attn.attn.last_layout for b in model.blocks}, {"dense"}
+                )
+
     @torch.inference_mode()
     def test_no_deepstack_reuses_merger_output(self):
         model = self.make_model()
