@@ -63,8 +63,9 @@ bool writebackKeepsKvReserveAfterRelease(const std::vector<SingleTypeCacheManage
 }
 
 bool WritebackRetainedKv::init(const std::shared_ptr<const CacheTopology>& topology,
-                               int threshold_percent,
-                               bool prefill) {
+                               int                                         threshold_percent,
+                               bool                                        prefill,
+                               kmonitor::MetricsReporterPtr                metrics_reporter) {
     if (!topology || threshold_percent < 1 || threshold_percent > 100) {
         return false;
     }
@@ -79,11 +80,13 @@ bool WritebackRetainedKv::init(const std::shared_ptr<const CacheTopology>& topol
         total_bytes_ += bytes * group.block_num;
     }
     threshold_percent_ = threshold_percent;
-    prefill_ = prefill;
+    prefill_           = prefill;
+    metrics_reporter_  = std::move(metrics_reporter);
     return total_bytes_ > 0;
 }
 
-void WritebackRetainedKv::check(const std::vector<KVCacheResourcePtr>& resources) {
+void WritebackRetainedKv::check(const std::vector<KVCacheResourcePtr>& resources,
+                                WritebackStatusMetricsCollector        status) {
     std::map<std::string, std::set<BlockIdxType>> held_blocks;
     for (const auto& resource : resources) {
         for (const auto& [tag, bytes] : group_block_bytes_) {
@@ -98,8 +101,19 @@ void WritebackRetainedKv::check(const std::vector<KVCacheResourcePtr>& resources
     for (const auto& [tag, blocks] : held_blocks) {
         held_bytes += blocks.size() * group_block_bytes_.at(tag);
     }
-    const auto now_ms = P2PNotification::nowMs();
+    status.prefill                     = prefill_;
+    status.retained_context_count      = resources.size();
+    status.retained_kv_bytes           = held_bytes;
+    status.retained_kv_percent         = total_bytes_ > 0 ? 100.0 * held_bytes / total_bytes_ : 0.0;
+    const auto                  now_ms = P2PNotification::nowMs();
     std::lock_guard<std::mutex> lock(mutex_);
+    if (last_report_ms_ < 0 || now_ms - last_report_ms_ >= 1000
+        || status.inflight_context_count != last_status_.inflight_context_count
+        || status.retained_kv_bytes != last_status_.retained_kv_bytes) {
+        reportWritebackMetrics(metrics_reporter_, status);
+        last_report_ms_ = now_ms;
+        last_status_    = status;
+    }
     if (held_bytes > 0 && (last_log_ms_ == 0 || now_ms - last_log_ms_ >= 30000)) {
         RTP_LLM_LOG_WARNING("writeback retained KV: role=%s contexts=%zu held_bytes=%zu total_bytes=%zu threshold=%d",
                             prefill_ ? "PREFILL" : "DECODE", resources.size(), held_bytes, total_bytes_, threshold_percent_);

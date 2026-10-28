@@ -359,7 +359,9 @@ private:
     const int64_t                       lease_query_timeout_ms_;
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     WriteSchedulerMetricsCollector      metrics_;
-    const int64_t                       start_time_us_{currentTimeUs()};
+    const int64_t                        start_time_us_{currentTimeUs()};
+    int64_t                              drain_start_time_us_{0};
+    int64_t                              peer_start_time_us_{0};
 
     mutable std::mutex                          mutex_;
     std::condition_variable                     cv_;
@@ -392,7 +394,7 @@ private:
 class P2PConnectorAsyncWriteContextChecker {
 public:
     ~P2PConnectorAsyncWriteContextChecker();
-    bool   init(const P2PConnectorSchedulerConfig& config);
+    bool   init(const P2PConnectorSchedulerConfig& config, kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
     bool   addContext(const std::shared_ptr<P2PConnectorAsyncWriteContext>& context);
     void   cancelAll();
     void   stop();
@@ -409,7 +411,8 @@ private:
     std::atomic<bool>                                                     stopping_{false};
     std::shared_ptr<P2PNotification>   notification_{std::make_shared<P2PNotification>()};
     std::shared_ptr<autil::ThreadPool> control_pool_;
-    WritebackRetainedKv retained_kv_;
+    WritebackRetainedKv                retained_kv_;
+    kmonitor::MetricsReporterPtr       metrics_reporter_;
 };
 
 }  // namespace rtp_llm

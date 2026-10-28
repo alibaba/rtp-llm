@@ -650,18 +650,29 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {
-    if (stream_->metrics_reporter_ == nullptr || !reuseCache()) {
+    if (stream_->metrics_reporter_ == nullptr) {
         return;
     }
+    const bool decode         = resource_context_.role_type == RoleType::DECODE;
+    cache_reuse_metrics_.side = decode                                           ? "decode" :
+                                resource_context_.role_type == RoleType::PREFILL ? "prefill" :
+                                                                                   "normal";
+    cache_reuse_metrics_.actual_reuse_len =
+        std::max<int64_t>(0, decode ? stream_->prefillTotalReuseLen() : stream_->initialReuseLength());
+    const int64_t first_use_len =
+        decode ? stream_->prefillWritebackFirstUseLength() : stream_->writebackFirstUseLength();
+    cache_reuse_metrics_.reuse_len = cache_reuse_metrics_.actual_reuse_len
+                                     - std::clamp<int64_t>(first_use_len, 0, cache_reuse_metrics_.actual_reuse_len);
     cache_reuse_metrics_.kv_cache_reuse_length            = stream_->initialReuseLength();
     cache_reuse_metrics_.stream_cache_device_reuse_length = stream_->deviceReuseLength();
     cache_reuse_metrics_.stream_cache_memory_reuse_length = stream_->hostReuseLength();
     cache_reuse_metrics_.stream_cache_disk_reuse_length   = stream_->diskReuseLength();
     cache_reuse_metrics_.stream_cache_remote_reuse_length = stream_->remoteReuseLength();
-    cache_reuse_metrics_.report_reuse_metrics             = true;
+    cache_reuse_metrics_.report_reuse_metrics             = reuseCache();
     kmonitor::MetricsTags tags;
-    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
-        &tags, &cache_reuse_metrics_);
+    auto                  metrics = cache_reuse_metrics_;
+    metrics.report_reuse_lengths  = true;
+    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &metrics);
 }
 
 std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {

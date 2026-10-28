@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "autil/ThreadPool.h"
+#include "autil/LoopThread.h"
 #include <condition_variable>
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
@@ -41,6 +42,8 @@ private:
 
         const int64_t           deadline_ms;
         const int64_t           stop_at_ms;
+        const int64_t           start_time_us{currentTimeUs()};
+        int64_t                 resource_start_time_us{0};
         mutable std::mutex      mutex;
         std::condition_variable cv;
         std::vector<bool>       registered_workers;
@@ -83,7 +86,8 @@ private:
     std::multimap<int64_t, std::string>                         request_expirations_;
     bool                                                        stopping_{false};
     bool                                             initialized_{false};
-    WritebackRetainedKv retained_kv_;
+    WritebackRetainedKv                                                         retained_kv_;
+    autil::LoopThreadPtr                                                        metrics_thread_;
 };
 
 }  // namespace rtp_llm

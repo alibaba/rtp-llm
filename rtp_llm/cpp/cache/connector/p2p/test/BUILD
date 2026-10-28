@@ -90,6 +90,7 @@ cc_test(
         "P2PQueueSaturationTest.cc",
         "P2PConnectorSchedulerTest.cc",
         "P2PConnectorWriteSchedulerTest.cc",
+        "P2PConnectorMetricsTest.cc",
         "main.cc",
     ],
     deps = [

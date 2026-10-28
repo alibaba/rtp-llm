@@ -45,7 +45,7 @@ bool P2PSchedulerDecodeWrite::init() {
     }
     auto async_write_pool = std::make_shared<autil::LockFreeThreadPool>(
         kP2PDecodeKickoffThreadCount, kP2PDecodeKickoffQueueSize, nullptr, "P2PAsyncWriteKickoff");
-    if (!async_write_pool->start() || !checker_.init(config_)) {
+    if (!async_write_pool->start() || !checker_.init(config_, metrics_reporter_)) {
         return false;
     }
     async_write_pool_ = std::move(async_write_pool);
@@ -308,7 +308,13 @@ void P2PSchedulerDecodeWrite::startAsyncWriteCalls(const std::shared_ptr<P2PConn
 
         // step 1. generate transfer plan, including several routes from decode tp to prefill tp,
         // each route contains the src/dst rank, src/dest keys/tp/cp configurations.
-        const auto planned = planFor(routing.prefill_tp_size);
+        const auto                     plan_start_us = currentTimeUs();
+        const auto                     planned       = planFor(routing.prefill_tp_size);
+        WritebackStageMetricsCollector plan_metrics;
+        plan_metrics.stage        = "plan";
+        plan_metrics.cost_time_us = currentTimeUs() - plan_start_us;
+        plan_metrics.error        = planned->error;
+        reportWritebackMetrics(metrics_reporter_, plan_metrics);
         if (!planned->ok()) {
             return context->finishWithoutTransfer(planned->error);
         }

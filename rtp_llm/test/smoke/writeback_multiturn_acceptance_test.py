@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from writeback_multiturn_acceptance import (
     MultiturnAcceptance,
@@ -111,6 +112,38 @@ class MultiturnAcceptanceTest(unittest.TestCase):
         cold["decode_local_reuse_len"] = 512
         with self.assertRaisesRegex(AssertionError, "decode_local_reuse_len"):
             validate_cold_control(cold)
+
+    def test_run_case_requires_matching_warm_cold_outputs(self):
+        aux = dict.fromkeys(self.aux, 0)
+        aux.update(
+            decode_local_reuse_len=0,
+            decode_memory_reuse_len=0,
+            decode_disk_reuse_len=0,
+        )
+        warm = {"output_ids": [[120, 120]], "response": ["xx"], "aux_info": aux}
+        for output_ids, response, error in (
+            ([120, 120], "xx", None),
+            ([120, 121], "xx", "output token IDs differ"),
+            ([120, 120], "xy", "response text differs"),
+        ):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                runner = MultiturnAcceptance(CharacterTokenizer(), 1, 2, directory, 512)
+                runner.status = mock.Mock(return_value={"cached_keys": []})
+                runner.wait_for_prefix = mock.Mock(return_value={"cached_keys": []})
+                cold = {"output_ids": [output_ids], "response": [response], "aux_info": aux}
+                runner.generate = mock.Mock(side_effect=[warm, warm, warm, warm, cold])
+                with mock.patch(
+                    "writeback_multiturn_acceptance.build_turn",
+                    return_value=("a", [97], 2),
+                ):
+                    if error:
+                        with self.assertRaisesRegex(AssertionError, error):
+                            runner.run_case("comparison", 2, False)
+                        self.assertFalse((Path(directory) / "comparison/result.json").exists())
+                    else:
+                        result = runner.run_case("comparison", 2, False)
+                        self.assertTrue(result["passed"])
+                        self.assertTrue(result["warm_cold_next_token_equal"])
 
 
 if __name__ == "__main__":

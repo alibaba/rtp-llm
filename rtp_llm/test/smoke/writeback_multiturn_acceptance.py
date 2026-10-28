@@ -9,6 +9,7 @@ from pathlib import Path
 from v4_cp_writeback_acceptance import (
     cache_block_size,
     cached_keys,
+    compare_outputs,
     generation_query,
     require,
     token_row,
@@ -281,6 +282,7 @@ class MultiturnAcceptance:
         )
         cold = self.generate(directory, "cold-control", prompt, input_ids, 2, False)
         validate_cold_control(cold["aux_info"])
+        compare_outputs(warm, cold)
         result = {
             "case": name,
             "turns": turns,

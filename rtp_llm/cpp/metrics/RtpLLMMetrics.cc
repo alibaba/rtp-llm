@@ -982,6 +982,8 @@ void RtpLLMRemoteCacheQuarantineMetrics::report(
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(reuse_len_metric, "rtp_llm_reuse_len");
+    REGISTER_GAUGE_MUTABLE_METRIC(actual_reuse_len_metric, "rtp_llm_actual_reuse_len");
     REGISTER_GAUGE_MUTABLE_METRIC(device_input_length_metric, "rtp_llm_device_input_length");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length_metric, "rtp_llm_kv_cache_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(stream_cache_device_reuse_length_metric, "rtp_llm_stream_cache_device_reuse_length");
@@ -1004,6 +1006,12 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
+    if (collector->report_reuse_lengths && collector->reuse_len >= 0 && collector->actual_reuse_len >= 0) {
+        kmonitor::MetricsTags reuse_tags = tags ? *tags : kmonitor::MetricsTags{};
+        reuse_tags.AddTag("side", collector->side);
+        reuse_len_metric->Report(&reuse_tags, collector->reuse_len);
+        actual_reuse_len_metric->Report(&reuse_tags, collector->actual_reuse_len);
+    }
     if (collector->report_reuse_metrics) {
         REPORT_MUTABLE_METRIC(device_input_length_metric, collector->device_input_length);
         REPORT_MUTABLE_METRIC(kv_cache_reuse_length_metric, collector->kv_cache_reuse_length);

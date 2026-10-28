@@ -76,14 +76,21 @@ void P2PSchedulerPrefillWrite::stop() {
     }
     if (control_pool_)
         control_pool_->stop(autil::ThreadPoolBase::STOP_AFTER_QUEUE_EMPTY);
+    if (metrics_thread_) {
+        metrics_thread_->stop();
+        metrics_thread_.reset();
+    }
+    if (initialized_) {
+        checkRetainedResources();
+    }
 }
 
 bool P2PSchedulerPrefillWrite::init() {
-    if (initialized_ || !coordinator_manager_ || !client_ || !config_.topology || config_.p2p_cancel_broadcast_timeout_ms <= 0
-        || config_.p2p_writeback_timeout_ms <= 0 || config_.load_cache_timeout_ms <= 0
-        || config_.p2p_lease_query_timeout_ms <= 0
+    if (initialized_ || !coordinator_manager_ || !client_ || !config_.topology
+        || config_.p2p_cancel_broadcast_timeout_ms <= 0 || config_.p2p_writeback_timeout_ms <= 0
+        || config_.load_cache_timeout_ms <= 0 || config_.p2p_lease_query_timeout_ms <= 0
         || !validWritebackKvReserveRatio(config_.p2p_writeback_kv_reserve_ratio)
-        || !retained_kv_.init(config_.topology, config_.p2p_kv_leak_exit_threshold_percent, true)
+        || !retained_kv_.init(config_.topology, config_.p2p_kv_leak_exit_threshold_percent, true, metrics_reporter_)
         || config_.worker_addrs.size() != static_cast<size_t>(config_.parallelism_config.tp_size)
         || config_.worker_grpc_addrs.size() != config_.worker_addrs.size()) {
         return false;
@@ -97,6 +104,10 @@ bool P2PSchedulerPrefillWrite::init() {
     }
     control_pool_ = std::make_shared<autil::ThreadPool>(4, 1024, nullptr, "P2PWriteControl");
     initialized_  = control_pool_->start();
+    if (initialized_ && metrics_reporter_) {
+        metrics_thread_ =
+            autil::LoopThread::createLoopThread([this] { checkRetainedResources(); }, 1000000, "WritebackMetrics");
+    }
     return initialized_;
 }
 
@@ -232,13 +243,32 @@ int64_t P2PSchedulerPrefillWrite::holdUntilMs(int64_t deadline_ms) const {
 
 void P2PSchedulerPrefillWrite::checkRetainedResources() {
     std::vector<KVCacheResourcePtr> retained;
+    WritebackStatusMetricsCollector status;
+    const auto                      now_us = currentTimeUs();
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
+        for (const auto& [key, state] : requests_) {
+            std::lock_guard<std::mutex> state_lock(state->mutex);
+            if (!state->stopped) {
+                ++status.inflight_context_count;
+                status.oldest_inflight_ms =
+                    std::max(status.oldest_inflight_ms, std::max<int64_t>(0, now_us - state->start_time_us) / 1000);
+            }
+        }
         for (const auto& [key, resource] : retained_resources_) {
             retained.push_back(resource);
+            const auto state = requests_.find(key);
+            if (state != requests_.end()) {
+                std::lock_guard<std::mutex> state_lock(state->second->mutex);
+                const auto                  hold_start_us = state->second->resource_start_time_us;
+                if (hold_start_us > 0) {
+                    status.oldest_kv_hold_ms =
+                        std::max(status.oldest_kv_hold_ms, std::max<int64_t>(0, now_us - hold_start_us) / 1000);
+                }
+            }
         }
     }
-    retained_kv_.check(retained);
+    retained_kv_.check(retained, status);
 }
 
 void P2PSchedulerPrefillWrite::pruneRequestsLocked(int64_t now_ms) {
@@ -377,11 +407,19 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     WriteSchedulerMetricsCollector metrics;
     metrics.prefill = true;
     const auto report = [&] {
-        if (metrics_reporter_) {
-            metrics.total_cost_time_us = currentTimeUs() - start_us;
-            metrics_reporter_->report<P2PConnectorMetrics, WriteSchedulerMetricsCollector>(nullptr, &metrics);
-        }
+        metrics.total_cost_time_us = currentTimeUs() - start_us;
+        reportWritebackMetrics(metrics_reporter_, metrics);
     };
+    const auto report_stage =
+        [&](const char* stage, int64_t stage_start_us, const ErrorInfo& error, int64_t transferred_bytes = -1) {
+            WritebackStageMetricsCollector collector;
+            collector.prefill           = true;
+            collector.stage             = stage;
+            collector.error             = error;
+            collector.cost_time_us      = currentTimeUs() - stage_start_us;
+            collector.transferred_bytes = transferred_bytes;
+            reportWritebackMetrics(metrics_reporter_, collector);
+        };
     const auto reject = [&](const ErrorInfo& error) {
         response.Clear();
         response.set_error_code(transErrorCodeToRPC(error.code()));
@@ -412,7 +450,9 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     if (is_cancelled && is_cancelled()) {
         return reject(ErrorInfo(ErrorCode::CANCELLED, "StartWriteBack cancelled"));
     }
-    const auto planned = planFor(request.decode_tp_size());
+    const auto plan_start_us = currentTimeUs();
+    const auto planned       = planFor(request.decode_tp_size());
+    report_stage("plan", plan_start_us, planned->error);
     if (!planned->ok()) {
         return reject(planned->error);
     }
@@ -487,8 +527,17 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     bool                                                     receive_started = false;
     bool                                                     receive_stopped = true;
     size_t                                                   start           = 0;
-    size_t                                                   count           = 0;
-    const auto                                               observe         = [&] {
+    size_t                                                   count             = 0;
+    int64_t                                                  hold_start_us     = 0;
+    int64_t                                                  transfer_start_us = 0;
+    bool                                                     transfer_reported = false;
+    const auto                                               finish_transfer   = [&](const ErrorInfo& error) {
+        if (transfer_start_us > 0 && !transfer_reported) {
+            transfer_reported = true;
+            report_stage("transfer", transfer_start_us, error, metrics.planned_bytes);
+        }
+    };
+    const auto observe = [&] {
         if (start_submission.valid()
             && start_submission.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
             std::string failure;
@@ -549,7 +598,15 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         observe();
         if (state->errorInfo().hasError())
             return state->errorInfo();
-        const auto error = coordinator_manager_->admitWriteBackDecodeCache(keys, prompt_blocks, resource, start, load_context);
+        const auto admission_start_us = currentTimeUs();
+        const auto error =
+            coordinator_manager_->admitWriteBackDecodeCache(keys, prompt_blocks, resource, start, load_context);
+        if (resource) {
+            hold_start_us = currentTimeUs();
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->resource_start_time_us = hold_start_us;
+        }
+        report_stage("admission", admission_start_us, error);
         if (error.hasError())
             return error;
         if (load_context)
@@ -558,8 +615,10 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
         if (state->errorInfo().hasError())
             return state->errorInfo();
         count = blocks - start;
-        if (count == 0 && !load_context)
+        if (count == 0 && !load_context) {
+            metrics.committed_token_count = 0;
             return ErrorInfo::OkStatus();
+        }
         // Checked after admission so each pool already reflects this writeback's real per-group, per-rank demand.
         if (!writebackKeepsKvReserve(coordinator_manager_->cacheGroups(), config_.p2p_writeback_kv_reserve_ratio)) {
             state->fail(ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback would leave too few available KV blocks"));
@@ -576,6 +635,7 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
             if (send_error.hasError())
                 return send_error;
         }
+        transfer_start_us = currentTimeUs();
         if (load_context && !load_context->commit())
             return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load submission failed");
         if (count > 0) {
@@ -641,10 +701,18 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
                        && (!load_context || load_context->done());
             }))
             return state->errorInfo();
+        finish_transfer(ErrorInfo::OkStatus());
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->cancelled)
             return state->error;
-        return coordinator_manager_->commitWriteBackDecodeCache(*resource, start, transferDeadline());
+        const auto commit_start_us = currentTimeUs();
+        const auto commit_error =
+            coordinator_manager_->commitWriteBackDecodeCache(*resource, start, transferDeadline());
+        report_stage("commit", commit_start_us, commit_error);
+        if (commit_error.ok()) {
+            metrics.committed_token_count = count * block_size;
+        }
+        return commit_error;
     };
     try {
         const auto error = run();
@@ -655,6 +723,8 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     } catch (...) {
         state->fail(ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback receive failed"));
     }
+    finish_transfer(state->errorInfo());
+    const auto drain_start_us = currentTimeUs();
 
     // Keep targets through physical stop, including any committed local load.
     std::future<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult>> control_submission;
@@ -727,11 +797,13 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     }
     load_context.reset();
     ErrorInfo error;
+    int64_t   released_us = 0;
     {
         std::lock_guard<std::mutex> requests_lock(requests_mutex_);
         std::lock_guard<std::mutex> lock(state->mutex);
         retained_resources_.erase(unique_key);
         resource.reset();
+        released_us    = currentTimeUs();
         state->stopped = true;
         error          = state->error;
         state->cv.notify_all();
@@ -747,7 +819,8 @@ void P2PSchedulerPrefillWrite::handleWrite(const P2PConnectorStartWriteBackReque
     metrics.no_transfer        = !receive_started && error.ok();
     metrics.error              = error;
     metrics.total_cost_time_us = currentTimeUs() - start_us;
-    metrics.hold_time_us       = metrics.total_cost_time_us;
+    metrics.hold_time_us       = hold_start_us > 0 ? released_us - hold_start_us : 0;
+    metrics.drain_time_us      = released_us - drain_start_us;
     report();
 }
 

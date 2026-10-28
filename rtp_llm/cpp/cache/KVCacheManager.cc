@@ -1277,10 +1277,21 @@ bool KVCacheManager::writebackEnabled() const {
 }
 
 std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheResourcePtr& resource,
-                                                           const CompleteTokenIdsPtr& tokens,
-                                                           int input_length,
-                                                           int kv_ready_token_count,
-                                                           const Meta& meta) noexcept {
+                                                             const CompleteTokenIdsPtr&     tokens,
+                                                             int                            input_length,
+                                                             int                            kv_ready_token_count,
+                                                             const Meta&                    meta) noexcept {
+    const auto start_us                  = currentTimeUs();
+    const auto report_submission_failure = [&]() noexcept {
+        try {
+            WritebackStageMetricsCollector metrics;
+            metrics.stage        = "submission";
+            metrics.cost_time_us = currentTimeUs() - start_us;
+            metrics.error =
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "writeback submission exception");
+            reportWritebackMetrics(metrics_reporter_, metrics);
+        } catch (...) {}
+    };
     try {
         const auto skip = [this, input_length, kv_ready_token_count](const char* reason) -> std::shared_ptr<AsyncContext> {
             RTP_LLM_LOG_DEBUG("writeback skipped: reason=%s input_length=%d kv_ready_token_count=%d",
@@ -1290,7 +1301,7 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
             if (metrics_reporter_) {
                 WriteSchedulerMetricsCollector metrics;
                 metrics.skip_reason = reason;
-                metrics_reporter_->report<P2PConnectorMetrics, WriteSchedulerMetricsCollector>(nullptr, &metrics);
+                reportWritebackMetrics(metrics_reporter_, metrics);
             }
             return nullptr;
         };
@@ -1349,8 +1360,10 @@ std::shared_ptr<AsyncContext> KVCacheManager::asyncWriteBack(const BatchKVCacheR
         return p2p_connector_->asyncWrite(std::move(hold), std::move(token_ids), input_length, ready_tokens, *routing);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("writeback submission failed: %s", error.what());
+        report_submission_failure();
     } catch (...) {
         RTP_LLM_LOG_WARNING("writeback submission failed");
+        report_submission_failure();
     }
     return nullptr;
 }

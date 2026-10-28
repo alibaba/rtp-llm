@@ -32,6 +32,8 @@
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "kmonitor/client/common/MinMaxCalculator.h"
+#include "kmonitor/client/core/MetricsCollector.h"
 
 namespace rtp_llm {
 namespace {
@@ -334,6 +336,41 @@ private:
 class P2PConnectorWriteSchedulerTest: public ::testing::Test {
 protected:
     using Allocator = test::BlockTreeCacheTestAllocator<CoordinatorCacheManager>;
+
+    kmonitor::KMonitorPtr attachPrefillMetrics() {
+        auto monitor = std::make_shared<kmonitor::KMonitor>("write_scheduler_metrics_test");
+        monitor->SetServiceName("");
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+        prefill_.reset();
+        prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, reporter, prefill_client_);
+        EXPECT_TRUE(prefill_->init());
+        return monitor;
+    }
+
+    void expectPrefillMetrics(const kmonitor::KMonitorPtr&                      monitor,
+                              const std::map<std::string, std::vector<double>>& expected_samples,
+                              const std::vector<std::string>&                   absent = {}) {
+        kmonitor::MetricsCollector snapshot;
+        monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, 10000);
+        std::map<std::string, std::vector<std::string>> values;
+        for (const auto* record : snapshot.GetRecords().getRecords()) {
+            for (const auto* value : record->Values()) {
+                values[value->Name()].push_back(value->Value());
+            }
+        }
+        for (const auto& [name, samples] : expected_samples) {
+            SCOPED_TRACE(name);
+            ASSERT_EQ(values[name].size(), 1);
+            kmonitor::MinMaxCalculator expected;
+            for (const auto value : samples) {
+                expected.Add(value);
+            }
+            EXPECT_EQ(values[name].front(), expected.ToString());
+        }
+        for (const auto& name : absent) {
+            EXPECT_EQ(values.count(name), 0) << name;
+        }
+    }
 
     void SetUp() override {
         config_    = test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1, 2);
@@ -697,6 +734,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, MirroredRoutesAndAllRanksRequiredBeforePu
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, ReceiverSelectsSuffixWithoutReturningRangeToSource) {
+    const auto monitor = attachPrefillMetrics();
     ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator_, {keys_[0], keys_[1]}).success);
     auto context = asyncWrite(source());
     ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
@@ -717,10 +755,17 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverSelectsSuffixWithoutReturningRang
     ASSERT_TRUE(await([&] { return !context->resourceHoldPending(); }));
     EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
     EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 3u);
+    const auto bytes = static_cast<double>(2 * config_.topology().blockSizeBytesForGroup("default"));
+    EXPECT_GT(context->metrics_.planned_bytes, bytes);
+    expectPrefillMetrics(monitor,
+                         {{"rtp_llm_p2p_writeback_planned_bytes", {bytes}},
+                          {"rtp_llm_p2p_writeback_transferred_bytes", {bytes}},
+                          {"rtp_llm_p2p_writeback_committed_token_count", {4}}});
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, ConcurrentBusySuffixFailsPublicationAndReleasesSource) {
-    auto owner = source();
+    const auto                     monitor = attachPrefillMetrics();
+    auto                           owner   = source();
     std::weak_ptr<KVCacheResource> weak = owner;
     auto context = asyncWrite(std::move(owner));
     ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
@@ -736,6 +781,11 @@ TEST_F(P2PConnectorWriteSchedulerTest, ConcurrentBusySuffixFailsPublicationAndRe
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
     EXPECT_NE(context->errorInfo().ToString().find("publication incomplete"), std::string::npos);
+    const auto bytes = static_cast<double>(4 * config_.topology().blockSizeBytesForGroup("default"));
+    expectPrefillMetrics(
+        monitor,
+        {{"rtp_llm_p2p_writeback_transferred_bytes", {bytes}}},
+        {"rtp_llm_p2p_writeback_committed_token_count"});
     EXPECT_TRUE(await([&] { return weak.expired(); }));
     {
         std::lock_guard<std::mutex> lock(cache->mutex_);
