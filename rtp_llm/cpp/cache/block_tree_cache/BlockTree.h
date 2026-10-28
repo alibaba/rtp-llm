@@ -42,7 +42,7 @@ struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
     std::vector<TreeNode*>                                 inserted_nodes;
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
-    // Original FULL source-tier leaves; consumed under the BlockTreeCache mutex.
+    // Replaced FULL resources; old-tier heap erasure tolerates absent entries. Consumed under the cache mutex.
     std::vector<BlockTreeReplacedCandidate> replaced_candidates;
     // Borrowed from the tree; consumed under the BlockTreeCache mutex.
     std::vector<TreeNode*> newly_resident_nodes;
