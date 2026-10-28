@@ -3,6 +3,7 @@ import asyncio
 import copy
 import json
 import os
+import socket
 from ..config.values import duration
 from .records import timestamp, write_json
 from .transport import post, ExecutionError
@@ -14,7 +15,19 @@ class EngineHosts:
     def __init__(self, owner):
         self.owner = owner
         self.hosts, self.instances, self.counters = {}, {}, {}
+        self.used_ports = set()
         self.lock = asyncio.Lock()
+
+    def port(self):
+        # Binding is a probe, not a reservation; a subsequent bind failure fails the run.
+        for _ in range(32):
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1', 0))
+                port = probe.getsockname()[1]
+            if port not in self.used_ports:
+                self.used_ports.add(port)
+                return port
+        raise ExecutionError('Cannot allocate a fresh Engine listener port')
 
     async def call(self, host, operation, args):
         async with asyncio.timeout(10):
@@ -42,26 +55,28 @@ class EngineHosts:
                     host_dir = self.owner.records.directory / 'hosts' / host_name
                     host_dir.mkdir(parents=True)
                     ready = host_dir / 'ready.json'
+                    host_port = self.port()
                     child = await self.owner.spawn(host_name, recipe['command'], recipe['cwd'],
                         {**os.environ, **recipe['env'], 'MOCK_COMPONENTS_DIR': str(directory.parent),
-                         'MOCK_OUTPUT_DIR': str(host_dir), 'MOCK_READY_FILE': str(ready)}, host_dir)
+                         'MOCK_OUTPUT_DIR': str(host_dir), 'MOCK_READY_FILE': str(ready), 'MOCK_HOST_PORT': str(host_port)}, host_dir)
                     host = {'child': child, 'members': set(), 'url': None}
                     self.hosts[host_name] = host
                     async def await_ready():
                         while not ready.exists():
                             await asyncio.sleep(.02)
                         value = json.loads(ready.read_text())
-                        if set(value) != {'url'} or not isinstance(value['url'], str):
+                        if value != {'url': f'http://127.0.0.1:{host_port}'}:
                             raise ExecutionError('Invalid Engine host readiness')
                         return value['url']
                     host['url'] = await self.owner.guard(await_ready(), float(duration(recipe['startup_timeout'])))
                     self.owner.records.emit(event='process_ready', node=host_name, url=host['url'])
-                unavailable = [item['rpc'] for item in self.owner.history if item['role'] in ROLES]
-                endpoint = await self.call(host, 'create', {'id': node, 'unavailable': unavailable})
+                rpc_port, control_port = self.port(), self.port()
+                endpoint = await self.call(host, 'create', {'id': node, 'rpcPort': rpc_port, 'controlPort': control_port})
                 saved = json.loads((directory / 'endpoints.json').read_text())
-                if any(endpoint.get(k) != saved.get(k) for k in ('id', 'role', 'rpc', 'control', 'metrics')) \
-                        or endpoint['id'] != node or endpoint['role'] != role or endpoint['rpc'] in unavailable:
-                    raise ExecutionError('Invalid or reused Engine endpoint')
+                expected = {'id': node, 'role': role, 'rpc': f'127.0.0.1:{rpc_port}',
+                    'control': f'http://127.0.0.1:{control_port}', 'metrics': f'http://127.0.0.1:{control_port}/metrics'}
+                if endpoint != expected or any(saved.get(key) != value for key, value in expected.items()):
+                    raise ExecutionError('Engine endpoints differ from the assigned identity and listeners')
                 host['members'].add(node)
                 self.instances[node] = host_name
                 self.owner.urls[node] = endpoint['control']

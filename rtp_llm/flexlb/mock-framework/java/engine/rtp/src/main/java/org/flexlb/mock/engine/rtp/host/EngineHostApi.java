@@ -7,8 +7,12 @@ import static org.flexlb.mock.api.Endpoint.Kind.*;
 
 /** Host-local operations. Selection and desired replica counts belong to Python. */
 public interface EngineHostApi {
-    record Create(String id, List<String> unavailable) {
-        public Create { valid(id); unavailable = List.copyOf(unavailable); }
+    record Create(String id, int rpcPort, int controlPort) {
+        public Create {
+            valid(id);
+            if (rpcPort < 1 || rpcPort > 65535 || controlPort < 1 || controlPort > 65535 || rpcPort == controlPort)
+                throw new IllegalArgumentException("Distinct valid RPC and control ports required");
+        }
     }
     record Stop(String id) { public Stop { valid(id); } }
     record Instance(String id, String role, String rpc, String control, String metrics) {}

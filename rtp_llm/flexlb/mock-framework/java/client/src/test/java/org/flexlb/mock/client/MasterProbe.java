@@ -17,7 +17,7 @@ public final class MasterProbe {
         return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4))
             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setReturnIncremental(true).setCanUsePdSeparation(true)).build();
     }
-    private static FlexlbScheduleRequestPB request(long id) {
+    static FlexlbScheduleRequestPB request(long id) {
         return FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setModel("mock").setSeqLen(4).setMaxNewTokens(3)
             .setCacheKeyBlockSize(16).setPriority(50).setRequestTimeMs(System.currentTimeMillis()).setGenerateInput(input(id).toByteString()).build();
     }

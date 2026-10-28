@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 import org.flexlb.mock.runtime.ApiServer;
 
-/** One owned RTP P/D node per JVM. Does not contain the case runner or a cluster controller. */
+/** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
 public final class RtpNode implements AutoCloseable {
     private final RtpConfig config;
     private final DeviceCache cache;
@@ -28,14 +28,18 @@ public final class RtpNode implements AutoCloseable {
     }
 
     public static RtpNode start(RtpConfig config) throws IOException {
+        return start(config, 0, 0);
+    }
+
+    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort) throws IOException {
         var node = new RtpNode(config);
         try {
-            var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(node.service);
+            var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", rpcPort)).addService(node.service);
             var transfer = node.service.transfer();
             if (transfer != null) builder.addService(transfer);
             node.rpc = builder.build().start();
             node.service.rpcAddress(node.rpcAddress());
-            node.api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).metrics(node.service::scrapeMetrics);
+            node.api = new ApiServer(new InetSocketAddress("127.0.0.1", controlPort)).metrics(node.service::scrapeMetrics);
             node.api.start();
             return node;
         } catch (IOException | RuntimeException error) { node.close(); throw error; }

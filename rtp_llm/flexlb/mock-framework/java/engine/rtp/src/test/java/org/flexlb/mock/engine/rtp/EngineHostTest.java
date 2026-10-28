@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.grpc.*;
 import io.grpc.stub.StreamObserver;
 import java.nio.file.*;
+import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
@@ -17,6 +18,15 @@ import org.junit.jupiter.api.io.TempDir;
 
 class EngineHostTest {
     @TempDir Path directory;
+    private final Set<Integer> allocated = new HashSet<>();
+    private int port() throws Exception {
+        while (true) try (var socket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            if (allocated.add(socket.getLocalPort())) return socket.getLocalPort();
+        }
+    }
+    private EngineHostApi.Create create(String id) throws Exception {
+        return new EngineHostApi.Create(id, port(), port());
+    }
     private void config(String id, String role) throws Exception {
         var json = new ObjectMapper(); ObjectNode value = json.valueToTree(RtpNodeTest.configuration(role));
         value.put("id", id);
@@ -27,8 +37,8 @@ class EngineHostTest {
     @Test void stoppingOneObjectPreservesOtherInstancesAndDoesNotReuseAnIdentity() throws Exception {
         config("prefill-0", "prefill"); config("decode-0", "decode"); config("prefill-1", "prefill");
         try (var host = new EngineHost(directory)) {
-            var p = host.create(new EngineHostApi.Create("prefill-0", List.of()));
-            var d = host.create(new EngineHostApi.Create("decode-0", List.of()));
+            var p = host.create(create("prefill-0"));
+            var d = host.create(create("decode-0"));
             assertEquals(2, host.status(new None()).size());
             assertNotEquals(p.rpc(), d.rpc()); assertNotEquals(p.metrics(), d.metrics());
             assertTrue(Files.exists(directory.resolve("prefill-0/ready.json")));
@@ -51,20 +61,69 @@ class EngineHostTest {
             assertEquals(List.of(d), host.status(new None()));
             assertFalse(Files.exists(directory.resolve("prefill-0/ready.json")));
             assertTrue(Files.exists(directory.resolve("prefill-0/endpoints.json")));
-            assertThrows(IllegalArgumentException.class, () -> host.create(new EngineHostApi.Create("prefill-0", List.of())));
-            var fresh = host.create(new EngineHostApi.Create("prefill-1", List.of(p.rpc(), d.rpc())));
+            assertThrows(IllegalArgumentException.class, () -> host.create(create("prefill-0")));
+            var fresh = host.create(create("prefill-1"));
             assertNotEquals(p.rpc(), fresh.rpc());
+            assertNotEquals(p.control(), fresh.control());
             assertEquals(2, host.status(new None()).size());
         }
     }
     @Test void invalidConfigurationAndUnknownStopDoNotAffectExistingInstances() throws Exception {
         config("decode-0", "decode"); config("prefill-0", "decode");
         try (var host = new EngineHost(directory)) {
-            var d = host.create(new EngineHostApi.Create("decode-0", List.of()));
-            assertThrows(IllegalArgumentException.class, () -> host.create(new EngineHostApi.Create("prefill-0", List.of())));
+            var d = host.create(create("decode-0"));
+            assertThrows(IllegalArgumentException.class, () -> host.create(create("prefill-0")));
             assertThrows(IllegalArgumentException.class, () -> host.stop(new EngineHostApi.Stop("prefill-99")));
             assertEquals(List.of(d), host.status(new None()));
-            assertThrows(IllegalArgumentException.class, () -> new EngineHostApi.Create("../outside", List.of()));
+            assertThrows(IllegalArgumentException.class, () -> create("../outside"));
         }
     }
+    @Test void retiredListenersCannotBeReassignedAcrossProtocols() throws Exception {
+        config("prefill-0", "prefill"); config("prefill-1", "prefill"); config("prefill-2", "prefill");
+        try (var host = new EngineHost(directory)) {
+            var original = create("prefill-0");
+            var node = host.create(original);
+            host.stop(new EngineHostApi.Stop(node.id()));
+            assertThrows(IllegalArgumentException.class, () -> host.create(
+                new EngineHostApi.Create("prefill-1", original.controlPort(), port())));
+            assertThrows(IllegalArgumentException.class, () -> host.create(
+                new EngineHostApi.Create("prefill-2", port(), original.rpcPort())));
+            assertTrue(host.status(new None()).isEmpty());
+            for (int port : List.of(original.rpcPort(), original.controlPort())) {
+                try (var socket = new Socket()) {
+                    assertThrows(java.io.IOException.class, () -> socket.connect(new InetSocketAddress("127.0.0.1", port), 500));
+                }
+            }
+        }
+    }
+    @Test void anotherHostCannotOverwriteRetiredArtifacts() throws Exception {
+        config("prefill-0", "prefill");
+        try (var first = new EngineHost(directory)) { first.create(create("prefill-0")); }
+        var old = Files.readAllBytes(directory.resolve("prefill-0/endpoints.json"));
+        try (var replacement = new EngineHost(directory)) {
+            assertThrows(FileAlreadyExistsException.class, () -> replacement.create(create("prefill-0")));
+            assertArrayEquals(old, Files.readAllBytes(directory.resolve("prefill-0/endpoints.json")));
+            assertTrue(replacement.status(new None()).isEmpty());
+        }
+    }
+    @Test void listenerBindFailureDoesNotSelectADifferentPortAndReleasesPartialStartup() throws Exception {
+        config("prefill-0", "prefill");
+        try (var host = new EngineHost(directory); var busy = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            int rpcPort = port();
+            assertThrows(java.io.IOException.class, () -> host.create(new EngineHostApi.Create("prefill-0", rpcPort, busy.getLocalPort())));
+            assertTrue(host.status(new None()).isEmpty());
+            assertFalse(Files.exists(directory.resolve("prefill-0/ready.json")));
+            try (var available = new ServerSocket()) {
+                available.bind(new InetSocketAddress("127.0.0.1", rpcPort));
+            }
+        }
+    }
+    @Test void invalidPortsAreRejectedBeforeCreatingAnInstance() {
+        for (int port : List.of(-1, 0, 65536)) {
+            assertThrows(IllegalArgumentException.class, () -> new EngineHostApi.Create("prefill-0", port, 12345));
+            assertThrows(IllegalArgumentException.class, () -> new EngineHostApi.Create("prefill-0", 12345, port));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new EngineHostApi.Create("prefill-0", 12345, 12345));
+    }
+
 }

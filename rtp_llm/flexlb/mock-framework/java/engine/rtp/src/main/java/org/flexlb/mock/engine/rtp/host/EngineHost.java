@@ -14,7 +14,8 @@ public final class EngineHost implements EngineHostApi, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final Path directory;
     private final Map<String, RtpNode> nodes = new LinkedHashMap<>();
-    private final Set<String> used = new HashSet<>(), addresses = new HashSet<>();
+    private final Set<String> used = new HashSet<>();
+    private final Set<Integer> ports = new HashSet<>();
     private boolean closed;
     public EngineHost(Path directory) { this.directory = directory.toAbsolutePath().normalize(); }
 
@@ -25,26 +26,26 @@ public final class EngineHost implements EngineHostApi, AutoCloseable {
         var config = RtpConfig.load(output.resolve("config.json"));
         if (!config.id().equals(args.id()) || !args.id().startsWith(config.role().name() + "-"))
             throw new IllegalArgumentException("Instance identity differs from configuration");
-        var unavailable = new HashSet<>(args.unavailable());
-        unavailable.addAll(addresses);
-        for (int attempt = 0; attempt < 32; attempt++) {
-            var node = RtpNode.start(config);
-            if (unavailable.contains(node.rpcAddress())) { node.close(); continue; }
-            try {
-                write(output.resolve("effective-config.json"), config.effective());
-                write(output.resolve("endpoints.json"), node.endpoints());
-                write(output.resolve("ready.json"), Map.of("url", node.endpoints().get("control")));
-                nodes.put(args.id(), node);
-                addresses.add(node.rpcAddress());
-                return instance(node);
-            } catch (Exception error) {
-                node.close();
-                Files.deleteIfExists(output.resolve("ready.json"));
-                throw error;
-            }
+        if (ports.contains(args.rpcPort()) || ports.contains(args.controlPort()))
+            throw new IllegalArgumentException("Listener port has already been used in this host");
+        ports.add(args.rpcPort()); ports.add(args.controlPort());
+        // CREATE_NEW also rejects reusing an artifact directory after the owning JVM exits.
+        try (var stream = Files.newOutputStream(output.resolve("effective-config.json"), StandardOpenOption.CREATE_NEW)) {
+            JSON.writeValue(stream, config.effective());
         }
-        throw new IllegalStateException("Cannot allocate a fresh Engine service address");
+        var node = RtpNode.start(config, args.rpcPort(), args.controlPort());
+        try {
+            write(output.resolve("endpoints.json"), node.endpoints());
+            write(output.resolve("ready.json"), Map.of("url", node.endpoints().get("control")));
+            nodes.put(args.id(), node);
+            return instance(node);
+        } catch (Exception error) {
+            try { node.close(); } catch (Exception cleanup) { error.addSuppressed(cleanup); }
+            Files.deleteIfExists(output.resolve("ready.json"));
+            throw error;
+        }
     }
+
     @Override public synchronized Instance stop(Stop args) throws Exception {
         var node = nodes.get(args.id());
         if (node == null) throw new IllegalArgumentException("Unknown active instance");
@@ -86,8 +87,11 @@ public final class EngineHost implements EngineHostApi, AutoCloseable {
     }
     public static void main(String[] args) throws Exception {
         if (args.length != 0) throw new IllegalArgumentException("Use launcher configuration");
+        int port = Integer.parseInt(required("MOCK_HOST_PORT"));
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("Invalid host port");
         try (var host = new EngineHost(Path.of(required("MOCK_COMPONENTS_DIR")));
-             var api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).bind(EngineHostApi.class, host).start()) {
+             var api = new ApiServer(new InetSocketAddress("127.0.0.1", port)).bind(EngineHostApi.class, host).start()) {
+            host.ports.add(port);
             var hook = new Thread(() -> { try { host.close(); } finally { api.close(); } }, "engine-host-close");
             Runtime.getRuntime().addShutdownHook(hook);
             try {
