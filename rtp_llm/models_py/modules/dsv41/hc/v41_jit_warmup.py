@@ -211,11 +211,6 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     ):
         return
     common._assert_not_capturing()
-    if _tile_ops() is None:
-        # No TileLang HC kernels (missing libz3): DelayedHCUnit runs the
-        # PyTorch reference path, so there is nothing to warm up here.
-        logging.info("[V41 HC] TileLang HC kernels unavailable; skipping JIT warmup")
-        return
     units, pairs = _collect_v41_hc_configs(v4)
     if not units:
         return
