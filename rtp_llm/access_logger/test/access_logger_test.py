@@ -212,6 +212,34 @@ class AccessLoggerTest(unittest.TestCase):
                 self.assertIsNone(logger.logger)
                 self.assertIsNone(logger.query_logger)
 
+    def test_mm_external_request_id_matches_greennet_fallback(self):
+        for request_id, external_id in [(42, "dash-abc"), (42, ""), (0, "")]:
+            with self.subTest(request_id=request_id, external_id=external_id):
+                logger = MMAccessLogger("unused", 1, disable_access_log=True)
+                logger.logger = MagicMock()
+                logger.query_logger = MagicMock()
+                kwargs = dict(request_id=request_id, external_request_id=external_id)
+                logger.log_query_access([], **kwargs)
+                logger.log_success_access([], "ready", **kwargs)
+                logger.log_exception_access([], RuntimeError("failed"), **kwargs)
+                records = [
+                    json.loads(logger.query_logger.info.call_args.args[0]),
+                    *[
+                        json.loads(call.args[0])
+                        for call in logger.logger.info.call_args_list
+                    ],
+                ]
+                self.assertEqual(len(records), 3)
+                for record in records:
+                    self.assertEqual(record["id"], request_id)
+                    self.assertIsInstance(record["id"], int)
+                    self.assertEqual(
+                        record["external_request_id"],
+                        external_id or str(request_id),
+                    )
+                self.assertEqual(records[1]["response"], "ready")
+                self.assertEqual(records[2]["exception"], "failed")
+
     def make_enabled_logger(self):
         with patch.object(access_logger, "init_logger"):
             logger = access_logger.AccessLogger("unused", 1, disable_access_log=False)
