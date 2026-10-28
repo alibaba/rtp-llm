@@ -574,6 +574,7 @@ class MMProcessEngine:
                     deadline=deadline,
                     defer_cache_complete=True,
                     request_id=request_id,
+                    external_request_id=external_request_id,
                     report_vit_error=False,
                     report_request_metrics=False,
                     report_embedding_length=False,
@@ -654,6 +655,7 @@ class MMProcessEngine:
                 cache_claim=(cache_key, entry, state),
                 defer_cache_complete=state == "miss",
                 request_id=request_id,
+                external_request_id=external_request_id,
                 report_vit_error=False,
                 report_request_metrics=False,
                 report_embedding_length=False,
@@ -838,10 +840,17 @@ class MMProcessEngine:
         return res
 
     def mm_embedding_impl(
-        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        external_request_id: str = "",
     ) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
-        result, _ = self._mm_embedding_impl(mm_inputs, request_id=request_id)
+        result, _ = self._mm_embedding_impl(
+            mm_inputs,
+            request_id=request_id,
+            external_request_id=external_request_id,
+        )
         return result
 
     def _mm_embedding_impl(
@@ -857,6 +866,7 @@ class MMProcessEngine:
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
         inspection_handle: Optional[SourceInspection] = None,
+        external_request_id: str = "",
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -882,7 +892,11 @@ class MMProcessEngine:
                 self.inc_query_num()
                 query_started = True
                 if not self.vit_config.disable_access_log:
-                    self._access_logger.log_query_access(mm_inputs, request_id)
+                    self._access_logger.log_query_access(
+                        mm_inputs,
+                        request_id,
+                        external_request_id=external_request_id,
+                    )
 
                 with torch.profiler.record_function("preprocess"):
                     work_items = self._create_work_items(
@@ -920,7 +934,10 @@ class MMProcessEngine:
 
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(
-                        mm_inputs, str(result), request_id
+                        mm_inputs,
+                        str(result),
+                        request_id,
+                        external_request_id=external_request_id,
                     )
 
             if report_request_metrics and not self.is_proxy_mode:
@@ -940,7 +957,12 @@ class MMProcessEngine:
             ):
                 gc.collect()
                 torch.cuda.empty_cache()
-            self._access_logger.log_exception_access(mm_inputs, e, request_id)
+            self._access_logger.log_exception_access(
+                mm_inputs,
+                e,
+                request_id,
+                external_request_id=external_request_id,
+            )
             raise
         finally:
             if query_started:
@@ -1722,6 +1744,7 @@ class MMProcessEngine:
                 cache_claim=(cache_key, entry, "miss"),
                 defer_cache_complete=True,
                 request_id=request_id,
+                external_request_id=external_request_id,
                 report_embedding_length=False,
                 report_image_count=False,
                 report_vit_error=False,
