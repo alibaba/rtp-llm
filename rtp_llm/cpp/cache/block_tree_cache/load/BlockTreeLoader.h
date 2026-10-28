@@ -56,8 +56,6 @@ public:
     void                 shutdown();
 
 private:
-    bool                                                validMatch(std::vector<TreeNode*>&            path,
-                                                                   std::vector<bool>&                 candidate_valid,
     bool                 validMatch(std::vector<TreeNode*>&            path,
                                    std::vector<bool>&                 candidate_valid,
                                    const std::function<bool(size_t)>& valid_prefix,
