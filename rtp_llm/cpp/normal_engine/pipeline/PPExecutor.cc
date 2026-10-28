@@ -468,7 +468,15 @@ absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return absl::OkStatus();
     }
-    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result, batch.round_snapshot);
+    const auto dispatch_begin_us = pp_step_log_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+    auto status = batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result, batch.round_snapshot);
+    if (pp_step_log_) {
+        RTP_LLM_LOG_INFO("[PPHANDOFF] rank=%lld streams=%ld dispatch_us=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(batch.stream_groups.allStreams().size()),
+                         static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() - dispatch_begin_us));
+    }
+    return status;
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
@@ -1502,6 +1510,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     RTP_LLM_PROFILE_FUNCTION();
 
     const auto step = step_count_++;
+    const auto process_begin_us = pp_step_log_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     if (pp_step_log_) {
         RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld first=%d last=%d root=%d streams=%ld",
                          static_cast<long long>(parallelism_config_.world_rank),
@@ -1645,6 +1654,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             profile_step_start_();
         }
 
+        // Host-wall intervals only: retain the production stream/sync behavior.
+        // Exclude the incoming plan/activation wait from stage service time.
+        const auto pass_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+        int64_t target_us = 0, draft_us = 0, sampling_us = 0, pd_publish_us = 0, handoff_us = 0;
         GptModelInputs& local_model_input = plan.model_input;
         if (cache_manager_) {
             cache_manager_->zeroBlocks(local_model_input.kv_cache_blocks_to_zero);
@@ -1693,7 +1706,11 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             // only runs on the first-stage root. Publish this rank's stage-local blocks
             // from the plan data (identical on every rank), so the decode side can load
             // every stage's layers.
+            const auto publish_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             publishPdPlanRequests(plan.model_input, pd_global_input_lengths);
+            if (obj_log_active_) {
+                pd_publish_us = autil::TimeUtility::currentTimeInMicroSeconds() - publish_begin_us;
+            }
         }
 
         if (expert_balancer_) {
@@ -1714,6 +1731,11 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             cudaDeviceSynchronize();
         }
 
+        if (obj_log_active_) {
+            // Publication was historically included in PPTARGET. Account for
+            // it separately here without moving it relative to GPU execution.
+            target_us = autil::TimeUtility::currentTimeInMicroSeconds() - target_begin_us - pd_publish_us;
+        }
         if (obj_log_active_ && isStageRoot()) {
             RTP_LLM_LOG_INFO("[PPTARGET] rank=%lld step=%ld rows=%ld elapsed_us=%ld",
                              static_cast<long long>(parallelism_config_.world_rank), static_cast<long>(step),
@@ -1721,7 +1743,11 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                              static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() - target_begin_us));
         }
         if (!isLastStage()) {
+            const auto handoff_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             asyncSendTensors(output_tensors, inflight.activation_sends);
+            if (obj_log_active_) {
+                handoff_us += autil::TimeUtility::currentTimeInMicroSeconds() - handoff_begin_us;
+            }
             // Chunked prefill: release fastgen context streams as soon as the chunk
             // has left stage 0 so the pipeline fills. Re-scheduling is gated by
             // pp_outstanding_results_ in PPScheduler (the final chunk must not
@@ -1736,6 +1762,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             }
         } else {
             PPExecutionResult execution_result;
+            const auto sampling_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             if (isStageRoot()) {
                 sampleTokens(plan, model_output, execution_result);
                 if (sp_enabled_ && (!is_dspark_ || intermediateCount(plan.intermediate_chunk_mask) == 0)) {
@@ -1749,6 +1776,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 }
             }
 
+            if (obj_log_active_) {
+                sampling_us = autil::TimeUtility::currentTimeInMicroSeconds() - sampling_begin_us;
+            }
             if (sp_enabled_) {
                 mtp::maybeOverrideLastHiddenWithMtpBuffer(
                     model_output, *model_, cp_enabled ? -1 : plan.model_input.combo_tokens.numel());
@@ -1775,6 +1805,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                                   plan.model_input.is_target_verify,
                                                                   &draft_last_hidden,
                                                                   draft_mask);
+                if (obj_log_active_) {
+                    draft_us = autil::TimeUtility::currentTimeInMicroSeconds() - draft_begin_us;
+                }
                 if (obj_log_active_ && isStageRoot()) {
                     RTP_LLM_LOG_INFO("[PPDRAFT] rank=%lld step=%ld rows=%ld elapsed_us=%ld",
                                      static_cast<long long>(parallelism_config_.world_rank), static_cast<long>(step),
@@ -1786,6 +1819,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 }
             }
 
+            const auto handoff_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             if (isStageRoot()) {
                 if (!plan.model_input.is_fake_stream
                     && (!is_dspark_ || intermediateCount(plan.intermediate_chunk_mask) == 0)) {
@@ -1793,8 +1827,23 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 }
                 asyncSendExecutionResult(execution_result, inflight.execution_result_sends);
             }
+            if (obj_log_active_) {
+                handoff_us += autil::TimeUtility::currentTimeInMicroSeconds() - handoff_begin_us;
+            }
         }
 
+        if (obj_log_active_ && isStageRoot()) {
+            const auto done_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld streams=%ld phase=done begin_us=%ld done_us=%ld "
+                             "wall_us=%ld process_us=%ld target_us=%ld draft_us=%ld sampling_us=%ld "
+                             "pd_publish_us=%ld handoff_us=%ld",
+                             static_cast<long long>(parallelism_config_.world_rank), static_cast<long>(step),
+                             static_cast<long>(plan.model_input.input_lengths.numel()),
+                             static_cast<long>(pass_begin_us), static_cast<long>(done_us),
+                             static_cast<long>(done_us - pass_begin_us), static_cast<long>(done_us - process_begin_us),
+                             static_cast<long>(target_us), static_cast<long>(draft_us), static_cast<long>(sampling_us),
+                             static_cast<long>(pd_publish_us), static_cast<long>(handoff_us));
+        }
         if (profile_step_finish_) {
             profile_step_finish_();
         }
