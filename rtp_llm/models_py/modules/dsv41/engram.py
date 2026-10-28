@@ -1863,7 +1863,8 @@ class Engram(nn.Module):
             hidden, hash_ids, token_mask, out=hidden if inplace else None
         )
 
-    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None):
+    def projection_input(self, hidden, hash_ids, *, cpu_rows=None):
+        """Consume this forward's lookup once, preserving packed FP8 inputs."""
         rows = cpu_rows
         del cpu_rows
         cpu_work = self._cpu_lookup_work
@@ -1881,21 +1882,9 @@ class Engram(nn.Module):
                 )
                 if pair is None:
                     del rows
-                    return self._forward_rows(hidden, hash_ids, token_mask, out=out)
-                kv = self.wkv.forward_quantized(*pair)
-                del pair
-            else:
-                kv = self.wkv(rows)
-            del rows
-            return gated_engram_residual(
-                hidden,
-                kv,
-                self.q_weight,
-                self.k_weight,
-                self.eps,
-                token_mask,
-                out=out,
-            )
+                    return Engram.projection_input(self, hidden, hash_ids)
+                return pair
+            return rows
         work = self._lookup_work
         rows = None
         if work is not None:
@@ -1903,10 +1892,15 @@ class Engram(nn.Module):
             rows = work.consume(hash_ids, hidden)
         if rows is None:
             rows = _lookup_for_projection(self, hash_ids, hidden.device)
+        return rows if isinstance(rows, tuple) else rows.flatten(-2)
+
+    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None):
+        rows = Engram.projection_input(self, hidden, hash_ids, cpu_rows=cpu_rows)
         if isinstance(rows, tuple):
             kv = self.wkv.forward_quantized(*rows)
         else:
-            kv = self.wkv(rows.flatten(-2))
+            kv = self.wkv(rows)
+        del rows
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
         )

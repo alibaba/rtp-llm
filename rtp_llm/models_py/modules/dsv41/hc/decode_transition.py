@@ -44,11 +44,15 @@ def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
         or not _enabled()
         or not _plain_decode_block(layer)
         or not _plain_decode_block(next_layer)
-        or next_layer.engram is not None
         or type(layer.ffn_hc) is not DelayedHCUnit
         or type(next_layer.attn_hc) is not DelayedHCUnit
     ):
         return False
+    if next_layer.engram is not None:
+        from rtp_llm.models_py.modules.dsv41.hc.engram_transition import enabled
+
+        if not enabled():
+            return False
     previous = next_layer.attn_hc._previous_ref
     return previous is not None and previous() is layer.ffn_hc
 
@@ -86,6 +90,18 @@ def forward_decode_layer(
     """
     prepared = None
     if isinstance(hidden, PendingDecodePost):
+        if (
+            _enabled()
+            and _plain_decode_block(layer)
+            and layer.engram is not None
+            and capture_input is None
+            and _can_quantize_attention_input(layer, hidden.output, attn_fn)
+        ):
+            from rtp_llm.models_py.modules.dsv41.hc.engram_transition import (
+                try_fused_engram_post_pre,
+            )
+
+            prepared = try_fused_engram_post_pre(layer, hidden)
         if _enabled() and _plain_decode_block(layer) and layer.engram is None:
             prepared = try_fused_post_pre(
                 hidden.output,
