@@ -18,9 +18,10 @@ def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr):
     chosen = tl.full((16,), 0, tl.float32)
     norm = tl.full((), 0, tl.float32)
     for i in tl.static_range(10):
-        best = tl.max(probabilities, 0)
         # CUB ArgMax in the native router chooses the lower ID on a tie.
-        expert = tl.min(tl.where(probabilities == best, experts, 2147483647), 0)
+        best, expert = tl.max(
+            probabilities, 0, return_indices=True, return_indices_tie_break_left=True
+        )
         chosen = tl.where(slots == i, best, chosen)
         norm = norm + best
         # The native 512-expert router scans two 256-element chunks.
@@ -74,6 +75,6 @@ class Qwen4ExpMoeTopk(nn.Module):
             topk_ids,
             topk_weights,
             STRIDE=router_logits.stride(0),
-            num_warps=4,
+            num_warps=1,
             enable_fp_fusion=False,
         )
