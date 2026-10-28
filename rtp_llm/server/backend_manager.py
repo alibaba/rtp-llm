@@ -32,9 +32,12 @@ class BackendManager(object):
         self._distributed_server = DistributedServer(py_env_configs)
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
-        # just rank 0 report metric
-        if py_env_configs.parallelism_config.world_rank == 0:
-            kmonitor.init()
+        parallelism = py_env_configs.parallelism_config
+        kmonitor.init_backend(
+            world_rank=parallelism.world_rank,
+            tp_rank=parallelism.tp_rank,
+            dp_rank=parallelism.dp_rank,
+        )
         self.engine: Optional["BaseEngine"] = None
         self._shutdown_requested = threading.Event()
 

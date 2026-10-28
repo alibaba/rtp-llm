@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from rtp_llm.aios.kmonitor.python_client.kmonitor.kmonitor import KMonitor, MetricTypes
 from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.metric_factory import (
@@ -21,12 +22,33 @@ class KmonTest(unittest.TestCase):
         metric.report(1, {"key": "v1"})
         metric.report(2, {"key": "v2"})
         points = metric.fetch_reported_data()
-        self.assertEqual(len(points), 3)
-        self.assertDictEqual(points[0].tags, {})
-        self.assertDictEqual(points[1].tags, {"key": "v1"})
-        self.assertDictEqual(points[2].tags, {"key": "v2"})
-        self.assertAlmostEqual(points[1].value * 1.5, points[2].value)
+        self.assertEqual(len(points), 2)
+        self.assertDictEqual(points[0].tags, {"key": "v1"})
+        self.assertDictEqual(points[1].tags, {"key": "v2"})
+        self.assertAlmostEqual(points[0].value * 1.5, points[1].value)
         report_worker.stop()
+
+    def test_unused_workers_do_not_overwrite_active_qps(self) -> None:
+        with patch(
+            "rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric.time.time",
+            return_value=10.0,
+        ) as clock:
+            metrics = [
+                MetricFactory.create_metric(MetricTypes.ACC_METRIC, "vit_success", {})
+                for _ in range(33)
+            ]
+            metrics[0].report(9)
+            for timestamp, expected in ((11.0, 9), (12.0, 0), (13.0, 2)):
+                if expected == 2:
+                    metrics[0].report(2)
+                clock.return_value = timestamp
+                points = [
+                    point
+                    for metric in metrics
+                    for point in metric.fetch_reported_data()
+                ]
+                self.assertEqual(len(points), 1)
+                self.assertEqual(points[0].value, expected)
 
     def test_report(self) -> None:
         kmon = KMonitor({"tag_a": "aa"})
