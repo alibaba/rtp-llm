@@ -197,6 +197,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
+        ":cuda_graph_input_test_utils",
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
@@ -219,6 +220,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
+        ":cuda_graph_input_test_utils",
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
@@ -242,6 +244,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
+        ":cuda_graph_input_test_utils",
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
@@ -266,6 +269,7 @@ py_test(
         "//:th_transformer",
     ],
     deps = [
+        ":cuda_graph_input_test_utils",
         ":cuda_graph_test_utils",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
@@ -317,4 +321,56 @@ py_test(
     },
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_library(
+    name = "cuda_graph_input_test_utils",
+    srcs = ["cuda_graph_input_test_utils.py"],
+    deps = ["//rtp_llm/test/model_test/test_util"],
+)
+
+py_test(
+    name = "embedding_cuda_graph_test",
+    main = "embedding_cuda_graph_test.py",
+    srcs = ["embedding_cuda_graph_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_input_test_utils",
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "embedding_cuda_graph_test_rocm",
+    main = "embedding_cuda_graph_test.py",
+    srcs = ["embedding_cuda_graph_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_input_test_utils",
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "ROCM",
+    },
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    tags = ["rocm"],
 )

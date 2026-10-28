@@ -187,6 +187,18 @@ public:
         return runner_->forward(inputs, state_);
     }
 
+    py::object forwardWithPreparation(torch_ext::PyModelInputs& inputs) {
+        c10::InferenceMode inference_guard(true);
+        prepareDeviceMirrors(inputs);
+        // Match the embedding branch in PyWrappedModel: one complete-input
+        // decision, followed by attention preparation and replay of that bucket.
+        if (runner_ == nullptr || !runner_->canRun(inputs, state_)) {
+            return py::none();
+        }
+        // forward() prepares inputs and attention when no plan was staged.
+        return py::cast(runner_->forward(inputs, state_));
+    }
+
     void prepareAttentionInputs(torch_ext::PyModelInputs& inputs) {
         c10::InferenceMode inference_guard(true);
         prepareDeviceMirrors(inputs);
@@ -281,6 +293,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
         .def("make_input_ids_scalar", &CudaGraphTestRunner::makeInputIdsScalar)
         .def("prepare", &CudaGraphTestRunner::prepare, py::arg("inputs"), py::arg("skip_forward_event_sync") = false)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("forward_with_preparation", &CudaGraphTestRunner::forwardWithPreparation)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("getGenerationPrefillStatus", &CudaGraphTestRunner::getGenerationPrefillStatus)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)

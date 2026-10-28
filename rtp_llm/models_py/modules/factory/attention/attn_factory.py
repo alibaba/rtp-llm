@@ -96,6 +96,9 @@ def get_mla_impl(
         is_cuda_graph, cuda_graph_selection_mode
     )
 
+    if selection_mode == CudaGraphSelectionMode.EMBEDDING_GRAPH:
+        raise ValueError("cache-free embedding graph MLA is not implemented")
+
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
@@ -221,6 +224,27 @@ def _is_fmha_impl_disabled(
     return False
 
 
+def _select_embedding_graph_impl(attn_configs, fmha_config=None):
+    """Select Graph support from the existing device backend registry."""
+    reasons = []
+    for impl in PREFILL_MHA_IMPS:
+        capability = getattr(impl, "embedding_cuda_graph_unsupported_reason", None)
+        if capability is None:
+            continue
+        if _is_fmha_impl_disabled(impl.__name__, fmha_config):
+            reasons.append(f"{impl.__name__} is disabled")
+            continue
+        reason = capability(attn_configs)
+        if not reason:
+            return impl, ""
+        reasons.append(reason)
+    return (
+        None,
+        "; ".join(reasons)
+        or "no registered device prefill backend supports embedding graphs",
+    )
+
+
 def get_fmha_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -235,6 +259,24 @@ def get_fmha_impl(
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
     )
+    if selection_mode == CudaGraphSelectionMode.EMBEDDING_GRAPH:
+        impl, reason = _select_embedding_graph_impl(attn_configs, fmha_config)
+        if impl is None:
+            raise ValueError(f"unsupported embedding graph backend: {reason}")
+        if not impl.support_parallelism_config(parallelism_config):
+            raise ValueError("embedding graph context parallelism requires an adapter")
+        if getattr(attn_inputs, "headwise_config", None) is not None:
+            raise ValueError("embedding graph headwise attention requires an adapter")
+        if not attn_inputs.is_prefill:
+            raise ValueError("embedding graph attention requires a prefill batch")
+        return impl(
+            attn_configs,
+            attn_inputs,
+            parallelism_config,
+            is_cuda_graph=True,
+            token_capacity=attn_inputs.padding_offset.numel(),
+            max_seq_len=max_seq_len,
+        )
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
 
@@ -325,6 +367,10 @@ class AttnImplFactory(object):
         "mha": get_fmha_impl,
         "mla": get_mla_impl,
     }
+
+    @staticmethod
+    def embedding_cuda_graph_unsupported_reason(attn_configs, fmha_config=None):
+        return _select_embedding_graph_impl(attn_configs, fmha_config)[1]
 
     @classmethod
     def get_fmha_impl(

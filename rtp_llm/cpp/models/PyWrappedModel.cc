@@ -250,6 +250,19 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths   = normalize_i32(inputs.prefix_lengths);
     py_attn_inputs.sequence_lengths = normalize_i32(inputs.sequence_lengths);
     py_attn_inputs.input_lengths    = normalize_i32(inputs.input_lengths);
+    // Cache-free embedding graphs plan ragged attention on the host. Keep
+    // model-facing inputs on their original device and obtain host views here;
+    // cached generation/MTP retain their existing device metadata pipeline.
+    const bool needs_host_graph_inputs =
+        enable_cuda_graph_ && is_prefill_cuda_graph_mode_ && !kv_cache_layer_layout_.has_value();
+    if (needs_host_graph_inputs) {
+        for (auto* tensor :
+             {&py_attn_inputs.prefix_lengths, &py_attn_inputs.sequence_lengths, &py_attn_inputs.input_lengths}) {
+            if (tensor->defined() && tensor->is_cuda()) {
+                *tensor = normalize_i32(tensor->cpu());
+            }
+        }
+    }
 #if !USING_CUDA
     // Non-CUDA platforms only support the host metadata pipeline (the device
     // branch below needs the CUDA-only metadata kernel), so lift any
@@ -349,6 +362,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens              = cu_seqlens;
         py_attn_inputs.cu_seqlens_device       = tensorHoldHostAndToCuda(cu_seqlens);
         py_attn_inputs.cu_kv_seqlens_device    = tensorHoldHostAndToCuda(cu_kv_seqlens);
+
+
     } else {
         py_attn_inputs.total_tokens         = 0;
         py_attn_inputs.cu_seqlens_device    = torch::zeros({batch_size + 1}, cuda_i32);
@@ -391,6 +406,19 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.host_model_metadata = host_input_metadata_builder_->build(
             inputs.combo_tokens, py_attn_inputs.input_lengths, inputs.text_tokens_mask, py_attn_inputs.cu_seqlens);
     }
+    // Let the model complete attention metadata before Graph eligibility checks.
+    // Use host views because device mirrors may still be waiting for fusedCopy().
+    // Model-specific adapters own the schema of the opaque host tensor payload.
+    // The default model hook leaves the attention inputs unchanged.
+    if (is_prefill_cuda_graph_mode_ && py_attn_inputs.is_prefill && !py_attn_inputs.input_lengths.is_cuda()
+        && (!inputs.combo_tokens.defined() || !inputs.combo_tokens.is_cuda())) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(py_model_, "prepare_embedding_attention_inputs")) {
+            py_attn_inputs = py_model_.attr("prepare_embedding_attention_inputs")(
+                py_attn_inputs, inputs.combo_tokens, inputs.text_tokens_mask).cast<torch_ext::PyAttentionInputs>();
+        }
+    }
+
     return py_attn_inputs;
 }
 
@@ -952,7 +980,9 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
-    if (enable_cuda_graph_ && runner != nullptr
+    // Embedding validates the complete request in forward. The runner then
+    // prepares its selected bucket through the existing prepareInputs path.
+    if (enable_cuda_graph_ && runner != nullptr && graph_role_ != CudaGraphRole::EMBEDDING_PREFILL
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
@@ -1141,7 +1171,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -1149,6 +1178,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
+            if (py::hasattr(py_model_, "prepare_forward_inputs")) {
+                // Preparation replaces input_hiddens; mutate this request's C++
+                // object rather than a Python-owned copy of PyModelInputs.
+                py_model_.attr("prepare_forward_inputs")(
+                    py::cast(&py_model_inputs, py::return_value_policy::reference));
+            }
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();

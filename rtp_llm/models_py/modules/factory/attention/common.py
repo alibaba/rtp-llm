@@ -138,3 +138,94 @@ def update_attention_params(
     old_offset = rope_params.kv_cache_offset
     copy_kv_cache_offset(old_offset, new_offset)
     rope_params.sequence_lengths = new_rope_params.sequence_lengths
+
+
+def embedding_graph_attention_unsupported_reason(configs, backend) -> str:
+    """Check the current cache-free embedding graph attention adapters.
+
+    These are adapter/backend limits, not inherent CUDA Graph restrictions.
+    Unsupported attention semantics (MLA, RoPE, sparse/logn/scaling) must fall
+    back to eager until an adapter implements them without changing results.
+    Also validate the supported dtype, head layout, and backend availability.
+    Return an empty string when supported, otherwise the eager fallback reason.
+    """
+    from importlib.util import find_spec
+
+    from rtp_llm.ops import RopeStyle
+
+    if configs.use_mla:
+        return "cache-free embedding graph MLA is not implemented"
+    if (
+        getattr(configs, "is_sparse", False)
+        or getattr(configs, "use_logn_attn", False)
+        or getattr(configs, "q_scaling", 1.0) != 1.0
+        or getattr(configs, "softmax_extra_scale", 1.0) != 1.0
+    ):
+        return (
+            "embedding graph sparse/logn/custom attention scaling requires an adapter"
+        )
+    if configs.dtype not in (torch.float16, torch.bfloat16):
+        return "embedding graph attention requires FP16 or BF16 activations"
+    if configs.rope_config.style != RopeStyle.No:
+        return "embedding graph RoPE requires a model adapter"
+    if (
+        configs.head_num <= 0
+        or configs.kv_head_num <= 0
+        or configs.size_per_head <= 0
+        or configs.head_num % configs.kv_head_num
+    ):
+        return "invalid embedding graph query/KV head counts"
+    if find_spec(backend) is None:
+        return f"embedding graph attention backend {backend} is not installed"
+    return ""
+
+
+def prepare_embedding_graph_lengths(
+    attn_inputs,
+    token_capacity,
+    request_capacity,
+    max_sequence_length,
+    cu_seqlens_host,
+    for_capture=False,
+):
+    """Update fixed host ragged boundaries, keeping padding in separate sequences."""
+    lengths = attn_inputs.input_lengths
+    if (
+        lengths is None
+        or lengths.is_cuda
+        or lengths.dtype != torch.int32
+        or lengths.ndim != 1
+        or not lengths.is_contiguous()
+    ):
+        raise ValueError(
+            "embedding graph planning requires contiguous host int32 input lengths"
+        )
+    if lengths.numel() != request_capacity:
+        raise ValueError("embedding graph request capacity changed")
+    prefix = attn_inputs.prefix_lengths
+    if prefix is not None and prefix.numel() and bool(prefix.any()):
+        raise ValueError("embedding graph does not support prefix KV")
+    if bool((lengths < 0).any()):
+        raise ValueError("embedding graph sequence lengths must be nonnegative")
+    limit = max_sequence_length or token_capacity
+    if not for_capture and bool((lengths > limit).any()):
+        raise ValueError("embedding graph sequence exceeds position-table capacity")
+    if int(lengths.sum()) > token_capacity:
+        raise ValueError("embedding graph token capacity exceeded")
+    if for_capture:
+        lengths = torch.tensor(
+            [
+                min(limit, max(0, token_capacity - i * limit))
+                for i in range(request_capacity)
+            ],
+            dtype=torch.int32,
+        )
+    real_tokens = int(lengths.sum())
+    cu_seqlens_host[0] = 0
+    torch.cumsum(lengths, 0, out=cu_seqlens_host[1 : request_capacity + 1])
+    padding_slots = (token_capacity + limit - 1) // limit
+    for index in range(padding_slots):
+        cu_seqlens_host[request_capacity + index + 1] = min(
+            token_capacity, real_tokens + (index + 1) * limit
+        )
+    return lengths

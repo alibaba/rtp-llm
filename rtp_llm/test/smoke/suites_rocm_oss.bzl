@@ -194,6 +194,16 @@ def rocm_oss_suites():
                 smoke_args="--reserver_runtime_mem_mb 107813 --use_aiter_pa 1 --seq_size_per_block 16 --fp8_kv_cache 1",
             ),
             smoke_test(
+                name="rocm_embedding_bert_st_cudagraph",
+                envs=["FT_SERVER_TEST=1"],
+                test_envs={
+                    "VISIT_RETRY_TIME": "1",
+                },
+                task_info="data/model/bert/q_r.json",
+                smoke_args="--seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type FP16 --enable_cuda_graph 1 --prefill_capture_config 32,64,128 --max_context_batch_size 4 --frontend_server_count 1 --warm_up 0 --concurrency_limit 4",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
                 name="rocm_embedding_bert_st",
                 task_info="data/model/bert/q_r.json",
                 smoke_args="--seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type FP16",

@@ -26,6 +26,14 @@ def sm120_suites():
                 gpu_type = ["RTX_5000_PRO_CU13"],
             ),
             smoke_test(
+                name = "embedding_bert_cudagraph_sm120",
+                task_info = "data/model/bert/q_r.json",
+                smoke_args = "--seq_size_per_block 64 --act_type FP16 --enable_flashinfer_trt_fmha_v2 0 --enable_cuda_graph 1 --prefill_capture_config 32,64,128 --max_context_batch_size 4 --frontend_server_count 1 --warm_up 0 --concurrency_limit 4",
+                envs = ["FT_SERVER_TEST=1"],
+                test_envs = {"VISIT_RETRY_TIME": "1"},
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
+            smoke_test(
                 name = "embedding_bert_sm120",
                 task_info = "data/model/bert/q_r.json",
                 smoke_args = "--seq_size_per_block 16 --act_type FP16",

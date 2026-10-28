@@ -140,6 +140,7 @@ class FMHAParams(ParamsBase):
         enable_cuda_graph: bool = True,
         graph_max_seq_len: Optional[int] = None,
         alloc_scale: bool = False,
+        graph_token_capacity: Optional[int] = None,
     ):
         super().__init__()
         self.enable_cuda_graph = enable_cuda_graph
@@ -147,6 +148,21 @@ class FMHAParams(ParamsBase):
         # avoids device alloc in forward under graph capture.
         self.kv_scale: Optional[torch.Tensor] = None
 
+        # Cache-free Graphs own fixed ragged storage; planning only updates values.
+        if is_prefill and graph_token_capacity is not None:
+            limit = graph_max_seq_len or graph_token_capacity
+            requests = attn_inputs.input_lengths.numel()
+            padding_slots = (graph_token_capacity + limit - 1) // limit
+            self.cu_seqlens_host = torch.empty(
+                requests + padding_slots + 1, dtype=torch.int32, pin_memory=True
+            )
+            self.cu_seqlens_q = torch.empty_like(self.cu_seqlens_host, device="cuda")
+            self.cu_seqlens_k = self.cu_seqlens_q
+            self.max_seq_len = self.max_seqlen_q = self.max_seqlen_k = limit
+            self.token_q_num = self.token_kv_num = graph_token_capacity
+            self.seq_lens = self.kv_cache_block_id_device = None
+            self.prefix_lengths = attn_inputs.prefix_lengths
+            return
         # Prefill mode
         if is_prefill:
             input_lengths = attn_inputs.input_lengths
@@ -293,6 +309,36 @@ class AiterPrefillAttnOp:
         self.linear_v = linear_v
         self._block_positions: Optional[torch.Tensor] = None
         self._compact_arange: Optional[torch.Tensor] = None
+        self.is_embedding_graph = False
+
+    def initialize_cuda_graph(self, configs, attn_inputs, token_capacity, max_seq_len):
+        self.is_embedding_graph = True
+        self.token_capacity = token_capacity
+        self.max_sequence_length = max_seq_len or token_capacity
+        self.request_capacity = attn_inputs.input_lengths.numel()
+        self.fmha_params = FMHAParams(
+            attn_inputs,
+            graph_max_seq_len=self.max_sequence_length,
+            graph_token_capacity=token_capacity,
+        )
+        self.cu_seqlens_host = self.fmha_params.cu_seqlens_host
+        self.cu_seqlens_device = self.fmha_params.cu_seqlens_q
+
+        self.prepare_cuda_graph(attn_inputs, for_capture=True)
+        return self.fmha_params
+
+    def prepare_cuda_graph(self, attn_inputs, for_capture=False):
+        common.prepare_embedding_graph_lengths(
+            attn_inputs,
+            self.token_capacity,
+            self.request_capacity,
+            self.max_sequence_length,
+            self.cu_seqlens_host,
+            for_capture,
+        )
+
+        self.cu_seqlens_device.copy_(self.cu_seqlens_host)
+        return self.fmha_params
 
     @staticmethod
     def _get_kv_cache_torch_dtype(kv_cache_dtype, base_dtype):
@@ -304,6 +350,8 @@ class AiterPrefillAttnOp:
         return True
 
     def prepare(self, attn_inputs: PyAttentionInputs):
+        if getattr(self, "is_embedding_graph", False):
+            return self.prepare_cuda_graph(attn_inputs)
         self.fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
@@ -672,6 +720,16 @@ class AiterPrefillAttnOp:
         return res.reshape(fmha_params.token_q_num, self.head_num * self.head_dim)
 
     def forward(self, qkv, kv_cache, fmha_params):
+        if getattr(self, "is_embedding_graph", False):
+            if kv_cache is not None:
+                raise ValueError("embedding graph cannot use KV cache")
+            if qkv.size(0) != self.token_capacity:
+                raise ValueError("embedding graph QKV token capacity changed")
+            query, key, value = self._split_raw_qkv(
+                qkv, self.token_capacity, self.token_capacity
+            )
+
+            return self._forward_varlen((query, key, value), fmha_params)
         q_tensor = qkv[0] if isinstance(qkv, (tuple, list)) else qkv
 
         # Paged path: only when kv_cache is a real paged cache object (has kv_cache_base).
@@ -1777,7 +1835,20 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
+        is_cuda_graph: bool = False,
+        token_capacity: Optional[int] = None,
+        max_seq_len: int = 0,
     ) -> None:
+        self.is_cuda_graph = is_cuda_graph
+        if is_cuda_graph:
+            if token_capacity is None or token_capacity <= 0:
+                raise ValueError("embedding graph requires a positive token capacity")
+            self.attn_inputs = attn_inputs
+            self.fmha_impl = AiterPrefillAttnOp(attn_configs, linear_v=True)
+            self.fmha_params = self.fmha_impl.initialize_cuda_graph(
+                attn_configs, attn_inputs, token_capacity, max_seq_len
+            )
+            return
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = AiterPrefillAttnOp(attn_configs, linear_v=True)
@@ -1792,6 +1863,18 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
+    @staticmethod
+    def embedding_cuda_graph_unsupported_reason(configs):
+        return common.embedding_graph_attention_unsupported_reason(configs, "aiter")
+
+    def support_cuda_graph(self):
+        return self.is_cuda_graph
+
+    def prepare_cuda_graph(self, attn_inputs):
+        if not self.is_cuda_graph:
+            raise ValueError("prefill instance was not initialized for a Graph")
+        self.fmha_impl.prepare_cuda_graph(attn_inputs)
+
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -1804,6 +1887,8 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
+        if self.is_cuda_graph:
+            return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
         if kv_cache is None:
             # Embedding models still need positional encoding even without a KV cache.
             if self.need_rope_kv_cache:
