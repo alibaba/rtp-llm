@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <limits>
+#include "rtp_llm/cpp/normal_engine/speculative/DSparkSampleSeed.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -898,16 +899,63 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
     torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
 
-    // Override per-stream uniform samples with seeded generator when random_seed is set,
-    // ensuring deterministic acceptance for reproducible iter_count.
+    // Override per-stream uniform samples when random_seed is set, so acceptance
+    // is reproducible for a fixed seed.
+    //
+    // Bounded DSpARK verification keys those draws by (seed, absolute position)
+    // instead of a stateful generator: the budget decides per round how many
+    // draft positions are verified, so a generator draw would land on a
+    // different absolute position whenever the budget or the accepted prefix
+    // changed. Every other speculative path keeps the historical generator draw
+    // byte for byte.
     {
-        int idx = 0;
+        struct SeededRow {
+            int64_t  row;
+            uint64_t seed;
+            int64_t  base_position;
+        };
+        std::vector<SeededRow> counter_rows;
+        int                    idx = 0;
         for (const auto& stream : streams) {
-            auto gen = stream->getGenerator();
-            if (gen.defined()) {
-                uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+            const auto seed = stream->generateConfig()->random_seed;
+            if (!seed.has_value()) {
+                ++idx;
+                continue;
             }
-            idx++;
+            if (valid_draft_lengths.defined()) {
+                // seqLength() is the pre-round prefix, so the first verified
+                // draft position is exactly seqLength().
+                counter_rows.push_back({idx,
+                                        static_cast<uint64_t>(static_cast<int64_t>(*seed)),
+                                        static_cast<int64_t>(stream->seqLength())});
+            } else {
+                auto gen = stream->getGenerator();
+                if (gen.defined()) {
+                    uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+                }
+            }
+            ++idx;
+        }
+        if (!counter_rows.empty()) {
+            const int64_t width     = static_cast<int64_t>(propose_step_) + 1;
+            auto          host      = torch::empty({static_cast<int64_t>(counter_rows.size()), width},
+                                     torch::TensorOptions().dtype(torch::kFloat).pinned_memory(true));
+            auto          rows      = torch::empty({static_cast<int64_t>(counter_rows.size())},
+                                     torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+            auto*         values    = host.data_ptr<float>();
+            auto*         row_index = rows.data_ptr<int64_t>();
+            for (size_t row = 0; row < counter_rows.size(); ++row) {
+                const auto& source = counter_rows[row];
+                row_index[row]     = source.row;
+                for (int64_t position = 0; position < width; ++position) {
+                    values[row * width + position] =
+                        dsparkUniformAt(source.seed, kDSparkTargetSeedNamespace, source.base_position + position);
+                }
+            }
+            buffer_holder_.hold_host(host);
+            buffer_holder_.hold_host(rows);
+            uniform_samples_d.index_copy_(
+                0, rows.to(target_device, /*non_blocking=*/true), host.to(target_device, /*non_blocking=*/true));
         }
     }
 
