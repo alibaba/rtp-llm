@@ -12,7 +12,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.fla.op import exp
 
 
@@ -36,6 +35,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     v,
     g,
     beta,
+    A_LOG,
+    DT_BIAS,
     o,
     h0,
     ht,
@@ -71,6 +72,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
+    FUSE_GATING: tl.constexpr,
+    STRIDE_AB: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -105,7 +108,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:
         p_beta = beta + bos * HV + i_hv
-    p_g = g + bos * HV + i_hv
+    if FUSE_GATING:
+        p_beta = beta + bos * STRIDE_AB + i_hv
+        p_g = g + bos * STRIDE_AB + i_hv
+    else:
+        p_g = g + bos * HV + i_hv
     p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
     mask_k = o_k < K
@@ -132,7 +139,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-        b_g = tl.load(p_g).to(tl.float32)
+        if FUSE_GATING:
+            xg = tl.load(p_g).to(tl.float32) + tl.load(DT_BIAS + i_hv).to(tl.float32)
+            softplus_x = tl.where(xg <= 20.0, tl.log(1 + tl.exp(xg)), xg)
+            b_g = -tl.exp(tl.load(A_LOG + i_hv).to(tl.float32)) * softplus_x
+        else:
+            b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
@@ -142,7 +154,14 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_h *= exp(b_g)
         # b_v[v] -= sum_k b_h[v, k] * b_k[k]
         b_v -= tl.sum(b_h * b_k[None, :], 1)
-        if IS_BETA_HEADWISE:
+        if FUSE_GATING:
+            # CUDA fused_gdn_gating materializes sigmoid in b's dtype.
+            b_beta = (
+                tl.sigmoid(tl.load(p_beta).to(tl.float32))
+                .to(p_beta.dtype.element_ty)
+                .to(tl.float32)
+            )
+        elif IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
             b_beta = tl.load(p_beta).to(tl.float32)
@@ -176,8 +195,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_k += stride_ks
         p_o += HV * V
         p_v += stride_vs
-        p_g += HV
-        p_beta += HV * (V if IS_BETA_HEADWISE else 1)
+        p_g += STRIDE_AB if FUSE_GATING else HV
+        p_beta += STRIDE_AB if FUSE_GATING else HV * (V if IS_BETA_HEADWISE else 1)
 
 
 def fused_recurrent_gated_delta_rule_fwd(
@@ -194,6 +213,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     seq_size_per_block=1,
     sequence_lengths: Optional[torch.Tensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
+    raw_gating: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -234,6 +254,8 @@ def fused_recurrent_gated_delta_rule_fwd(
         v=v,
         g=g,
         beta=beta,
+        A_LOG=raw_gating[0] if raw_gating is not None else None,
+        DT_BIAS=raw_gating[1] if raw_gating is not None else None,
         o=o,
         h0=initial_state,
         ht=final_state,
@@ -268,6 +290,8 @@ def fused_recurrent_gated_delta_rule_fwd(
         num_warps=num_warps,
         num_stages=num_stages,
         SEQ_SIZE_PER_BLOCK=seq_size_per_block,
+        FUSE_GATING=raw_gating is not None,
+        STRIDE_AB=g.stride(0) if raw_gating is not None else 0,
     )
     o = o.squeeze(0)
     return o, final_state

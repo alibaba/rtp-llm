@@ -5,8 +5,6 @@ from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
@@ -71,6 +69,7 @@ from rtp_llm.utils.swizzle_utils import (
     should_swizzle_linear_attn_ba,
 )
 from rtp_llm.utils.util import to_torch_dtype
+from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -487,6 +486,28 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
+        if gating is None:
+            from rtp_llm.models_py.triton_kernels.fla.gdn_recurrent_gating import (
+                fused_recurrent_with_gating,
+                is_enabled_for_shape,
+            )
+
+            if is_enabled_for_shape(query):
+                fused = fused_recurrent_with_gating(
+                    query,
+                    key,
+                    value,
+                    a,
+                    b,
+                    self.alog,
+                    self.dt_bias,
+                    self._get_ssm_states(kv_cache_tensor),
+                    self._get_fla_block_map(attn_inputs),
+                    seq_size_per_block,
+                    attn_inputs.sequence_lengths_plus_1_device,
+                )
+                if fused is not None:
+                    return fused[0].reshape(-1, self.local_num_v_heads, self.head_v_dim)
         if gating is not None:
             g, beta = gating
         else:
@@ -1399,6 +1420,13 @@ class Qwen3NextModel(GptModelBase):
         )
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
+        )
+        from rtp_llm.models_py.kernels.cuda.sm120_ipc_allreduce import (
+            prepare_communicator,
+        )
+
+        prepare_communicator(
+            parallelism_config, model_config.hidden_size, model_config.quant_config
         )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (

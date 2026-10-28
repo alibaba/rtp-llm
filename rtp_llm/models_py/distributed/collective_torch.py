@@ -10,7 +10,6 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import torch.distributed
-
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -557,6 +556,10 @@ def destroy_distributed_environment():
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
 
+    from rtp_llm.models_py.kernels.cuda.sm120_ipc_allreduce import destroy_communicator
+
+    destroy_communicator()
+
     from rtp_llm.models_py.utils.arch import is_cuda
 
     if is_cuda():
@@ -691,13 +694,17 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
         tensor: Tensor to all-reduce.
         group: Process group to use
-        inplace: If true, write the symmetric-memory fast-path result back to ``tensor``.
+        inplace: If true, write IPC and symmetric-memory results to ``tensor``.
+            Otherwise fast paths may return separate storage. Always consume the
+            returned tensor; the NCCL fallback can still modify the input.
 
     Returns:
         All-reduced tensor.
@@ -709,6 +716,11 @@ def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> 
             return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
 
     if group == Group.TP:
+        from rtp_llm.models_py.kernels.cuda.sm120_ipc_allreduce import get_communicator
+
+        ipc_comm = get_communicator()
+        if ipc_comm is not None and ipc_comm.is_supported(tensor):
+            return ipc_comm.all_reduce(tensor, out=tensor if inplace else None)
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
@@ -797,7 +809,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 

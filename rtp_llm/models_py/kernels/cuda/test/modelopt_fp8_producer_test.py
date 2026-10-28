@@ -4,7 +4,6 @@ import unittest
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.kernels.cuda import modelopt_fp8_quant as quant
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.modelopt_fp8_linear import (
     CudaModelOptFp8Linear,

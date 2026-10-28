@@ -1,7 +1,6 @@
 """Static FP8 projections with the checkpoint's per-projection scales intact."""
 
 import torch
-
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
 from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import (
     gated_fp8_quant_rows,

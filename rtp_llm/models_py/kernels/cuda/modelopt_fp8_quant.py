@@ -5,7 +5,6 @@ import os
 import torch
 import triton as tr
 import triton.language as tl
-
 from rtp_llm.models_py.utils.arch import get_sm
 
 # This fast path is bounded by the shapes/architecture validated against the
@@ -13,7 +12,7 @@ from rtp_llm.models_py.utils.arch import get_sm
 _VALIDATED_WIDTHS = frozenset((3072, 5120, 6144))
 _VALIDATED_SM = (12, 0)
 _FUSED_QUANT_ENABLED = os.getenv("RTP_LLM_MODELOPT_FP8_FUSED_QUANT", "1") == "1"
-_FUSED_PRODUCER_ENABLED = os.getenv("RTP_LLM_MODELOPT_FP8_FUSED_PRODUCER", "0") == "1"
+_FUSED_PRODUCER_ENABLED = os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
 
 
 @tr.jit

@@ -124,6 +124,24 @@ py_test(
 )
 
 py_test(
+    name = "modelopt_fp4_producer_test",
+    srcs = ["modelopt_fp4_producer_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+)
+
+py_test(
+    name = "sm120_ipc_allreduce_test",
+    srcs = ["sm120_ipc_allreduce_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "2"},
+)
+
+py_test(
     name = "test_xqa_batch_decode",
     srcs = ["test_xqa_batch_decode.py"],
     deps = py_test_deps + select({

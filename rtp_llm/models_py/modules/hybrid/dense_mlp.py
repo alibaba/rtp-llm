@@ -4,13 +4,12 @@ import logging
 from typing import Dict, Optional, Type
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
@@ -114,8 +113,15 @@ class DenseMLP(nn.Module):
             output = self.down_proj(activated)
         else:
             up = self.up_proj(x)
-            activated = self.act_fn(up)
-            output = self.down_proj(activated)
+            fused_silu = (
+                getattr(self.down_proj, "forward_with_silu", None)
+                if self.is_gated
+                else None
+            )
+            output = fused_silu(up) if fused_silu is not None else None
+            if output is None:
+                activated = self.act_fn(up)
+                output = self.down_proj(activated)
 
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         if not skip_allreduce and ffn_tp_size > 1:

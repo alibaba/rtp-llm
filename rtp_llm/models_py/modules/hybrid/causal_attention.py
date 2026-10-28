@@ -2,7 +2,6 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory import LinearFactory
