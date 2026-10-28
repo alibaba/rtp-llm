@@ -244,6 +244,66 @@ class RocmBeamCascadeTest(unittest.TestCase):
                 )
             self.assertEqual(output.data_ptr(), address)
 
+    def test_unaligned_request_boundaries_and_graph_replay(self):
+        # Two production-sized requests must not lose their shared prefix at
+        # row 500 merely because it is not a multiple of the query tile size.
+        for force_fallback in (False, True):
+            with self.subTest(force_fallback=force_fallback):
+                q, kv, table, lengths, k, v = make_case(rows=1000)
+                first_prefix = table[0, :-1].clone()
+                second_prefix = table[500, :-1].clone()
+                table[:500, :-1] = first_prefix
+                table[500:, :-1] = second_prefix
+                op = RocmBeamSearchCascadeAttention(
+                    1000,
+                    16,
+                    8,
+                    128,
+                    16,
+                    32,
+                    q.dtype,
+                    q.device,
+                    max_requests=2,
+                )
+                if force_fallback:
+                    op.NATIVE_PREFIX_BYTE_LIMIT = kv.numel() * kv.element_size()
+                op.plan(table, lengths)
+                self.assertIn(500, op.qptr_host.tolist())
+                self.assertEqual(op.shared_tokens, 1000 * 496)
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        op.run(q, kv)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = op.run(q, kv)
+                addresses = (
+                    output.data_ptr(),
+                    op.prefix_qptr.data_ptr(),
+                    op.row_cuts.data_ptr(),
+                )
+                for boundary in (500, 503, 128, 500):
+                    table[:boundary, :-1] = first_prefix
+                    table[boundary:, :-1] = second_prefix
+                    op.plan(table, lengths)
+                    self.assertEqual(op.shared_tokens, 1000 * 496)
+                    graph.replay()
+                    for row in (0, boundary - 1, boundary, 999):
+                        expected = reference(q, k, v, table, lengths, row)
+                        torch.testing.assert_close(
+                            output[row].float(), expected, atol=0.005, rtol=0.03
+                        )
+                    self.assertEqual(
+                        addresses,
+                        (
+                            output.data_ptr(),
+                            op.prefix_qptr.data_ptr(),
+                            op.row_cuts.data_ptr(),
+                        ),
+                    )
+
     def test_invalid_metadata_is_rejected_before_launch(self):
         q, kv, table, lengths, _, _ = make_case()
         op = RocmBeamSearchCascadeAttention(128, 16, 8, 128, 16, 32, q.dtype, q.device)

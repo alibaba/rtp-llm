@@ -55,6 +55,7 @@ py_library(
 py_library(
     name = "attention",
     srcs = glob(["attention/*.py"]),
+    data = glob(["attention/native_cascade_fp32/**"]),
     deps = ["//rtp_llm:torch"] + select({
         "@//:using_rocm": ["//rtp_llm:aiter"],
         "//conditions:default": [],

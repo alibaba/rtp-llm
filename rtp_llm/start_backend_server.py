@@ -45,6 +45,16 @@ def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str =
         logging.warning(f"Failed to send status via pipe: {e}")
 
 
+def _install_hot_hook_runtime(role: str) -> None:
+    try:
+        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+
+        if install_if_enabled():
+            logging.info("RTP hot hook runtime installed for %s", role)
+    except Exception as e:
+        logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
+
+
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -81,6 +91,7 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
+        _install_hot_hook_runtime(f"backend_rank_{local_rank}")
         from rtp_llm.server.backend_manager import BackendManager
 
         backend_manager = BackendManager(py_env_configs)

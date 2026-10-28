@@ -28,9 +28,36 @@ filegroup(
     srcs = ["data/model/qwen3/q_r_new_model_py.json"],
 )
 
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
+
+# Private inputs are supplied only through test_env. This manual target captures
+# real eager tensors; it does not assert a text golden or benchmark the service.
+custom_smoke_test(
+    name = "rocm_mkt_cascade_fixture_capture",
+    main = "rocm_mkt_cascade_fixture_capture_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --ep_size 1 --world_size 1",
+    gpu_type = ["MI308X-ROCM7"],
+    data = [
+        "data/hooks/rocm_cascade_capture.py",
+        "//rtp_llm:sdk",
+    ],
+    deps = ["//rtp_llm:torch"],
+)
+
 # ============================================================================
 # Open-source smoke test suites (platform-grouped)
 # ============================================================================
+
+# Opt-in real-workload HTTP measurements; never included in automatic suites.
+custom_smoke_test(
+    name = "rocm_mkt_cascade_e2e",
+    main = "rocm_mkt_cascade_e2e_test.py",
+    smoke_args = "--tp_size 1 --dp_size 1 --ep_size 1 --world_size 1",
+    gpu_type = ["MI308X-ROCM7"],
+    tags = ["manual"],
+    data = ["rocm_mkt_cascade_fixture_capture_test.py", "//rtp_llm:sdk"],
+    deps = ["//rtp_llm:torch"],
+)
 
 load("//rtp_llm/test/smoke:suites_h20_oss.bzl", "h20_oss_suites")
 load("//rtp_llm/test/smoke:suites_sm8x.bzl", "sm8x_suites")

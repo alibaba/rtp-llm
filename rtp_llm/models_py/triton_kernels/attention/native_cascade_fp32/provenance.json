@@ -1,0 +1,25 @@
+{
+  "source": "ROCm/aiter 0.1.17.dev79+g2570b35f9 and its bundled Composable Kernel",
+  "recipe": "gfx942 BF16 Q/K/V/P, RN probability conversion, FP32 O; D128 page16, M64/M128 bload/gload; original selector",
+  "changes": [
+    "FP32 pipeline and epilogue O type",
+    "narrow FP32 output contract in wrapper",
+    "independent Python module name; RN macro scoped to this module"
+  ],
+  "sources": {
+    "host/mha_fwd_batch_prefill.cu": "83542ba243a47f436580e817173377a3627b4ebc72f2f0de9d8bb219e6ff6bea",
+    "host/mha_common.cu": "b196471e307e9ae39a339248620b13321dfe8983f140ce9a4efa6c902022e682",
+    "host/mha_batch_prefill_kernels.cu": "d580714b44d64e6a859af08e7967ccefcc30cee91f982cd88a5ebeaa7396f6fc",
+    "host/mha_batch_prefill_pybind.cu": "2b1b64bf65574c66a6c16a26f7e038e8b192d4e3bd34491274172abea4c0ad9e",
+    "generated/fmha_batch_prefill_d128_bf16_group_ps16_bload_b64x128x64x128x64x128_r4x1x1_r4x1x1_w16x16x16_w16x16x16_qr_async_vr_psskddv_nlogits_nbias_nmask_lse_ndropout_nqscale_nsink_vectorized_vllm.cpp": "f8b1f898db9d6d6d93a5d81cdc06571a32949bbfdf16a91e570153b6b4a31a9c",
+    "generated/fmha_batch_prefill_d128_bf16_group_ps16_bload_b128x128x32x128x32x128_r4x1x1_r4x1x1_w32x32x16_w32x32x16_qr_async_vr_psskddv_nlogits_nbias_nmask_lse_ndropout_nqscale_nsink_vectorized_vllm.cpp": "dd9cd9b592b87bf5e9220159e9a28c833ccacee620811b4f0389182e1909b108",
+    "generated/fmha_batch_prefill_d128_bf16_group_ps16_gload_b64x128x64x128x64x128_r4x1x1_r4x1x1_w16x16x16_w16x16x16_qr_async_vr_psskddv_nlogits_nbias_nmask_lse_ndropout_nqscale_nsink_vectorized_vllm.cpp": "69d4004ce7a97232b877880975db9b2382fe2d34b0c0e02933d377ab4d68ed76",
+    "generated/fmha_batch_prefill_api.cpp": "dd7954c799203ba82a80a952732262c78c4827a0fd48f63106fc20acf49566fc",
+    "generated/fmha_batch_prefill_d128_bf16_group_ps16_gload_b128x128x32x128x32x128_r4x1x1_r4x1x1_w32x32x16_w32x32x16_qr_async_vr_psskddv_nlogits_nbias_nmask_lse_ndropout_nqscale_nsink_vectorized_vllm.cpp": "172ed23c62ef6deb653054bc215d11dd7533f7f8eb3e8b3bde3284f60807ffea"
+  },
+  "dependency_sha256": {
+    "aiter/jit/core.py": "2f70aaa835086d261734d08ba3bc4c7368e53769865e2a3e2579edbedd8c0294",
+    "aiter/jit/optCompilerConfig.json": "08a9d2741eb8f2a99d2ebc3f4f14d3e3c3a7e6a31a62986364214a7c2da6947d",
+    "aiter/jit/utils/cpp_extension.py": "550dc7e8a6d48ce02bb35974561d640e6e38df9804b4f4425a7091cd24ecc776"
+  }
+}

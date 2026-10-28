@@ -1,0 +1,26 @@
+{
+  "evidence": "SOURCE_FACT; v1 build failure preserved; v2 not compiled/run",
+  "candidate_path": "include/ck_tile/ops/fmha/pipeline/block_fmha_batch_prefill_pipeline_qr_ks_vs_async.hpp",
+  "candidate_sha256": "5493558a1ded949da25663244492485762e2e84e7863dd1f5757a561f49cdc69",
+  "original_sha256": "f72960eba179a634e0c227ff8d0ca8dc630e47dcb8dd1f2ca2dd54d500058a35",
+  "failed_v1_sha256": "d6d9efc3233f3660e1d51c924a498dbcc77fdcc58f984e8785631255191c5975",
+  "v1_failure_run": "native_fp32o_vsafe_build_01",
+  "failure": "private SimplifiedGenericAttentionMask.x_total direct member access",
+  "v2_change": "Only two expressions in inserted helper changed to public IsOutOfBound(0,logical_token). Three call sites/timing unchanged.",
+  "predicate_source": {
+    "path": "aiter_meta/3rdparty/composable_kernel/include/ck_tile/ops/fmha/block/block_masking.hpp",
+    "sha256": "4d8b4ef67ad4f4ac331a4c6f0eb66c0fa0c6bce92b1569db3f2b22dd4adda99b",
+    "lines": "490-499",
+    "nomask_semantics": "IsOutOfBound(i_y,i_x) ignores i_y and returns i_x>=x_total"
+  },
+  "scope": "Existing fixed four SimplifiedGenericAttentionMask<false> RN FP32O instances only; no claim for masked geometry",
+  "empty_key_semantics": "Pipeline num_total_loop<=0 returns before V loads/helper; public nomask predicate does not index Q row0.",
+  "unchanged": [
+    "3 V load call sites",
+    "QK/P/RN/FP32 O/selector",
+    "installed original",
+    "v1 source and receipt"
+  ],
+  "compile": "NOT_RUN",
+  "gpu": "NOT_RUN"
+}
