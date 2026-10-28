@@ -143,38 +143,96 @@ class _DFlashAttention(nn.Module):
             self.head_dim,
             config.layernorm_eps,
         )
+        # _out is the CUDA-graph-stable attention output buffer: captured
+        # graphs hold raw pointers into it, so it must never be reallocated
+        # after the first capture. _eager_out backs eager steps whose rows
+        # exceed the graph buffer (decode batches above the largest captured
+        # bucket under --max_generate_batch_size, or warmup before capture);
+        # no graph captures it, so it may be replaced freely. _active_out is
+        # the buffer prepare_fmha_impl selected for the upcoming forward.
         self._out: torch.Tensor | None = None
+        self._eager_out: torch.Tensor | None = None
+        self._active_out: torch.Tensor | None = None
 
     def _output_buffer(self, query: torch.Tensor) -> torch.Tensor:
         rows, heads, dim = query.shape
+        out = self._active_out
         if (
-            self._out is None
-            or self._out.device != query.device
-            or self._out.dtype != query.dtype
-            or self._out.shape[0] < rows
-            or self._out.shape[1:] != (heads, dim)
+            out is None
+            or out.device != query.device
+            or out.dtype != query.dtype
+            or out.shape[0] < rows
+            or out.shape[1:] != (heads, dim)
         ):
             raise RuntimeError(
                 "DFlash attention output was not prepared for this input shape; "
                 "prepare_fmha_impl must run before forward"
             )
-        return self._out[:rows]
+        return out[:rows]
 
     def reserve_output(
-        self, rows: int, device: torch.device, dtype: torch.dtype
+        self,
+        rows: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        for_graph: bool = False,
     ) -> None:
-        """Allocate graph-stable attention output before the model forward."""
+        """Prepare the graph-stable or eager attention output buffer.
+
+        for_graph=True (CUDA graph capture): _out is allocated once at the
+        first capture bucket — capture runs largest bucket first, so that
+        reservation is the process maximum — and never replaced afterwards:
+        captured graphs hold raw pointers into it, and a reallocation would
+        free memory they still write on every replay. for_graph=False (eager
+        steps: decode batches above the largest captured bucket when
+        --max_generate_batch_size exceeds the graph capacity, or warmup
+        before capture): prefer _out when it already covers rows, otherwise
+        grow the eager buffer, which no graph holds.
+        """
         if rows < 0:
             raise ValueError(f"DFlash output rows must be non-negative, got {rows}")
+        if for_graph:
+            if self._out is None:
+                self._out = torch.empty(
+                    (rows, self.q_heads, self.head_dim), device=device, dtype=dtype
+                )
+            elif (
+                self._out.device != device
+                or self._out.dtype != dtype
+                or self._out.shape[0] < rows
+            ):
+                raise RuntimeError(
+                    "DFlash graph attention output capacity is fixed at the "
+                    f"first capture reservation ({tuple(self._out.shape)}); "
+                    f"refusing to reallocate for {rows} rows: captured CUDA "
+                    "graphs hold raw pointers into this buffer"
+                )
+            self._active_out = self._out
+            return
         if (
-            self._out is None
-            or self._out.device != device
-            or self._out.dtype != dtype
-            or self._out.shape[0] < rows
+            self._out is not None
+            and self._out.device == device
+            and self._out.dtype == dtype
+            and self._out.shape[0] >= rows
         ):
-            self._out = torch.empty(
+            self._active_out = self._out
+            # The oversized eager fallback buffer is no longer needed while
+            # the graph buffer covers eager batches; drop it instead of
+            # keeping two live buffers. Freeing is stream-ordered safe: any
+            # pending eager kernels writing it were enqueued on the same
+            # stream as all later reuse.
+            self._eager_out = None
+            return
+        if (
+            self._eager_out is None
+            or self._eager_out.device != device
+            or self._eager_out.dtype != dtype
+            or self._eager_out.shape[0] < rows
+        ):
+            self._eager_out = torch.empty(
                 (rows, self.q_heads, self.head_dim), device=device, dtype=dtype
             )
+        self._active_out = self._eager_out
 
     def forward(
         self,
@@ -392,7 +450,10 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
         device = self._forward_device()
         dtype = self.embed_tokens.weight.dtype
         for layer in self.layers:
-            layer.self_attn.reserve_output(rows, device, dtype)
+            # for_graph routes capture-time reservations to the graph-stable
+            # buffer and oversized eager batches to the growable buffer; see
+            # _DFlashAttention.reserve_output.
+            layer.self_attn.reserve_output(rows, device, dtype, is_cuda_graph)
         return None
 
     def _layer_cache_and_table(self, inputs: PyModelInputs, layer_idx: int):

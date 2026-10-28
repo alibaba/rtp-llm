@@ -742,6 +742,14 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
+        # AITER's shuffle_moe_weight marks preshuffled MoE kernels with the
+        # tensor attribute is_shuffled; aiter's fused_moe kernels and the
+        # deterministic FP8 MoE executor dispatch on it. Both the reshape
+        # below and convert_fp8_weight_params (whose gfx942 fnuz conversion
+        # rebuilds the tensor through dtype views) return NEW tensor objects
+        # and silently drop python tensor attributes, so capture the marker
+        # here and re-stamp it on the final kernel tensor below.
+        was_shuffled = getattr(kernel_weight, "is_shuffled", None)
         kernel_weight = (
             kernel_weight.reshape(kernel_weight.shape[-1], -1)
             if kernel_weight.dim() == 2
@@ -763,6 +771,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 )
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
+        if (
+            was_shuffled is not None
+            and getattr(kernel_weight, "is_shuffled", None) is None
+        ):
+            kernel_weight.is_shuffled = was_shuffled
 
         return processed_res
 
