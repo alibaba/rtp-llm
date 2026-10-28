@@ -24,6 +24,49 @@
 
 namespace rtp_llm {
 
+PPSamplingPlan selectPPSamplingRows(const PPSamplingPlan& plan, const torch::Tensor& rows) {
+    const auto count = plan.request_ids.numel();
+    RTP_LLM_CHECK_WITH_INFO(rows.device().is_cpu() && rows.scalar_type() == torch::kInt64 && rows.dim() == 1,
+                            "PP sampling row selection requires CPU int64 indexes");
+    RTP_LLM_CHECK_WITH_INFO(plan.token_ids.size(0) == count,
+                            "mixed speculative chunks require one sequence per request");
+    const auto indexes = rows.contiguous();
+    const auto* ids = indexes.data_ptr<int64_t>();
+    for (int64_t i = 0; i < indexes.numel(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(ids[i] >= 0 && ids[i] < count, "PP sampling row is out of range");
+    }
+    auto select_vector = [&](const auto& values) {
+        auto selected = values;
+        selected.clear();
+        if (!values.empty()) {
+            RTP_LLM_CHECK_WITH_INFO(values.size() == static_cast<size_t>(count),
+                                    "PP sampling vector does not match request count");
+            selected.reserve(indexes.numel());
+            for (int64_t i = 0; i < indexes.numel(); ++i) {
+                selected.push_back(values[ids[i]]);
+            }
+        }
+        return selected;
+    };
+    PPSamplingPlan selected = plan;
+    selected.random_seeds = select_vector(plan.random_seeds);
+    selected.logits_processor_configs = select_vector(plan.logits_processor_configs);
+    selected.num_return_sequences = select_vector(plan.num_return_sequences);
+    for (auto* tensor : {&selected.request_ids, &selected.token_ids, &selected.input_lengths,
+                         &selected.sequence_lengths, &selected.max_tokens, &selected.top_k,
+                         &selected.top_p, &selected.temperature, &selected.repetition_penalty,
+                         &selected.presence_penalty, &selected.frequency_penalty, &selected.no_repeat_ngram_size,
+                         &selected.do_sample, &selected.finished_mask, &selected.spec_do_sample,
+                         &selected.force_sp_accept}) {
+        if (tensor->defined()) {
+            RTP_LLM_CHECK_WITH_INFO(tensor->dim() > 0 && tensor->size(0) == count,
+                                    "PP sampling tensor does not match request count");
+            *tensor = tensor->index_select(0, indexes.to(tensor->device())).contiguous();
+        }
+    }
+    return selected;
+}
+
 static int64_t getProcessorEosTokenId(const ModelConfig& model_config) {
     const auto  eos_token_id     = model_config.special_tokens.eos_token_id;
     const auto& output_vocab_ids = model_config.output_vocab_ids;

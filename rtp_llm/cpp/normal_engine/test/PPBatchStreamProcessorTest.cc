@@ -740,8 +740,8 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
     }
 
     PPExecutionPlan plan;
-    plan.dspark_intermediate_chunk    = scenario.intermediate_chunk;
     if (scenario.intermediate_chunk) {
+        plan.intermediate_chunk_mask = torch::ones({3}, torch::kBool);
         plan.draft_next_token_ids = intTensor({40, 41, 42}).reshape({3, 1});
     }
     plan.is_decode                    = scenario.is_verify;
@@ -880,7 +880,7 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
                 root_forward_positions = forward_positions;
                 ASSERT_EQ(wire->sent_tensors.size(), 2u);
                 const auto result = pp_serialization::deserializeExecutionResult(wire->sent_tensors.back());
-                EXPECT_EQ(result.new_token_ids.numel(), 0);
+                EXPECT_EQ(result.new_token_ids.sizes().vec(), (std::vector<int64_t>{3, 1}));
                 EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{0, 0, 0}));
                 EXPECT_FALSE(result.propose_token_ids.defined());
             } else {
@@ -3491,6 +3491,51 @@ TEST_F(PPBatchStreamProcessorTest, ContextBatchLimitAppliesToRescheduledChunks) 
     EXPECT_EQ(ready.front(), streams[2]);
 }
 
+TEST_F(PPBatchStreamProcessorTest, MixedMtpChunksSampleOnlyFinalRows) {
+    auto params = makeMtpParams(3);
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    PPExecutor executor(params, nullptr, true);
+    executor.chunked_prefill_enabled_ = true;
+    std::list<GenerateStreamPtr> streams{
+        makeStream(ResourceContext{}, params.model_config_, 901, {1, 2, 3, 4, 5, 6, 7, 8}, 0),
+        makeStream(ResourceContext{}, params.model_config_, 902, {9, 10, 11, 12}, 0),
+        makeStream(ResourceContext{}, params.model_config_, 903, {21, 22, 23, 24, 25, 26, 27, 28}, 0),
+        makeStream(ResourceContext{}, params.model_config_, 904, {31, 32, 33, 34}, 0),
+    };
+    for (const auto& stream : streams) {
+        stream->enable_fast_gen_ = true;
+        stream->resetChunkLen(4, stream->inputLength());
+        stream->generateConfig()->pd_separation = true;
+        stream->generateConfig()->do_sample = false;
+        stream->generateConfig()->top_k = 1;
+    }
+    auto plan = executor.buildPlan(StreamGroups(streams), {});
+    ASSERT_TRUE(plan.ok());
+    EXPECT_EQ(tensorToVector<bool>(plan->intermediate_chunk_mask), (std::vector<bool>{true, false, true, false}));
+    EXPECT_EQ(tensorToVector<bool>(plan->model_input.request_pd_separation), (std::vector<bool>{false, true, false, true}));
+    EXPECT_EQ(tensorToVector<int32_t>(plan->draft_next_token_ids), (std::vector<int32_t>{5, -1, 25, -1}));
+    auto restored = pp_serialization::deserializePlan(pp_serialization::serializePlan(*plan, false));
+    EXPECT_TRUE(torch::equal(restored.intermediate_chunk_mask, plan->intermediate_chunk_mask));
+    const auto selected = selectPPSamplingRows(plan->sampling_plan, torch::tensor({1, 3}, torch::kInt64));
+    EXPECT_EQ(tensorToVector<int64_t>(selected.request_ids), (std::vector<int64_t>{902, 904}));
+    GptModelOutputs output;
+    output.logits = torch::full({4, 64}, std::numeric_limits<float>::quiet_NaN(),
+                                torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    output.logits[1].zero_(); output.logits[1][13] = 100;
+    output.logits[3].zero_(); output.logits[3][15] = 100;
+    PPExecutionResult result;
+    executor.sampleTokens(*plan, output, result);
+    EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{0, 1, 0, 1}));
+    EXPECT_EQ(result.new_token_ids[1][0].item<int32_t>(), 13);
+    EXPECT_EQ(result.new_token_ids[3][0].item<int32_t>(), 15);
+    EXPECT_EQ(executor.sampling_states_.size(), 2u);
+    EXPECT_EQ(executor.sampling_states_.count(901), 0u);
+    EXPECT_EQ(executor.sampling_states_.count(903), 0u);
+    EXPECT_FALSE(result.request_errors[0].hasError());
+    EXPECT_FALSE(result.request_errors[2].hasError());
+    EXPECT_NO_THROW(executor.advanceSamplingStates(plan->sampling_plan, result));
+}
+
 TEST_F(PPBatchStreamProcessorTest, MtpChunkLookaheadComesFromPromptAndKeepsPositions) {
     auto params = makeMtpParams(3);
     params.pd_sep_config.role_type = RoleType::PREFILL;
@@ -3502,7 +3547,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpChunkLookaheadComesFromPromptAndKeepsPosit
     stream->generate_input_->generate_config->pd_separation = true;
     auto plan = executor.buildPlan(StreamGroups({stream}), {});
     ASSERT_TRUE(plan.ok());
-    ASSERT_TRUE(plan->dspark_intermediate_chunk);
+    ASSERT_TRUE((plan->intermediate_chunk_mask.defined() && plan->intermediate_chunk_mask.any().item<bool>()));
     EXPECT_EQ(tensorToVector<int32_t>(plan->draft_next_token_ids), (std::vector<int32_t>{5}));
     EXPECT_FALSE(plan->model_input.request_pd_separation.any().item<bool>());
     const auto restored = pp_serialization::deserializePlan(pp_serialization::serializePlan(*plan, false));
@@ -3520,7 +3565,7 @@ TEST_F(PPBatchStreamProcessorTest, MtpChunkLookaheadComesFromPromptAndKeepsPosit
     ASSERT_TRUE(stream->acquireCapacity(4).ok());
     const auto final_plan = executor.buildPlan(StreamGroups({stream}), {});
     ASSERT_TRUE(final_plan.ok());
-    EXPECT_FALSE(final_plan->dspark_intermediate_chunk);
+    EXPECT_FALSE((final_plan->intermediate_chunk_mask.defined() && final_plan->intermediate_chunk_mask.any().item<bool>()));
     EXPECT_FALSE(final_plan->draft_next_token_ids.defined());
 }
 
@@ -3537,10 +3582,10 @@ TEST_F(PPBatchStreamProcessorTest, DSparkChunkPlanDefersPublicationAndSampling) 
     stream->generate_input_->generate_config->pd_separation = true;
     auto plan                                               = executor.buildPlan(StreamGroups({stream}), {});
     ASSERT_TRUE(plan.ok());
-    EXPECT_TRUE(plan->dspark_intermediate_chunk);
+    EXPECT_TRUE((plan->intermediate_chunk_mask.defined() && plan->intermediate_chunk_mask.any().item<bool>()));
     EXPECT_FALSE(plan->model_input.request_pd_separation.any().item<bool>());
     auto restored = pp_serialization::deserializePlan(pp_serialization::serializePlan(*plan, false));
-    EXPECT_TRUE(restored.dspark_intermediate_chunk);
+    EXPECT_TRUE((restored.intermediate_chunk_mask.defined() && restored.intermediate_chunk_mask.any().item<bool>()));
     EXPECT_FALSE(restored.model_input.request_pd_separation.any().item<bool>());
     PPExecutionResult result;
     executor.sampleTokens(restored, GptModelOutputs{}, result);
@@ -3564,7 +3609,7 @@ TEST_F(PPBatchStreamProcessorTest, DSparkChunkPlanDefersPublicationAndSampling) 
     ASSERT_TRUE(stream->acquireCapacity(4).ok());
     auto final_plan = executor.buildPlan(StreamGroups({stream}), {});
     ASSERT_TRUE(final_plan.ok());
-    EXPECT_FALSE(final_plan->dspark_intermediate_chunk);
+    EXPECT_FALSE((final_plan->intermediate_chunk_mask.defined() && final_plan->intermediate_chunk_mask.any().item<bool>()));
     EXPECT_TRUE(final_plan->model_input.request_pd_separation.all().item<bool>());
     EXPECT_EQ(tensorToVector<int32_t>(final_plan->model_input.prefix_lengths), (std::vector<int32_t>{4}));
     EXPECT_EQ(tensorToVector<int32_t>(final_plan->model_input.input_lengths), (std::vector<int32_t>{4}));

@@ -56,6 +56,9 @@ struct PPSamplingPlan {
     torch::Tensor force_sp_accept;  // [stream_count]
 };
 
+// Select request-major sampling rows (one sequence per request).
+PPSamplingPlan selectPPSamplingRows(const PPSamplingPlan& plan, const torch::Tensor& rows);
+
 struct PPPromptLogitsRequest {
     bool enabled               = false;
     int  top_k                 = 64;
@@ -85,7 +88,7 @@ struct PPExecutionPlan {
     std::vector<int64_t> finished_request_ids;
 
     bool          is_decode                 = false;  // Request phase; verify may use a prefill input shape
-    bool          dspark_intermediate_chunk = false;
+    torch::Tensor intermediate_chunk_mask;  // CPU bool [requests]; true means draft KV only, no output
     torch::Tensor draft_next_position_ids;  // [stream_count * position_id_len_factor], MTP prefill
     torch::Tensor draft_next_token_ids;     // [stream_count, 1], prompt lookahead for intermediate MTP chunks
 };

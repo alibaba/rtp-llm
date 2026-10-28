@@ -37,11 +37,9 @@ bool PPScheduler::supportsChunkedPrefill(const RuntimeConfig&              runti
     if (sp_config.type == SP_TYPE_NONE) {
         return true;
     }
-    // MTP fastgen: every chunk fills target and draft KV; only the final chunk
-    // samples and proposes for PD handoff. Keep singleton admission until mixed
-    // per-request chunk phases are supported.
+    // MTP fastgen: each request carries its own chunk phase. Admission and
+    // ready-stream scheduling remain bounded by max_context_batch_size.
     if (sp_config.type == SP_TYPE_MTP && pd_sep_config.role_type == RoleType::PREFILL
-        && runtime_config.fifo_scheduler_config.cp_force_single_prefill
         && autil::EnvUtil::getEnv<int64_t>("RTP_LLM_MTP_CHUNKED_PREFILL", 0) == 1) {
         return true;
     }
