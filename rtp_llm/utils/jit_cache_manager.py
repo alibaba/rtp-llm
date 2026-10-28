@@ -262,6 +262,8 @@ class JitCacheManager(FileSystemEventHandler):
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
+                    if not item.should_sync(rel, event.event_type):
+                        return
                     if item.name == "deep_gemm":
                         if not rel.startswith("cache/"):
                             return
