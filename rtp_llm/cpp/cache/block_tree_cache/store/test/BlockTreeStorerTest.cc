@@ -400,15 +400,14 @@ protected:
             EXPECT_EQ(node->group_set_resources[0].getTopTier(), succeeded ? Tier::DEVICE : GetParam());
         }
 
-        const size_t resident_prefix_length =
-            env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, succeeded ? keys_.size() : 0u);
         if (succeeded) {
+            const size_t resident_prefix_length =
+                env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
+            EXPECT_EQ(resident_prefix_length, keys_.size());
             expectResidentPrefix(target_blocks);
             EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
         } else {
-            // A failed load retains the only source; resident insertion must not
-            // publish a second serving tier or mark an unpromoted prefix resident.
+            // Before any replacement insert, a failed load retains its source for retry.
             for (const TreeNode* node : settled_path) {
                 EXPECT_FALSE(node->is_resident);
                 EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
@@ -433,23 +432,25 @@ protected:
     std::vector<BlockIndicesType>                         request_holds_;
 };
 
-TEST_P(ResidentTieredCacheTest, ResidentInsertDoesNotDuplicateExistingLowerTier) {
+TEST_P(ResidentTieredCacheTest, ResidentInsertReplacesIdleLowerTierWithoutCopy) {
     EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
+    const auto   original_path    = env_->cache->tree()->findNode(keys_);
+    const size_t submitted_before = engine_->submittedBatchCount();
     {
         const size_t resident_prefix_length =
             env_->cache->insert(keys_, resources_, Tier::DEVICE, /*is_resident=*/true);
-        EXPECT_EQ(resident_prefix_length, 0u);
+        EXPECT_EQ(resident_prefix_length, keys_.size());
     }
     const auto path = env_->cache->tree()->findNode(keys_);
-    ASSERT_EQ(path.size(), keys_.size());
-    for (const TreeNode* node : path) {
-        EXPECT_FALSE(node->is_resident);
-        EXPECT_EQ(node->group_set_resources[0].getTopTier(), GetParam());
-        EXPECT_EQ(node->group_set_resources[0].servingTierCount(), 1u);
+    EXPECT_EQ(path, original_path);
+    EXPECT_EQ(engine_->submittedBatchCount(), submitted_before);
+    BlockIndicesType expected_blocks;
+    for (const auto& resource : resources_) {
+        expected_blocks.push_back(resource[0].device_blocks.front());
     }
-    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), keys_.size());
-    EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
-    EXPECT_EQ(candidateCountForTier(*env_->cache, Tier::DEVICE), 0u);
+    expectResidentPrefix(expected_blocks);
+    EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(env_->poolFor(GetParam()).freeBlocksNum(), env_->poolFor(GetParam()).totalBlocksNum());
 }
 
 TEST_P(ResidentTieredCacheTest, SuccessfulAsyncLoadCanBePromotedToResidentAfterSettlement) {

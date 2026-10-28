@@ -863,6 +863,74 @@ TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources
     EXPECT_TRUE(node->children.empty());
 }
 
+TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshesCandidates) {
+    for (Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        auto full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
+            block_tree_cache_test::makeHostPool(1, 4),
+            block_tree_cache_test::makeDiskPool(1, 4, std::make_unique<block_tree_cache_test::MemoryDiskBlockIO>()));
+        auto swa = std::make_shared<SWAGroupSet>(
+            128, 64, std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)}, nullptr, nullptr);
+        auto                 reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        BlockTreeCacheConfig config;
+        config.enable_host_cache = true;
+        config.enable_disk_cache = true;
+        auto        cache        = makeBlockTreeCacheForTest({full, swa}, config, nullptr, nullptr, reporter);
+        IBlockPool* pool         = tier == Tier::HOST ? static_cast<IBlockPool*>(full->hostPool().get()) :
+                                                        static_cast<IBlockPool*>(full->diskPool().get());
+        const auto  old_blocks   = full->allocateBlocks(2, tier, BlockTreeRefType::STORE);
+        ASSERT_TRUE(old_blocks.has_value());
+        std::vector<std::vector<GroupSetResource>> original(2, std::vector<GroupSetResource>(2));
+        for (size_t index = 0; index < 2; ++index) {
+            original[index][0].setBlocks(tier, {(*old_blocks)[index]});
+        }
+        const auto seeded = cache->tree()->insertNode({100, 200}, original, true, false);
+        ASSERT_EQ(seeded.path.size(), 2u);
+        cache->evictor_.onInserted(seeded);
+        full->releaseBlocks(tier, *old_blocks, BlockTreeRefType::STORE);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, tier), 1u);
+        auto before = cache->match({100, 200});
+        EXPECT_EQ(before.matched_device_blocks, 0u);
+        releaseRequestRefsForTest(*cache, before.matched_device_resources);
+        seeded.path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us = 1;
+
+        std::vector<std::vector<GroupSetResource>> incoming(3, std::vector<GroupSetResource>(2));
+        for (size_t index = 0; index < 3; ++index) {
+            incoming[index][0].device_blocks = {static_cast<BlockIdxType>(42 + index)};
+            incoming[index][1].device_blocks = {static_cast<BlockIdxType>(52 + index)};
+        }
+        cache->insert({100, 200, 300}, incoming, Tier::DEVICE);
+
+        const auto path = cache->tree()->findNode({100, 200, 300});
+        ASSERT_EQ(path.size(), 3u);
+        EXPECT_EQ(path[0], seeded.path[0]);
+        EXPECT_EQ(path[1], seeded.path[1]);
+        for (size_t index = 0; index < path.size(); ++index) {
+            EXPECT_EQ(path[index]->group_set_resources[1].device_blocks,
+                      (BlockIndicesType{static_cast<BlockIdxType>(52 + index)}));
+        }
+        for (const auto block : *old_blocks) {
+            EXPECT_FALSE(pool->isAllocated(block));
+        }
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::HOST), 0u);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::DISK), 0u);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::DEVICE), 1u);
+        EXPECT_EQ(cache->evictor_.candidateCount(1, Tier::DEVICE), 3u);
+        EXPECT_GT(path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us, 1);
+        EXPECT_EQ(metricSeriesCount(reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric),
+                  0u);
+        EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier), 0);
+
+        auto after = cache->match({100, 200, 300});
+        EXPECT_EQ(after.matched_device_blocks, 3u);
+        EXPECT_EQ(cache->matchedBlocksForGroup("group0", after.matched_device_resources),
+                  (BlockIndicesType{42, 43, 44}));
+        EXPECT_EQ(cache->matchedBlocksForGroup("group1", after.matched_device_resources), (BlockIndicesType{53, 54}));
+        releaseRequestRefsForTest(*cache, after.matched_device_resources);
+    }
+}
+
 TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
