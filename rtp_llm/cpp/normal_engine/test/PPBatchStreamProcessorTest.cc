@@ -741,6 +741,9 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
 
     PPExecutionPlan plan;
     plan.dspark_intermediate_chunk    = scenario.intermediate_chunk;
+    if (scenario.intermediate_chunk) {
+        plan.draft_next_token_ids = intTensor({40, 41, 42}).reshape({3, 1});
+    }
     plan.is_decode                    = scenario.is_verify;
     plan.model_input.is_target_verify = scenario.is_verify;
     plan.model_input.is_fake_stream   = scenario.fake;
@@ -864,12 +867,15 @@ TEST_P(PPDraftSyncTest, PreservesGlobalInputsLocalHiddenAndAcceptedRows) {
         EXPECT_EQ(target_model->inputs[0].is_target_verify, scenario.is_verify);
         EXPECT_TRUE(torch::equal(target_model->inputs[0].input_lengths.cpu(), plan.model_input.input_lengths));
         if (scenario.intermediate_chunk) {
-            // Peers receive an empty PP plan. They must learn the root's skip
-            // decision before entering any hidden-buffer read/draft collective.
-            EXPECT_TRUE(target_model->hidden_requests.empty());
-            EXPECT_TRUE(draft_inputs->empty());
+            // Peers receive an empty plan but must join the same draft commit
+            // collectives. Only the root needs the serialized prompt lookahead.
+            EXPECT_EQ(target_model->hidden_requests, (std::vector<int64_t>{-1}));
+            ASSERT_EQ(draft_inputs->size(), 1u);
+            EXPECT_EQ(tensorToVector<int32_t>(draft_inputs->front().combo_tokens),
+                      (std::vector<int32_t>{2, 3, 40, 5, 6, 7, 8, 41, 10, 42}));
+            EXPECT_TRUE(recorded_mtp->last_hidden_requests.empty());
             EXPECT_TRUE(tail.sampling_states_.empty());
-            ASSERT_EQ(forward_positions.size(), 1u);
+            ASSERT_EQ(forward_positions.size(), 2u);
             if (rank == 0) {
                 root_forward_positions = forward_positions;
                 ASSERT_EQ(wire->sent_tensors.size(), 2u);
@@ -3483,6 +3489,39 @@ TEST_F(PPBatchStreamProcessorTest, ContextBatchLimitAppliesToRescheduledChunks) 
     ready = scheduler.evaluateRunningStreams();
     ASSERT_EQ(ready.size(), 1u);
     EXPECT_EQ(ready.front(), streams[2]);
+}
+
+TEST_F(PPBatchStreamProcessorTest, MtpChunkLookaheadComesFromPromptAndKeepsPositions) {
+    auto params = makeMtpParams(3);
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    PPExecutor executor(params, nullptr, true);
+    executor.chunked_prefill_enabled_ = true;
+    auto stream = makeStream(ResourceContext{}, params.model_config_, 909, {1, 2, 3, 4, 5, 6, 7, 8}, 0);
+    stream->enable_fast_gen_ = true;
+    stream->resetChunkLen(4, 8);
+    stream->generate_input_->generate_config->pd_separation = true;
+    auto plan = executor.buildPlan(StreamGroups({stream}), {});
+    ASSERT_TRUE(plan.ok());
+    ASSERT_TRUE(plan->dspark_intermediate_chunk);
+    EXPECT_EQ(tensorToVector<int32_t>(plan->draft_next_token_ids), (std::vector<int32_t>{5}));
+    EXPECT_FALSE(plan->model_input.request_pd_separation.any().item<bool>());
+    const auto restored = pp_serialization::deserializePlan(pp_serialization::serializePlan(*plan, false));
+    EXPECT_TRUE(torch::equal(restored.draft_next_token_ids, plan->draft_next_token_ids));
+
+    auto input = plan->model_input;
+    input.combo_position_ids = intTensor({0, 1, 2, 3});
+    const auto positions = executor.batch_stream_processor_->gatherDraftNextPositionIds(StreamGroups({stream}), input);
+    EXPECT_EQ(tensorToVector<int32_t>(positions), (std::vector<int32_t>{4}));
+    const auto hidden = torch::zeros({4, 4}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    executor.prepareDraftPrefillAfterTargetPrefill(input, hidden, plan->draft_next_token_ids, positions);
+    EXPECT_EQ(tensorToVector<int32_t>(input.combo_tokens), (std::vector<int32_t>{2, 3, 4, 5}));
+    EXPECT_EQ(tensorToVector<int32_t>(input.combo_position_ids), (std::vector<int32_t>{1, 2, 3, 4}));
+
+    ASSERT_TRUE(stream->acquireCapacity(4).ok());
+    const auto final_plan = executor.buildPlan(StreamGroups({stream}), {});
+    ASSERT_TRUE(final_plan.ok());
+    EXPECT_FALSE(final_plan->dspark_intermediate_chunk);
+    EXPECT_FALSE(final_plan->draft_next_token_ids.defined());
 }
 
 TEST_F(PPBatchStreamProcessorTest, DSparkChunkPlanDefersPublicationAndSampling) {

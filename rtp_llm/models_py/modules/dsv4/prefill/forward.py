@@ -290,7 +290,7 @@ def _maybe_kick_async_head(
     from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
 
     _head_prebuild.maybe_kick_async_head(
-        v4, kv_cache, block_tables_by_type, cp_ctx, input_ids.device
+        v4, kv_cache, block_tables_by_type, cp_ctx, input_ids.device, owner=v4
     )
 
 
@@ -391,6 +391,7 @@ def forward_layers(
         cp_size,
         cp_rank,
         int(input_ids.size(0)),
+        owner=v4,
     )
     if _async_head_bundle is not None:
         cp_ctx = _async_head_bundle.cp_ctx

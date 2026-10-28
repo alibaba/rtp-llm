@@ -256,20 +256,32 @@ _BUILDER_LOCK = threading.Lock()
 _BUILDER_STREAMS: Dict[Any, Any] = {}
 
 
-def _builder() -> AsyncHeadBuilder:
+def _builder(owner=None) -> AsyncHeadBuilder:
+    """Keep target and draft predictions separate even for identical geometry.
+
+    The owner-less form is retained for standalone helper callers. Model
+    forwards pass their transformer instance on both kick and consume.
+    """
     global _BUILDER
     with _BUILDER_LOCK:
+        if owner is not None:
+            builder = getattr(owner, "_dsv4_async_head_builder", None)
+            if builder is None:
+                builder = AsyncHeadBuilder()
+                owner._dsv4_async_head_builder = builder
+            return builder
         if _BUILDER is None:
             _BUILDER = AsyncHeadBuilder()
         return _BUILDER
 
 
 def _builder_stream(device):
-    stream = _BUILDER_STREAMS.get(device)
-    if stream is None:
-        stream = torch.cuda.Stream(device=device)
-        _BUILDER_STREAMS[device] = stream
-    return stream
+    with _BUILDER_LOCK:
+        stream = _BUILDER_STREAMS.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            _BUILDER_STREAMS[device] = stream
+        return stream
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +486,7 @@ def _build_with_stream_fence(
 # ---------------------------------------------------------------------------
 
 
-def maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, device) -> None:
+def maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, device, *, owner=None) -> None:
     """Kick the builder for the predicted next chunk. Never raises."""
     try:
         if not async_head_enabled():
@@ -523,7 +535,7 @@ def maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, device) ->
         if device.type == "cuda":
             ready_event = torch.cuda.Event()
             ready_event.record(torch.cuda.current_stream(device))
-        _builder().kick(
+        _builder(owner).kick(
             key, lambda: _build_with_stream_fence(kwargs, inference_mode, ready_event)
         )
     except Exception:
@@ -581,6 +593,8 @@ def consume_async_head(
     cp_size: int,
     cp_rank: int,
     num_tokens: int,
+    *,
+    owner=None,
 ) -> Optional[PrebuiltHead]:
     """Join the builder and validate its bundle for THIS chunk.
 
@@ -599,7 +613,7 @@ def consume_async_head(
         key = key_from_forward_inputs(
             cp_info, prefix_lengths, device, cp_size, cp_rank, num_tokens
         )
-    builder = _BUILDER
+    builder = getattr(owner, "_dsv4_async_head_builder", None) if owner is not None else _BUILDER
     if builder is None:
         return None
     # Even a non-CP/tail/request-boundary miss must join before the eager

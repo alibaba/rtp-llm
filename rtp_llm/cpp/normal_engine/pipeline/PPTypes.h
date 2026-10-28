@@ -87,6 +87,7 @@ struct PPExecutionPlan {
     bool          is_decode                 = false;  // Request phase; verify may use a prefill input shape
     bool          dspark_intermediate_chunk = false;
     torch::Tensor draft_next_position_ids;  // [stream_count * position_id_len_factor], MTP prefill
+    torch::Tensor draft_next_token_ids;     // [stream_count, 1], prompt lookahead for intermediate MTP chunks
 };
 
 struct PPIntermediateTensors {

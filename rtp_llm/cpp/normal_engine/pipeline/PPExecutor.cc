@@ -869,6 +869,9 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
         plan.output_config = batch_stream_processor_->gatherOutputConfig(stream_groups);
         plan.draft_next_position_ids =
             batch_stream_processor_->gatherDraftNextPositionIds(stream_groups, plan.model_input);
+        if (plan.dspark_intermediate_chunk && !is_dspark_) {
+            plan.draft_next_token_ids = batch_stream_processor_->gatherDraftNextTokenIds(stream_groups);
+        }
     }
 
     return plan;
@@ -1178,7 +1181,8 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
                                        const torch::Tensor&  new_token_ids,
                                        const torch::Tensor&  new_token_lengths,
                                        bool                  is_decode,
-                                       torch::Tensor*        out_draft_last_hidden) {
+                                       torch::Tensor*        out_draft_last_hidden,
+                                       bool                  prefill_commit_only) {
     const bool cp_enabled = parallelism_config_.local_cp_enabled();
 
     GptModelInputs draft_input = target_input;
@@ -1212,6 +1216,13 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
 
     /** 2. Draft Prefill. */
     auto draft_prefill_output = forwardDraftModel(draft_input);
+    if (prefill_commit_only) {
+        RTP_LLM_CHECK_WITH_INFO(!is_dspark_ && !is_decode && role_type_ == RoleType::PREFILL,
+                                "MTP chunk commit-only mode requires a prefill instance");
+        // KV is now written. Intermediate chunks have no sampled/proposed output.
+        cudaSyncAndCheck();
+        return {};
+    }
     if (!is_dspark_) {
         if (cp_enabled) {
             /** CP returns per-request final hidden; P has no following draft decode. */
@@ -1548,7 +1559,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 }
             }
 
-            if (sp_enabled_ && (is_dspark_ || !plan.dspark_intermediate_chunk)) {
+            if (sp_enabled_) {
                 mtp::maybeOverrideLastHiddenWithMtpBuffer(
                     model_output, *model_, cp_enabled ? -1 : plan.model_input.combo_tokens.numel());
 
@@ -1556,13 +1567,17 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 // sam/mtp-pp2-20261023: also capture the draft's final hidden
                 // into the PP result so the handoff can ship propose_hidden.
                 torch::Tensor draft_last_hidden;
+                const bool mtp_chunk_commit = !is_dspark_ && plan.dspark_intermediate_chunk;
+                const auto& draft_tail_tokens =
+                    mtp_chunk_commit ? plan.draft_next_token_ids : execution_result.new_token_ids;
                 execution_result.propose_token_ids = runDraftStep(plan.model_input,
                                                                   plan.draft_next_position_ids,
                                                                   model_output.all_hidden_states,
-                                                                  execution_result.new_token_ids,
+                                                                  draft_tail_tokens,
                                                                   execution_result.new_token_lengths,
                                                                   plan.model_input.is_target_verify,
-                                                                  &draft_last_hidden);
+                                                                  &draft_last_hidden,
+                                                                  mtp_chunk_commit);
                 if (draft_last_hidden.defined() && !plan.output_config.return_hidden_states) {
                     execution_result.hidden_states = draft_last_hidden.to(torch::kCPU).contiguous();
                 }

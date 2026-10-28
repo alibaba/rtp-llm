@@ -743,6 +743,26 @@ void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&
                           intermediate_chunk});
 }
 
+torch::Tensor PPBatchStreamProcessor::gatherDraftNextTokenIds(const StreamGroups& stream_groups) const {
+    const auto streams = stream_groups.allStreams();
+    auto next_tokens = torch::full({static_cast<int64_t>(streams.size()), 1},
+                                   -1,
+                                   torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    int64_t row = 0;
+    for (const auto& stream : streams) {
+        if (stream->isChunkStream()) {
+            const auto end = stream->prefixLength() + stream->contextLength();
+            RTP_LLM_CHECK_WITH_INFO(stream->isContextStream() && stream->currentBatchSize() == 1
+                                        && end >= 0 && end < stream->inputLength(),
+                                    "MTP chunk lookahead must address the next prompt token");
+            const auto tokens = stream->completeTokenIds();
+            next_tokens.data_ptr<int32_t>()[row] = tokens.data_ptr<int32_t>()[end];
+        }
+        ++row;
+    }
+    return next_tokens;
+}
+
 torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGroups&   stream_groups,
                                                                  const GptModelInputs& model_input) const {
     if (!sp_enabled_ || model_input.is_target_verify || !model_input.combo_position_ids.defined()) {
@@ -755,7 +775,21 @@ torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGro
                                      torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
     size_t     row             = 0;
     for (const auto& stream : streams) {
-        stream->generateNextPositionId(position_ids.data_ptr<int32_t>() + row * position_factor);
+        auto* destination = position_ids.data_ptr<int32_t>() + row * position_factor;
+        if (stream->isContextStream() && stream->isChunkStream()) {
+            // generateNextPositionId addresses the end of the entire prompt.
+            // Intermediate drafts instead consume the next chunk's first token.
+            const auto end = stream->prefixLength() + stream->contextLength();
+            const auto context_positions = stream->generateContextPositionIds();
+            RTP_LLM_CHECK_WITH_INFO(end >= 0 && end < stream->inputLength()
+                                        && context_positions.numel() >= (end + 1) * position_factor,
+                                    "MTP chunk lookahead position is outside the prompt");
+            std::memcpy(destination,
+                        context_positions.data_ptr<int32_t>() + end * position_factor,
+                        position_factor * sizeof(int32_t));
+        } else {
+            stream->generateNextPositionId(destination);
+        }
         ++row;
     }
     return position_ids;
