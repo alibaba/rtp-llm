@@ -906,7 +906,22 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_precision(status_info.precision);
     response->set_dp_rank(status_info.dp_rank);
     response->set_max_seq_len(maga_init_params_.model_config_.max_seq_len);
-    response->set_max_batch_tokens_size(maga_init_params_.runtime_config.fifo_scheduler_config.max_batch_tokens_size);
+    const auto& runtime_config = maga_init_params_.runtime_config;
+    const auto& fifo_config    = runtime_config.fifo_scheduler_config;
+    auto        batch_tokens   = fifo_config.max_batch_tokens_size;
+    const bool  uses_fifo =
+        maga_init_params_.parallelism_config.pp_size <= 1 && !runtime_config.use_batch_decode_scheduler
+        && !(maga_init_params_.pd_sep_config.role_type == RoleType::PDFUSION
+             && parsePDFusionSchedulerMode(fifo_config.pdfusion_scheduler_mode) == PDFusionSchedulerMode::RATIO);
+    if (uses_fifo && fifo_config.max_batch_kv_len > 0) {
+        // Legacy planners have one compute cap and use a full-prompt rectangle.
+        // Bounding it by both FIFO sums is conservative; physical KV stays separate
+        // so an oversized head request can still run alone. Negative T becomes
+        // an unsigned limit in FIFO; zero T permits only the singleton fast path.
+        batch_tokens = batch_tokens < 0 ? fifo_config.max_batch_kv_len :
+                                          std::max<int64_t>(1, std::min(batch_tokens, fifo_config.max_batch_kv_len));
+    }
+    response->set_max_batch_tokens_size(batch_tokens);
     auto kv_info = engine_->getCacheStatusInfo(-1, false);
     response->set_available_kv_cache(kv_info.available_kv_cache);
     response->set_total_kv_cache(kv_info.total_kv_cache);
