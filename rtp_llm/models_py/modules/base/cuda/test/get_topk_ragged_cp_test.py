@@ -73,6 +73,10 @@ def _tp2_indexer_worker(rank: int, nccl_port: int) -> None:
     initialized = False
     try:
         os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+        # Remote executor TMPDIR paths can exceed the Unix socket path limit.
+        os.environ.setdefault(
+            "RTP_LLM_CPU_TP_BROADCASTER_DIR", f"/tmp/rtp_llm_{os.getuid()}"
+        )
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
 
