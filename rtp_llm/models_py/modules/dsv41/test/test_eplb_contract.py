@@ -236,6 +236,58 @@ class EplbPrivateMoeContractTest(unittest.TestCase):
                             model.eplb_layer.logical_to_physical.data_ptr(), pointer
                         )
 
+    def test_prefill_native_mapping_and_chunk_local_replica_phase(self):
+        from rtp_llm.models_py.modules.dsv41.moe import mega_gate
+
+        for fake_balance in (False, True):
+            with self.subTest(fake_balance=fake_balance):
+                model = self.build(rank=1)
+                model.max_tokens_per_rank = 2
+                layer = model.eplb_layer
+                reference_map = layer.map_ids
+                layer.map_ids = mock.Mock(wraps=reference_map)
+                context = object()
+                expected = []
+
+                def override(indices, weights):
+                    indices.fill_(1)
+                    weights.fill_(1)
+
+                if fake_balance:
+                    model._strategy.fake_balance_expert = override
+
+                def native(x, gate, rank, *, to_physical_map, logical_count):
+                    self.assertEqual(rank, 1)
+                    self.assertIs(to_physical_map, layer.logical_to_physical)
+                    self.assertIs(logical_count, layer.logical_count)
+                    logical = torch.tensor([[0, 1]]).expand(x.shape[0], 2)
+                    expected.append(
+                        reference_map(
+                            torch.ones_like(logical) if fake_balance else logical
+                        )
+                    )
+                    return torch.ones_like(logical, dtype=torch.float32), reference_map(
+                        logical
+                    )
+
+                x = torch.zeros(5, 2)
+                with mock.patch.object(
+                    mega_gate, "can_use_mega_gate", return_value=True
+                ), mock.patch.object(
+                    mega_gate, "mega_gate", side_effect=native
+                ), mock.patch.object(
+                    model, "_should_chunk", return_value=True
+                ):
+                    actual = model(x, torch.arange(5), expert_load=context)
+                torch.testing.assert_close(actual, x + 1)
+                self.assertEqual(len(model._strategy.calls), 3)
+                for (ids, load), ref in zip(model._strategy.calls, expected):
+                    torch.testing.assert_close(ids, ref, rtol=0, atol=0)
+                    self.assertIs(load, context)
+                self.assertEqual(layer.map_ids.call_count, 3 if fake_balance else 0)
+                # Each chunk starts at local row zero, independent of prompt position.
+                torch.testing.assert_close(expected[0][0], expected[1][0])
+
     def test_mega_input_streams_rotate_replicas_by_rank(self):
         # Even equal input rows are independent requests to Mega on each rank.
         ids = torch.tensor([[0, -1], [1, 0]])
@@ -288,6 +340,16 @@ class EplbPrivateMoeContractTest(unittest.TestCase):
                         buf.topk_idx.copy_(logical)
                         buf.topk_weights.fill_(0.25)
 
+                    def gate_pack(
+                        *args, to_physical_map, logical_count, ep_rank, **kwargs
+                    ):
+                        self.assertIs(to_physical_map, layer.logical_to_physical)
+                        self.assertIs(logical_count, layer.logical_count)
+                        self.assertEqual(ep_rank, strategy.cfg.ep_rank)
+                        self.assertIs(args[1], scores)
+                        buf.topk_idx.copy_(to_physical_map[logical, 0])
+                        buf.topk_weights.fill_(0.25)
+
                     def override(indices, weights):
                         indices.copy_(overridden)
                         weights.fill_(1)
@@ -337,21 +399,36 @@ class EplbPrivateMoeContractTest(unittest.TestCase):
                         y.fill_(2)
 
                     strategy._input_packer = SimpleNamespace(pack=pack)
+                    scores = torch.arange(8, dtype=torch.bfloat16).view(2, 4)
                     gate = SimpleNamespace(
                         hash=False,
                         route_scale=1.5,
                         bias=torch.zeros(4),
                         tid2eid=torch.zeros(2, 2, dtype=torch.int64),
                         _weight_bf16=lambda: torch.zeros(4, 8, dtype=torch.bfloat16),
-                        _project_scores=lambda x, w: x @ w.T,
+                        _project_scores=mock.Mock(return_value=scores),
                     )
+
+                    def packed_gate(hash_mode):
+                        gate.hash = hash_mode
+                        gate._project_scores.reset_mock()
+                        result = strategy.forward_with_gate_pack(
+                            x,
+                            gate,
+                            torch.arange(2),
+                            expert_load=context,
+                            eplb_layer=layer,
+                        )
+                        gate._project_scores.assert_called_once()
+                        return result
+
                     getter = (
                         "_get_mega_se_gate_pack_kernels"
                         if module is mega_se
                         else "_get_gate_pack_kernels"
                     )
                     with mock.patch.object(
-                        module, getter, return_value=(pack, pack, None)
+                        module, getter, return_value=(gate_pack, gate_pack, None)
                     ), mock.patch.object(
                         module, "sync_cuda_graph_warmup_ranks"
                     ), mock.patch.dict(
@@ -366,13 +443,8 @@ class EplbPrivateMoeContractTest(unittest.TestCase):
                                 expert_load=context,
                                 eplb_layer=layer,
                             ),
-                            lambda: strategy.forward_with_gate_pack(
-                                x,
-                                gate,
-                                torch.arange(2),
-                                expert_load=context,
-                                eplb_layer=layer,
-                            ),
+                            lambda: packed_gate(False),
+                            lambda: packed_gate(True),
                         ]
                         if module is mega_se:
                             inputs = SimpleNamespace(
@@ -398,7 +470,7 @@ class EplbPrivateMoeContractTest(unittest.TestCase):
                                 torch.testing.assert_close(
                                     entry(), torch.full_like(x, 2)
                                 )
-                                if entry_index == 2 and not fake_balance:
+                                if entry_index != 0 and not fake_balance:
                                     layer.map_ids.assert_not_called()
                                 else:
                                     layer.map_ids.assert_called_once()

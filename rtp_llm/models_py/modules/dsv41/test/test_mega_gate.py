@@ -248,7 +248,9 @@ class MegaGateMoETest(unittest.TestCase):
                             actual, x * (2 if includes_shared else 3)
                         )
                         if enabled:
-                            native.assert_called_once_with(x, moe.gate, 3)
+                            native.assert_called_once_with(
+                                x, moe.gate, 3, to_physical_map=None, logical_count=None
+                            )
                             strategy.assert_called_once_with(
                                 x, weights, indices, expert_load=None, eplb_layer=None
                             )
@@ -311,7 +313,7 @@ class MegaGateCudaTest(unittest.TestCase):
                 torch.arange(experts, device="cuda", dtype=torch.float32) * 4,
             )
             for rank in (0, 3, 31):
-                for rows in (1, 32, 192):
+                for rows in (1, 32, 192, 257, 2048, 8192):
                     with self.subTest(rank=rank, rows=rows):
                         state = EplbLayer(
                             0,

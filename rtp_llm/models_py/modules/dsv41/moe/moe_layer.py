@@ -341,10 +341,27 @@ class MoE(nn.Module):
         from .mega_gate import can_use_mega_gate, mega_gate
 
         if can_use_mega_gate(x, self.gate):
+            layer = self.eplb_layer
             with record_function_range("dsv4.moe.deepgemm_mega_gate"):
-                weights, indices = mega_gate(x, self.gate, self._strategy.cfg.ep_rank)
+                weights, indices = mega_gate(
+                    x,
+                    self.gate,
+                    self._strategy.cfg.ep_rank,
+                    to_physical_map=(
+                        layer.logical_to_physical if layer is not None else None
+                    ),
+                    logical_count=layer.logical_count if layer is not None else None,
+                )
+            # Native routing already emits physical IDs. Fake balance replaces
+            # them with logical IDs and still needs its override-then-map step.
             return self._strategy(
-                x, weights, indices, expert_load=expert_load, eplb_layer=self.eplb_layer
+                x,
+                weights,
+                indices,
+                expert_load=expert_load,
+                eplb_layer=(
+                    layer if self._strategy.fake_balance_expert is not None else None
+                ),
             )
         return self._strategy.forward_with_gate_pack(
             x, self.gate, input_ids, expert_load=expert_load, eplb_layer=self.eplb_layer

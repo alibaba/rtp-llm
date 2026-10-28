@@ -516,8 +516,9 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                     FakeBalanceExpert,
                 )
 
-                for enabled, mapped, rows in (
-                    (enabled, mapped, rows)
+                for prepared, enabled, mapped, rows in (
+                    (prepared, enabled, mapped, rows)
+                    for prepared in (False, True)
                     for enabled in (False, True)
                     for mapped in (False, True)
                     for rows in (192, 6, 160)
@@ -535,12 +536,26 @@ class MHCPreparedMoECudaTest(unittest.TestCase):
                         counts.zero_()
                         out = v41_mega_mhc.try_fused_post_pre(**case)
                         self.assertIsNotNone(out)
-                        return moe(out[1], ids, expert_load=expert_load)
+                        # Reference the old logical gate -> pack -> Torch map chain.
+                        x = out[1].view(-1, _DIM)
+                        weights, indices = mega_gate.mega_gate(x, moe.gate, 0)
+                        return strategy(
+                            x,
+                            weights,
+                            indices,
+                            expert_load=expert_load,
+                            eplb_layer=moe.eplb_layer,
+                        ).view_as(out[1])
 
                     def direct():
                         counts.zero_()
-                        inputs = moe.prepare_mhc_inputs(case["attn_out"])
-                        self.assertIsNotNone(inputs)
+                        inputs = (
+                            moe.prepare_mhc_inputs(case["attn_out"])
+                            if prepared
+                            else None
+                        )
+                        if prepared:
+                            self.assertIsNotNone(inputs)
                         out = v41_mega_mhc.try_fused_post_pre(**case, moe_inputs=inputs)
                         self.assertIsNotNone(out)
                         # The prepared native gate must perform the map itself;
