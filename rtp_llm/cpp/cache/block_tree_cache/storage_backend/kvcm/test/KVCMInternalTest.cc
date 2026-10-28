@@ -353,12 +353,12 @@ TEST(KVCMInternalTest, FullLinearMultiGroupWriteMatrixPreservesAvailableStatesAn
         std::vector<std::string> expected;
     };
     const std::vector<WriteCase> cases{
-        {{true, true, true, true}, {}},
+        {{true, true, true, true}, {aggregate_name, aggregate_name, aggregate_name, aggregate_name}},
         {{true, false, true, true}, {aggregate_name, full_name, aggregate_name, aggregate_name}},
         {{true, true, true, false}, {aggregate_name, aggregate_name, aggregate_name, full_name}},
         {{false, false}, {full_name, full_name}},
         {{false}, {full_name}},
-        {{true}, {}},
+        {{true}, {aggregate_name}},
     };
 
     for (const int tp_size : {1, 2}) {
@@ -432,7 +432,7 @@ TEST(KVCMInternalTest, FullAndLinearWriteSelectionKeepsEveryAvailableState) {
     EXPECT_EQ(selected, (std::vector<std::string>{"FfullLlinear", "Ffull", "FfullLlinear", "FfullLlinear"}));
 }
 
-TEST(KVCMInternalTest, FullAndLinearWriteSelectionHandlesCompleteAndPartialRequests) {
+TEST(KVCMInternalTest, FullAndLinearWritesNameAllGroupsToUpgradeExistingFullOnlyBlocks) {
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), makeGroup("linear", 1, CacheGroupType::LINEAR)},
         {{0, {"full"}}, {1, {"linear"}}});
@@ -448,7 +448,7 @@ TEST(KVCMInternalTest, FullAndLinearWriteSelectionHandlesCompleteAndPartialReque
                                                                          {{"full", 12}, {"linear", 22}},
                                                                          {{"full", 13}, {"linear", 23}}};
     ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest(all_groups), all_groups.size(), selected));
-    EXPECT_TRUE(selected.empty());
+    EXPECT_EQ(selected, (std::vector<std::string>{"FfullLlinear", "FfullLlinear", "FfullLlinear", "FfullLlinear"}));
 
     const auto partial_groups = std::vector<std::vector<StorageBlockHandle>>{
         {{"full", 10}, {"linear", 20}}, {{"full", 11}, {"linear", 21}}, {{"full", 12}}, {{"full", 13}, {"linear", 23}}};

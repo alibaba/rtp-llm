@@ -492,7 +492,6 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const StorageRequest&     request,
                             request.keys->size(),
                             request.handles.size());
     location_spec_group_names.resize(valid_keys_size);
-    bool is_all_full_other = true;
     for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
         uint64_t groups_name_bithash = 0;
         for (const auto& handle : request.handles[key_idx]) {
@@ -510,11 +509,7 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const StorageRequest&     request,
             RTP_LLM_LOG_WARNING("invalid hybrid remote group mask [%lu]", groups_name_bithash);
             return false;
         }
-        is_all_full_other                  = is_all_full_other && groups_name_bithash == valid_full_other_bithash_;
         location_spec_group_names[key_idx] = location_spec_group_map_.at(groups_name_bithash);
-    }
-    if (is_all_full_other) {
-        location_spec_group_names.clear();
     }
     return true;
 }
