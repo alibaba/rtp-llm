@@ -280,6 +280,7 @@ markers = [
     "Tesla_V100S_PCIE_32GB: (deprecated) use gpu(type='Tesla_V100S_PCIE_32GB')",
     "L20: (deprecated) use gpu(type='L20')",
     "H20: (deprecated) use gpu(type='H20')",
+    "L20D_TEST: existing CUDA 13 performance worker pool",
     "SM100: (deprecated) use gpu(type='SM100')",
     "SM100_ARM: (deprecated) use gpu(type='SM100_ARM')",
     "RTX_5000_PRO: RTX 5000 Pro / SM120 smoke tests",
@@ -365,11 +366,11 @@ version = 1
 default_pytest_cli = "-v --tb=short --timeout=300"
 
 [tool.rtp_llm.pytest_ci.profiles.perf_cuda13]
-description = "Mainline DSV4 model and kernel performance workloads"
+description = "Public CUDA 13 kernel performance workloads"
 gpu_type = "L20D_TEST"
-paths = ["rtp_llm/test/perf_test/test_perf_dsv4.py", "rtp_llm/test/perf_test/test_perf_dsv4_kernels.py"]
+paths = ["rtp_llm/test/perf_test/test_perf_dsv4_kernels.py"]
 markexpr = "manual and perf and cuda"
-expected_count = 16
+expected_count = 3
 forbid_skips = true
 
 [tool.rtp_llm.pytest_ci.profiles.py_ut_cuda13_arm]

@@ -870,7 +870,9 @@ def _collect_session_extra_files(rootdir: Path) -> List[str]:
     return files
 
 
-def _collect_perf_files(rootdir: Path) -> List[str]:
+def _collect_perf_files(
+    rootdir: Path, *, include_internal_presets: bool = False
+) -> List[str]:
     """Perf test data: distribution CSVs, batch configs, and baselines."""
     files: List[str] = []
     # perf_test data: distribution CSVs, batch_seq_len configs, baselines.
@@ -882,6 +884,15 @@ def _collect_perf_files(rootdir: Path) -> List[str]:
         files.extend(
             str(p.relative_to(rootdir)) for p in rootdir.glob(pattern) if p.is_file()
         )
+    # Site presets are data for the selected internal model workload only.
+    # Public kernel/perf sessions must not receive this private registry.
+    if include_internal_presets:
+        preset_file = (
+            rootdir / "internal_source/rtp_llm/test/perf_test/perf_presets.json"
+        )
+        if not preset_file.is_file():
+            raise FileNotFoundError("Selected internal perf preset registry is missing")
+        files.append(str(preset_file.relative_to(rootdir)))
     return files
 
 
@@ -922,7 +933,15 @@ def collect_remote_files(rootdir: Path, items: List[Any]) -> List[str]:
         files.extend(_collect_smoke_files(rootdir))
     has_perf = any(item.get_closest_marker("perf") is not None for item in items)
     if has_perf or any("/perf_test/" in rel for rel in item_rels):
-        files.extend(_collect_perf_files(rootdir))
+        files.extend(
+            _collect_perf_files(
+                rootdir,
+                include_internal_presets=(
+                    "internal_source/rtp_llm/test/perf_test/test_perf_dsv4.py"
+                    in item_rels
+                ),
+            )
+        )
 
     files = sorted(set(files))
     if has_smoke:

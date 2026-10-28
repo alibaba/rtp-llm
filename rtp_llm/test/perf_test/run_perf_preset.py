@@ -8,9 +8,12 @@ import subprocess
 import sys
 
 
-def main():
+def main(preset_file=None):
     root = Path(__file__).resolve().parent
-    presets = json.loads((root / "perf_presets.json").read_text())
+    preset_file = (
+        Path(preset_file) if preset_file is not None else root / "perf_presets.json"
+    )
+    presets = json.loads(preset_file.read_text())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("preset", choices=sorted(presets))
     options, extra = parser.parse_known_args()
