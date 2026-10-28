@@ -6,6 +6,9 @@ FP32 softmax states. Planning happens outside HIP Graph capture; every launch
 and device address is fixed for a given sequence-row capacity.
 """
 
+import logging
+import os
+
 import numpy as np
 import torch
 import triton
@@ -18,6 +21,7 @@ def _shared_prefix(
     KV,
     TABLE,
     CUTS,
+    Q_PTR,
     PART_OUT,
     PART_LSE,
     Q_ROW: tl.constexpr,
@@ -45,14 +49,19 @@ def _shared_prefix(
     X: tl.constexpr = 8  # FP16/BF16 shuffled K/V vector width (16 bytes).
     m = tl.arange(0, M)
     d = tl.arange(0, DIM)
-    rows = tile * BEAMS + m // G
+    subtiles: tl.constexpr = CUT_BEAMS // BEAMS
+    group_index = tile // subtiles
+    group_begin = tl.load(Q_PTR + group_index)
+    group_end = tl.load(Q_PTR + group_index + 1)
+    rows = group_begin + (tile % subtiles) * BEAMS + m // G
+    valid_rows = (rows < group_end) & (rows < ROWS)
     qheads = head * G + m % G
     q = tl.load(
         Q + rows[:, None] * Q_ROW + qheads[:, None] * Q_HEAD + d[None, :],
-        rows[:, None] < ROWS,
+        valid_rows[:, None],
         other=0,
     )
-    shared = tl.load(CUTS + tile * BEAMS // CUT_BEAMS)
+    shared = tl.load(CUTS + group_index)
     per_split = tl.cdiv(shared, SPLITS)
     begin = split * per_split
     end = tl.minimum(shared, begin + per_split)
@@ -61,7 +70,7 @@ def _shared_prefix(
     acc = tl.full((M, DIM), 0, tl.float32)
     for start in range(begin, end, N):
         n = start + tl.arange(0, N)
-        block = tl.load(TABLE + tile * BEAMS * TABLE_ROW + n // PAGE, n < end, other=0)
+        block = tl.load(TABLE + group_begin * TABLE_ROW + n // PAGE, n < end, other=0)
         if INDEX64:
             block = block.to(tl.int64)
         t = n % PAGE
@@ -93,12 +102,12 @@ def _shared_prefix(
     tl.store(
         PART_OUT + pos[:, None] * DIM + d[None, :],
         acc / safe_denom[:, None],
-        rows[:, None] < ROWS,
+        valid_rows[:, None],
     )
     tl.store(
         PART_LSE + pos,
         tl.where(denom > 0, maximum + tl.log2(safe_denom), -float("inf")),
-        rows < ROWS,
+        valid_rows,
     )
 
 
@@ -147,7 +156,7 @@ def _private_tail_merge(
         other=0,
     ).to(tl.float32)
     length = tl.load(LENGTHS + row, row < ROWS, other=0)
-    begin = tl.load(CUTS + tile * ROW_TILE // BEAMS)
+    begin = tl.load(CUTS + tile * ROW_TILE)
     maximum = tl.full((M,), -float("inf"), tl.float32)
     denom = tl.full((M,), 0, tl.float32)
     acc = tl.full((M, DIM), 0, tl.float32)
@@ -230,7 +239,8 @@ class RocmBeamSearchCascadeAttention:
     MIN_BEAMS = 32
     MIN_SHARED_TOKENS = 128
     BEAMS_PER_TILE = 16
-    # CK paged prefill uses signed 32-bit byte offsets in its buffer loads.
+    # Validated byte-span bound for this native route; independent of Triton
+    # address width and the underlying allocation's storage offset.
     NATIVE_PREFIX_BYTE_LIMIT = 1 << 31
 
     def __init__(
@@ -244,7 +254,8 @@ class RocmBeamSearchCascadeAttention:
         dtype,
         device,
         *,
-        linear_v=False
+        linear_v=False,
+        max_requests=1,
     ):
         if (
             heads <= 0
@@ -257,6 +268,7 @@ class RocmBeamSearchCascadeAttention:
             or dtype not in (torch.bfloat16, torch.float16)
             or rows <= 0
             or max_pages <= 0
+            or max_requests <= 0
         ):
             raise ValueError("Unsupported ROCm cascade geometry or dtype")
         self.rows, self.heads, self.kv_heads = rows, heads, kv_heads
@@ -268,14 +280,56 @@ class RocmBeamSearchCascadeAttention:
         self.native_prefix = (
             not linear_v and dtype == torch.bfloat16 and page_size == 16
         )
+        # Explicit opt-in while full-model acceptance is being established.
+        # Keep the original route available for matched service comparisons.
+        mode = os.getenv("RTP_ROCM_CASCADE_FP32", "0")
+        if mode not in ("0", "1"):
+            raise ValueError("RTP_ROCM_CASCADE_FP32 must be 0 or 1")
+        self.optimized = mode == "1"
+        self.native_fp32_module = None
+        if (
+            self.optimized
+            and self.native_prefix
+            and (heads, kv_heads, head_dim) == (16, 8, 128)
+        ):
+            arch = torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
+            if arch == "gfx942":
+                from rtp_llm.models_py.triton_kernels.attention.beam_search_cascade_native import (
+                    load_native_prefix,
+                )
+
+                self.native_fp32_module = load_native_prefix()
+        self.tail_kernel = None
+        self.tail_warps = 2
+        if (
+            self.optimized
+            and self.native_prefix
+            and (heads, kv_heads, head_dim) == (16, 8, 128)
+        ):
+            from rtp_llm.models_py.triton_kernels.attention.beam_search_cascade_tail import (
+                _private_tail_merge_layout,
+            )
+
+            self.tail_kernel = _private_tail_merge_layout
+            self.tail_warps = 1
         self.BEAMS_PER_TILE = 128 if self.native_prefix else 16
-        self.tiles = triton.cdiv(rows, self.BEAMS_PER_TILE)
+        # Reserve enough fixed-address partitions to split at request boundaries.
+        # Excessively fragmented inputs safely fall back to the original tiling.
+        self.tiles = min(
+            rows, triton.cdiv(rows, self.BEAMS_PER_TILE) + max_requests - 1
+        )
         self.splits = 1 if self.native_prefix else (4 if rows <= 512 else 1)
         self.table_host = torch.zeros(
             (rows, max_pages), dtype=torch.int32, pin_memory=True
         )
         self.lengths_host = torch.zeros(rows, dtype=torch.int32, pin_memory=True)
         self.cuts_host = torch.zeros(self.tiles, dtype=torch.int32, pin_memory=True)
+        self.qptr_host = torch.full(
+            (self.tiles + 1,), rows, dtype=torch.int32, pin_memory=True
+        )
+        self.row_cuts_host = torch.zeros(rows, dtype=torch.int32, pin_memory=True)
+        self.prefix_qptr = torch.empty_like(self.qptr_host, device=device)
+        self.row_cuts = torch.empty_like(self.row_cuts_host, device=device)
         self.table = torch.empty_like(self.table_host, device=device)
         self.lengths = torch.empty_like(self.lengths_host, device=device)
         self.cuts = torch.empty_like(self.cuts_host, device=device)
@@ -287,19 +341,21 @@ class RocmBeamSearchCascadeAttention:
         )
         self.output = torch.empty((rows, heads, head_dim), dtype=dtype, device=device)
         self.shared_tokens = 0
+        self._runtime_path_logged = False
         if self.native_prefix:
             self.prefix_table = torch.empty(
                 (self.tiles, max_pages), dtype=torch.int32, device=device
             )
-            self.prefix_qptr = (
-                torch.arange(self.tiles + 1, dtype=torch.int32, device=device)
-                * self.BEAMS_PER_TILE
-            ).clamp_max(rows)
+            self.prefix_table_host = torch.zeros(
+                (self.tiles, max_pages), dtype=torch.int32, pin_memory=True
+            )
             self.prefix_indptr = (
                 torch.arange(self.tiles + 1, dtype=torch.int32, device=device)
                 * max_pages
             )
-            self.prefix_output = torch.empty_like(self.output)
+            self.prefix_output = torch.empty_like(
+                self.output, dtype=torch.float32 if self.optimized else dtype
+            )
         self._staging_done = torch.cuda.Event()
         self._staging_in_flight = False
 
@@ -336,26 +392,39 @@ class RocmBeamSearchCascadeAttention:
         )
         if np.any(table[live_pages] < 0):
             raise ValueError("ROCm cascade page IDs must be nonnegative")
-        # A fixed query tiling keeps launches invariant when requests, beam
-        # ancestry or padded rows change. Only proven complete common pages
-        # are shared; a tile crossing a request boundary safely has a zero cut.
+        # Group adjacent rows by their first physical page, then split long
+        # groups into bounded query tiles. All pages below the cut are still
+        # checked: the first page only proposes boundaries, never proves sharing.
+        # For e.g. 500-beam requests, fixed 128-row tiles otherwise straddle
+        # requests and force whole histories through the private-tail kernel.
+        changes = np.flatnonzero(table[1:, 0] != table[:-1, 0]) + 1
+        starts = np.r_[0, changes]
+        ends = np.r_[changes, self.rows]
+        boundaries = np.concatenate(
+            [
+                np.arange(first, last, self.BEAMS_PER_TILE)
+                for first, last in zip(starts, ends)
+            ]
+        )
+        if len(boundaries) > self.tiles:
+            boundaries = np.arange(0, self.rows, self.BEAMS_PER_TILE)
+        qptr = self.qptr_host.numpy()
+        qptr.fill(self.rows)
+        qptr[: len(boundaries)] = boundaries
         cuts = self.cuts_host.numpy()
         cuts.fill(0)
-        for tile in range(self.tiles):
-            first = tile * self.BEAMS_PER_TILE
-            last = min(first + self.BEAMS_PER_TILE, self.rows)
+        row_cuts = self.row_cuts_host.numpy()
+        row_cuts.fill(0)
+        for tile in range(len(boundaries)):
+            first, last = int(qptr[tile]), int(qptr[tile + 1])
             limit = int((lengths[first:last] - 1).min() // self.page)
             same = np.all(table[first:last, :limit] == table[first, :limit], axis=0)
             mismatch = np.flatnonzero(~same)
             shared = int(mismatch[0]) if len(mismatch) else limit
-            if (
-                last - first >= min(self.MIN_BEAMS, self.BEAMS_PER_TILE)
-                and shared * self.page >= self.MIN_SHARED_TOKENS
-            ):
+            if shared * self.page >= self.MIN_SHARED_TOKENS:
                 cuts[tile] = shared * self.page
-        self.shared_tokens = int(
-            np.repeat(cuts, self.BEAMS_PER_TILE)[: self.rows].sum()
-        )
+                row_cuts[first:last] = shared * self.page
+        self.shared_tokens = int(row_cuts.sum())
         # A CPU Tensor.copy_ may wake the full OpenMP pool for this small
         # metadata copy. Keep planning single-threaded and write pinned memory.
         np.copyto(self.table_host.numpy()[:, :width], table)
@@ -363,10 +432,14 @@ class RocmBeamSearchCascadeAttention:
         self.table.copy_(self.table_host, non_blocking=True)
         self.lengths.copy_(self.lengths_host, non_blocking=True)
         self.cuts.copy_(self.cuts_host, non_blocking=True)
+        self.prefix_qptr.copy_(self.qptr_host, non_blocking=True)
+        self.row_cuts.copy_(self.row_cuts_host, non_blocking=True)
         if self.native_prefix:
-            self.prefix_table.copy_(
-                self.table_host[:: self.BEAMS_PER_TILE], non_blocking=True
+            np.copyto(
+                self.prefix_table_host.numpy(),
+                self.table_host.numpy()[np.minimum(qptr[:-1], self.rows - 1)],
             )
+            self.prefix_table.copy_(self.prefix_table_host, non_blocking=True)
         self._staging_done.record()
         self._staging_in_flight = True
 
@@ -403,11 +476,30 @@ class RocmBeamSearchCascadeAttention:
             self.BEAMS_PER_TILE,
         )
         scale = self.dim**-0.5 * 1.4426950408889634
-        large_pool = (
-            kv_cache.shape[0] * kv_cache.stride(0) * kv_cache.element_size()
-            >= self.NATIVE_PREFIX_BYTE_LIMIT
+        kv_span_bytes = kv_cache.shape[0] * kv_cache.stride(0) * kv_cache.element_size()
+        # Triton address width is independent of the native backend's limit.
+        # Keep 64-bit indexing even when a native large-pool path is enabled.
+        large_pool = kv_span_bytes >= (1 << 31)
+        native_prefix = (
+            self.native_prefix
+            and kv_span_bytes < self.NATIVE_PREFIX_BYTE_LIMIT
+            and (not self.optimized or self.native_fp32_module is not None)
         )
-        native_prefix = self.native_prefix and not large_pool
+        if not self._runtime_path_logged:
+            logging.info(
+                "ROCm beam cascade execution: prefix=%s, kv_span_bytes=%d, "
+                "rows=%d, partition_capacity=%d, optimized=%s",
+                (
+                    ("ck_rn_fp32" if self.optimized else "aiter_bf16")
+                    if native_prefix
+                    else "triton_fp32"
+                ),
+                kv_cache.shape[0] * kv_cache.stride(0) * kv_cache.element_size(),
+                self.rows,
+                self.tiles,
+                self.optimized,
+            )
+            self._runtime_path_logged = True
         if native_prefix:
             import aiter
 
@@ -417,7 +509,19 @@ class RocmBeamSearchCascadeAttention:
             v = kv_cache[:, 1].view(
                 kv_cache.shape[0], self.kv_heads, self.page // 8, self.dim, 8
             )
-            prefix_output, prefix_lse = aiter.mha_batch_prefill_func(
+            if self.optimized:
+                from rtp_llm.models_py.triton_kernels.attention.beam_search_cascade_native import (
+                    prefix_forward,
+                )
+
+                prefix_fn = lambda *args, **kwargs: prefix_forward(
+                    self.native_fp32_module, *args, **kwargs
+                )
+                prefix_kwargs = {}
+            else:
+                prefix_fn = aiter.mha_batch_prefill_func
+                prefix_kwargs = dict(causal=False, return_lse=True)
+            prefix_output, prefix_lse = prefix_fn(
                 q,
                 k,
                 v,
@@ -426,24 +530,28 @@ class RocmBeamSearchCascadeAttention:
                 self.prefix_table.flatten(),
                 self.BEAMS_PER_TILE,
                 self.max_pages * self.page,
-                causal=False,
-                return_lse=True,
+                **prefix_kwargs,
                 out=self.prefix_output,
                 block_table=self.prefix_table,
                 seqlen_k=self.cuts,
             )
         else:
-            # A large physical KV pool must not use CK's 32-bit addressing.
-            # Subdivide the planned query tiles while retaining their cuts.
+            # Preserve the validated native byte-span bound. Missing FP32
+            # capability also uses this path, retaining the planned cuts.
             prefix_beams = 16
             prefix_args = (*args[:-1], prefix_beams)
             _shared_prefix[
-                (triton.cdiv(self.rows, prefix_beams), self.kv_heads, self.splits)
+                (
+                    self.tiles * (self.BEAMS_PER_TILE // prefix_beams),
+                    self.kv_heads,
+                    self.splits,
+                )
             ](
                 q,
                 kv_cache,
                 self.table,
                 self.cuts,
+                self.prefix_qptr,
                 self.partial_out,
                 self.partial_lse,
                 *prefix_args,
@@ -453,15 +561,16 @@ class RocmBeamSearchCascadeAttention:
                 self.BEAMS_PER_TILE,
                 large_pool,
                 num_warps=4,
-                waves_per_eu=2
+                waves_per_eu=2,
             )
             prefix_output, prefix_lse = self.partial_out, self.partial_lse
-        _private_tail_merge[(triton.cdiv(self.rows, 1), self.kv_heads)](
+        tail = self.tail_kernel or _private_tail_merge
+        tail[(triton.cdiv(self.rows, 1), self.kv_heads)](
             q,
             kv_cache,
             self.table,
             self.lengths,
-            self.cuts,
+            self.row_cuts,
             prefix_output,
             prefix_lse,
             self.output,
@@ -472,6 +581,6 @@ class RocmBeamSearchCascadeAttention:
             large_pool,
             NATIVE_PREFIX=native_prefix,
             ROW_TILE=1,
-            num_warps=2
+            num_warps=self.tail_warps,
         )
         return self.output

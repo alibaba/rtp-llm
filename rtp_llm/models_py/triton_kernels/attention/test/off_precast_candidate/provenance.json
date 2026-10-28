@@ -1,0 +1,107 @@
+{
+  "evidence": "SOURCE_FACT; CPU AST validation only",
+  "upstream": {
+    "revision": "2570b35f95ff012b2abac5f5d4f4158ee03d77a3",
+    "url": "https://github.com/ROCm/aiter/blob/2570b35f95ff012b2abac5f5d4f4158ee03d77a3/aiter/ops/triton/gluon/pa_decode_gluon.py",
+    "path": "aiter/ops/triton/gluon/pa_decode_gluon.py",
+    "sha256": "995267a0513bbc7e1dac1fe6810517219fed8a0efaa7cb754eec3aa9f36ee781"
+  },
+  "symbol": "paged_attention_decode_v2_gluon_dot_kernel",
+  "new_pointer": "actual_partial_fp32_ptr",
+  "pointer_arg_index": 40,
+  "arg_names": [
+    "exp_sums_ptr",
+    "max_logits_ptr",
+    "output_ptr",
+    "query_ptr",
+    "key_cache_ptr",
+    "value_cache_ptr",
+    "block_tables_ptr",
+    "context_lengths_ptr",
+    "softmax_scale",
+    "query_scale",
+    "key_scale",
+    "value_scale",
+    "stride_max_logits_seq",
+    "stride_max_logits_head",
+    "stride_max_logits_part",
+    "stride_output_seq",
+    "stride_output_head",
+    "stride_output_part",
+    "stride_output_group",
+    "stride_query_bs",
+    "stride_query_qlen",
+    "stride_query_kv_head",
+    "stride_query_group_size",
+    "stride_key_block",
+    "stride_key_head",
+    "stride_key_head_split",
+    "stride_key_block_elem",
+    "stride_value_block",
+    "stride_value_head",
+    "stride_value_head_size",
+    "stride_block_table_seq",
+    "stride_query_scale_bs",
+    "stride_query_scale_qlen",
+    "stride_query_scale_kv_head",
+    "kv_scale_stride_0",
+    "kv_scale_stride_1",
+    "head_size",
+    "num_seqs",
+    "num_kv_heads",
+    "max_context_partition_num",
+    "actual_partial_fp32_ptr",
+    "COMPUTE_TYPE",
+    "QUERY_SEQ_LEN",
+    "ONE_QUERY_GROUP_SIZE",
+    "HEAD_SIZE_POW2",
+    "KV_BLOCK_SIZE",
+    "CONTEXT_PARTITION_SIZE",
+    "KV_COMPUTE_BLOCK_SIZE",
+    "QUERY_QUANT_MODE",
+    "KV_QUANT_MODE",
+    "FP8_MAX_VALUE",
+    "VALUE_TRANSPOSED",
+    "IS_CAUSAL",
+    "CDNA_VERSION",
+    "SLIDING_WINDOW"
+  ],
+  "ast_allowed_differences": [
+    "one new pointer argument",
+    "one FP32 observation store after normalization and before original BF16 cast"
+  ],
+  "ast_equal_after_removing_observer": true,
+  "upstream_fragments": {
+    "define_layout": {
+      "first_line": 122,
+      "last_line": 183
+    },
+    "store_temporary_result": {
+      "first_line": 189,
+      "last_line": 222
+    },
+    "paged_attention_decode_v2_gluon_dot_kernel": {
+      "first_line": 3150,
+      "last_line": 3942
+    }
+  },
+  "files": {
+    "pa_decode_gluon_baseline.py": {
+      "sha256": "e8e9cc7b237e3e022523088ddb4f289f98429068b5a2bbf0094176d739b4ee79",
+      "bytes": 37628
+    },
+    "pa_decode_gluon_precast.py": {
+      "sha256": "808140c42e54cc2dba1b8a07fe59330473d15d4f8ac9281c742355c34ecb7481",
+      "bytes": 37834
+    },
+    "observer_only.diff": {
+      "sha256": "7ec94b88edeae9cb677812cdc6aa52aab7e0b96ceea65af0241b9771a5b5b304",
+      "bytes": 758
+    },
+    "LICENSE": {
+      "sha256": "0baca809927cad448401b252ce3bae12687c2987597ad7088cf3423f872d5bcd",
+      "bytes": 1100
+    }
+  },
+  "gpu_controls": "NOT_RUN; require original M/E/BF16 partial/final byte exact and precast.bfloat16 == original partial before attribution"
+}

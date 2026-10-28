@@ -7,6 +7,8 @@ repos:
       - id: check-symlinks
       - id: mixed-line-ending
       - id: trailing-whitespace
+        # These vendored sources are checked against a byte-exact SHA256 manifest.
+        exclude: ^rtp_llm/models_py/triton_kernels/attention/native_cascade_fp32/(host|generated)/
 
     # Formatters
   - repo: https://github.com/psf/black-pre-commit-mirror
@@ -14,18 +16,22 @@ repos:
     hooks:
       - id: black
         types_or: [python]
+        # Frozen AITER observation kernels retain their source hash contracts.
+        exclude: ^rtp_llm/models_py/triton_kernels/attention/test/off_(precast|probability)_candidate/pa_decode_gluon_.*\.py$
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
         args: ["--profile=black"]
+        exclude: ^rtp_llm/models_py/triton_kernels/attention/test/off_(precast|probability)_candidate/pa_decode_gluon_.*\.py$
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v19.1.1
     hooks:
       - id: clang-format
         types_or: [c++, c, cuda]
-        exclude: ^rtp_llm/cpp/cutlass/
+        # Preserve pinned AITER/CK sources used by native and diagnostic builds.
+        exclude: ^rtp_llm/cpp/cutlass/|^rtp_llm/models_py/triton_kernels/attention/(native_cascade_fp32/(host|generated)/|test/native_partial_safe/include/)
 
 exclude: ^rtp_llm/ops|^3rdparty

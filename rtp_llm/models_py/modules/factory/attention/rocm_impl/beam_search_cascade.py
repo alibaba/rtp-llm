@@ -75,6 +75,7 @@ class AiterCascadeDecodeImpl(AiterDecodeImplBase):
             configs.dtype,
             torch.device("cuda", torch.cuda.current_device()),
             linear_v=linear_v,
+            max_requests=max_requests,
         )
         self.cascade.plan(inputs.kv_cache_kernel_block_id, inputs.sequence_lengths)
         self.write_cache_store_impl = common.create_write_cache_store_impl(inputs)
