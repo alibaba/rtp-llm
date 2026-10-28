@@ -1,0 +1,24 @@
+syntax = "proto3";
+package mock.rtp;
+option java_package = "org.flexlb.mock.engine.rtp.transfer";
+option java_multiple_files = true;
+import "engine_rpc_service.proto";
+
+// Mock-internal metadata transport, not the real engine's tensor/cache-store wire protocol.
+message TransferRequest {
+  string client_id = 1;
+  GenerateInputPB input = 2;
+  uint32 block_size = 3;
+}
+message TransferMetadata {
+  uint32 block_size = 1;
+  uint32 input_tokens = 2;
+  repeated int64 cache_keys = 3;
+}
+service PrefillTransfer {
+  // Owns the P computation and pins its data until cancellation, deadline or node shutdown.
+  // Emits one ready message; the stream remains open while Read may consume the data.
+  rpc Prepare(TransferRequest) returns (stream TransferMetadata);
+  // Waits for the matching Prepare to finish its Forward; never accepts mere LRU cache presence.
+  rpc Read(TransferRequest) returns (TransferMetadata);
+}

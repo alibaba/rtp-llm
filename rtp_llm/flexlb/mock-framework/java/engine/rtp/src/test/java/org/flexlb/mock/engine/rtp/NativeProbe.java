@@ -9,6 +9,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.mock.engine.rtp.transfer.*;
 
 /** Test-only external native client. No Engine substitution. */
 public final class NativeProbe {
@@ -55,7 +56,52 @@ public final class NativeProbe {
                     result.put("decode_available_after_cancel", rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 } finally { context.cancel(null); }
             }
+            if (args.length == 3) result.putAll(transfer(args[2], channel));
             new ObjectMapper().writeValue(Path.of(args[1]).toFile(), result);
         } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }
+    private static Map<String, Object> transfer(String prefillAddress, ManagedChannel decode) throws Exception {
+        var p = ManagedChannelBuilder.forTarget(prefillAddress).usePlaintext().build();
+        var source = new LinkedBlockingQueue<Object>(); var replies = new LinkedBlockingQueue<Object>();
+        var context = Context.current().withCancellation();
+        try {
+            var input = GenerateInputPB.newBuilder().setRequestId(44).addAllTokenIds(List.of(1, 2, 3, 4))
+                .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(4).setTimeoutMs(2000)).build();
+            context.run(() -> PrefillTransferGrpc.newStub(p).prepare(TransferRequest.newBuilder().setClientId("native-probe")
+                .setInput(input).setBlockSize(16).build(), new StreamObserver<>() {
+                    @Override public void onNext(TransferMetadata value) { source.add(value); }
+                    @Override public void onError(Throwable error) { source.add(error); }
+                    @Override public void onCompleted() { source.add("completed"); }
+                }));
+            if (!(source.poll(2, TimeUnit.SECONDS) instanceof TransferMetadata)) throw new IllegalStateException("P source not ready");
+            var pRpc = RpcServiceGrpc.newBlockingStub(p).withDeadlineAfter(2, TimeUnit.SECONDS);
+            var dRpc = RpcServiceGrpc.newBlockingStub(decode).withDeadlineAfter(2, TimeUnit.SECONDS);
+            long held = pRpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache();
+            if (held != 112) throw new IllegalStateException("P data was not pinned until transfer");
+            var request = context.call(() -> RpcServiceGrpc.newStub(decode).remoteGenerate(new StreamObserver<>() {
+                @Override public void onNext(GenerateOutputsPB value) { replies.add(value); }
+                @Override public void onError(Throwable error) { replies.add(error); }
+                @Override public void onCompleted() { replies.add("completed"); }
+            }));
+            request.onNext(GenerateRequestPB.newBuilder().setRequestId(44).setClientId("native-probe").setInput(input)
+                .addPeerAddrs(prefillAddress).setStage(RemoteStage.ALLOCATE).build());
+            if (!(replies.poll(2, TimeUnit.SECONDS) instanceof GenerateOutputsPB)) throw new IllegalStateException("D allocation failed");
+            request.onNext(GenerateRequestPB.newBuilder().setRequestId(44).setStage(RemoteStage.LOAD).build());
+            if (!(replies.poll(2, TimeUnit.SECONDS) instanceof GenerateOutputsPB loaded) || !loaded.hasErrorInfo()
+                    || loaded.getErrorInfo().getErrorCodeValue() != 0) throw new IllegalStateException("D LOAD was not confirmed");
+            if (!"completed".equals(source.poll(2, TimeUnit.SECONDS))) throw new IllegalStateException("P source did not terminate after transfer");
+            long pAvailable = pRpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache();
+            if (pAvailable != 128 || dRpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache() != 112)
+                throw new IllegalStateException("Wrong P/D ownership after LOAD");
+            context.cancel(null);
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (dRpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache() != 128) {
+                if (System.nanoTime() >= end) throw new IllegalStateException("D leaked loaded KV");
+                Thread.sleep(5);
+            }
+            return Map.of("transfer_loaded", true, "prefill_available_while_pinned", held,
+                "prefill_available_after_load", pAvailable, "decode_available_after_load_cancel", 128);
+        } finally { context.cancel(null); p.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+    }
+
 }

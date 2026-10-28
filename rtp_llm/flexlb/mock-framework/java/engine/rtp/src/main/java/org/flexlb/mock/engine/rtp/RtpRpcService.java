@@ -23,6 +23,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache) : null;
         decode = requests == null ? new DecodeAdmission(config, cache) : null;
     }
+    io.grpc.BindableService transfer() { return requests == null ? null : new PrefillTransfer(config, requests); }
     public void close() { closed = true; if (requests != null) requests.close(); if (decode != null) decode.close(); }
     String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
 

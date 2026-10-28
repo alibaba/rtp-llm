@@ -35,7 +35,10 @@ public final class RtpNode implements AutoCloseable {
     public static RtpNode start(RtpConfig config) throws IOException {
         var node = new RtpNode(config);
         try {
-            node.rpc = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(node.service).build().start();
+            var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(node.service);
+            var transfer = node.service.transfer();
+            if (transfer != null) builder.addService(transfer);
+            node.rpc = builder.build().start();
             node.api = new ApiServer(new InetSocketAddress("127.0.0.1", 0)).metrics(node.service::scrapeMetrics);
             if (node.queries != null) node.api.bind(EngineMetricsApi.class, node.queries).bind(PrometheusApi.class, node.queries);
             node.api.start();
@@ -46,14 +49,16 @@ public final class RtpNode implements AutoCloseable {
     public String rpcAddress() { return "127.0.0.1:" + rpc.getPort(); }
     public DeviceCache cache() { return cache; }
     public Map<String, Object> endpoints() {
-        return Map.of("id", config.id(), "role", config.role().name(), "engine", "rtp", "rpc", rpcAddress(),
+        return Map.of("mock_transfer", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
+                ? Map.of("address", rpcAddress(), "service", "mock.rtp.PrefillTransfer", "metadata_only", true) : Map.of(),
+            "id", config.id(), "role", config.role().name(), "engine", "rtp", "rpc", rpcAddress(),
             "control", api.url(), "metrics", api.url() + "/metrics", "supported_rpc", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
                 ? List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "GenerateStreamCall")
                 : List.of("CheckHealth", "GetWorkerStatus", "GetCacheStatus", "RemoteGenerate"),
             "local_generation", config.role() == org.flexlb.mock.api.model.Types.Role.prefill
                 ? Map.of("max_new_tokens", 1, "text_only", true) : Map.of(),
             "remote_generation", config.role() == org.flexlb.mock.api.model.Types.Role.decode
-                ? Map.of("stages", List.of("ALLOCATE"), "text_only", true, "load", false) : Map.of());
+                ? Map.of("stages", List.of("ALLOCATE", "LOAD"), "text_only", true, "load", true) : Map.of());
     }
 
     @Override public void close() {

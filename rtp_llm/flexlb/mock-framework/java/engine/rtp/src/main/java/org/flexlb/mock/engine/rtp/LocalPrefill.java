@@ -9,7 +9,7 @@ import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 import org.flexlb.mock.metrics.EngineMetrics;
 
-/** Bounded FIFO for local, text-only, single-token prefill. Owns each request's timer and KV lease. */
+/** Bounded text Prefill FIFO. Owns Forward, deadline and KV through local completion or transfer. */
 final class LocalPrefill implements AutoCloseable {
     static final int LIMIT = TaskHistory.LIMIT;
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
@@ -38,13 +38,18 @@ final class LocalPrefill implements AutoCloseable {
         final long deadline;
         final CompletableFuture<Result> result = new CompletableFuture<>();
         final List<Long> keys;
+        final boolean retained;
+        final CompletableFuture<Result> termination = new CompletableFuture<>();
+        boolean ready;
+        long computedAt;
         DeviceCache.Lease lease;
         SimulatedCompute.Execution execution;
         ScheduledFuture<?> timeout;
         long runningAt;
         int reused;
         boolean terminal;
-        Session(GenerateInputPB input, long rpcDeadline) {
+        Session(GenerateInputPB input, long rpcDeadline, boolean retained) {
+            this.retained = retained;
             this.input = input;
             long requestDeadline = input.getGenerateConfig().getTimeoutMs() > 0 ? started + TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()) : Long.MAX_VALUE;
             deadline = Math.min(requestDeadline, rpcDeadline);
@@ -58,11 +63,15 @@ final class LocalPrefill implements AutoCloseable {
     Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
 
     synchronized Session submit(GenerateInputPB input, long rpcDeadline) {
-        validate(input);
+        return submit(input, rpcDeadline, false);
+    }
+
+    synchronized Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
+        validate(input, retained);
         if (closed) throw Status.UNAVAILABLE.withDescription("RTP node is closing").asRuntimeException();
         if (active.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Active request id already exists").asRuntimeException();
         if (active.size() >= LIMIT) throw Status.RESOURCE_EXHAUSTED.withDescription("Mock local request limit reached").asRuntimeException();
-        var session = new Session(input, rpcDeadline);
+        var session = new Session(input, rpcDeadline, retained);
         active.put(input.getRequestId(), session); waiting.add(session);
         metrics.started();
         if (session.deadline != Long.MAX_VALUE)
@@ -72,9 +81,9 @@ final class LocalPrefill implements AutoCloseable {
         return session;
     }
 
-    private void validate(GenerateInputPB input) {
-        if (config.role() != Role.prefill || input.getGenerateConfig().getMaxNewTokens() != 1)
-            throw Status.UNIMPLEMENTED.withDescription("Only local prefill max_new_tokens=1 is implemented").asRuntimeException();
+    private void validate(GenerateInputPB input, boolean retained) {
+        if (config.role() != Role.prefill || (retained ? input.getGenerateConfig().getMaxNewTokens() < 1 : input.getGenerateConfig().getMaxNewTokens() != 1))
+            throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
         var generation = input.getGenerateConfig();
         if (input.getMultimodalInputsCount() > 0 || input.hasV41Inputs() || input.hasMultimodalTokenLayout()
                 || generation.getNumBeams() > 1 || generation.getNumReturnSequences() > 1 || generation.getVariableNumBeamsCount() > 0
@@ -85,7 +94,7 @@ final class LocalPrefill implements AutoCloseable {
             throw Status.UNIMPLEMENTED.withDescription("Unsupported multimodal/adapter/shape or extra output mode").asRuntimeException();
         if (input.getTokenIdsCount() < 1 || (long) input.getTokenIdsCount() + 1 > config.maxSeqLen()
                 || config.maxBatchTokens() > 0 && input.getTokenIdsCount() > config.maxBatchTokens()
-                || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > 1
+                || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()
                 || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
             throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
     }
@@ -126,6 +135,24 @@ final class LocalPrefill implements AutoCloseable {
         if (session.terminal) return;
         if (System.nanoTime() < session.deadline)
             metrics.forwardCompleted(elapsedNanos, session.input.getTokenIdsCount(), session.input.getTokenIdsCount() - session.reused, 1);
+        if (session.retained && System.nanoTime() < session.deadline) {
+            // Data exists only after Forward completed. Keep the lease, including its partial tail block.
+            session.ready = true; session.computedAt = System.nanoTime();
+            if (running == session) running = null;
+            var result = new Result(LocalResponse.oneToken(session.input, session.reused, session.computedAt - session.started), Status.OK, 0);
+            replies.execute(() -> session.result.complete(result));
+            advance();
+        } else finish(session, Status.OK, 0);
+    }
+
+    synchronized void requireReady(Session session) {
+        if (session.terminal || !session.ready || System.nanoTime() >= session.deadline)
+            throw Status.FAILED_PRECONDITION.withDescription("Prefill transfer data is no longer owned").asRuntimeException();
+    }
+
+    synchronized void consume(Session session, Runnable deliver) {
+        requireReady(session);
+        deliver.run();
         finish(session, Status.OK, 0);
     }
 
@@ -165,12 +192,12 @@ final class LocalPrefill implements AutoCloseable {
         history.add(task.build());
         var output = status.isOk() ? LocalResponse.oneToken(session.input, session.reused, System.nanoTime() - session.started) : null;
         var result = new Result(output, status, code);
-        replies.execute(() -> session.result.complete(result));
+        replies.execute(() -> { session.result.complete(result); session.termination.complete(result); });
     }
 
     synchronized TaskHistory.Snapshot snapshot(long latestFinished) {
         return history.snapshot(latestFinished, active.values().stream().map(s -> task(s).build()).toList(),
-                                waiting.size(), running == null ? 0 : 1);
+                                active.size() - (running == null ? 0 : 1), running == null ? 0 : 1);
     }
 
     String scrapeMetrics() { return metrics.scrape(); }
@@ -178,17 +205,17 @@ final class LocalPrefill implements AutoCloseable {
     private synchronized EngineMetrics.State metricState() {
         var kv = cache.snapshot(0, false);
         long size = config.blockSize();
-        return new EngineMetrics.State(waiting.size(), running == null ? 0 : 1,
+        return new EngineMetrics.State(active.size() - (running == null ? 0 : 1), running == null ? 0 : 1,
             kv.totalBlocks() * size, kv.availableBlocks() * size, kv.freeBlocks() * size, kv.heldBlocks() * size);
     }
     private TaskInfoPB.Builder task(Session s) {
-        boolean executing = s.runningAt != 0;
+        boolean executing = s.runningAt != 0 && !s.ready;
         long nanos = System.nanoTime();
         return TaskInfoPB.newBuilder().setRequestId(s.input.getRequestId()).setInputLength(s.input.getTokenIdsCount())
             .setPrefixLength(s.reused).setPriority(s.input.getPriority()).setDpRank(0).setIsWaiting(!executing)
-            .setPhase(executing ? TaskPhase.TASK_PHASE_RUNNING : TaskPhase.TASK_PHASE_PENDING)
-            .setWaitingTimeMs(TimeUnit.NANOSECONDS.toMillis((executing ? s.runningAt : nanos) - s.started))
-            .setExecutionTimeMs(executing ? TimeUnit.NANOSECONDS.toMillis(nanos - s.runningAt) : 0);
+            .setPhase(s.ready ? TaskPhase.TASK_PHASE_KV_ALLOCATED : executing ? TaskPhase.TASK_PHASE_RUNNING : TaskPhase.TASK_PHASE_PENDING)
+            .setWaitingTimeMs(TimeUnit.NANOSECONDS.toMillis((s.runningAt != 0 ? s.runningAt : nanos) - s.started))
+            .setExecutionTimeMs(s.runningAt != 0 ? TimeUnit.NANOSECONDS.toMillis((s.ready ? s.computedAt : nanos) - s.runningAt) : 0);
     }
 
     @Override public synchronized void close() {

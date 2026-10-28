@@ -7,8 +7,9 @@ import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.rtp.cache.DeviceCache;
 import org.flexlb.mock.metrics.EngineMetrics;
+import org.flexlb.mock.engine.rtp.transfer.*;
 
-/** D-side ALLOCATE only. An ACK owns real simulated KV; LOAD never succeeds without a connector. */
+/** D-side ALLOCATE/LOAD owner. A LOAD ACK requires data from a live, computed P source. */
 final class DecodeAdmission implements AutoCloseable {
     private record Key(String client, long request) {}
     private final RtpConfig config;
@@ -43,7 +44,9 @@ final class DecodeAdmission implements AutoCloseable {
         DeviceCache.Lease lease;
         Future<?> allocation;
         ScheduledFuture<?> timeout;
-        boolean terminal, acknowledged;
+        boolean terminal, acknowledged, loading, loaded;
+        List<String> peers;
+        ManagedChannel source;
         int reused;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
@@ -67,15 +70,20 @@ final class DecodeAdmission implements AutoCloseable {
             if (call.input != null) {
                 if (request.getRequestId() != call.key.request())
                     throw Status.INVALID_ARGUMENT.withDescription("RemoteGenerate identity changed").asRuntimeException();
-                if (request.getStage() == RemoteStage.LOAD && call.acknowledged)
-                    throw Status.UNIMPLEMENTED.withDescription("P-to-D cache connector is not implemented; LOAD was not acknowledged").asRuntimeException();
+                if (!request.getClientId().isEmpty() && !request.getClientId().equals(call.key.client()))
+                    throw Status.INVALID_ARGUMENT.withDescription("RemoteGenerate client identity changed").asRuntimeException();
+                if (request.getStage() == RemoteStage.LOAD && call.acknowledged && !call.loading && !call.loaded) {
+                    load(call); return;
+                }
+                if (call.loaded && request.getStage() == RemoteStage.GENERATE)
+                    throw Status.UNIMPLEMENTED.withDescription("Decode token generation is not implemented").asRuntimeException();
                 throw Status.FAILED_PRECONDITION.withDescription("Expected LOAD after ALLOCATE acknowledgement").asRuntimeException();
             }
             validate(request);
             var key = new Key(request.getClientId(), request.getRequestId());
             if (active.containsKey(key)) throw Status.ALREADY_EXISTS.withDescription("Active decode request already exists").asRuntimeException();
             if (active.size() >= TaskHistory.LIMIT) throw Status.RESOURCE_EXHAUSTED.withDescription("Mock decode reservation limit reached").asRuntimeException();
-            call.input = request.getInput(); call.key = key;
+            call.input = request.getInput(); call.key = key; call.peers = request.getPeerAddrsList();
             call.deadline = Math.min(call.rpcDeadline, call.input.getGenerateConfig().getTimeoutMs() == 0 ? Long.MAX_VALUE
                 : after(call.started, TimeUnit.MILLISECONDS.toNanos(call.input.getGenerateConfig().getTimeoutMs())));
             active.put(key, call); metrics.started();
@@ -90,6 +98,7 @@ final class DecodeAdmission implements AutoCloseable {
             }
             call.allocation = workers.submit(() -> allocate(call));
         } catch (StatusRuntimeException error) { stop(call, error.getStatus(), error.getStatus().getCode() == Status.Code.INVALID_ARGUMENT ? 605 : 0); }
+        catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode frame failed: " + error.getMessage()), 0); }
     }
 
     private void validate(GenerateRequestPB request) {
@@ -153,12 +162,50 @@ final class DecodeAdmission implements AutoCloseable {
         catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("Decode acknowledgement failed"), 8100); }
     }
 
+    private void load(Call call) {
+        if (call.peers.size() != 1 || call.peers.getFirst().isBlank())
+            throw Status.FAILED_PRECONDITION.withDescription("Mock LOAD requires one P transfer address in ALLOCATE.peer_addrs").asRuntimeException();
+        call.loading = true;
+        call.source = ManagedChannelBuilder.forTarget(call.peers.getFirst()).usePlaintext().build();
+        long budget = Math.min(TimeUnit.MILLISECONDS.toNanos(config.loadTimeoutMs()), call.deadline == Long.MAX_VALUE
+            ? Long.MAX_VALUE : Math.max(1, call.deadline - System.nanoTime()));
+        PrefillTransferGrpc.newStub(call.source).withDeadlineAfter(budget, TimeUnit.NANOSECONDS).read(
+            TransferRequest.newBuilder().setClientId(call.key.client()).setInput(call.input).setBlockSize(config.blockSize()).build(), new StreamObserver<>() {
+                private TransferMetadata metadata;
+                @Override public void onNext(TransferMetadata value) { metadata = value; }
+                @Override public void onError(Throwable error) {
+                    var status = Status.fromThrowable(error);
+                    stop(call, status.augmentDescription("P-to-D LOAD failed"), status.getCode() == Status.Code.DEADLINE_EXCEEDED ? 603 : 8212);
+                }
+                @Override public void onCompleted() { loaded(call, metadata); }
+            });
+    }
+
+    private synchronized void loaded(Call call, TransferMetadata metadata) {
+        if (call.terminal) return;
+        if (System.nanoTime() >= call.deadline) { stop(call, Status.DEADLINE_EXCEEDED.withDescription("LOAD exceeded request budget"), 603); return; }
+        if (call.response.isCancelled()) { stop(call, Status.CANCELLED.withDescription("LOAD cancelled"), 8100); return; }
+        var keys = PrefixKeys.completeBlocks(call.input, config.blockSize());
+        if (metadata == null || metadata.getBlockSize() != config.blockSize()
+                || metadata.getInputTokens() != call.input.getTokenIdsCount() || !metadata.getCacheKeysList().equals(keys)) {
+            stop(call, Status.FAILED_PRECONDITION.withDescription("P-to-D KV layout differs"), 8212); return;
+        }
+        call.loading = false; call.loaded = true;
+        call.source.shutdownNow(); call.source = null;
+        try {
+            // The transferred prefix is not a historical D cache hit. Keep the lease private until terminal cleanup.
+            call.response.onNext(GenerateOutputsPB.newBuilder().setRequestId(call.key.request())
+                .setErrorInfo(RpcErrorPB.newBuilder().setErrorCodeValue(0)).build());
+        } catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
+    }
+
     private synchronized void stop(Call call, Status status, long code) {
         if (call.terminal) return;
         call.terminal = true;
         if (call.timeout != null) call.timeout.cancel(false);
         if (call.allocation != null) call.allocation.cancel(true);
-        if (call.lease != null) call.lease.close(); // No computed D data exists at this phase; never publish it.
+        if (call.source != null) { call.source.shutdownNow(); call.source = null; }
+        if (call.lease != null) call.lease.close(); // Partial P transfer is not committed as a reusable D prefix on cancellation.
         if (call.input != null) {
             active.remove(call.key, call);
             history.add(task(call).setEndTimeMs(System.currentTimeMillis()).setErrorInfo(ErrorDetailsPB.newBuilder()

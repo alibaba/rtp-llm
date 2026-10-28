@@ -47,8 +47,11 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 with urllib.request.urlopen(endpoints['control'] + '/health', timeout=2) as response:
                     assert json.load(response)['interfaces'] == []
                 probe_result = tmp_path / f'{role}.json'
-                completed = await asyncio.to_thread(subprocess.run,
-                    [str(java), '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', endpoints['rpc'], str(probe_result)],
+                command = [str(java), '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', endpoints['rpc'], str(probe_result)]
+                if role == 'decode':
+                    prefill = json.loads((output / 'components/prefill-0/endpoints.json').read_text())
+                    command.append(prefill['rpc'])
+                completed = await asyncio.to_thread(subprocess.run, command,
                     capture_output=True, text=True, timeout=10)
                 assert completed.returncode == 0, completed.stderr
                 actual = json.loads(probe_result.read_text())
@@ -59,10 +62,14 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 if role == 'prefill':
                     assert actual['local_output_tokens'] == 1
                 else:
+                    assert actual['transfer_loaded'] is True
+                    assert actual['prefill_available_while_pinned'] == 112
+                    assert actual['prefill_available_after_load'] == 128
+                    assert actual['decode_available_after_load_cancel'] == 128
                     assert actual['decode_reserved_tokens'] == 16
                     assert actual['decode_available_after_cancel'] == 128
-                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE']
-                    assert endpoints['remote_generation']['load'] is False
+                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE', 'LOAD']
+                    assert endpoints['remote_generation']['load'] is True
                 with urllib.request.urlopen(endpoints['metrics'], timeout=2) as response:
                     assert response.status == 200
                     assert response.headers.get_content_type() == 'text/plain'

@@ -12,7 +12,7 @@ import org.flexlb.mock.compute.ComputeModels;
 /** Native RTP names/units stay native; only simulated capacity is added by this loader. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
-                        int tpSize, JsonNode business, ComputeModels compute) {
+                        int tpSize, int loadTimeoutMs, JsonNode business, ComputeModels compute) {
     private static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -20,7 +20,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || blockSize < 1 || deviceBlocks < 1 || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || maxSeqLen < 1 || maxBatchTokens < 0 || tpSize < 1)
+                || maxSeqLen < 1 || maxBatchTokens < 0 || tpSize < 1 || loadTimeoutMs < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
         Objects.requireNonNull(compute);
@@ -60,7 +60,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
-            nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE), config, compute);
+            nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE),
+            loadTimeout(config), config, compute);
     }
 
     public ObjectNode effective() {
@@ -69,13 +70,17 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("device_blocks", deviceBlocks).put("reserve_blocks", reserveBlocks)
             .put("reuse_cache", reuseCache).put("enable_device_cache", deviceCache)
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
-            .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
+            .put("load_cache_timeout_ms", loadTimeoutMs).put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("dp_size", 1).put("dp_rank", 0).put("tp_size", tpSize);
         result.put("max_context_batch_size", 1).put("local_request_limit", LocalPrefill.LIMIT);
         result.set("config", business()); result.set("compute", compute.effectiveConfiguration());
         return result;
     }
 
+    private static int loadTimeout(JsonNode config) {
+        int value = nativeInt(config, "load_cache_timeout_ms", 5000, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        return value > 0 ? value : 5000;
+    }
     private static JsonNode nativeValue(JsonNode config, String key) {
         String env = key.toUpperCase(Locale.ROOT);
         if (config.has(key) && config.has(env)) throw new IllegalArgumentException("Duplicate native setting: " + key + "/" + env);
