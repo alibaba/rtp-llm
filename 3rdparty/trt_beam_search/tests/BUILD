@@ -50,3 +50,16 @@ py_test(
     tags = ["RTX_5000_PRO"],
     exec_properties = {"gpu": "RTX_5000_PRO"},
 )
+
+py_test(
+    name = "beam_search_ppu_test",
+    srcs = ["beam_search_parallel_test.py"],
+    main = "beam_search_parallel_test.py",
+    args = [
+        "BeamSearchParallelTest.test_large_variable_beams_masked_full_vs_compact_math_reference",
+        "BeamSearchParallelTest.test_unmasked_full_vocab_changes_cross_parent_ranking",
+    ],
+    deps = [":sampling_test_support"],
+    tags = ["manual", "PPU-ZW810E"],
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+)
