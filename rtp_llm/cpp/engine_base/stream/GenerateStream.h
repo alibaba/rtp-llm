@@ -313,6 +313,10 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, std::forward<T>(error_msg));
     }
 
+    // Consumer teardown must preserve completion pending a scheduler tick.
+    // Explicit cancellation and execution failures still use reportError().
+    void cancelIfNotFinished();
+
     // Caller must already hold mutex_. Use this only on state-machine paths entered through moveToNext().
     void reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
         reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
