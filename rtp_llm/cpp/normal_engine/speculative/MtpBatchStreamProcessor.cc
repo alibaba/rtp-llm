@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpTargetLogprobs.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -182,6 +183,210 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
 }  // namespace
 
 namespace {
+
+struct CompactMtpTargetLogprobs {
+    torch::Tensor token_logprobs;
+    torch::Tensor top_logprob_token_ids;
+    torch::Tensor top_logprobs;
+};
+
+using MtpLogprobField = torch::Tensor StreamSpecUpdateInfo::*;
+
+struct PackedMtpCpuField {
+    torch::Tensor                     host_storage;
+    std::vector<int64_t>              offsets;
+    std::vector<std::vector<int64_t>> shapes;
+};
+
+PackedMtpCpuField
+stageMtpFieldToPinnedCpu(std::vector<StreamSpecUpdateInfo>& update_infos, MtpLogprobField field, bool& need_sync) {
+    PackedMtpCpuField packed;
+    packed.offsets.assign(update_infos.size(), -1);
+    packed.shapes.resize(update_infos.size());
+
+    bool                       has_cuda = false;
+    bool                       has_cpu  = false;
+    int64_t                    offset   = 0;
+    std::vector<torch::Tensor> flattened;
+    flattened.reserve(update_infos.size());
+    for (size_t i = 0; i < update_infos.size(); ++i) {
+        auto& tensor = update_infos[i].*field;
+        if (!tensor.defined()) {
+            continue;
+        }
+        has_cuda          = has_cuda || tensor.is_cuda();
+        has_cpu           = has_cpu || !tensor.is_cuda();
+        packed.offsets[i] = offset;
+        packed.shapes[i]  = std::vector<int64_t>(tensor.sizes().begin(), tensor.sizes().end());
+        offset += tensor.numel();
+        flattened.push_back(tensor.reshape({-1}));
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(!(has_cuda && has_cpu), "MTP logprob payload must not mix CPU and CUDA tensors");
+    if (!has_cuda) {
+        for (auto& update_info : update_infos) {
+            auto& tensor = update_info.*field;
+            if (tensor.defined()) {
+                tensor = tensor.contiguous();
+            }
+        }
+        return packed;
+    }
+
+    RTP_LLM_CHECK(!flattened.empty());
+    auto device_storage = torch::cat(flattened, /*dim=*/0).contiguous();
+    packed.host_storage = torch::empty({offset},
+                                       torch::TensorOptions()
+                                           .dtype(device_storage.scalar_type())
+                                           .device(torch::kCPU)
+                                           .pinned_memory(true)
+                                           .requires_grad(false));
+    if (offset > 0) {
+        packed.host_storage.copy_(device_storage, /*non_blocking=*/true);
+        need_sync = true;
+    }
+    return packed;
+}
+
+void publishMtpCpuField(std::vector<StreamSpecUpdateInfo>& update_infos,
+                        MtpLogprobField                    field,
+                        const PackedMtpCpuField&           packed) {
+    if (!packed.host_storage.defined()) {
+        return;
+    }
+    for (size_t i = 0; i < update_infos.size(); ++i) {
+        if (packed.offsets[i] < 0) {
+            continue;
+        }
+        int64_t numel = 1;
+        for (const auto dim : packed.shapes[i]) {
+            numel *= dim;
+        }
+        update_infos[i].*field = packed.host_storage.narrow(0, packed.offsets[i], numel).view(packed.shapes[i]);
+        RTP_LLM_CHECK((update_infos[i].*field).is_contiguous());
+        RTP_LLM_CHECK(!(update_infos[i].*field).is_cuda());
+    }
+}
+
+void stageMtpLogprobsToCpu(std::vector<StreamSpecUpdateInfo>& update_infos) {
+    bool need_sync      = false;
+    auto token_logprobs = stageMtpFieldToPinnedCpu(update_infos, &StreamSpecUpdateInfo::token_logprobs, need_sync);
+    auto top_token_ids =
+        stageMtpFieldToPinnedCpu(update_infos, &StreamSpecUpdateInfo::top_logprob_token_ids, need_sync);
+    auto top_logprobs = stageMtpFieldToPinnedCpu(update_infos, &StreamSpecUpdateInfo::top_logprobs, need_sync);
+
+    if (need_sync) {
+        // All three compact batch copies were enqueued on this dispatch stream;
+        // one wait makes every pinned host view safe for GenerateStream update.
+        cuda_graph::graphGetCurrentStream().synchronize();
+    }
+    publishMtpCpuField(update_infos, &StreamSpecUpdateInfo::token_logprobs, token_logprobs);
+    publishMtpCpuField(update_infos, &StreamSpecUpdateInfo::top_logprob_token_ids, top_token_ids);
+    publishMtpCpuField(update_infos, &StreamSpecUpdateInfo::top_logprobs, top_logprobs);
+}
+
+CompactMtpTargetLogprobs gatherMtpTargetLogprobs(const GenerateStreamPtr& stream,
+                                                 const MtpTargetLogprobs& target_logprobs,
+                                                 int64_t                  target_row_offset,
+                                                 int64_t                  batch_size,
+                                                 int64_t                  token_count,
+                                                 const torch::Tensor&     emitted_token_ids) {
+    if (!stream->generateConfig()->return_logprobs || token_count == 0) {
+        return {};
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(target_logprobs.defined(),
+                            "MTP target logprobs were requested but no target statistics were captured");
+    RTP_LLM_CHECK_WITH_INFO(target_logprobs.finalized(),
+                            "MTP target logprobs must be batch-finalized before stream dispatch");
+    RTP_LLM_CHECK(target_logprobs.token_logprobs.dim() == 1);
+    RTP_LLM_CHECK(target_logprobs.top_logprob_token_ids.defined());
+    RTP_LLM_CHECK(target_logprobs.top_logprobs.defined());
+    RTP_LLM_CHECK(emitted_token_ids.dim() == 2);
+    RTP_LLM_CHECK(emitted_token_ids.size(0) == batch_size);
+    RTP_LLM_CHECK(emitted_token_ids.size(1) == token_count);
+
+    const int64_t row_count = batch_size * token_count;
+    RTP_LLM_CHECK(target_row_offset >= 0);
+    RTP_LLM_CHECK(target_row_offset + row_count <= target_logprobs.token_logprobs.size(0));
+    RTP_LLM_CHECK(target_logprobs.top_logprob_token_ids.size(0) == target_logprobs.token_logprobs.size(0));
+    RTP_LLM_CHECK(target_logprobs.top_logprobs.size(0) == target_logprobs.token_logprobs.size(0));
+
+    CompactMtpTargetLogprobs compact;
+    compact.token_logprobs =
+        target_logprobs.token_logprobs.narrow(0, target_row_offset, row_count).reshape({batch_size, token_count});
+
+    const int64_t max_top_logprobs = target_logprobs.maxTopLogprobs();
+    const int64_t requested_top_logprobs =
+        std::min<int64_t>(std::max<int64_t>(stream->generateConfig()->top_logprobs, 0), max_top_logprobs);
+    compact.top_logprob_token_ids = target_logprobs.top_logprob_token_ids.narrow(0, target_row_offset, row_count)
+                                        .reshape({batch_size, token_count, max_top_logprobs})
+                                        .narrow(2, 0, requested_top_logprobs);
+    compact.top_logprobs = target_logprobs.top_logprobs.narrow(0, target_row_offset, row_count)
+                               .reshape({batch_size, token_count, max_top_logprobs})
+                               .narrow(2, 0, requested_top_logprobs);
+    return compact;
+}
+
+struct AcceptedMtpLogprobSelection {
+    std::vector<int64_t> rows;
+    int64_t              max_top_logprobs = 0;
+};
+
+AcceptedMtpLogprobSelection collectAcceptedMtpLogprobRows(const StreamGroups&  stream_groups,
+                                                          const torch::Tensor& accept_len_cpu,
+                                                          const torch::Tensor& accept_tokens_cpu,
+                                                          int64_t              positions_per_batch,
+                                                          int64_t              captured_row_count) {
+    RTP_LLM_CHECK(accept_len_cpu.defined());
+    RTP_LLM_CHECK(!accept_len_cpu.is_cuda());
+    RTP_LLM_CHECK(accept_len_cpu.dim() == 1);
+    RTP_LLM_CHECK(accept_tokens_cpu.defined());
+    RTP_LLM_CHECK(!accept_tokens_cpu.is_cuda());
+    RTP_LLM_CHECK(accept_tokens_cpu.dim() == 2);
+    RTP_LLM_CHECK(accept_tokens_cpu.size(0) == accept_len_cpu.size(0));
+    RTP_LLM_CHECK(accept_tokens_cpu.size(1) >= positions_per_batch);
+    RTP_LLM_CHECK(positions_per_batch > 0);
+
+    auto                        accept_len_i32 = accept_len_cpu.to(torch::kInt32).contiguous();
+    AcceptedMtpLogprobSelection selection;
+    int64_t                     batch_offset = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        const int64_t next_batch_size = stream->nextBatchSize();
+        for (int64_t batch_idx = 0; batch_idx < next_batch_size; ++batch_idx) {
+            const int64_t global_batch_idx = batch_offset + batch_idx;
+            RTP_LLM_CHECK(global_batch_idx < accept_len_i32.size(0));
+            const int64_t accepted = accept_len_i32.data_ptr<int32_t>()[global_batch_idx];
+            RTP_LLM_CHECK_WITH_INFO(accepted > 0 && accepted <= positions_per_batch,
+                                    "MTP accepted length %ld must be in [1, %ld] for batch row %ld",
+                                    accepted,
+                                    positions_per_batch,
+                                    global_batch_idx);
+            if (stream->generateConfig()->return_logprobs) {
+                RTP_LLM_CHECK_WITH_INFO(next_batch_size == 1,
+                                        "MTP content-only logprobs require single-sequence streams");
+                auto          candidate_tokens = accept_tokens_cpu.narrow(0, global_batch_idx, 1);
+                const int64_t content_offset   = stream->logprobsContentOffset(candidate_tokens, accepted);
+                RTP_LLM_CHECK_WITH_INFO(content_offset >= 0 && content_offset <= accepted,
+                                        "invalid MTP content logprob offset %ld for accepted length %ld",
+                                        content_offset,
+                                        accepted);
+                const int64_t row_begin = global_batch_idx * positions_per_batch;
+                for (int64_t position = content_offset; position < accepted; ++position) {
+                    selection.rows.push_back(row_begin + position);
+                }
+                if (content_offset < accepted) {
+                    selection.max_top_logprobs = std::max<int64_t>(
+                        selection.max_top_logprobs, std::max<int64_t>(stream->generateConfig()->top_logprobs, 0));
+                }
+            }
+        }
+        batch_offset += next_batch_size;
+    }
+    RTP_LLM_CHECK(batch_offset == accept_len_i32.size(0));
+    RTP_LLM_CHECK(batch_offset * positions_per_batch == captured_row_count);
+    return selection;
+}
 
 torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length) {
     if (!hidden_states.defined() || length <= 0) {
@@ -698,21 +903,38 @@ torch::Tensor MtpBatchStreamProcessor::expandDSparkPositionIds(const torch::Tens
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
                                                       const MergedOutput& propose_output) const {
-    return dispatchPrefill(stream_groups, prefill_output, propose_output, torch::Tensor());
+    return dispatchPrefill(stream_groups, prefill_output, propose_output, torch::Tensor(), {});
 }
 
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  stream_groups,
                                                       const MergedOutput&  prefill_output,
                                                       const MergedOutput&  propose_output,
                                                       const torch::Tensor& draft_last_hidden_states) const {
+    return dispatchPrefill(stream_groups, prefill_output, propose_output, draft_last_hidden_states, {});
+}
+
+absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&      stream_groups,
+                                                      const MergedOutput&      prefill_output,
+                                                      const MergedOutput&      propose_output,
+                                                      const torch::Tensor&     draft_last_hidden_states,
+                                                      const MtpTargetLogprobs& target_logprobs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     const size_t                      total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     auto                              new_tokens_all = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
-    preparePrefillSpecUpdateInfo(
-        stream_groups, prefill_output, propose_output, draft_last_hidden_states, new_tokens_all, spec_update_infos);
+    preparePrefillSpecUpdateInfo(stream_groups,
+                                 prefill_output,
+                                 propose_output,
+                                 draft_last_hidden_states,
+                                 target_logprobs,
+                                 new_tokens_all,
+                                 spec_update_infos);
+
+    if (target_logprobs.defined()) {
+        stageMtpLogprobsToCpu(spec_update_infos);
+    }
 
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
@@ -727,11 +949,23 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput& draft_prefill_output) const {
+    return dispatchDecode(stream_groups, spec_decode_output, draft_prefill_output, {});
+}
+
+absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
+                                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                                                     const MergedOutput&                          draft_prefill_output,
+                                                     MtpTargetLogprobs target_logprobs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
 
-    prepareDecodeSpecUpdateInfo(stream_groups, spec_decode_output, draft_prefill_output, spec_update_infos);
+    prepareDecodeSpecUpdateInfo(
+        stream_groups, spec_decode_output, draft_prefill_output, target_logprobs, spec_update_infos);
+
+    if (target_logprobs.defined()) {
+        stageMtpLogprobsToCpu(spec_update_infos);
+    }
 
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
@@ -1268,17 +1502,18 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
 
     const int* sampled_tokens = new_all_token_ids_cpu.data_ptr<int>();
-    int* combo_position_ids =
+    int*       combo_position_ids =
         model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     auto         all_streams            = stream_groups.allStreams();
-    const size_t stream_row_count = std::accumulate(
+    const size_t stream_row_count       = std::accumulate(
         all_streams.begin(), all_streams.end(), size_t{0}, [](size_t count, const GenerateStreamPtr& stream) {
             return count + static_cast<size_t>(stream->nextBatchSize());
         });
     RTP_LLM_CHECK_WITH_INFO(stream_row_count == batch_size,
                             "prefill draft input stream rows %zu != sampler rows %zu",
-                            stream_row_count, batch_size);
+                            stream_row_count,
+                            batch_size);
 
     size_t row_idx = 0;
     int    offset  = 0;
@@ -1291,8 +1526,8 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
             // Middle chunk tail is the next prompt token; other prefill tails use sampled token.
             // Using sampled token at a chunk boundary would build draft KV from the wrong input.
-            const int tail_token = middle_chunk ? stream->nextChunkBoundaryToken() :
-                                                  sampled_tokens[row_idx * token_stride + token_stride - 1];
+            const int tail_token                    = middle_chunk ? stream->nextChunkBoundaryToken() :
+                                                                     sampled_tokens[row_idx * token_stride + token_stride - 1];
             combo_tokens[offset + input_length - 1] = tail_token;
 
             if (combo_position_ids != nullptr) {
@@ -1672,6 +1907,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
                                                            const MergedOutput&                prefill_output,
                                                            const MergedOutput&                propose_output,
                                                            const torch::Tensor&               draft_last_hidden_states,
+                                                           const MtpTargetLogprobs&           target_logprobs,
                                                            const torch::Tensor&               new_tokens_all,
                                                            std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
     const auto& sampler_output       = prefill_output.sampler_output;
@@ -1696,9 +1932,10 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
 
-    int batch_idx_in  = 0;
-    int batch_idx_out = 0;
-    int token_offset  = 0;
+    int batch_idx_in      = 0;
+    int batch_idx_out     = 0;
+    int token_offset      = 0;
+    int target_row_offset = 0;
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -1737,7 +1974,19 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        const int32_t offset =
+            stream->generateConfig()->return_logprobs && !stream->hasLogprobsContentStarted() ? 1 : 0;
+        const int32_t count   = 1 - offset;
+        auto          compact = gatherMtpTargetLogprobs(
+            stream, target_logprobs, target_row_offset, next_batch_size, count, new_tokens.narrow(1, offset, count));
+        StreamSpecUpdateInfo update{new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        update.token_logprobs        = std::move(compact.token_logprobs);
+        update.top_logprob_token_ids = std::move(compact.top_logprob_token_ids);
+        update.top_logprobs          = std::move(compact.top_logprobs);
+        update.logprobs_offset       = offset;
+        spec_update_infos.push_back(std::move(update));
+        if (stream->generateConfig()->return_logprobs)
+            target_row_offset += next_batch_size * count;
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1749,8 +1998,10 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const StreamGroups&                          stream_groups,
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
+    MtpTargetLogprobs&                           target_logprobs,
     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
     // wait for the transfer to complete
+    finalizeDecodeTargetLogprobs(stream_groups, spec_decode_output, target_logprobs);
     spec_decode_output.transfer_done_event->synchronize();
     const auto& accept_len    = spec_decode_output.accept_len_cpu;
     const auto& accept_tokens = spec_decode_output.accept_tokens_cpu;
@@ -1758,9 +2009,10 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
 
-    int batch_idx_in  = 0;
-    int batch_idx_out = 0;
-    int token_offset  = 0;
+    int batch_idx_in      = 0;
+    int batch_idx_out     = 0;
+    int token_offset      = 0;
+    int target_row_offset = 0;
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -1796,7 +2048,23 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         if (stream_idx < spec_decode_output.processor_errors.size()) {
             spec_update_info.error_info = spec_decode_output.processor_errors[stream_idx];
         }
+        const int32_t offset                   = stream->generateConfig()->return_logprobs ?
+                                                     stream->logprobsContentOffset(accept_tokens_tensor, cur_accept_len) :
+                                                     0;
+        const int32_t count                    = cur_accept_len - offset;
+        auto          compact                  = gatherMtpTargetLogprobs(stream,
+                                               target_logprobs,
+                                               target_row_offset,
+                                               next_batch_size,
+                                               count,
+                                               accept_tokens_tensor.narrow(1, offset, count));
+        spec_update_info.token_logprobs        = std::move(compact.token_logprobs);
+        spec_update_info.top_logprob_token_ids = std::move(compact.top_logprob_token_ids);
+        spec_update_info.top_logprobs          = std::move(compact.top_logprobs);
+        spec_update_info.logprobs_offset       = offset;
         spec_update_infos.push_back(std::move(spec_update_info));
+        if (stream->generateConfig()->return_logprobs)
+            target_row_offset += next_batch_size * count;
 
         // Draft hidden layout differs per mode: the device-state path keeps a
         // dense (propose_step_+1) rows/stream layout, while the default sync
@@ -1899,6 +2167,48 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     }
 
     model_input.last_hidden_states = all_hidden_states;
+}
+
+void MtpBatchStreamProcessor::finalizeDecodeTargetLogprobs(
+    const StreamGroups&                          stream_groups,
+    const speculative::SpeculativeSamplerOutput& spec_decode_output,
+    MtpTargetLogprobs&                           target_logprobs) const {
+    if (!target_logprobs.defined() || target_logprobs.finalized()) {
+        return;
+    }
+
+    RTP_LLM_CHECK(target_logprobs.raw_logits.defined());
+    spec_decode_output.transfer_done_event->synchronize();
+    auto selection = collectAcceptedMtpLogprobRows(stream_groups,
+                                                   spec_decode_output.accept_len_cpu,
+                                                   spec_decode_output.accept_tokens_cpu,
+                                                   static_cast<int64_t>(propose_step_ + 1),
+                                                   target_logprobs.dense_row_count);
+    // Decode cannot know which speculative rows become content until
+    // acceptance. Recompute K from only streams that actually contributed a
+    // content suffix before launching the selected-row reduction.
+    target_logprobs.requested_top_logprobs =
+        std::min<int64_t>(selection.max_top_logprobs, target_logprobs.raw_logits.size(1));
+    const auto& emitted_token_ids = target_logprobs.raw_logits.is_cuda() && spec_decode_output.accept_tokens.defined()
+                                            && spec_decode_output.accept_tokens.is_cuda() ?
+                                        spec_decode_output.accept_tokens :
+                                        spec_decode_output.accept_tokens_cpu;
+    finalizeSelectedMtpTargetLogprobs(target_logprobs, emitted_token_ids, selection.rows);
+}
+
+int64_t maxMtpActiveContentTopLogprobs(const StreamGroups& stream_groups) {
+    int64_t max_top_logprobs = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        if (stream->shouldComputeLogprobs()) {
+            max_top_logprobs =
+                std::max<int64_t>(max_top_logprobs, std::max<int64_t>(stream->generateConfig()->top_logprobs, 0));
+        }
+    }
+    return max_top_logprobs;
+}
+
+bool shouldFinalizeMtpTargetLogprobsEarly(bool stream_async_enabled, const MtpTargetLogprobs& target_logprobs) {
+    return stream_async_enabled && target_logprobs.retainsFullLmHeadStorage();
 }
 
 }  // namespace rtp_llm
