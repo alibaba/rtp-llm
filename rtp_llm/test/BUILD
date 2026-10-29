@@ -504,3 +504,9 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "compact_logprobs_renderer_test",
+    srcs = ["compact_logprobs_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
