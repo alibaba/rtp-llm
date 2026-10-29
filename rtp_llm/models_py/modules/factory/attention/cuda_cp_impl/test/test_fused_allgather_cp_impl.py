@@ -8,6 +8,7 @@ from typing import List
 from unittest.mock import patch
 
 import torch
+from flashinfer.page import append_paged_kv_cache, get_seq_lens
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
     select_prefill_cp_impl,
@@ -226,14 +227,33 @@ class TestPCPFusedPagedAttnOp(CPAttnTestBase):
         kv_cache.kv_cache_base[total_blocks].fill_(7)
         adjacent_request_block = kv_cache.kv_cache_base[total_blocks].clone()
 
+        def append_with_checked_positions(**kwargs):
+            declared_lengths = get_seq_lens(
+                kwargs["kv_indptr"], kwargs["kv_last_page_len"], tokens_per_block
+            )
+            self.assertTrue(
+                torch.all(
+                    kwargs["positions"] < declared_lengths[kwargs["batch_indices"]]
+                ).item(),
+                "append metadata must include every written position, including padding",
+            )
+            return append_paged_kv_cache(**kwargs)
+
         with contextlib.ExitStack() as stack:
             self._patch_all_gather(stack, all_local_k, all_local_v, cp_rank)
+            stack.enter_context(
+                patch(
+                    f"{_FUSED_MODULE}.append_paged_kv_cache",
+                    side_effect=append_with_checked_positions,
+                )
+            )
             op = self.OP_CLASS(attn_cfg, attn_inputs, par_cfg)
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
             output_storage = output.data_ptr()
             repeated_output = op.forward(qkv, kv_cache, params)
             self.assertEqual(repeated_output.data_ptr(), output_storage)
+            self.assertEqual(params.paged_kv_last_page_len_d.tolist(), [1, 16])
 
         valid_local = [
             local

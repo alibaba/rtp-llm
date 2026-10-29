@@ -61,6 +61,21 @@ class _CPGeometry:
             (prefix + actual + self.page_size - 1) // self.page_size
             for prefix, actual in zip(self.prefix_lengths, self.actual_lengths)
         ]
+        # Append includes the padded tail, so its metadata must cover those
+        # positions too. The capability checks guarantee the page counts match;
+        # keep the actual-length params returned by prepare unchanged for decode.
+        append_lengths = [
+            prefix + padded
+            for prefix, padded in zip(self.prefix_lengths, self.padded_lengths)
+        ]
+        self.append_last_page_len = torch.tensor(
+            [
+                (length - 1) % self.page_size + 1 if length else 0
+                for length in append_lengths
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
 
         assert all(
             chunk_length % 2 == 0 for chunk_length in self.chunk_lengths
@@ -396,7 +411,7 @@ class PCPFusedPagedAttnOp:
             paged_kv_cache=kv_cache_tensor,
             kv_indices=params.page_indice_d,
             kv_indptr=params.decode_page_indptr_d,
-            kv_last_page_len=params.paged_kv_last_page_len_d,
+            kv_last_page_len=self.geometry.append_last_page_len,
             kv_layout="HND",
         )
 
