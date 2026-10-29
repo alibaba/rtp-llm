@@ -15,19 +15,19 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
 )
 
 
-@gluon.jit
+@gluon.jit(do_not_specialize=["M", "ZX", "SS"])
 def _gdn_norm_quant(
     X,
     Z,
     W,
     Q,
     S,
-    M: gl.constexpr,
+    M,
     N: gl.constexpr,
-    ZX: gl.constexpr,
+    ZX,
     EPS: gl.constexpr,
     GROUPS: gl.constexpr,
-    SS: gl.constexpr,
+    SS,
     GH: gl.constexpr,
     WARPS: gl.constexpr,
 ):
