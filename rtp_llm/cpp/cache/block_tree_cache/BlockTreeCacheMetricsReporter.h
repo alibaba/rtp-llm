@@ -24,6 +24,7 @@ namespace rtp_llm {
 
 struct BlockTreeInsertHardStopInfo;
 struct BlockTreeQueueSizes;
+class CacheStageMetrics;
 
 struct BlockTreePoolMetricsSnapshot {
     Tier        tier{Tier::DEVICE};
@@ -89,7 +90,30 @@ using BlockTreeTransferBytes = std::unordered_map<BlockTreeTransferBytesKey, siz
 
 class BlockTreeCacheMetricsReporter final {
 public:
-    explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
+    explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+                                           bool                                       enable_stage_metrics = true,
+                                           std::chrono::milliseconds stage_interval = std::chrono::seconds(1));
+    ~BlockTreeCacheMetricsReporter();
+    bool stageMetricsEnabled() const noexcept {
+        return stage_metrics_ != nullptr;
+    }
+    void flushStageMetrics() const;
+
+    // Durations are per worker batch, except coordinator multi-rank stages.
+    // Request/transfer IDs belong in the timeline, never in metric tags.
+    void reportDiskLoadStage(const char* stage,
+                             int64_t     latency_us,
+                             bool        success,
+                             int64_t     rank  = -1,
+                             const char* scope = "worker_batch") const noexcept;
+    void reportTransferStage(const char* stage,
+                             int64_t     latency_us,
+                             bool        success,
+                             int64_t     rank,
+                             const char* scope,
+                             const char* operation,
+                             const char* source_tier,
+                             const char* target_tier) const noexcept;
 
     std::vector<BlockTreePoolMetricsSnapshot>
     collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
@@ -160,6 +184,7 @@ private:
                                  const std::vector<GroupSetPtr>&        group_sets,
                                  BlockTreeTransferBytes&                transfer_bytes) const;
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
+    std::unique_ptr<CacheStageMetrics>                                             stage_metrics_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
 };
 

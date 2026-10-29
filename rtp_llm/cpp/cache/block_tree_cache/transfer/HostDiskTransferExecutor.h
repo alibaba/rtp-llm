@@ -14,7 +14,8 @@ public:
     HostDiskTransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                              size_t                                         max_descriptors_per_batch,
                              std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
-                             BlockTreeTaskPool*                             load_task_pool   = nullptr);
+                             BlockTreeTaskPool*                             load_task_pool   = nullptr,
+                             int64_t                                        world_rank       = -1);
 
 private:
     friend class DeviceDiskTransferExecutor;

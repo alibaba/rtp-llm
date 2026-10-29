@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/DecodePublicationBudget.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 namespace {
@@ -952,6 +953,96 @@ TEST(StorageBackendTest, DefaultExecutorShutdownSettlesQueuedOperationsAndPins) 
     EXPECT_EQ(backend->readCalls(), 1u);
     EXPECT_EQ(backend->writeHandleCount(), 1u);
     EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, TimelineSeparatesPrepareQueueIoSettlementAndCallback) {
+    auto       pool  = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    executor->setDuplicate(true);
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    auto   session           = AsyncProfileSession::start();
+    size_t callbacks         = 0;
+    auto   match_request     = makeRequest(NULL_BLOCK_IDX);
+    match_request.request_id = 42;
+    backend.match(std::move(match_request), [&](size_t, auto, bool ok) {
+        EXPECT_TRUE(ok);
+        ++callbacks;
+    });
+    auto read_request       = makeRequest(block);
+    read_request.request_id = 43;
+    backend.read(std::move(read_request), nullptr, [&](ErrorInfo e) {
+        EXPECT_TRUE(e.ok());
+        ++callbacks;
+    });
+    auto write_request       = makeRequest(block);
+    write_request.request_id = 44;
+    EXPECT_TRUE(backend.write(backend.prepareWrite(std::move(write_request))));
+    EXPECT_EQ(callbacks, 0u);
+    EXPECT_EQ(executor->runAll(), 3u);
+    EXPECT_EQ(callbacks, 2u);
+    auto events = session->finish();
+    EXPECT_EQ(events.size(), 15u);
+    for (const auto* stage : {"match_total",
+                              "match_queue_wait",
+                              "match_io",
+                              "match_callback",
+                              "read_total",
+                              "read_prepare",
+                              "read_queue_wait",
+                              "read_io",
+                              "read_settle",
+                              "read_callback",
+                              "write_total",
+                              "write_prepare",
+                              "write_queue_wait",
+                              "write_io",
+                              "write_settle"}) {
+        size_t count = 0;
+        for (const auto& event : events) {
+            if (event.name.find(std::string("cache.transfer.storage_backend.") + stage + "(") == 0)
+                ++count;
+            EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+            EXPECT_GE(event.end_us, event.start_us);
+        }
+        EXPECT_EQ(count, 1u) << stage;
+    }
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, RejectedStorageOperationsHaveNoIoRangesAndStillReleasePins) {
+    auto       pool  = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    executor->setReject(true);
+    auto   session   = AsyncProfileSession::start();
+    size_t callbacks = 0;
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo e) {
+        EXPECT_FALSE(e.ok());
+        ++callbacks;
+    });
+    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool ok) {
+        EXPECT_FALSE(ok);
+        ++callbacks;
+    });
+    EXPECT_FALSE(backend.write(backend.prepareWrite(makeRequest(block))));
+    EXPECT_EQ(callbacks, 2u);
+    const auto events = session->finish();
+    EXPECT_EQ(events.size(), 12u);
+    for (const auto& event : events) {
+        EXPECT_EQ(event.name.find("_io("), std::string::npos);
+        EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    }
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
     pool->decRef(block);
 }
 

@@ -7,8 +7,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <type_traits>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -25,9 +27,21 @@ class MultiRankTransferAsyncContext final:
     public std::enable_shared_from_this<MultiRankTransferAsyncContext> {
 public:
     static std::shared_ptr<MultiRankTransferAsyncContext>
-    create(std::shared_ptr<TransferBroadcastResult> result, size_t worker_count, size_t block_count) {
+    create(std::shared_ptr<TransferBroadcastResult>       result,
+           size_t                                         worker_count,
+           size_t                                         block_count,
+           SharedTransferStageTimer                       wait_timer,
+           std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
+           int64_t                                        request_id,
+           uint64_t                                       transfer_id,
+           CacheStageContext                              identity) {
         auto context = std::shared_ptr<MultiRankTransferAsyncContext>(
             new MultiRankTransferAsyncContext(std::move(result), worker_count, block_count));
+        context->wait_timer_  = std::move(wait_timer);
+        context->reporter_    = std::move(reporter);
+        context->request_id_  = request_id;
+        context->transfer_id_ = transfer_id;
+        context->identity_    = identity;
         context->start();
         return context;
     }
@@ -154,13 +168,57 @@ private:
                 result.merge(std::move(rank_result));
             }
         }
+        // Copy before claiming completion: allocation failure must leave the
+        // context retryable. Once claimed, publication cannot allocate.
+        if (auto probe =
+                block_tree_cache_detail::before_transfer_publication_copy_for_test.load(std::memory_order_acquire))
+            probe();
+        auto published_result = result;
+        static_assert(std::is_nothrow_move_assignable_v<TransferResult>);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (evaluated_ || finishing_) {
+                return;
+            }
+            finishing_ = true;
+        }
+        if (wait_timer_) {
+            wait_timer_.finish(result.ok());
+            try {
+                const auto times = broadcast_result_->completionTimesUs();
+                if (times.size() > 1 && std::all_of(times.begin(), times.end(), [](int64_t t) { return t > 0; })) {
+                    const auto    bounds  = std::minmax_element(times.begin(), times.end());
+                    const int64_t skew_us = *bounds.second - *bounds.first;
+                    if (reporter_) {
+                        reporter_->reportTransferStage("rank_completion_skew",
+                                                       skew_us,
+                                                       result.ok(),
+                                                       -1,
+                                                       "coordinator",
+                                                       identity_.operation,
+                                                       identity_.source,
+                                                       identity_.target);
+                    }
+                    const auto       wall_times = broadcast_result_->completionWallTimesUs();
+                    const auto       end_us     = wall_times[std::distance(times.begin(), bounds.second)];
+                    AsyncProfileSpan span("rank_completion_skew",
+                                          request_id_,
+                                          0,
+                                          block_count_,
+                                          end_us - skew_us,
+                                          -1,
+                                          transfer_id_,
+                                          identity_.path);
+                    span.finish(end_us);
+                }
+            } catch (...) {
+                // Diagnostics must not prevent completion notification.
+            }
+        }
         std::vector<DoneCallback> callbacks;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (evaluated_) {
-                return;
-            }
-            result_    = result;
+            result_    = std::move(published_result);
             evaluated_ = true;
             callbacks.swap(callbacks_);
         }
@@ -170,23 +228,47 @@ private:
         }
     }
 
-    std::shared_ptr<TransferBroadcastResult> broadcast_result_;
-    size_t                                   worker_count_{0};
-    size_t                                   block_count_{0};
-    mutable std::mutex                       mutex_;
-    std::condition_variable                  cv_;
-    TransferResult                           result_;
-    bool                                     evaluated_{false};
-    std::vector<DoneCallback>                callbacks_;
+    std::shared_ptr<TransferBroadcastResult>       broadcast_result_;
+    size_t                                         worker_count_{0};
+    size_t                                         block_count_{0};
+    mutable std::mutex                             mutex_;
+    std::condition_variable                        cv_;
+    TransferResult                                 result_;
+    bool                                           evaluated_{false};
+    bool                                           finishing_{false};
+    std::vector<DoneCallback>                      callbacks_;
+    SharedTransferStageTimer                       wait_timer_;
+    std::shared_ptr<BlockTreeCacheMetricsReporter> reporter_;
+    int64_t                                        request_id_{-1};
+    uint64_t                                       transfer_id_{0};
+    CacheStageContext                              identity_;
 };
 
 }  // namespace
 
-MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<GroupSetPtr>          group_sets,
-                                                           std::shared_ptr<BroadcastManager> broadcast_manager):
-    group_sets_(std::move(group_sets)), broadcast_manager_(std::move(broadcast_manager)) {}
+MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(
+    std::vector<GroupSetPtr>                       group_sets,
+    std::shared_ptr<BroadcastManager>              broadcast_manager,
+    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
+    group_sets_(std::move(group_sets)),
+    broadcast_manager_(std::move(broadcast_manager)),
+    metrics_reporter_(std::move(metrics_reporter)) {}
 
 std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(TransferTask task) const {
+    const bool   has_descriptors = !task.descriptors().empty();
+    const auto   identity        = has_descriptors ? CacheStageContext::local(task.descriptors().front().source_tier,
+                                                                              task.descriptors().front().target_tier) :
+                                                     CacheStageContext{};
+    auto         wait_timer        = has_descriptors ? TransferStageTimer::create(metrics_reporter_,
+                                                                                  "multi_rank_wait",
+                                                                                  task.requestId().value_or(-1),
+                                                                                  0,
+                                                                                  task.descriptors().size(),
+                                                                                  -1,
+                                                                                  "coordinator",
+                                                                                  task.traceId(),
+                                                                                  identity) :
+                                                       SharedTransferStageTimer{};
     const size_t block_count       = task.descriptors().size();
     const auto   deadline_exceeded = [block_count]() {
         return std::make_shared<CompletedTransferAsyncContext>(
@@ -234,7 +316,14 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
                            CacheCopyError::RPC_FAILED),
             block_count);
     }
-    return MultiRankTransferAsyncContext::create(std::move(broadcast_result), worker_count, block_count);
+    return MultiRankTransferAsyncContext::create(std::move(broadcast_result),
+                                                 worker_count,
+                                                 block_count,
+                                                 std::move(wait_timer),
+                                                 metrics_reporter_,
+                                                 task.requestId().value_or(-1),
+                                                 task.traceId(),
+                                                 identity);
 }
 
 }  // namespace rtp_llm

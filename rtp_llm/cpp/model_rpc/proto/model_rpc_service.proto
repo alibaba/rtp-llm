@@ -739,6 +739,10 @@ message MemoryOperationRequestPB {
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
     int64 timeout_ms = 3;
+    // Diagnostic identity only; absent on older peers. Never used for allocation or routing.
+    uint64 transfer_trace_id = 4;
+    int64 transfer_request_id = 5;
+    bool has_transfer_request_id = 6;
 }
 
 message MemoryOperationResponsePB {

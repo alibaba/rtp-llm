@@ -806,7 +806,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                                         parallelism_config.world_rank);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
-        multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
+        multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(
+            group_sets, std::move(broadcast_manager), cache_metrics_reporter);
     }
     auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
         std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
