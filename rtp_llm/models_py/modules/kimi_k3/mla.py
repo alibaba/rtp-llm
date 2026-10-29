@@ -94,6 +94,13 @@ class KimiK3MlaImpl(MlaImplBase):
         self.kv_cache_type = attn_configs.kv_cache_dtype
         self.fp8_compute = attn_configs.mla_fp8_compute
         self.q_replicated = parallelism.role_type == RoleType.DECODE
+        # Match MtpBatchStreamProcessor::useMtpDeviceState and the fixed-width
+        # SP layout in PyWrappedModel. This scheduling configuration is static
+        # across graph capture/replay; accepted lengths only select outputs.
+        self._rectangular_mtp_update = any(
+            os.environ.get(name) == "1"
+            for name in ("RTP_LLM_STREAM_ASYNC", "RTP_LLM_MTP_ASYNC_DEVICE_STATE")
+        )
         self.page_rr_metadata = PageRRMlaMetadata(
             int(self.attn_configs.tokens_per_block), int(self.token_per_block),
             int(parallelism.tp_size), int(parallelism.tp_rank),
@@ -235,7 +242,18 @@ class KimiK3MlaImpl(MlaImplBase):
         ):
             raise ValueError("K3 MLA replay requires the captured physical shape")
         self.attn_inputs = inputs
-        self.page_rr_metadata.prepare_decode(inputs, forbid_realloc)
+        rectangular_update = inputs.is_mtp_draft_update and self._rectangular_mtp_update
+        self.page_rr_metadata.prepare_decode(
+            inputs,
+            forbid_realloc,
+            compact_queries=(
+                self.q_replicated
+                and self.fp8_compute
+                and (inputs.is_target_verify or rectangular_update)
+                and self.tokens > self.batch
+            ),
+            rectangular_update=rectangular_update,
+        )
 
     def _plan_prefill(self, mla_params):
         self.qo_indptr = mla_params.qo_indptr_d
@@ -620,36 +638,40 @@ class KimiK3MlaImpl(MlaImplBase):
 
     def _forward_paged(self, query, kv_cache, layer_id):
         weights = self.weights[layer_id]
-        local_query = query.transpose(0, 1).contiguous()
-        gathered = (
-            local_query
-            if self.q_replicated
-            else self.page_rr_communicator.query_gather(local_query)
-        )
+        if self.q_replicated:
+            # Every replicated paged phase produces token-major Q, including
+            # Q1 and ragged updates that retain per-query local-length metadata.
+            query = query.contiguous()
+        else:
+            local_query = query.transpose(0, 1).contiguous()
+            gathered = self.page_rr_communicator.query_gather(local_query)
+            query = gathered.transpose(0, 1)
         batch, queries = self.page_rr_metadata.local_causal_lens.shape
         dimension = self.kv_lora_rank + self.qk_rope_head_dim
         partial, lse = self._run_paged_attention(
-            # TokenSpeed accepts the gathered head-major strides, as in
-            # feat/k3_dev. Avoid copying the entire FP8 query after AG.
-            gathered.transpose(0, 1).view(
-                batch, queries, self.page_rr_communicator.heads, dimension
-            ),
+            query.view(batch, queries, self.page_rr_communicator.heads, dimension),
             kv_cache.kv_cache_base.view(-1, self.token_per_block, dimension),
             self._paged_workspace.view(torch.int8),
             self.kv_lora_rank,
             self.qk_rope_head_dim,
             self.page_rr_metadata.query_block_tables,
             self.page_rr_metadata.local_causal_lens,
-            self.page_rr_metadata.query_block_tables.shape[1]
-            * self.token_per_block,
+            self.page_rr_metadata.query_block_tables.shape[1] * self.token_per_block,
             self.scale
-            * (
-                self._q_scale * self._kv_scale_value
-                if self.fp8_compute
-                else 1.0
-            ),
+            * (self._q_scale * self._kv_scale_value if self.fp8_compute else 1.0),
             output_scale=self._kv_scale_value if self.fp8_compute else 1.0,
             normalize_empty=False,
+            local_seq_lens=self.page_rr_metadata.local_seq_lens,
+            **(
+                {
+                    "global_causal_lens": self.page_rr_metadata.global_causal_lens,
+                    "cp_world": self.page_rr_metadata.cp_size,
+                    "cp_rank": self.page_rr_metadata.cp_rank,
+                    "cp_interleave_size": self.page_rr_metadata.page_size,
+                }
+                if self.page_rr_metadata.local_seq_lens is not None
+                else {}
+            ),
         )
         merged = self.page_rr_communicator.combine(
             partial.view(

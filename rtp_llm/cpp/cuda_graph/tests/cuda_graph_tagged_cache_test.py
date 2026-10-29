@@ -4,6 +4,7 @@ import os
 import unittest
 import weakref
 from typing import Optional
+from unittest import mock
 
 import torch
 
@@ -524,6 +525,8 @@ def _build_target_verify_inputs(
 
 
 class CompactMtpDraftModel:
+    requires_sequence_parallel_padding = False
+
     def __init__(self, max_requests, query_width):
         self.max_requests = max_requests
         self.query_width = query_width
@@ -579,11 +582,23 @@ class CompactMtpDraftModel:
 
 
 class RectangularMtpDraftModel:
+    requires_sequence_parallel_padding = True
+
     def __init__(self, query_width):
         self.query_width = query_width
         self.capture_shapes = set()
+        self.prepared_shapes = set()
 
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        attention = inputs.attention_inputs["full"]
+        requests = attention.input_lengths.numel()
+        tokens = inputs.input_ids.numel()
+        # Production MLA constructs metadata before actual CUDA capture, while
+        # attention.is_cuda_graph is still false. The C++ profile must already
+        # have the producer's fixed Q layout at that point.
+        assert is_cuda_graph
+        assert tokens == requests * self.query_width
+        self.prepared_shapes.add((requests, tokens, attention.is_cuda_graph))
         return None
 
     def forward(self, inputs, fmha_impl=None):
@@ -596,14 +611,24 @@ class RectangularMtpDraftModel:
         assert attention.physical_token_count == tokens
         self.capture_shapes.add((requests, tokens))
         hidden = inputs.input_hiddens.reshape(tokens, -1, HIDDEN_SIZE).sum(dim=1)
-        return PyModelOutputs(hidden * attention.valid_token_mask[:, None])
+        if attention.valid_token_mask is not None:
+            hidden = hidden * attention.valid_token_mask[:, None]
+        return PyModelOutputs(hidden)
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    @mock.patch.dict(
+        os.environ,
+        {"RTP_LLM_STREAM_ASYNC": "0", "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0"},
+    )
     def test_compact_mtp_buckets_reserve_request_rows_per_token_capacity(self):
         max_requests, query = 16, 3
-        for sp in (1, 4):
-            with self.subTest(sp=sp):
+        for sp, stream_async in ((1, "0"), (4, "0"), (4, "1")):
+            # SP size alone must not select fixed Q for a model that does not
+            # declare the producer contract, even with stream async enabled.
+            with self.subTest(sp=sp, stream_async=stream_async), mock.patch.dict(
+                os.environ, {"RTP_LLM_STREAM_ASYNC": stream_async}
+            ):
                 model = CompactMtpDraftModel(max_requests, query)
                 runner = CudaGraphRunner()
                 runner.init_mtp_draft_prefill(model, max_requests, query, sp, 1)
@@ -678,26 +703,73 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 )
                 self.assertFalse(runner.canRun(oversized))
 
-    def test_rectangular_mtp_buckets_capture_their_own_capacity_with_hc_and_sp(self):
+    def test_rectangular_mtp_buckets_match_hc_and_device_state_producers(self):
         cases = (
             (
+                160,
                 4,
+                16,
+                2,
+                {},
                 {(12, 48), (16, 64), (28, 112), (32, 128), (64, 256)},
                 ((14, 16, 64), (28, 28, 112), (12, 12, 48)),
             ),
             (
+                160,
                 3,
+                16,
+                2,
+                {},
                 {(16, 48), (32, 96), (48, 144)},
                 ((14, 16, 48), (28, 32, 96), (11, 16, 48)),
             ),
+            (
+                64,
+                4,
+                4,
+                1,
+                {"RTP_LLM_STREAM_ASYNC": "1"},
+                {(32, 128), (63, 252), (64, 256)},
+                ((63, 63, 252), (32, 32, 128), (64, 64, 256), (1, 1, 4)),
+            ),
+            (
+                160,
+                4,
+                16,
+                1,
+                {"RTP_LLM_MTP_ASYNC_DEVICE_STATE": "1"},
+                {(32, 128), (156, 624), (160, 640)},
+                ((155, 156, 624), (32, 32, 128), (156, 156, 624), (1, 4, 16)),
+            ),
+            (
+                64,
+                4,
+                1,
+                1,
+                {"RTP_LLM_STREAM_ASYNC": "1"},
+                {(32, 128), (63, 252), (64, 256)},
+                ((63, 63, 252), (32, 32, 128), (1, 1, 4)),
+            ),
         )
-        hc_mult = 2
-        for query, captures, requests in cases:
-            with self.subTest(hc_mult=hc_mult, query=query):
+        for max_requests, query, sp, hc_mult, env, captures, requests in cases:
+            with self.subTest(
+                max_requests=max_requests, query=query, sp=sp, hc_mult=hc_mult, env=env
+            ), mock.patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_STREAM_ASYNC": "0",
+                    "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0",
+                    **env,
+                },
+            ):
                 model = RectangularMtpDraftModel(query)
                 runner = CudaGraphRunner()
-                runner.init_mtp_draft_prefill(model, 160, query, 16, hc_mult)
+                runner.init_mtp_draft_prefill(model, max_requests, query, sp, hc_mult)
                 self.assertTrue(captures <= model.capture_shapes)
+                self.assertTrue(
+                    {(batch, tokens, False) for batch, tokens in captures}
+                    <= model.prepared_shapes
+                )
                 for logical, physical, bucket in requests:
                     inputs = _build_target_verify_inputs(
                         GROUP_TAGS,

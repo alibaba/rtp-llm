@@ -46,6 +46,12 @@ cuda13_sm100_py_test(
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
 )
 
+cuda13_sm100_py_test(
+    name = "tokenspeed_mla_page_rr_test",
+    srcs = ["tokenspeed_mla_page_rr_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
 py_test(
     name = "page_rr_jit_warmup_test",
     srcs = ["page_rr_jit_warmup_test.py"],

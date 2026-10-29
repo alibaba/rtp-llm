@@ -356,6 +356,10 @@ def _prepare_decode_metadata(
     has_valid_mask: tl.constexpr,
     block: tl.constexpr,
     table_block: tl.constexpr = 128,
+    compact_queries: tl.constexpr = False,
+    kv_lengths=None,
+    causal_lengths=None,
+    rectangular_update: tl.constexpr = False,
 ):
     if mtp_update:
         # One program prepares a physical query and its complete page table.
@@ -373,19 +377,27 @@ def _prepare_decode_metadata(
         active = valid
         batch = row // queries
         query_offset = row % queries
+        if rectangular_update:
+            # Fixed-width device-state updates keep all candidate rows, while
+            # graph capacity can append requests with zero input length.
+            active = active & (row < tl.load(cu_seqlens + request_count))
+            if has_valid_mask:
+                active = active & tl.load(valid_token_mask + row, valid, other=False)
+        table_row = batch if compact_queries else row
+        copy_row = valid & (query_offset == 0) if compact_queries else valid
         column = tl.program_id(1) * table_block + tl.arange(0, table_block)
         page = tl.load(
             table + batch[:, None] * table_stride + column[None, :],
-            valid[:, None] & (column[None, :] < table_width), other=0,
+            copy_row[:, None] & (column[None, :] < table_width), other=0,
         )
         width = tl.maximum(table_width, 1)
         tl.store(
-            query_tables + row[:, None] * width + column[None, :], page,
-            valid[:, None] & (column[None, :] < width),
+            query_tables + table_row[:, None] * width + column[None, :], page,
+            copy_row[:, None] & (column[None, :] < width),
         )
         # Other column tiles only copy their disjoint part of the page table.
         valid = valid & (tl.program_id(1) == 0)
-        active = valid
+        active = active & (tl.program_id(1) == 0)
     base = tl.load(sequence_base + batch, active, other=0)
     if graph_decode:
         # CudaGraphRunner's synthetic q1 capture leaves plus_1 at zero.
@@ -396,8 +408,8 @@ def _prepare_decode_metadata(
     position = tl.where(active, position, 0)
     tl.store(positions + row, position, valid)
 
-    # Count keys <= this query in the rank's physical-page stripes. Treating
-    # B*Q as q1 rows avoids imposing a false *local* multi-query causal mask.
+    # Count keys <= this query in the rank's physical-page stripes. Each query
+    # needs its own visible length, even when packed into a shared KV scan.
     end = tl.maximum(position + 1, 0)
     interval = page_size * cp_size
     length = end // interval * page_size + tl.minimum(
@@ -408,6 +420,19 @@ def _prepare_decode_metadata(
         "Page-RR Decode page table is too narrow for the local history",
     )
     tl.store(local_lengths + row, tl.where(active, length, 0), valid)
+    if compact_queries:
+        tl.store(
+            kv_lengths + batch,
+            tl.where(active, length, 0),
+            valid & (query_offset == queries - 1),
+        )
+        # TokenSpeed 0.2.11 maps this final global query bound through the
+        # Page-RR ownership stripes to mask each packed query independently.
+        tl.store(
+            causal_lengths + batch,
+            tl.where(active, end, 0),
+            valid & (query_offset == queries - 1),
+        )
 
     slot = _page_rr_cache_slot(
         position, batch, active, table, table_width, table_stride,

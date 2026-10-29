@@ -1982,7 +1982,7 @@ void CudaGraphRunner::initCapture() {
         // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
         // to hidden_size * hc_mult for regular (MTP) graphs and to
         // len(target_layer_ids) * hidden_size for a DSpARK draft graph, so it must be used
-        // instead of recomputing hc_mult_ * hidden_size_ here.
+        // instead of recomputing the HC multiplier * hidden_size_ here.
         if (isGenerationPrefillCudaGraph()) {
             // Generation prefill consumes token ids and builds its
             // embeddings inside the captured model. input_hiddens is an MTP /

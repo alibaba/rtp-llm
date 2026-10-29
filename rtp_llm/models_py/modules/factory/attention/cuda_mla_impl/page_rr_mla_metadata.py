@@ -32,6 +32,8 @@ class PageRRMlaMetadata:
         self.positions_d = None
         self.slot_mapping = None
         self.local_causal_lens = None
+        self.local_seq_lens = None
+        self.global_causal_lens = None
         self.block_tables = None
         self.query_block_tables = None
 
@@ -117,12 +119,22 @@ class PageRRMlaMetadata:
                        table, padding, self.slot_mapping):
             tensor.record_stream(stream)
 
-    def prepare_decode(self, inputs, forbid_realloc: bool = False) -> None:
+    def prepare_decode(
+        self,
+        inputs,
+        forbid_realloc: bool = False,
+        *,
+        compact_queries: bool = False,
+        rectangular_update: bool = False,
+    ) -> None:
         multi = inputs.is_target_verify or inputs.is_mtp_draft_update
         mtp_update = inputs.is_mtp_draft_update
+        if rectangular_update and not mtp_update:
+            raise ValueError("Rectangular update layout requires an MTP draft update")
+        ragged_update = mtp_update and not rectangular_update
         batch = inputs.input_lengths.numel()
         tokens = inputs.physical_token_count
-        if batch <= 0 or tokens <= 0 or (not mtp_update and tokens % batch):
+        if batch <= 0 or tokens <= 0 or (not ragged_update and tokens % batch):
             raise ValueError(
                 "Page-RR Decode requires rectangular physical queries: "
                 f"batch={batch} physical_tokens={tokens} "
@@ -130,7 +142,9 @@ class PageRRMlaMetadata:
                 f"draft_update={inputs.is_mtp_draft_update} "
                 f"graph={inputs.is_cuda_graph}"
             )
-        queries = 1 if mtp_update else tokens // batch
+        queries = 1 if ragged_update else tokens // batch
+        if compact_queries and (ragged_update or queries <= 1):
+            raise ValueError("Compact query metadata requires rectangular multi-query input")
         if not multi and queries != 1:
             raise ValueError("Ordinary Page-RR Decode requires one query per request")
         base = (
@@ -162,9 +176,10 @@ class PageRRMlaMetadata:
                 or not valid_mask.is_contiguous()
             ):
                 raise ValueError("MTP update requires one valid-row mask entry per physical query")
-        # MTP consumes the original compact query layout; metadata capacity
-        # does not determine its physical query count or per-request width.
-        shape = (tokens, 1) if mtp_update else (base.numel(), queries)
+        # Host-compacted MTP rows are ragged. Device-state MTP retains the
+        # target's fixed B*Q physical layout, including virtual request rows;
+        # cu_seqlens/valid_token_mask determine activity during graph replay.
+        shape = (tokens, 1) if ragged_update else (base.numel(), queries)
         if self.local_causal_lens is None or self.local_causal_lens.shape != shape:
             if forbid_realloc:
                 raise ValueError("Page-RR Decode metadata shape cannot change during replay")
@@ -176,17 +191,36 @@ class PageRRMlaMetadata:
         # A completely empty owner still needs a valid kernel table descriptor.
         # Its zero lengths prevent KV reads; no dummy page becomes a real key.
         width = max(table.shape[1], 1)
-        table_shape = (rows, width)
+        table_shape = (batch if compact_queries else rows, width)
         if self.query_block_tables is None or self.query_block_tables.shape != table_shape:
             if forbid_realloc:
                 raise ValueError("Page-RR Decode query page table shape cannot change during replay")
             self.query_block_tables = torch.empty(table_shape, dtype=torch.int32, device=base.device)
-        grid = (rows, 1) if mtp_update else (triton.cdiv(rows, 32), triton.cdiv(width, 128))
+        if compact_queries:
+            if self.local_seq_lens is None or self.local_seq_lens.shape != (batch,):
+                if forbid_realloc:
+                    raise ValueError("Page-RR local sequence lengths cannot change during replay")
+                self.local_seq_lens = torch.empty(batch, dtype=torch.int32, device=base.device)
+                self.global_causal_lens = torch.empty(
+                    batch, dtype=torch.int32, device=base.device
+                )
+        else:
+            self.local_seq_lens = None
+            self.global_causal_lens = None
+        grid = (
+            (rows, 1)
+            if ragged_update
+            else (triton.cdiv(rows, 32), triton.cdiv(width, 128))
+        )
         _prepare_decode_metadata[grid](
             base,
             # Main's sequence_lengths is a CPU mirror. The device length is
             # the graph-stable source for ordinary Decode capture and replay.
-            inputs.sequence_lengths_plus_1_device if inputs.is_cuda_graph and not multi else base,
+            (
+                inputs.sequence_lengths_plus_1_device
+                if inputs.is_cuda_graph and not multi
+                else base
+            ),
             cu_seqlens if mtp_update else base,
             valid_mask if valid_mask is not None else base,
             table,
@@ -204,9 +238,13 @@ class PageRRMlaMetadata:
             cp_rank=self.cp_rank,
             multi_query_update=multi,
             graph_decode=inputs.is_cuda_graph and not multi,
-            mtp_update=mtp_update,
+            mtp_update=ragged_update,
+            rectangular_update=rectangular_update,
             request_count=batch,
             has_valid_mask=valid_mask is not None,
             block=32,
             table_block=128,
+            compact_queries=compact_queries,
+            kv_lengths=self.local_seq_lens,
+            causal_lengths=self.global_causal_lens,
         )

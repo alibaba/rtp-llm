@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -66,7 +67,7 @@ public:
         max_seq_len_(graph_params.max_seq_len),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
-        hc_mult_(static_cast<int>(graph_params.hc_mult)),
+        rectangular_mtp_draft_prefill_(graph_params.hc_mult > 1),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         position_encoding_(graph_params.position_encoding),
@@ -101,6 +102,18 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        // Match the model contract and device-state producer used by
+        // PyWrappedModel::padSequenceParallelInputs, including TP=1. Freeze
+        // this layout for the runner's capture and replay lifetime.
+        if (isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "requires_sequence_parallel_padding")
+            && py_instance_.attr("requires_sequence_parallel_padding").cast<bool>()) {
+            const auto env_on = [](const char* name) {
+                const char* value = std::getenv(name);
+                return value != nullptr && std::string(value) == "1";
+            };
+            rectangular_mtp_draft_prefill_ = rectangular_mtp_draft_prefill_ || env_on("RTP_LLM_STREAM_ASYNC")
+                                             || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+        }
         if (sequence_parallel_size_ > 1 && role_ != CudaGraphRole::GENERATION_PREFILL) {
             const int unit = sequence_parallel_size_ / std::gcd(sequence_parallel_size_, num_tokens_per_bs_);
             max_bs_        = (max_bs_ + unit - 1) / unit * unit;
@@ -208,8 +221,9 @@ private:
     }
     bool requiresRectangularMtpDraftPrefillLayout() const {
         // The HC MTP backend runs forward_decode with rectangular B*Q rows.
+        // SP-padding models retain the same layout with device-state scheduling.
         // DSpARK propose/commit use their own decode graph roles.
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        return isMtpDraftPrefillCudaGraph() && rectangular_mtp_draft_prefill_;
     }
     int mtpDraftPrefillBatchCapacity(int tokens) const {
         if (!isMtpDraftPrefillCudaGraph())
@@ -264,7 +278,7 @@ private:
     int                     max_seq_len_{0};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
-    int                     hc_mult_{1};
+    bool                    rectangular_mtp_draft_prefill_{false};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

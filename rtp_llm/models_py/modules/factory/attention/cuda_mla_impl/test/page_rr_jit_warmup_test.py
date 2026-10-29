@@ -160,6 +160,76 @@ class PageRRJitWarmupTest(unittest.TestCase):
                     )
             self.assertEqual(len(attempts), 1, attempts)
 
+    def test_compact_target_verify_shapes_reuse_jit(self):
+        query = 4
+        with compile_attempts(page_rr._prepare_decode_metadata) as attempts:
+            for batch, pages in ((1, 2), (3, 4)):
+                table, maps = source_table(batch, pages, 2, 1)
+                starts = [PAGE - 1 + r for r in range(batch)]
+                base = torch.tensor(starts, dtype=torch.int32, device="cuda")
+                inputs = SimpleNamespace(
+                    input_lengths=torch.full((batch,), query, dtype=torch.int32),
+                    physical_token_count=batch * query,
+                    is_target_verify=True,
+                    is_mtp_draft_update=False,
+                    is_cuda_graph=False,
+                    prefix_lengths_device=base,
+                    kv_cache_kernel_block_id_device=table,
+                )
+                metadata = PageRRMlaMetadata(PAGE, KERNEL, 2, 1)
+                for increment in (0, 1):
+                    if increment:
+                        base.add_(1)
+                    metadata.prepare_decode(
+                        inputs, forbid_realloc=bool(increment), compact_queries=True
+                    )
+                    positions = [
+                        [start + increment + j for j in range(query)]
+                        for start in starts
+                    ]
+                    # Count independently enumerated owner-local keys, including
+                    # the query that straddles the first rank-1 ownership page.
+                    lengths = [
+                        [sum(key <= position for key in maps[r]) for position in row]
+                        for r, row in enumerate(positions)
+                    ]
+                    self.assertEqual(metadata.local_causal_lens.shape, (batch, query))
+                    self.assertEqual(metadata.local_causal_lens.dtype, torch.int32)
+                    self.assertEqual(metadata.local_causal_lens.cpu().tolist(), lengths)
+                    self.assertEqual(metadata.local_seq_lens.shape, (batch,))
+                    self.assertEqual(metadata.local_seq_lens.dtype, torch.int32)
+                    self.assertTrue(metadata.local_seq_lens.is_contiguous())
+                    self.assertEqual(
+                        metadata.local_seq_lens.cpu().tolist(),
+                        [max(row) for row in lengths],
+                    )
+                    self.assertEqual(metadata.global_causal_lens.shape, (batch,))
+                    self.assertEqual(metadata.global_causal_lens.dtype, torch.int32)
+                    self.assertTrue(metadata.global_causal_lens.is_contiguous())
+                    self.assertEqual(
+                        metadata.global_causal_lens.cpu().tolist(),
+                        [row[-1] + 1 for row in positions],
+                    )
+                    self.assertEqual(metadata.query_block_tables.shape, table.shape)
+                    self.assertEqual(metadata.query_block_tables.dtype, torch.int32)
+                    self.assertTrue(metadata.query_block_tables.is_contiguous())
+                    self.assertEqual(
+                        metadata.query_block_tables.cpu().tolist(), table.cpu().tolist()
+                    )
+                    self.assertEqual(
+                        metadata.positions_d.cpu().tolist(),
+                        [position for row in positions for position in row],
+                    )
+                    self.assertEqual(
+                        metadata.slot_mapping.cpu().tolist(),
+                        [
+                            maps[r].get(position, -1)
+                            for r, row in enumerate(positions)
+                            for position in row
+                        ],
+                    )
+        self.assertEqual(len(attempts), 1, attempts)
+
 
 if __name__ == "__main__":
     unittest.main()
