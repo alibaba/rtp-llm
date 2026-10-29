@@ -11,7 +11,7 @@ import torch
 
 def check_policy(mode):
     # The native policy uses std::call_once, so every case needs a fresh process.
-    from libth_transformer_config import RopeStyle, get_rope_cache_once
+    from rtp_llm.ops import RopeStyle, get_rope_cache_once
 
     from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
         SparseGqaFmhaImpl,

@@ -83,6 +83,7 @@ class _Attention(nn.Module):
 
 class _RoutedBackend(nn.Module):
     includes_shared_expert = False
+    fused_experts = None
     topk_ids_dtype = torch.int32
     router = SimpleNamespace(tp_collective_size=1, supports_skip_tp_allreduce=False)
 

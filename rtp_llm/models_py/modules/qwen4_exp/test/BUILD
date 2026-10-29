@@ -321,6 +321,8 @@ py_test(
     name = "pd_cache_store_test",
     srcs = ["pd_cache_store_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(
@@ -630,6 +632,8 @@ py_test(
     name = "prefetch_order_test",
     srcs = ["prefetch_order_test.py"],
     deps = ["//rtp_llm:testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(
