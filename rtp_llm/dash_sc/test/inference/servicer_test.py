@@ -19,8 +19,9 @@ import struct
 import unittest
 import weakref
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import grpc
 import requests
 import torch
 
@@ -31,6 +32,13 @@ from rtp_llm.config.exceptions import (
 )
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
 from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    FlexlbScheduleResponsePB,
+)
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
+    FlexlbServiceServicer,
+    add_FlexlbServiceServicer_to_server,
+)
 from rtp_llm.dash_sc import grpc_metrics
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import (
@@ -76,10 +84,10 @@ from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
     iter_real_model_stream_infer,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
-from rtp_llm.server.master_client import MasterClient
+from rtp_llm.server.master_client import FLEXLB_GRPC_PORT_OFFSET, MasterClient
 from rtp_llm.telemetry import tracing
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -3638,6 +3646,14 @@ class _FakeGrpcContext:
     def __init__(self, metadata=()):
         self._metadata = tuple(metadata)
         self.initial_metadata = []
+        self._code = None
+        self._details = ""
+        self.abort = AsyncMock(side_effect=self._abort)
+
+    async def _abort(self, code, details):
+        self._code = code
+        self._details = details
+        raise grpc.aio.AbortError()
 
     def invocation_metadata(self):
         return self._metadata
@@ -3649,13 +3665,13 @@ class _FakeGrpcContext:
         return "ipv4:1.2.3.4:5678"
 
     def code(self):
-        return None
+        return self._code
 
     def is_active(self):
         return True
 
     def details(self):
-        return ""
+        return self._details
 
 
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
@@ -3674,7 +3690,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             try:
                 async for _ in servicer.ModelStreamInfer(iterator, _FakeGrpcContext()):
                     pass
-            except asyncio.CancelledError:
+            except grpc.aio.AbortError:
                 self.assertFalse(log_failure)
             except RuntimeError as error:
                 self.assertTrue(log_failure)
@@ -5227,7 +5243,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
-        ) as info, self.assertRaises(asyncio.CancelledError):
+        ) as info, self.assertRaises(grpc.aio.AbortError):
             await _drain(
                 servicer.ModelStreamInfer(
                     _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
@@ -5623,12 +5639,16 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
                 return stream()
 
         servicer = DashScInferenceServicer(backend_visitor=_CancelVisitor())
-        with self.assertRaises(asyncio.CancelledError):
+        context = _FakeGrpcContext()
+        with self.assertRaises(grpc.aio.AbortError):
             await _drain(
                 servicer.ModelStreamInfer(
-                    _areq_iter([self._request("cancel")]), _FakeGrpcContext()
+                    _areq_iter([self._request("cancel")]), context
                 )
             )
+        context.abort.assert_awaited_once_with(
+            grpc.StatusCode.CANCELLED, "Request handling cancelled"
+        )
 
         span = self._finished_spans()[-1]
         self.assertEqual(span.status.status_code.name, "ERROR")
@@ -5734,6 +5754,192 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(span.end_time)
         self.assertEqual(span.status.status_code.name, "ERROR")
         self.assertIsNone(tracing.CURRENT_TRACE_STATE.get())
+
+
+class _ControlledCancellationStream(_FakeAsyncStream):
+    def __init__(self, chunks=()):
+        super().__init__(chunks)
+        self.waiting = asyncio.Event()
+        self.release = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def __anext__(self):
+        if self._emitted < len(self._chunks):
+            return await super().__anext__()
+        self.waiting.set()
+        await self.release.wait()
+        raise asyncio.CancelledError()
+
+    async def aclose(self):
+        await super().aclose()
+        self.closed.set()
+
+
+class DashScInferenceCancellationRpcTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.access_records = []
+        self.access_logged = asyncio.Event()
+
+        def capture_access(payload):
+            self.access_records.append(json.loads(payload))
+            self.access_logged.set()
+
+        log_patch = patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME),
+            "info",
+            side_effect=capture_access,
+        )
+        log_patch.start()
+        self.addCleanup(log_patch.stop)
+
+    async def _start_call(self, visitor, timeout=None):
+        self.frontend_server = grpc.aio.server()
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        self.addAsyncCleanup(servicer.close)
+        self.addAsyncCleanup(self.frontend_server.stop, 0)
+        predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(
+            servicer, self.frontend_server
+        )
+        port = self.frontend_server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(port, 0)
+        await self.frontend_server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        self.addAsyncCleanup(channel.close)
+        stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+        request = predict_v2_pb2.ModelInferRequest(
+            id="cancellation-test", model_name="default"
+        )
+        _add_input_tensor(request, "input_ids", "INT32", [1], struct.pack("<i", 42))
+        call = stub.ModelStreamInfer(_areq_iter([request]), timeout=timeout)
+        self.addCleanup(call.cancel)
+        return call
+
+    async def _assert_cancelled_terminal(self, call):
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.CANCELLED)
+        self.assertEqual(raised.exception.details(), "Request handling cancelled")
+        self.assertTrue(call.done())
+        await asyncio.wait_for(self.access_logged.wait(), timeout=3)
+
+    @staticmethod
+    def _chunk(finished=False):
+        return GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([9], dtype=torch.int32),
+                    finished=finished,
+                    aux_info=AuxInfo(input_len=1, output_len=1, reuse_len=0),
+                )
+            ]
+        )
+
+    async def test_internal_cancel_before_first_frame_sends_terminal_status(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream))
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        stream.release.set()
+        await self._assert_cancelled_terminal(call)
+        self.assertTrue(stream.aclose_called)
+        self.assertEqual(self.access_records[-1]["resp_count"], 0)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+        self.assertEqual(self.access_records[-1]["exc_type"], "CancelledError")
+
+    async def test_internal_cancel_after_output_sends_terminal_status(self):
+        stream = _ControlledCancellationStream([self._chunk()])
+        call = await self._start_call(_FakeVisitor(stream))
+        response = await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(_gen_ids(response), [9])
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        stream.release.set()
+        await self._assert_cancelled_terminal(call)
+        self.assertTrue(stream.aclose_called)
+        self.assertEqual(self.access_records[-1]["resp_count"], 1)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+
+    async def test_master_client_close_finishes_pending_frontend_rpc(self):
+        schedule_entered = asyncio.Event()
+
+        class ScheduleService(FlexlbServiceServicer):
+            async def Schedule(self, request, context):
+                schedule_entered.set()
+                await asyncio.Event().wait()
+                return FlexlbScheduleResponsePB(code=200, success=True)
+
+        server = grpc.aio.server()
+        self.addAsyncCleanup(server.stop, 0)
+        add_FlexlbServiceServicer_to_server(ScheduleService(), server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(port, 0)
+        await server.start()
+        master_client = MasterClient(
+            host_service=SimpleNamespace(
+                get_master_addr=lambda: f"127.0.0.1:{port - FLEXLB_GRPC_PORT_OFFSET}",
+                get_slave_addr=lambda: None,
+            ),
+            master_config=SimpleNamespace(master_default_timeout_ms=60000),
+        )
+        self.addAsyncCleanup(master_client.close)
+
+        class SchedulingVisitor:
+            async def enqueue(self, generate_input):
+                await master_client.get_backend_role_addrs(
+                    [], 1024, generate_input, generate_input.request_id
+                )
+                return _FakeAsyncStream([])
+
+        call = await self._start_call(SchedulingVisitor())
+        await asyncio.wait_for(schedule_entered.wait(), timeout=3)
+        await asyncio.wait_for(master_client.close(), timeout=3)
+        await self._assert_cancelled_terminal(call)
+        self.assertEqual(self.access_records[-1]["resp_count"], 0)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+
+    async def test_client_cancel_still_closes_backend_stream(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream))
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        self.assertTrue(call.cancel())
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(await call.code(), grpc.StatusCode.CANCELLED)
+        await asyncio.wait_for(stream.closed.wait(), timeout=3)
+        await asyncio.wait_for(self.access_logged.wait(), timeout=3)
+        self.assertEqual(self.access_records[-1]["status"], "CANCELLED")
+
+    async def test_client_deadline_still_closes_backend_stream(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream), timeout=1)
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.DEADLINE_EXCEEDED)
+        await asyncio.wait_for(stream.closed.wait(), timeout=3)
+        self.assertTrue(call.done())
+
+    async def test_server_stop_finishes_rpc_and_closes_backend_stream(self):
+        stream = _ControlledCancellationStream()
+        call = await self._start_call(_FakeVisitor(stream))
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        await self.frontend_server.stop(0)
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAVAILABLE)
+        await asyncio.wait_for(stream.closed.wait(), timeout=3)
+        self.assertTrue(call.done())
+
+    async def test_late_internal_cancel_preserves_completed_access_status(self):
+        stream = _ControlledCancellationStream([self._chunk(finished=True)])
+        call = await self._start_call(_FakeVisitor(stream))
+        response = await asyncio.wait_for(call.read(), timeout=3)
+        self.assertEqual(_gen_ids(response), [9])
+        await asyncio.wait_for(stream.waiting.wait(), timeout=3)
+        stream.release.set()
+        await self._assert_cancelled_terminal(call)
+        self.assertTrue(stream.aclose_called)
+        self.assertEqual(self.access_records[-1]["status"], "OK")
+        self.assertEqual(self.access_records[-1]["exc_type"], "CancelledError")
+        self.assertEqual(self.access_records[-1]["output_token_len"], 1)
 
 
 if __name__ == "__main__":
