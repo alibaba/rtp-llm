@@ -35,10 +35,30 @@ local_repository(
     path = "deps",
 )
 
+# Never overridden: the pip surface (requirements locks + pip.bzl) resolves to
+# this repository in both trees, so internal checkouts share the public copy
+# instead of mirroring it; index selection is injected through pip.bzl's
+# envsubst channel, not through this repository.
+local_repository(
+    name = "rtp_pip_deps",
+    path = "deps",
+)
+
 local_repository(
     name = "arch_config",
     path = "arch_config",
 )
+
+# Closed-impl seam: the public default is the internal_impls/ stub; the closed
+# checkout overrides the repository with internal_source/impls.bzl.
+local_repository(
+    name = "internal_impls",
+    path = "internal_impls",
+)
+
+load("@internal_impls//:impls.bzl", "internal_only_deps")
+
+internal_only_deps()
 
 load("@rtp_deps//:http.bzl", "http_deps")
 
@@ -60,7 +80,7 @@ load("@rules_python//python:repositories.bzl", "py_repositories")
 
 py_repositories()
 
-load("@rtp_deps//:pip.bzl", "pip_deps")
+load("@rtp_pip_deps//:pip.bzl", "pip_deps")
 
 pip_deps()
 

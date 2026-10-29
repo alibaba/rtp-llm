@@ -1,7 +1,9 @@
-package(default_visibility = ["//visibility:public"])
+load("@internal_impls//:impls.bzl", "extension_frontend_lib_deps", "extension_lib_deps", "extension_packages")
 load("@rules_python//python:packaging.bzl", "py_package")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
+
+package(default_visibility = ["//visibility:public"])
 exports_files([
     "http.bzl",
     "requirements_base.txt",
@@ -13,34 +15,28 @@ exports_files([
     "requirements_rocm.txt",
 ])
 
+# Closed-model seam: the @internal_impls stub swaps under the closed override.
 py_package(
     name = "extension_package",
-    deps = [
-    ],
-    packages = [
-        "rtp_llm"
-    ],
+    deps = [":extension_lib"],
+    packages = extension_packages(),
 )
-
 
 py_package(
     name = "extension_package_frontend",
-    deps = [
-    ],
-    packages = [
-        "rtp_llm"
-    ],
+    deps = [":extension_frontend_lib"],
+    packages = extension_packages(),
 )
 
 py_library(
     name = "extension_frontend_lib",
-    deps = [],
+    deps = extension_frontend_lib_deps(),
     visibility = ["//visibility:public"],
 )
 
 py_library(
     name = "extension_lib",
-    deps = [],
+    deps = extension_lib_deps(),
     visibility = ["//visibility:public"],
 )
 
