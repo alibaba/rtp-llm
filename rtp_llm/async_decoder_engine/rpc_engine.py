@@ -87,6 +87,9 @@ class LanguageCppEngine(BaseEngine):
                 None,  # chat_renderer is not needed for HTTP server startup
             )
 
+    def set_serving(self, serving: bool) -> None:
+        self.rtp_llm_op_.set_serving(serving)
+
     @override
     def _stop(self) -> None:
         # Stop the C++ request entry first so no more embedding calls are issued,

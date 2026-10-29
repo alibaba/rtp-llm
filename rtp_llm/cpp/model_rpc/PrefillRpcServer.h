@@ -84,6 +84,11 @@ private:
     void                            remoteGenerate(PrefillGenerateContext& prefill_context);
     void                            pollRemoteOutput(PrefillGenerateContext& prefill_context);
     static void mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
+    static void mergeFrontendContextMetrics(GenerateOutputsPB& response,
+                                            int64_t            token_num,
+                                            int64_t            token_num_with_cache,
+                                            int64_t            execute_time_us,
+                                            int64_t            execute_time_with_cache_us);
     static void mergeCacheReuseInfo(AuxInfoPB& aux_info,
                                     int        prefill_total_reuse_len,
                                     int        prefill_local_reuse_len,

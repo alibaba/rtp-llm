@@ -298,6 +298,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
             auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(parallelism_config.dp_rank));
             params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+            startKmonServiceStatus(params.metrics_reporter);
         }
         return params;
     } catch (const std::exception& e) {
@@ -472,7 +473,12 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
     }
 }
 
+void RtpLLMOp::setServing(bool serving) {
+    setKmonServiceServing(serving);
+}
+
 void RtpLLMOp::stop() {
+    setKmonServiceServing(false);
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
         if (model_rpc_service_) {
@@ -546,6 +552,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
+        .def("set_serving", &RtpLLMOp::setServing)
         .def("stop", &RtpLLMOp::stop);
 }
 

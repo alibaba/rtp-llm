@@ -240,6 +240,9 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.generation_prefill_capture_token_buckets = [32, 64, 96]
         config.prefill_capture_seq_lens = [17, 23]
         config.decode_capture_batch_sizes = [2, 7]
+        config.disable_dpc_random = True
+        config.rocm_disable_custom_ag = True
+        config.enable_fuse_kernels = False
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -252,6 +255,9 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
         self.assertEqual(restored.prefill_capture_seq_lens, [17, 23])
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
+        self.assertTrue(restored.disable_dpc_random)
+        self.assertTrue(restored.rocm_disable_custom_ag)
+        self.assertFalse(restored.enable_fuse_kernels)
 
     def test_core_only_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
@@ -266,7 +272,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 11, 15, 19, 20):
+        for size in (6, 12, 15, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):

@@ -3,6 +3,8 @@ import threading
 import time
 from typing import Optional
 
+from rtp_llm.metrics import kmonitor
+
 
 class FrontendShutdownManager:
     """Tracks frontend draining state and accepted in-flight requests."""
@@ -16,6 +18,7 @@ class FrontendShutdownManager:
         self._active_requests = 0
 
     def start_unavailable(self, reason: str) -> None:
+        kmonitor.set_serving(False)
         with self._lock:
             if self._unavailable:
                 return
@@ -30,6 +33,7 @@ class FrontendShutdownManager:
         )
 
     def start_draining(self, reason: str) -> None:
+        kmonitor.set_serving(False)
         with self._lock:
             if self._draining:
                 return
