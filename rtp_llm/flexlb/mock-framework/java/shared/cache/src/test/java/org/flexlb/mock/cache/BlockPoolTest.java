@@ -70,6 +70,8 @@ class BlockPoolTest {
             long allocated = owners.stream().map(Owner::block).distinct().count();
             long active = owners.stream().filter(o -> o.kind != CACHE).map(Owner::block).distinct().count();
             assertEquals(new BlockPool.Snapshot(32, 32 - (int) allocated, 32 - (int) active, (int) active), pool.snapshot());
+            var cached = new HashSet<>(owners.stream().filter(o -> o.kind == CACHE).map(Owner::block).toList());
+            assertEquals(owners.stream().filter(o -> o.kind != CACHE && cached.contains(o.block)).map(Owner::block).distinct().count(), pool.cachedActiveBlocks());
             for (var refKind : BlockPool.Kind.values())
                 assertEquals(owners.stream().filter(o -> o.kind == refKind).map(Owner::block).distinct().count(), pool.referencedBlocks(refKind));
         }

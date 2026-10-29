@@ -17,11 +17,11 @@ class HostCacheTest {
         try (var cache = cache(true, 4, 8)) {
             seed(cache, 1L, 2L, 3L, 4L);
             assertEquals(Set.of(1L, 2L, 3L, 4L), cache.snapshot(-1, true).keys());
-            assertEquals(2, cache.hostSnapshot().total() - cache.hostSnapshot().free());
+            assertEquals(4, cache.hostSnapshot().total() - cache.hostSnapshot().free());
             long version = cache.snapshot(-1, true).version();
             try (var lease = cache.acquire(4, List.of(1L, 2L, 3L, 4L)).lease()) {
                 assertNotNull(lease); assertEquals(4, lease.reusedTokens());
-                assertEquals(8, cache.hostSnapshot().free());
+                assertEquals(4, cache.hostSnapshot().free());
                 assertEquals(0, cache.snapshot(-1, false).availableBlocks());
                 assertEquals(version, cache.snapshot(-1, true).version());
                 assertEquals(KvCache.Failure.RETRYABLE, cache.acquire(1, List.of()).failure());
@@ -99,14 +99,28 @@ class HostCacheTest {
         assertEquals(4, cache.hostSnapshot().free()); assertEquals(4, cache.snapshot(-1, false).freeBlocks());
         assertFalse(lease.publish(List.of(1L), 1));
     }
-    @Test void watermarkRemainsTriggeredUntilPinnedOwnersCanReleaseEnoughToReachLow() {
+    @Test void watermarkCanUnregisterActiveCacheWithoutReleasingRequestBlocks() {
         try (var cache = new KvCache(1, 10, 0, LRU, true, 20, LRU, new KvCache.Watermark(.5, .9), null)) {
             var held = cache.acquire(8, List.of()).lease();
-            seed(cache, 1L); // High watermark reached; only this one idle block can move.
+            seed(cache, 1L); // High watermark reached; only this block is registered.
             assertEquals(8, cache.snapshot(-1, false).heldBlocks());
             held.publish(List.of(2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L), 8); held.close();
-            assertEquals(5, cache.snapshot(-1, false).freeBlocks(), "Continue toward low even though usage is now below high");
-            assertEquals(16, cache.hostSnapshot().free());
+            assertEquals(10, cache.snapshot(-1, false).freeBlocks());
+            assertEquals(11, cache.hostSnapshot().free());
+        }
+    }
+
+    @Test void fullHostKeepsBothItsKeysAndDeviceTransferSource() {
+        try (var cache = cache(true, 4, 1)) {
+            var lease = cache.acquire(4, List.of()).lease();
+            lease.publish(List.of(1L, 2L, 3L, 4L), 4);
+            assertEquals(0, cache.hostSnapshot().free());
+            assertEquals(Set.of(1L, 2L, 3L, 4L), cache.snapshot(-1, true).keys());
+            assertEquals(0, cache.snapshot(-1, false).freeBlocks(), "Active request keeps the demoted physical source");
+            assertEquals(1, cache.snapshot(-1, false).heldBlocks());
+            lease.close();
+            assertEquals(1, cache.snapshot(-1, false).freeBlocks());
+            assertEquals(Set.of(1L, 2L, 3L, 4L), cache.snapshot(-1, true).keys());
         }
     }
 

@@ -67,19 +67,21 @@ public final class KvCache implements AutoCloseable {
                     slots.add(new Slot(target, node));
                 } else {
                     // Host remains indexed; the request's working copy stays private.
-                    tree.unpin(node); slots.add(new Slot(target, null));
+                    slots.add(new Slot(target, node));
                 }
             } else slots.add(new Slot(direct.get(node), node));
         }
         while (allocated.hasNext()) slots.add(new Slot(allocated.next(), null));
+        matched.forEach(tree::unpin);
         var lease = new Lease(slots, matched.size()); active.add(lease);
+        balance();
         return new Admission(lease, null, device.generation());
     }
     private Admission rejected(Failure failure) { return new Admission(null, failure, device.generation()); }
     public long allocationGeneration() { return device.generation(); }
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
         var state = device.snapshot();
-        int indexed = tree.pinnedDeviceBlocks();
+        int indexed = device.cachedActiveBlocks();
         return new Snapshot(state.total(), state.available(), state.free(), state.active() - indexed, indexed,
             needKeys ? tree.version() : latestVersion, needKeys && latestVersion != tree.version() ? tree.keys() : Set.of());
     }
@@ -100,6 +102,7 @@ public final class KvCache implements AutoCloseable {
                 int need = (int) target - slots.size();
                 if (need > device.snapshot().available() || !makeDeviceFree(need)) return Failure.RETRYABLE;
                 for (var ref : Objects.requireNonNull(device.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
+                balance();
                 return null;
             }
         }
@@ -112,7 +115,7 @@ public final class KvCache implements AutoCloseable {
                     throw new IllegalArgumentException("Published prefix exceeds valid KV or allocated capacity");
                 for (int i = 0; i < keys.size(); i++) {
                     var slot = slots.get(i);
-                    if (slot.node != null && slot.node.key != keys.get(i))
+                    if (slot.key != null && !slot.key.equals(keys.get(i)))
                         throw new IllegalArgumentException("Computed prefix differs from reused blocks");
                 }
                 var publicationPins = new ArrayList<BlockTree.Node>();
@@ -124,9 +127,10 @@ public final class KvCache implements AutoCloseable {
                         if (node == null) {
                             if (deviceCache) {
                                 node = tree.insert(keys.get(i), parent, device.retain(slot.reference, CACHE), false);
-                                slot.node = node; tree.pin(node);
+                                slot.key = node.key;
                             } else if (host.snapshot().total() > 0) {
-                                if (!makeHostFree(1)) break; // Cache retention is optional; request success is not.
+                                // shortcut: Host-only stores retain a partial prefix; use atomic reservation if this mode matters.
+                                if (!makeHostFree(1)) break;
                                 var ref = Objects.requireNonNull(host.allocate(1, CACHE)).getFirst();
                                 node = tree.insert(keys.get(i), parent, ref, true);
                             } else break;
@@ -135,7 +139,7 @@ public final class KvCache implements AutoCloseable {
                         parent = node;
                     }
                     return true;
-                } finally { publicationPins.forEach(tree::unpin); }
+                } finally { publicationPins.forEach(tree::unpin); balance(); }
             }
         }
         @Override public void close() {
@@ -143,7 +147,6 @@ public final class KvCache implements AutoCloseable {
                 if (terminal) return;
                 int available = device.snapshot().available();
                 for (var slot : slots) {
-                    if (slot.node != null) tree.unpin(slot.node);
                     slot.reference.close();
                 }
                 slots.clear(); terminal = true; active.remove(this);
@@ -160,9 +163,9 @@ public final class KvCache implements AutoCloseable {
         tree.clear();
     }
     private boolean makeDeviceFree(int count) {
-        // Admission may drop idle cache directly, matching RTP's forced reclamation path.
+        // Forced reclamation removes the index; request references keep their physical blocks alive.
         while (device.snapshot().free() < count) {
-            if (!tree.evict(false) && !tree.evict(true)) return false;
+            if (!tree.evict(false)) return false;
         }
         return true;
     }
@@ -174,24 +177,25 @@ public final class KvCache implements AutoCloseable {
         if (balancing) return;
         balancing = true;
         try {
+            if (hostWatermark != null && host.snapshot().total() > 0) {
+                hostTriggered |= used(host) >= Math.ceil(host.snapshot().total() * hostWatermark.high());
+                int low = (int) Math.floor(host.snapshot().total() * hostWatermark.low());
+                while (hostTriggered && used(host) > low && tree.evict(true)) { }
+                hostTriggered &= used(host) > low;
+            }
             if (deviceWatermark != null) {
                 deviceTriggered |= used(device) >= Math.ceil(device.snapshot().total() * deviceWatermark.high());
                 int low = (int) Math.floor(device.snapshot().total() * deviceWatermark.low());
                 while (deviceTriggered && used(device) > low) {
                     var node = tree.movableDevice();
                     if (node == null) break;
-                    if (host.snapshot().total() > 0 && makeHostFree(1)) {
-                        var target = Objects.requireNonNull(host.allocate(1, CACHE)).getFirst();
-                        tree.relocate(node, target, true);
+                    if (host.snapshot().total() > 0) {
+                        var target = host.allocate(1, CACHE);
+                        if (target == null) break; // Target failure keeps the source registered.
+                        tree.relocate(node, target.getFirst(), true);
                     } else if (!tree.evict(false)) break;
                 }
                 deviceTriggered &= used(device) > low;
-            }
-            if (hostWatermark != null && host.snapshot().total() > 0) {
-                hostTriggered |= used(host) >= Math.ceil(host.snapshot().total() * hostWatermark.high());
-                int low = (int) Math.floor(host.snapshot().total() * hostWatermark.low());
-                while (hostTriggered && used(host) > low && tree.evict(true)) { }
-                hostTriggered &= used(host) > low;
             }
         } finally { balancing = false; }
     }
@@ -202,8 +206,8 @@ public final class KvCache implements AutoCloseable {
     private static int used(BlockPool pool) { return pool.snapshot().total() - pool.snapshot().free(); }
     private static final class Slot {
         final BlockPool.Reference reference;
-        BlockTree.Node node;
-        Slot(BlockPool.Reference reference, BlockTree.Node node) { this.reference = reference; this.node = node; }
+        Long key;
+        Slot(BlockPool.Reference reference, BlockTree.Node node) { this.reference = reference; key = node == null ? null : node.key; }
     }
     private static void validate(List<Long> keys) {
         if (keys == null || keys.stream().anyMatch(Objects::isNull) || new HashSet<>(keys).size() != keys.size())
