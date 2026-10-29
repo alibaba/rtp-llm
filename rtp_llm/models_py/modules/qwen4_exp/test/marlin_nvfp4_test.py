@@ -109,20 +109,21 @@ class MarlinNvfp4Test(unittest.TestCase):
 
     def test_graph_refreshes_values_ids_weights(self):
         for rank in (0, 1):
-            x, ids, weights = self.inputs(4, rank)
-            model = self.models[rank]
-            model(x, ids, weights)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = model(x, ids, weights)
-            for _ in range(3):
-                new = self.inputs(4, rank)
-                for dst, src in zip((x, ids, weights), new):
-                    dst.copy_(src)
-                expected = model(x, ids, weights)
-                graph.replay()
-                torch.cuda.synchronize()
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            for rows in (1, 4):
+                x, ids, weights = self.inputs(rows, rank)
+                model = self.models[rank]
+                model(x, ids, weights)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = model(x, ids, weights)
+                for _ in range(3):
+                    new = self.inputs(rows, rank)
+                    for dst, src in zip((x, ids, weights), new):
+                        dst.copy_(src)
+                    expected = model(x, ids, weights)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_concurrent_stream_workspaces(self):
         model = self.models[0]
@@ -216,6 +217,16 @@ class MarlinNvfp4Test(unittest.TestCase):
                 payload, "silu", None, None, False, None
             ).fused_expert_output
             torch.testing.assert_close(repeated, actual, rtol=0, atol=0)
+            one_row = self.inputs(1, 1)
+            one_payload = ExpertForwardPayload(
+                expert_x=one_row[0],
+                expert_topk_ids=one_row[1],
+                expert_topk_weights=one_row[2],
+            )
+            one_output = executor.execute(
+                one_payload, "silu", None, None, False, None
+            ).fused_expert_output
+            self.assert_reference(one_output, self.reference(*one_row, 1))
         for activation, expert_map, apply_input in [
             ("relu", None, False),
             ("silu", torch.zeros(8, device="cuda"), False),
