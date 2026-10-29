@@ -3,8 +3,19 @@ import copy
 import logging
 import queue
 import threading
+from contextlib import aclosing
 from dataclasses import asdict
-from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import torch
 
@@ -32,6 +43,7 @@ from rtp_llm.server.backend_rpc_server_visitor import (
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     BatchedTerminalOutputs,
+    FrontendMetricFrame,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
@@ -531,6 +543,25 @@ class Pipeline(object):
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
+        frontend_metric_observer: Optional[Callable[[Any], None]] = kwargs.pop(
+            "frontend_metric_observer", None
+        )
+        frontend_metric_unit_id = int(kwargs.pop("frontend_metric_unit_id", 0))
+        frontend_metric_side_channel = frontend_metric_observer is not None
+
+        # Preserve the public streaming/retry contract while asking the backend
+        # for private counter frames used by the frontend TPS accumulator.
+        backend_generate_config = generate_config
+        if frontend_metric_side_channel:
+            backend_generate_config = generate_config.model_copy(
+                update={"frontend_metric_streaming": True, "aux_info": True},
+                deep=True,
+            )
+        context_batch_size = (
+            1
+            if generate_config.has_num_beams()
+            else max(generate_config.num_return_sequences, 1)
+        )
 
         prepared = kwargs.pop("v41_inputs", None)
         if prepared is not None:
@@ -542,17 +573,32 @@ class Pipeline(object):
             token_ids = list(prepared.token_ids)
         token_ids = torch.tensor(token_ids, dtype=torch.int)
 
+        raw_metric_observer = None
+        if frontend_metric_observer is not None:
+
+            def raw_metric_observer(output: GenerateOutputs, attempt: int) -> None:
+                frontend_metric_observer(
+                    FrontendMetricFrame.from_output(
+                        output,
+                        attempt=attempt,
+                        context_batch_size=context_batch_size,
+                        unit_id=frontend_metric_unit_id,
+                    )
+                )
+
         input = GenerateInput(
             request_id=request_id,
             token_ids=token_ids,
             mm_inputs=mm_inputs,
-            generate_config=generate_config,
+            generate_config=backend_generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
             v41_inputs=prepared,
             group_size=kwargs.get("group_size", 1),
             group_id=kwargs.get("group_id", -1),
             headers=request_headers,
+            frontend_metric_tags=dict(kwargs.get("frontend_metric_tags", {})),
+            frontend_metric_observer=raw_metric_observer,
         )
 
         stop_word_strs = generate_config.stop_words_str
@@ -566,6 +612,7 @@ class Pipeline(object):
         generate_outputs_cache = GenerateOutputs()
 
         async def backend_stream():
+            stream = None
             try:
                 stream: AsyncGenerator[GenerateOutputs, None] = (
                     await self.backend_rpc_server_visitor.enqueue(input)
@@ -592,80 +639,87 @@ class Pipeline(object):
                     )
                 e.aux_info = aux_info_dict
                 raise
+            finally:
+                close = getattr(stream, "aclose", None)
+                if callable(close):
+                    await close()
 
         # TODO(xinfei.sxf) add batch and stop test
-        async for generate_outputs in backend_stream():
-            if not generate_outputs_cache.generate_outputs:
-                generate_outputs_cache.generate_outputs = (
+        async with aclosing(backend_stream()) as stream:
+            async for generate_outputs in stream:
+                if not generate_outputs_cache.generate_outputs:
+                    generate_outputs_cache.generate_outputs = (
+                        generate_outputs.generate_outputs
+                    )
+                else:
+                    generate_outputs_cache.generate_outputs = [
+                        out if out.finished else generate_outputs.generate_outputs[i]
+                        for i, out in enumerate(generate_outputs_cache.generate_outputs)
+                    ]
+                assert len(generate_outputs_cache.generate_outputs) == len(
                     generate_outputs.generate_outputs
                 )
-            else:
-                generate_outputs_cache.generate_outputs = [
-                    out if out.finished else generate_outputs.generate_outputs[i]
-                    for i, out in enumerate(generate_outputs_cache.generate_outputs)
-                ]
-            assert len(generate_outputs_cache.generate_outputs) == len(
-                generate_outputs.generate_outputs
-            )
-            begin_time = current_time_ms()
-            is_incremental = (
-                not generate_config.has_num_beams() and generate_config.is_streaming
-            )
-            if is_incremental:
-                (
-                    generate_texts,
-                    output_lens,
-                    decoding_states,
-                    token_buffers,
-                    ouput_tokens_list,
-                ) = self.decode_incremental_tokens(
-                    generate_config,
-                    generate_outputs_cache,
-                    stop_word_strs,
-                    stop_word_str_slices,
-                    stop_word_ids,
-                    stop_word_id_slices,
-                    decoding_states,
-                    token_buffers,
-                    ouput_tokens_list,
-                    **kwargs,
+                begin_time = current_time_ms()
+                is_incremental = (
+                    not generate_config.has_num_beams() and generate_config.is_streaming
                 )
-            else:
-                (
-                    generate_texts,
-                    output_lens,
-                    ouput_tokens_list,
-                ) = self.decode_non_incremental_tokens(
-                    generate_config,
-                    generate_outputs_cache,
-                    stop_word_strs,
-                    stop_word_str_slices,
-                    stop_word_ids,
-                    stop_word_id_slices,
-                    ouput_tokens_list,
-                    **kwargs,
-                )
-
-            kmonitor.report(
-                GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time
-            )
-
-            yield GenerateResponse(
-                generate_outputs=generate_outputs_cache, generate_texts=generate_texts
-            )
-            if generate_config.aux_info and all(
-                output.finished for output in generate_outputs_cache.generate_outputs
-            ):
-                kmonitor.report(
-                    GaugeMetrics.FT_ITERATE_COUNT_METRIC,
-                    generate_outputs_cache.generate_outputs[0].aux_info.iter_count,
-                )
-                if len(output_lens) > 0:
-                    kmonitor.report(
-                        GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC,
-                        sum(output_lens) / len(output_lens),
+                if is_incremental:
+                    (
+                        generate_texts,
+                        output_lens,
+                        decoding_states,
+                        token_buffers,
+                        ouput_tokens_list,
+                    ) = self.decode_incremental_tokens(
+                        generate_config,
+                        generate_outputs_cache,
+                        stop_word_strs,
+                        stop_word_str_slices,
+                        stop_word_ids,
+                        stop_word_id_slices,
+                        decoding_states,
+                        token_buffers,
+                        ouput_tokens_list,
+                        **kwargs,
                     )
-                break
+                else:
+                    (
+                        generate_texts,
+                        output_lens,
+                        ouput_tokens_list,
+                    ) = self.decode_non_incremental_tokens(
+                        generate_config,
+                        generate_outputs_cache,
+                        stop_word_strs,
+                        stop_word_str_slices,
+                        stop_word_ids,
+                        stop_word_id_slices,
+                        ouput_tokens_list,
+                        **kwargs,
+                    )
+
+                kmonitor.report(
+                    GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time
+                )
+
+                yield GenerateResponse(
+                    generate_outputs=generate_outputs_cache,
+                    generate_texts=generate_texts,
+                )
+                if generate_config.aux_info and all(
+                    output.finished
+                    for output in generate_outputs_cache.generate_outputs
+                ):
+                    kmonitor.report(
+                        GaugeMetrics.FT_ITERATE_COUNT_METRIC,
+                        generate_outputs_cache.generate_outputs[0].aux_info.iter_count,
+                    )
+                    if len(output_lens) > 0:
+                        kmonitor.report(
+                            GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC,
+                            sum(output_lens) / len(output_lens),
+                        )
+                    break
 
     @torch.inference_mode()
     async def batch_infer(
@@ -676,6 +730,8 @@ class Pipeline(object):
         generate_env_config=None,
         **kwargs: Any,
     ) -> List[GenerateResponse]:
+        frontend_metric_observer = kwargs.pop("frontend_metric_observer", None)
+        frontend_metric_tags = dict(kwargs.pop("frontend_metric_tags", None) or {})
         generate_config = self.create_generate_config(
             generate_config_json,
             len(self.tokenizer),
@@ -685,6 +741,15 @@ class Pipeline(object):
             **kwargs,
         )
         generate_config.is_streaming = False
+        if frontend_metric_observer is not None:
+            generate_config = generate_config.model_copy(
+                update={"frontend_metric_streaming": True}
+            )
+        context_batch_size = (
+            1
+            if generate_config.has_num_beams()
+            else max(generate_config.num_return_sequences, 1)
+        )
 
         inputs = []
         for i, prompt in enumerate(prompts):
@@ -714,6 +779,19 @@ class Pipeline(object):
                 )
 
             input_tensor = torch.tensor(token_ids, dtype=torch.int)
+            raw_metric_observer = None
+            if frontend_metric_observer is not None:
+
+                def raw_metric_observer(output, attempt, unit_id=i):
+                    frontend_metric_observer(
+                        FrontendMetricFrame.from_output(
+                            output,
+                            attempt=attempt,
+                            context_batch_size=context_batch_size,
+                            unit_id=unit_id,
+                        )
+                    )
+
             # Shallow copy is enough: GenerateConfig is treated as immutable from here on,
             # and at the RPC layer it is converted to a per-request protobuf so any brief
             # list aliasing across siblings is dropped before it reaches the engine.
@@ -723,6 +801,8 @@ class Pipeline(object):
                 mm_inputs=[],
                 generate_config=copy.copy(generate_config),
                 tokenizer=self.tokenizer,
+                frontend_metric_tags=frontend_metric_tags,
+                frontend_metric_observer=raw_metric_observer,
             )
             inputs.append(gen_input)
 

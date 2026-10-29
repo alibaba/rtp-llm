@@ -2,14 +2,17 @@ import asyncio
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+import torch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -17,6 +20,7 @@ from rtp_llm.server.backend_rpc_server_visitor import (
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse
 from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
 class _FakeTokenIds:
@@ -195,7 +199,133 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
         self.assertEqual(visitor._cache_key_block_size(), 1024)
 
 
+class BackendRPCServerVisitorFrontendCacheMetricTest(unittest.TestCase):
+    def test_frontend_cache_metrics_are_opt_in(self):
+        self.assertFalse(
+            BackendRPCServerVisitor._frontend_cache_metrics_enabled(
+                SimpleNamespace(frontend_metric_tags={})
+            )
+        )
+        self.assertTrue(
+            BackendRPCServerVisitor._frontend_cache_metrics_enabled(
+                SimpleNamespace(frontend_metric_tags={"source": "frontend"})
+            )
+        )
+
+    def test_reports_every_prompt_with_frontend_tags(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.seq_size_per_block = 16
+        visitor.cache_key_seed = 0
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
+        visitor.frontend_recent_cache_key_window = SimpleNamespace(
+            record=lambda keys: SimpleNamespace(
+                request_occurrences=len(keys),
+                request_hit_occurrences=1,
+                request_hit_ratio=0.5,
+            )
+        )
+        input = SimpleNamespace(
+            token_ids=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
+            frontend_metric_tags={
+                "rank_id": "0",
+                "server_id": "1",
+                "source": "test",
+            },
+        )
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+            side_effect=[[11, 12], [21, 22]],
+        ) as cache_keys, patch(
+            "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+        ) as metric_sink:
+            prompt_cache_keys = visitor._frontend_route_cache_keys(input)
+            visitor._report_frontend_cache_key_metrics(input, prompt_cache_keys)
+
+        self.assertEqual(cache_keys.call_count, 2)
+        ratio_calls = [
+            call
+            for call in metric_sink.report.call_args_list
+            if call.args[0] == GaugeMetrics.FRONTEND_RECENT_CACHE_KEY_HIT_RATIO_METRIC
+        ]
+        self.assertEqual(len(ratio_calls), 2)
+        self.assertEqual(ratio_calls[0].args[2], input.frontend_metric_tags)
+        self.assertFalse(
+            any(
+                call.args[0] == GaugeMetrics.RECENT_CACHE_KEY_HIT_RATIO_METRIC
+                for call in metric_sink.report.call_args_list
+            )
+        )
+
+
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_early_vit_failure_and_exception_are_reported_once(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        request = _FakeRouteInput()
+        request.frontend_metric_tags = {"priority": "7"}
+        failure = FlexlbResponse.error_response(987654, "ViT route failed")
+        visitor._get_master_route_addrs = AsyncMock(return_value=failure)
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor") as sink:
+            self.assertIs(await visitor.get_master_route_addrs(request), failure)
+            sink.report.assert_called_once_with(
+                AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
+                1,
+                {"priority": "7", "error_code": "987654"},
+            )
+        visitor._get_master_route_addrs = AsyncMock(
+            side_effect=RuntimeError("ViT metadata failed")
+        )
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor") as sink:
+            with self.assertRaisesRegex(RuntimeError, "ViT metadata failed"):
+                await visitor.get_master_route_addrs(request)
+            self.assertEqual(sink.report.call_count, 1)
+            self.assertEqual(sink.report.call_args.args[2]["priority"], "7")
+
+    async def test_returned_master_route_failure_reports_priority_once(self):
+        for response, expected_code in (
+            (FlexlbResponse.error_response(987654, "unknown code"), "987654"),
+            (FlexlbResponse.connection_failed_response(), None),
+        ):
+            with self.subTest(error_code=response.error_code):
+                visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+                visitor.seq_size_per_block = 16
+                visitor.cache_key_seed = 0
+                visitor.remote_vit = False
+                visitor.master_client = _FakeMasterClient()
+
+                async def route(**kwargs):
+                    return response
+
+                visitor.master_client.get_backend_role_addrs = route
+                visitor._route_cache_keys = lambda keys: keys
+                visitor._report_recent_cache_key_metrics = lambda keys: None
+                visitor._page_rr_route_cache_keys = False
+                visitor._page_rr_cp_size = 1
+                request = _FakeRouteInput()
+                request.frontend_metric_tags = {"priority": "80", "source": "dash_sc"}
+                with patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+                    return_value=[],
+                ), patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+                    return_value=_FakeInputPB(),
+                ), patch(
+                    "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+                ) as sink:
+                    self.assertIs(
+                        await visitor.get_master_route_addrs(request), response
+                    )
+                reports = [
+                    call
+                    for call in sink.report.call_args_list
+                    if call.args[0] == AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC
+                ]
+                self.assertEqual(len(reports), 1)
+                self.assertEqual(reports[0].args[2]["priority"], "80")
+                if expected_code is not None:
+                    self.assertEqual(reports[0].args[2]["error_code"], expected_code)
+
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16
@@ -236,7 +366,10 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL"]
 
+        received_cache_keys = []
+
         async def get_master_route_addrs(_input):
+            received_cache_keys.append(_input)
             return FlexlbResponse.error_response(
                 int(ExceptionType.MASTER_NO_AVAILABLE_WORKER), "no worker"
             )
@@ -247,6 +380,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(FtRuntimeException) as ctx:
                 await visitor.route_ips(_FakeInput())
 
+        self.assertEqual(len(received_cache_keys), 1)
         self.assertEqual(ctx.exception.exception_type, ExceptionType.ROUTE_ERROR)
         self.assertEqual(
             ctx.exception.rtp_error_code,
@@ -537,6 +671,39 @@ class _CapacityThenBatchSloExpiredModelRpcClient:
         )
 
 
+class _MetricRetryingModelRpcClient:
+    def __init__(self, first_metric_observed):
+        self.first_metric_observed = first_metric_observed
+        self.attempts = 0
+
+    @staticmethod
+    def metric_output(output_len):
+        return GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    aux_info=AuxInfo(
+                        output_len=output_len,
+                    )
+                )
+            ],
+            frontend_metric_only=True,
+            frontend_generate_token_num=output_len,
+            frontend_generate_execute_time_us=output_len * 10_000,
+        )
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        attempt = self.attempts
+        yield self.metric_output(attempt)
+        if attempt == 1:
+            # The visitor must run the observer as soon as it receives the
+            # side-channel frame, not after the non-streaming RPC completes.
+            if not self.first_metric_observed.is_set():
+                raise AssertionError("metric side-channel was buffered")
+            raise RuntimeError("StatusCode.UNAVAILABLE recvmsg:Connection timed out")
+        yield "successful-output"
+
+
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -548,7 +715,68 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.request_id_factory = None
         visitor.fill_request_info = lambda _input: None
         visitor.check_sp_supported = lambda _input: None
+        visitor._report_frontend_cache_key_metrics = lambda _input: None
         return visitor
+
+    async def test_native_batch_reuses_route_hashes_and_observes_each_item_once(self):
+        from rtp_llm.utils.base_model_datatypes import GenerateInput
+
+        outputs = [GenerateOutputs(frontend_input_len=3) for _ in range(2)]
+        client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=outputs))
+        visitor = self._visitor(client)
+        visitor.host_service = SimpleNamespace(service_available=True)
+        visitor.remote_vit = False
+        visitor.seq_size_per_block = 16
+        visitor.cache_key_seed = 0
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
+        visitor.master_client = _FakeMasterClient()
+        visitor.route_ips = visitor.get_master_route_addrs
+        visitor._report_recent_cache_key_metrics = Mock()
+        visitor._report_frontend_cache_key_metrics = Mock()
+        visitor._frontend_route_cache_keys = Mock(
+            side_effect=AssertionError("duplicate hash")
+        )
+        inputs = [
+            GenerateInput(
+                request_id=i,
+                token_ids=torch.tensor([1, 2, 3]),
+                mm_inputs=[],
+                generate_config=GenerateConfig(),
+                frontend_metric_tags={"priority": "70"},
+                frontend_metric_observer=Mock(),
+            )
+            for i in range(2)
+        ]
+        # A metrics sink failure must not hide another item's terminal result.
+        inputs[0].frontend_metric_observer.side_effect = ValueError("metrics failed")
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+            side_effect=[[11], [22]],
+        ) as hash_keys, patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            self.assertIs(await visitor.batch_enqueue(inputs), outputs)
+
+        self.assertEqual(hash_keys.call_count, 2)
+        self.assertEqual(len(visitor.master_client.calls), 2)
+        visitor._frontend_route_cache_keys.assert_not_called()
+        self.assertEqual(visitor._report_frontend_cache_key_metrics.call_count, 2)
+        for i, inp in enumerate(inputs):
+            self.assertFalse(hasattr(inp, "_frontend_batch_cache_probe"))
+            inp.frontend_metric_observer.assert_called_once_with(outputs[i], 0)
+            self.assertEqual(
+                visitor._report_frontend_cache_key_metrics.call_args_list[i].args,
+                (inp, [[11 if i == 0 else 22]]),
+            )
+        client.batch_enqueue.assert_awaited_once_with(inputs)
+
+    async def test_native_batch_disabled_does_not_probe_or_change_outputs(self):
+        outputs = [GenerateOutputs()]
+        client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=outputs))
+        visitor = self._visitor(client)
+        visitor._frontend_route_cache_keys = Mock()
+        self.assertIs(await visitor.batch_enqueue([_FakeInput()]), outputs)
+        visitor._frontend_route_cache_keys.assert_not_called()
+        client.batch_enqueue.assert_awaited_once()
 
     async def test_prefill_cp_rejects_full_sequence_outputs_before_rpc(self):
         client = _SuccessfulModelRpcClient(["unexpected-output"])
@@ -620,6 +848,78 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(retried_config.return_hidden_states)
         self.assertFalse(retried_config.return_all_hidden_states)
         self.assertEqual(retried_config.role_addrs, [])
+
+    async def test_metric_side_channel_is_observed_live_and_retry_is_segmented(self):
+        first_metric_observed = asyncio.Event()
+        client = _MetricRetryingModelRpcClient(first_metric_observed)
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        input = _FakeInput(is_streaming=False)
+        observed_attempts = []
+
+        def observe(_output, attempt):
+            observed_attempts.append(attempt)
+            if attempt == 0:
+                first_metric_observed.set()
+
+        input.frontend_metric_observer = observe
+        stream = await visitor.enqueue(input)
+        outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+        self.assertEqual(observed_attempts, [0, 1, 1])
+        self.assertEqual(client.attempts, 2)
+
+    async def test_metric_observer_failure_does_not_change_response(self):
+        client = _SuccessfulModelRpcClient(["successful-output"])
+        visitor = self._visitor(client)
+        input = _FakeInput(is_streaming=False)
+
+        def fail_observer(_output, _attempt):
+            raise RuntimeError("metric observer failure")
+
+        input.frontend_metric_observer = fail_observer
+        with self.assertLogs(level="ERROR"):
+            stream = await visitor.enqueue(input)
+            outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+
+    async def test_closing_public_stream_closes_backend_immediately(self):
+        closed = asyncio.Event()
+
+        class Client:
+            async def enqueue(self, _input):
+                try:
+                    yield "first-output"
+                    await asyncio.Event().wait()
+                finally:
+                    closed.set()
+
+        visitor = self._visitor(Client())
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        self.assertEqual(await stream.__anext__(), "first-output")
+        await stream.aclose()
+        self.assertTrue(closed.is_set())
+
+    async def test_cache_metrics_count_prompt_once_across_retry(self):
+        first_metric_observed = asyncio.Event()
+        client = _MetricRetryingModelRpcClient(first_metric_observed)
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        visitor._frontend_route_cache_keys = Mock(return_value=[[11, 12]])
+        visitor._report_frontend_cache_key_metrics = Mock()
+        request = _FakeInput(is_streaming=False)
+        request.frontend_metric_tags = {"source": "test"}
+        request.frontend_metric_observer = (
+            lambda output, attempt: first_metric_observed.set()
+        )
+        stream = await visitor.enqueue(request)
+        self.assertEqual([output async for output in stream], ["successful-output"])
+        visitor._frontend_route_cache_keys.assert_called_once_with(request)
+        visitor._report_frontend_cache_key_metrics.assert_called_once_with(
+            request, [[11, 12]]
+        )
 
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])

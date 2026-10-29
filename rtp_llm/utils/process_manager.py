@@ -51,6 +51,7 @@ class ProcessManager:
         pre_stop_drain_signal: bool = False,
         backend_post_frontend_drain_seconds: float = DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS,
         pre_exit_cleanup: Optional[Callable[[], None]] = None,
+        service_draining=None,
     ):
         if shutdown_timeout != -1 and shutdown_timeout <= 0:
             logging.warning(
@@ -63,6 +64,7 @@ class ProcessManager:
         self.shutdown_requested = False
         self.failure_detected = False
         self.pre_exit_cleanup = pre_exit_cleanup
+        self.service_draining = service_draining
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
         self.frontend_pre_stop_drain_seconds = normalize_non_negative_seconds(
@@ -110,10 +112,15 @@ class ProcessManager:
         logging.info(
             f"Process manager received signal {signum}, initiating shutdown..."
         )
+        self._mark_service_draining()
         if self._defer_first_sigterm_if_needed(signum):
             return
         self._cancel_deferred_sigterm_timer()
         self.shutdown_requested = True
+
+    def _mark_service_draining(self):
+        if self.service_draining is not None:
+            self.service_draining.set()
 
     def _defer_first_sigterm_if_needed(self, signum) -> bool:
         if not self._defer_first_sigterm or signum != signal.SIGTERM:
@@ -363,6 +370,7 @@ class ProcessManager:
         SIGINT here is the explicit parent-to-backend shutdown handoff so it
         can begin reaping its rank children before the outer manager escalates.
         """
+        self._mark_service_draining()
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
         self._used_pre_stop_drain_signal = False
         drain_deadline = self._make_deadline(drain_timeout)
@@ -811,6 +819,7 @@ class ProcessManager:
         Normal SIGTERM/SIGINT shutdown does NOT call this method; the signal
         handler sets shutdown_requested directly, leaving failure_detected=False.
         """
+        self._mark_service_draining()
         self.shutdown_requested = True
         self.failure_detected = True
 

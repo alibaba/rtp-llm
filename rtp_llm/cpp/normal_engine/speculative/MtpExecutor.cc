@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -1080,6 +1081,14 @@ void MtpExecutor::collectPrefillMetrics(const StreamGroups&  stream_groups,
         tps_execute_time_us = model_forward_us;
     }
 
+    if (metrics_collector.frontend_prefill_step) {
+        metrics_collector.frontend_prefill_step->publish(
+            {static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+             static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+             0,
+             tps_execute_time_us,
+             std::nullopt});
+    }
     tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
                                stream_groups.contextExecuteTokenSizeWithCache(),
                                0,
@@ -1190,6 +1199,23 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     metrics_collector.not_skip = true;
 
+    // Every successful prefill exit, including target-only requests, must
+    // reserve its final frame before publishing the completed engine sample.
+    auto collect_prefill_metrics = [&] {
+        metrics_collector.frontend_prefill_step = std::make_unique<FrontendMetricsStep<GenerateStreamPtr>>(
+            stream_groups.allStreams(),
+            isKmonMetricReportingEnabled() && isTpRank0() && !warm_up_ && !model_input.is_fake_stream);
+        if (isKmonMetricReportingEnabled()
+            && (metrics_reporter_ || !metrics_collector.frontend_prefill_step->empty())) {
+            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
+        }
+    };
+    auto dispatch_prefill_only = [&] {
+        auto result = isTpRank0() ? batch_stream_processor_->dispatchPrefillOnly(stream_groups) : absl::OkStatus();
+        metrics_collector.frontend_prefill_step.reset();
+        return result;
+    };
+
     // Any return or exception after DSpark PD work becomes possible must drain
     // local publication state. The normal path performs the TP-wide check below
     // and disarms this fallback; unwinding deliberately avoids collectives.
@@ -1263,9 +1289,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     if (target_only && !is_dspark_
         && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size, enable_ffn_disaggregate_)) {
-        if (metrics_reporter_) {
-            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-        }
+        collect_prefill_metrics();
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
@@ -1277,10 +1301,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             }
             return absl::OkStatus();
         }
-        if (isTpRank0()) {
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
-        }
-        return absl::OkStatus();
+        return dispatch_prefill_only();
     }
 
     // Prepare the draft prefill input on each TP root. Target-only MTP uses a
@@ -1388,15 +1409,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (target_only) {
-        if (metrics_reporter_) {
-            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-        }
+        collect_prefill_metrics();
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        if (isTpRank0()) {
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
-        }
-        return absl::OkStatus();
+        return dispatch_prefill_only();
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -1426,10 +1442,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
     }
 
-    // collect metrics
-    if (metrics_reporter_) {
-        collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-    }
+    // Use the exact timing sample recorded by the engine TPS collector.
+    collect_prefill_metrics();
 
     // dispatch
     {
@@ -1440,6 +1454,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)},
                                                      draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
+        metrics_collector.frontend_prefill_step.reset();
 
         releaseAllModelBuffers();
 
@@ -1900,9 +1915,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         draft_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    if (metrics_reporter_) {
+    metrics_collector.frontend_decode_step = std::make_unique<FrontendMetricsStep<GenerateStreamPtr>>(
+        stream_groups.allStreams(), isKmonMetricReportingEnabled() && isTpRank0() && !warm_up_);
+    if (isKmonMetricReportingEnabled() && (metrics_reporter_ || !metrics_collector.frontend_decode_step->empty())) {
         collectDecodeMetrics(
             stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, model_forward_us);
+    } else {
+        // Discard a delayed previous-batch numerator when collection is disabled.
+        // A later request must not inherit a non-adjacent speculative sample.
+        consumePendingAcceptLenMetrics();
     }
 
     auto dispatch_result = dispatchDecodeOutput(stream_groups,
@@ -2574,10 +2595,10 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         schedule_time_us = process_start_time_us;
     }
     MtpMetricsCollector metrics_collector;
-    auto                tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
-    auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                          && isTpRank0() && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                                    && isTpRank0() && !warm_up_ && !streams.empty());
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
@@ -2602,11 +2623,22 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
     // report metrics
-    if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
+    if (isKmonMetricReportingEnabled() && isTpRank0() && !warm_up_ && metrics_collector.not_skip
+        && (metrics_reporter_ || metrics_collector.frontend_decode_step)) {
         // decode metrics
         auto& tps_collector       = metrics_collector.tps_collector;
         auto& sp_engine_collector = metrics_collector.sp_engine_collector;
         auto  decode_time         = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (metrics_collector.frontend_decode_step) {
+            FrontendMetricUpdate update;
+            update.generate_tokens = sp_engine_collector.total_accepted_token_num;
+            update.execute_time_us = decode_time;
+            if (sp_engine_collector.total_propose_token_num > 0 && sp_engine_collector.total_stream_num > 0
+                && sp_engine_collector.total_accepted_token_num > 0) {
+                update.sp_tpot_us = sp_engine_collector.estimateTpotUs();
+            }
+            metrics_collector.frontend_decode_step->publish(update);
+        }
         if (sp_engine_collector.total_accepted_token_num) {
             tps_collector.addTokenSize(0,
                                        0,
@@ -2627,15 +2659,18 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
             tps_collector.addTokenSizeByPriority(accepted_counts_by_priority, decode_time);
         }
 
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
-        metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
-            nullptr, &metrics_collector.executor_collector);
-        tps_reporter_.report(&metrics_collector.tps_collector);
-        wall_tps_reporter_.report(&metrics_collector.tps_collector);
-        metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
-            nullptr, &metrics_collector.sp_engine_collector);
+        if (metrics_reporter_) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
+            metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
+                nullptr, &metrics_collector.executor_collector);
+            tps_reporter_.report(&metrics_collector.tps_collector);
+            wall_tps_reporter_.report(&metrics_collector.tps_collector);
+            metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
+                nullptr, &metrics_collector.sp_engine_collector);
+        }
     }
 
+    metrics_collector.frontend_decode_step.reset();
     return absl::OkStatus();
 }
 
