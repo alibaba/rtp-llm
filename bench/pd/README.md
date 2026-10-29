@@ -32,7 +32,7 @@ per-request nonce.
 
 ## Cost model
 
-`pd_cost_model.py`: P and D instance capacities measured on 32K input (5kpro CEP4PP2 / PPU TP4 / PPU TP8 prefill per prefix-hit ratio, PPU DEP8 / 5kpro TP4 decode at TPOT 15 ms) combined into QPS per GPU for homogeneous 5kpro PD, heterogeneous 5kpro P -> PPU D and homogeneous PPU PD, with the ideal P:D ratio and the smallest integer instance mix within 5% of the best. `--out-tokens`, `--price-5kpro`, `--price-ppu`, `--max-inst`. The capacities are constants at the top of the script; update them when re-measured.
+`pd_cost_model.py`: measured P and D instance capacities (32K input; 5kpro CEP4PP2 / PPU TP4 / PPU TP8 prefill per prefix-hit ratio, PPU DEP8 / 5kpro TP4 decode at TPOT 15 ms) turned into, per hit ratio: prefill cost efficiency per GPU (5kpro vs PPU), QPS per GPU and per cost unit at the ideal P:D ratio for homogeneous 5kpro PD, heterogeneous 5kpro P -> PPU D and homogeneous PPU PD (with the heterogeneous gain over each), and the best whole-machine mix within the available machines with its idle share (over-provisioned side and whole system, cost-weighted). Options: `--out-tokens`, `--price-5kpro` (default 1), `--price-ppu` (default 1.6), `--5kpro-hosts`, `--ppu-hosts`. The capacities are constants at the top of the script; update them when re-measured.
 
 ## Wire sampling
 
