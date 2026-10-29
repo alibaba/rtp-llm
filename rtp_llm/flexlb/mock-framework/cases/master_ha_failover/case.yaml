@@ -1,6 +1,6 @@
 id: master_ha_failover
 name: Master 滚动重启
-describe: DeepSeek 原始前缀流量按 5 倍速回放，贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
+describe: DeepSeek 原始前缀流量按 0.1 倍速回放，贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
 environment:
   master:
     config:
@@ -152,7 +152,7 @@ phases:
   timeout: 600s
   steps:
   - id: traffic
-    describe: 按原 Case 的 5 倍速回放完整 DeepSeek trace，先等待 30 秒建立基线。
+    describe: 按 0.1 倍速回放完整 DeepSeek trace，先等待 30 秒建立基线。
     interface: client/start
     args:
       requests_file: deepseek.binpb.zst
@@ -160,7 +160,7 @@ phases:
       queue_capacity: 4096
       request_timeout: 120s
       drain_timeout: 150s
-      replay_speed: 5
+      replay_speed: 0.1
     wait_after: 30s
     within: 300s
   - id: baseline

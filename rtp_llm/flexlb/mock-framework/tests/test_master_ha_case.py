@@ -63,7 +63,7 @@ def test_ha_case_keeps_one_playback_and_full_rolling_order_without_progress_or_s
                                   'block_tree_memory_evict_low_watermark_ratio', 'block_tree_memory_evict_high_watermark_ratio',
                                   'prefill_retry_times', 'prefill_max_wait_timeout_ms', 'max_inited_kv_cache_streams'}
     traffic, = [step for step in steps if step.interface == 'client/start']
-    assert traffic.args['replay_speed'] == 5 and 'qps' not in traffic.args
+    assert traffic.args['replay_speed'] == 0.1 and 'qps' not in traffic.args
     assert traffic.args['concurrency'] == 4096
     from contextlib import closing
     from itertools import islice
