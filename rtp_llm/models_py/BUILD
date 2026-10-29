@@ -443,3 +443,21 @@ exports_files(
     ["utils/cutlass.py"],
     visibility = ["//rtp_llm/models_py/utils/test:__pkg__"],
 )
+
+# Kernel-only test closure for the qwen4_exp qsa prefill-score scorer: the
+# real production module and the torch and triton wheels it imports.
+py_library(
+    name = "qsa_prefill_score_testlib",
+    testonly = True,
+    srcs = [
+        "kernels/cuda/qsa/indexer_prefill_score.py",
+    ],
+    data = [
+        "//rtp_llm:__init__.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)

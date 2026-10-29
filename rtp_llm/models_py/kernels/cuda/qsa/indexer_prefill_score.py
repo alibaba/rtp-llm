@@ -64,12 +64,15 @@ def try_prefill_score(q, block_keys):
         and block_keys.shape[2] == d
         and h == 4
         and d == 128
-        and 128 <= s <= 8192
-        and 32 <= n <= 2048
+        and 128 <= s <= 20480
+        and 32 <= n <= 5120
         and q.stride(-1) == block_keys.stride(-1) == 1
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device)[0] >= 8
     ):
+        return None
+    major = torch.cuda.get_device_capability(q.device)[0]
+    # The validated long-prefill extension is restricted to SM90.
+    if major < 8 or (major != 9 and (s > 8192 or n > 2048)):
         return None
     out = torch.empty((b, s, n), device=q.device, dtype=torch.float32)
     _prefill_score[(b, triton.cdiv(s, 16), triton.cdiv(n, 128))](
