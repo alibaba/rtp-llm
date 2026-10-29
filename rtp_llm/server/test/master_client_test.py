@@ -1,6 +1,9 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+import grpc
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -8,15 +11,22 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    CANCEL_REASON_CLIENT_CANCELLED,
+    CANCEL_REASON_DEADLINE_EXCEEDED,
     HIGHER_PRIORITY_AHEAD,
     RESOURCE_EXHAUSTED,
     SAME_PRIORITY_AHEAD,
     SCHEDULE_FAILURE_REASON_UNSPECIFIED,
+    FlexlbCancelResponsePB,
     FlexlbScheduleRequestPB,
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
 )
-from rtp_llm.server.master_client import MasterClient
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
+    FlexlbServiceServicer,
+    add_FlexlbServiceServicer_to_server,
+)
+from rtp_llm.server.master_client import FLEXLB_GRPC_PORT_OFFSET, MasterClient
 
 
 class _FakeMasterConfig:
@@ -131,6 +141,228 @@ class _RejectingMasterClient(MasterClient):
 class _FakeInputPB:
     def SerializeToString(self):
         return b"serialized-input"
+
+
+class _ConcurrentScheduleService(FlexlbServiceServicer):
+    def __init__(self):
+        self.started = {1: asyncio.Event(), 2: asyncio.Event()}
+        self.release = asyncio.Event()
+        self.failure_status = None
+        self.schedule_requests = []
+        self.cancel_requests = []
+        self.response = FlexlbScheduleResponsePB(
+            code=200,
+            success=True,
+            server_status=[
+                FlexlbServerStatusPB(
+                    role="PREFILL",
+                    server_ip="10.0.0.8",
+                    http_port=8000,
+                    grpc_port=8001,
+                )
+            ],
+        )
+
+    async def Schedule(self, request, context):
+        self.schedule_requests.append(request.request_id)
+        if request.request_id in self.started:
+            self.started[request.request_id].set()
+            if request.request_id == 1 and self.failure_status is not None:
+                await context.abort(self.failure_status, "schedule rejected")
+            await self.release.wait()
+        return self.response
+
+    async def Cancel(self, request, context):
+        self.cancel_requests.append((request.request_id, request.reason))
+        return FlexlbCancelResponsePB(found=True)
+
+
+class MasterClientChannelIsolationTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.service = _ConcurrentScheduleService()
+        self.server = grpc.aio.server()
+        add_FlexlbServiceServicer_to_server(self.service, self.server)
+        port = self.server.add_insecure_port("127.0.0.1:0")
+        await self.server.start()
+        self.address = f"127.0.0.1:{port - FLEXLB_GRPC_PORT_OFFSET}"
+        self.target = f"127.0.0.1:{port}"
+        self.client = MasterClient(master_config=_FakeMasterConfig())
+        self.channel = self.client._get_channel(self.target)
+        self.requests = []
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await asyncio.gather(*self.requests, return_exceptions=True)
+        await self.server.stop(0)
+
+    async def _start_pending_request(self, request_id, timeout_s=None):
+        pending = asyncio.create_task(
+            self.client._send_schedule_request(
+                self.address,
+                FlexlbScheduleRequestPB(request_id=request_id),
+                timeout_s,
+                request_id,
+            )
+        )
+        self.requests.append(pending)
+        await asyncio.wait_for(self.service.started[request_id].wait(), timeout=5)
+        self.assertFalse(pending.done())
+        return pending
+
+    async def _start_slave(self):
+        service = _ConcurrentScheduleService()
+        service.release.set()
+        server = grpc.aio.server()
+        add_FlexlbServiceServicer_to_server(service, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        self.addAsyncCleanup(server.stop, 0)
+        await server.start()
+        self.client.host_service = SimpleNamespace(
+            get_master_addr=lambda: self.address,
+            get_slave_addr=lambda: f"127.0.0.1:{port - FLEXLB_GRPC_PORT_OFFSET}",
+        )
+        return service
+
+    async def _assert_peer_completes_and_channel_is_reused(self, peer):
+        self.service.release.set()
+        response = await asyncio.wait_for(peer, timeout=5)
+        self.assertEqual(response.code, 200)
+        self.assertIs(self.client._get_channel(self.target), self.channel)
+        response = await self.client._send_schedule_request(
+            self.address, FlexlbScheduleRequestPB(request_id=3), 5, 3
+        )
+        self.assertEqual(response.code, 200)
+        self.assertIs(self.client._get_channel(self.target), self.channel)
+
+    async def _assert_rpc_failure_is_isolated(self, status):
+        peer = await self._start_pending_request(2)
+        self.service.failure_status = status
+        with self.assertLogs("route_logger", level="ERROR"):
+            response = await self.client._send_schedule_request(
+                self.address, FlexlbScheduleRequestPB(request_id=1), 5, 1
+            )
+        self.assertIsNone(response)
+        await self._assert_peer_completes_and_channel_is_reused(peer)
+        self.assertEqual(self.service.cancel_requests, [])
+
+    async def test_resource_exhausted_does_not_cancel_shared_channel_peer(self):
+        await self._assert_rpc_failure_is_isolated(grpc.StatusCode.RESOURCE_EXHAUSTED)
+
+    async def test_unavailable_does_not_cancel_shared_channel_peer(self):
+        await self._assert_rpc_failure_is_isolated(grpc.StatusCode.UNAVAILABLE)
+
+    async def test_transport_failure_retries_slave_without_cancelling_peer(self):
+        slave = await self._start_slave()
+        peer = await self._start_pending_request(2)
+        self.service.failure_status = grpc.StatusCode.RESOURCE_EXHAUSTED
+        with self.assertLogs("route_logger", level="ERROR"):
+            response = await self.client.get_backend_role_addrs(
+                [11, 12], 1024, _FakeInput(), 1
+            )
+        self.assertTrue(response.is_ok)
+        self.assertFalse(response.connection_failed)
+        self.assertEqual(response.role_addrs[0].ip, "10.0.0.8")
+        self.assertEqual(response.role_addrs[0].grpc_port, 8001)
+        self.assertEqual(self.service.schedule_requests, [2, 1])
+        self.assertEqual(slave.schedule_requests, [1])
+        self.assertFalse(peer.done())
+        await self._assert_peer_completes_and_channel_is_reused(peer)
+        self.assertEqual(self.service.cancel_requests, [])
+        self.assertEqual(slave.cancel_requests, [])
+
+    async def test_both_transport_failures_return_connection_failed(self):
+        slave = await self._start_slave()
+        peer = await self._start_pending_request(2)
+        self.service.failure_status = grpc.StatusCode.UNAVAILABLE
+        slave.failure_status = grpc.StatusCode.UNAVAILABLE
+        with self.assertLogs("route_logger", level="ERROR"):
+            response = await self.client.get_backend_role_addrs(
+                [11, 12], 1024, _FakeInput(), 1
+            )
+        self.assertTrue(response.connection_failed)
+        self.assertFalse(response.is_ok)
+        self.assertEqual(self.service.schedule_requests, [2, 1])
+        self.assertEqual(slave.schedule_requests, [1])
+        self.assertFalse(peer.done())
+        await self._assert_peer_completes_and_channel_is_reused(peer)
+        self.assertEqual(self.service.cancel_requests, [])
+        self.assertEqual(slave.cancel_requests, [])
+
+    async def test_business_rejection_does_not_retry_slave(self):
+        slave = await self._start_slave()
+        self.service.release.set()
+        self.service.response = FlexlbScheduleResponsePB(
+            code=int(ExceptionType.PRIORITY_ADMISSION_REJECTED),
+            admission_reject_reason=int(AdmissionRejectReason.SAME_PRIORITY_AHEAD),
+            error_message="same-priority request ahead",
+        )
+        with self.assertLogs("route_logger", level="ERROR"):
+            with self.assertRaises(FtRuntimeException) as raised:
+                await self.client.get_backend_role_addrs(
+                    [11, 12], 1024, _FakeInput(), 1
+                )
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.PRIORITY_ADMISSION_REJECTED
+        )
+        self.assertEqual(
+            raised.exception.admission_reject_reason,
+            AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+        )
+        self.assertEqual(self.service.schedule_requests, [1])
+        self.assertEqual(slave.schedule_requests, [])
+        self.assertIs(self.client._get_channel(self.target), self.channel)
+        self.assertEqual(self.service.cancel_requests, [])
+
+    async def test_deadline_cancels_only_expired_request(self):
+        peer = await self._start_pending_request(2)
+        with self.assertLogs("route_logger", level="ERROR"):
+            expired = await self._start_pending_request(1, timeout_s=0.1)
+            with self.assertRaises(FtRuntimeException) as raised:
+                await asyncio.wait_for(expired, timeout=5)
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.DEADLINE_EXCEEDED
+        )
+        self.assertEqual(
+            self.service.cancel_requests, [(1, CANCEL_REASON_DEADLINE_EXCEEDED)]
+        )
+        await self._assert_peer_completes_and_channel_is_reused(peer)
+
+    async def test_task_cancel_cancels_only_requested_rpc(self):
+        peer = await self._start_pending_request(2)
+        cancelled = await self._start_pending_request(1)
+        self.assertTrue(cancelled.cancel())
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(cancelled, timeout=5)
+        self.assertEqual(
+            self.service.cancel_requests, [(1, CANCEL_REASON_CLIENT_CANCELLED)]
+        )
+        await self._assert_peer_completes_and_channel_is_reused(peer)
+
+    async def test_local_exception_does_not_cancel_shared_channel_peer(self):
+        peer = await self._start_pending_request(2)
+        with patch(
+            "rtp_llm.server.master_client.start_client_span",
+            side_effect=RuntimeError("span setup failed"),
+        ), self.assertLogs("route_logger", level="ERROR"):
+            response = await self.client._send_schedule_request(
+                self.address, FlexlbScheduleRequestPB(request_id=1), 5, 1
+            )
+        self.assertIsNone(response)
+        await self._assert_peer_completes_and_channel_is_reused(peer)
+        self.assertEqual(self.service.cancel_requests, [])
+
+    async def test_owner_close_cancels_pending_rpcs_and_closes_channel(self):
+        first = await self._start_pending_request(1)
+        second = await self._start_pending_request(2)
+        await self.client.close()
+        results = await asyncio.wait_for(
+            asyncio.gather(first, second, return_exceptions=True), timeout=5
+        )
+        self.assertTrue(
+            all(isinstance(result, asyncio.CancelledError) for result in results)
+        )
+        self.assertEqual(self.channel.get_state(), grpc.ChannelConnectivity.SHUTDOWN)
+        self.assertEqual(self.client._channels, {})
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
