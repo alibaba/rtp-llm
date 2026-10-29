@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, NamedTuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -163,6 +164,52 @@ def canonicalize_topk_output(out: torch.Tensor) -> None:
             sorted_indices,
         )
     )
+
+
+def _run_decode_topk(
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    out: torch.Tensor,
+    backend: str,
+) -> None:
+    """Select decode indices with the same stable tie rule as GLM53 prefill."""
+    topk, width = out.shape[1], logits.shape[1]
+    k_eff = min(topk, width)
+    out.fill_(-1)
+    stable = backend == "topk_v3_tie_break"
+    if k_eff > 0 and topk in (512, 1024, 2048) and _persistent_topk_enabled():
+        if stable:
+            # The ragged selector also accepts decode rows: their windows
+            # start at zero and end at the live, graph-updated context lengths.
+            rtp_llm_ops.topk_v3_tie_break(
+                logits, torch.zeros_like(lengths), lengths, out, topk, width
+            )
+        else:
+            op = (
+                rtp_llm_ops.topk_v3
+                if backend == "topk_v3"
+                else rtp_llm_ops.dsv4_persistent_topk
+            )
+            op(logits, lengths, out, _get_topk_workspace(logits.device), topk, width)
+    elif k_eff > 0:
+        columns = torch.arange(width, device=logits.device).view(1, width)
+        masked = torch.where(
+            columns < lengths.view(-1, 1),
+            logits,
+            torch.full_like(logits, float("-inf")),
+        )
+        if stable:
+            indices = torch.argsort(masked, dim=-1, descending=True, stable=True)[
+                :, :k_eff
+            ]
+        else:
+            indices = masked.topk(k_eff, dim=-1)[1]
+        out[:, :k_eff].copy_(indices.to(torch.int32))
+        ranks = torch.arange(topk, device=out.device).view(1, topk)
+        out.masked_fill_(ranks >= lengths.view(-1, 1), -1)
+    # Native selectors return an unordered set, even when its membership is
+    # stable. Give sparse attention a fixed reduction order in decode too.
+    canonicalize_topk_output(out)
 
 
 def _run_prefill_topk_torch(
@@ -447,14 +494,14 @@ class IndexerFP8(PoolBackedModule):
             raise ValueError(
                 f"Unsupported Prefill TopK backend: {prefill_topk_backend}"
             )
-        if decode_topk_backend not in ("dsv4_persistent", "topk_v3"):
+        if decode_topk_backend not in (
+            "dsv4_persistent",
+            "topk_v3",
+            "topk_v3_tie_break",
+        ):
             raise ValueError(f"Unsupported Decode TopK backend: {decode_topk_backend}")
         self.prefill_topk_backend = prefill_topk_backend
-        self._decode_topk_op = (
-            rtp_llm_ops.topk_v3
-            if decode_topk_backend == "topk_v3"
-            else rtp_llm_ops.dsv4_persistent_topk
-        )
+        self.decode_topk_backend = decode_topk_backend
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
@@ -924,33 +971,12 @@ class IndexerFP8(PoolBackedModule):
             )  # [B*q_len, T_max] fp32
             score = logits.view(bsz, q_len, T_max)
 
-            # TopK (with optional persistent radix-select)
-            K_eff = min(K, T_max)
-            score_2d = score.view(bsz * q_len, T_max)
-            lengths_i32 = compressed_len.view(bsz * q_len)
-            out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
-            out_topk_buffer.fill_(-1)
-            if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
-                self._decode_topk_op(
-                    score_2d,
-                    lengths_i32,
-                    out_topk_2d,
-                    _get_topk_workspace(score.device),
-                    K,
-                    T_max,
-                )
-            else:
-                if K_eff > 0:
-                    t_range = torch.arange(T_max, device=score.device).view(1, T_max)
-                    score_masked = torch.where(
-                        t_range < lengths_i32.view(-1, 1),
-                        score_2d,
-                        torch.full_like(score_2d, float("-inf")),
-                    )
-                    topk_idxs = score_masked.topk(K_eff, dim=-1)[1].to(torch.int32)
-                    out_topk_2d[:, :K_eff].copy_(topk_idxs)
-                    k_arange = torch.arange(K, device=out_topk_buffer.device).view(1, K)
-                    out_topk_2d.masked_fill_(k_arange >= lengths_i32.view(-1, 1), -1)
+            _run_decode_topk(
+                score.view(bsz * q_len, T_max),
+                compressed_len.view(bsz * q_len),
+                out_topk_buffer.view(bsz * q_len, K),
+                self.decode_topk_backend,
+            )
             return out_topk_buffer
         finally:
             self._clear_nested_pool()

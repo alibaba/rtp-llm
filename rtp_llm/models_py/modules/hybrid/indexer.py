@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+from torch import nn
+
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.dsv4.forward_metadata import (
@@ -18,7 +20,6 @@ from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, KVCacheRegionName
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
@@ -226,7 +227,7 @@ class Indexer(nn.Module):
                     "GLM53_PREFILL_INDEXER_TOPK_BACKEND", "topk_v3_tie_break"
                 ),
                 decode_topk_backend=os.environ.get(
-                    "GLM53_DECODE_INDEXER_TOPK_BACKEND", "topk_v3"
+                    "GLM53_DECODE_INDEXER_TOPK_BACKEND", "topk_v3_tie_break"
                 ),
             )
             return
