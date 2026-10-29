@@ -26,6 +26,7 @@ Run:
 
 from __future__ import annotations
 
+import unittest
 from typing import Tuple
 
 import torch
@@ -243,8 +244,7 @@ def test_lengths_2d_accepted():
 def test_non_current_cuda_device():
     """Both bindings must launch on the input tensor's device and stream."""
     if torch.cuda.device_count() < 2:
-        print("  [non-current CUDA device] SKIP: requires two GPUs")
-        return
+        raise unittest.SkipTest("non-current CUDA device regression requires two GPUs")
 
     torch.cuda.set_device(0)
     with torch.cuda.device(1):
@@ -262,8 +262,7 @@ def test_non_current_cuda_device():
 
 def test_rejects_mixed_cuda_devices():
     if torch.cuda.device_count() < 2:
-        print("  [mixed CUDA devices] SKIP: requires two GPUs")
-        return
+        raise unittest.SkipTest("mixed CUDA device regression requires two GPUs")
 
     logits = torch.randn(1, 2048, dtype=torch.float32, device="cuda:1")
     lengths = torch.full((1,), 2048, dtype=torch.int32, device="cuda:0")

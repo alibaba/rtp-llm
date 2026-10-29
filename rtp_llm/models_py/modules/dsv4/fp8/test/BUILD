@@ -78,8 +78,8 @@ _CONTRACT_TESTS = [
             "-k",
             "SwaDequantLargeStrideTest",
         ] if name == "test_swa_dequant_large_stride" else [],
-        gpu_count = 2 if name == "test_topk_v3" else 1,
-        tags = ["multi_device"] if name == "test_topk_v3" else [],
+        gpu_count = 2 if name in ["test_topk_v3", "test_dsv4_persistent_topk"] else 1,
+        tags = ["multi_device"] if name in ["test_topk_v3", "test_dsv4_persistent_topk"] else [],
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in _GPU_TESTS + _CONTRACT_TESTS
@@ -149,7 +149,7 @@ cuda13_sm100_py_test(
     )
     for name, gpu_count in [
         ("test_topk_v3", 2),
-        ("test_dsv4_persistent_topk", 1),
+        ("test_dsv4_persistent_topk", 2),
     ]
 ]
 

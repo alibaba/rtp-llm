@@ -30,6 +30,8 @@ _CP_HELPER_TESTS = [
 ]
 
 _MODEL_CONTRACT_TESTS = [
+    "test_strategy_select",
+    "test_flash_mla_probe",
     "test_mtp_hidden_buffer",
     "test_dspark_cuda_graph_contract",
     "test_dspark_runtime_config",

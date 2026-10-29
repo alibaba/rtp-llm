@@ -134,6 +134,21 @@ class CudaGroupedFp8Strategy(MoeStrategy):
     supported_moe_quant_method = "FP8_FP4"
     strategy_name = "grouped_fp8"
 
+    def can_handle(self, config: MoEConfigAdapter) -> bool:
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+            ep_group_unavailable_reason,
+        )
+
+        self.rejection_reason = None
+        supported = super().can_handle(config)
+        if (
+            not supported
+            and not self.skip_reason
+            and getattr(config, "expert_dtype", "fp4") == "fp8"
+        ):
+            self.rejection_reason = ep_group_unavailable_reason() or None
+        return supported
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         checker.check(config.moe_strategy in ("auto", cls.strategy_name))

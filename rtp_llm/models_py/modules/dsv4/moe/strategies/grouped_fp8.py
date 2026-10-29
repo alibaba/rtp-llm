@@ -273,7 +273,7 @@ def _ep_group():
 
 
 def ep_group_unavailable_reason() -> str:
-    """Why :func:`_ep_group` last returned None, for inclusion in error text."""
+    """Why the last EP availability check failed, for inclusion in error text."""
     return _ep_group_unavailable_reason
 
 
@@ -329,6 +329,10 @@ def _ll_buffer(ep: int, dim: int, n_experts: int):
         raise RuntimeError(
             f"{_DEEPEP_LL_ENV}=1 needs an initialised Group.TP process group."
         )
+    # This backend enables NVLink below. ACCL's constructor promotes its
+    # local mode to 1, but dispatch/combine independently read the environment;
+    # leave both on the same mode when the caller has not configured one.
+    os.environ.setdefault("ACCL_LOW_LATENCY_OPTIMIZE", "1")
     try:
         from deep_ep import Buffer
     except ImportError as exc:  # RDMA libs missing from the loader path
@@ -590,6 +594,8 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         The common factory checks FP8 storage before selecting this backend.
         Standalone callers still receive dtype/shape errors in setup_weights.
         """
+        global _ep_group_unavailable_reason
+        _ep_group_unavailable_reason = ""
         if not (
             cfg.dim % FP8_BLOCK == 0
             and cfg.moe_inter_dim % FP8_BLOCK == 0
@@ -598,11 +604,22 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             return False
         if cfg.ep_size == 1:
             return True
-        # EP needs a process group whose size matches ep_size, because the
-        # combine reduce-scatters over Group.TP. TP is the right group: this
-        # model's CP shards tokens over it (``cp.py`` all-gathers with
-        # ``Group.TP``), and ep_size is derived as tp_size * dp_size.
-        return _ep_group_size() == cfg.ep_size
+        # This backend currently exchanges over Group.TP. In mixed TP/DP
+        # topologies TP may cover only part of the EP world; reject that
+        # explicitly instead of entering collectives with the wrong peers.
+        group_size = _ep_group_size()
+        if group_size != cfg.ep_size:
+            if group_size:
+                _ep_group_unavailable_reason = (
+                    f"grouped_fp8 requires Group.TP size == ep_size, but "
+                    f"Group.TP size={group_size} and ep_size={cfg.ep_size}. "
+                    "Mixed TP/DP EP groups are not supported by this backend; "
+                    "use a topology with a matching TP/EP group."
+                )
+            elif not _ep_group_unavailable_reason:
+                _ep_group_unavailable_reason = "grouped_fp8 has no initialized EP group"
+            return False
+        return True
 
     def setup_weights(self, layer_weights: Dict) -> None:
         """Stack routed experts into the ``[E, N, K]`` FP8 buffers DeepGEMM reads.
@@ -1047,6 +1064,11 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                 "grouped_fp8 EP CUDA graphs require the DECODE role; "
                 "disable CUDA graphs for PREFILL/PDFUSION or use PD separation."
             )
+        # DeepEP LL exchanges runtime token counts within a fixed-capacity
+        # buffer and supports different rank-local graph batch sizes. The
+        # restriction below protects the NCCL all-gather path only.
+        if self._ll_ok:
+            return
         seen = self._captured_ns
         if seen is None:
             seen = self._captured_ns = set()

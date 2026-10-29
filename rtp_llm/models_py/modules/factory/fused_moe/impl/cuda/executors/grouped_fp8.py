@@ -11,6 +11,10 @@ from .fp8_fp4_base import Fp8Fp4ExecutorBase, split_moe_w13_gate_up
 
 
 class GroupedFp8Executor(Fp8Fp4ExecutorBase):
+    # The backend owns EP collectives, so an empty local rank must still enter
+    # execute() and participate in dispatch/combine with its nonempty peers.
+    execute_empty_inputs = True
+
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
         super().check_conditions(checker, config)

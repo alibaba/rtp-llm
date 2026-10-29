@@ -97,6 +97,49 @@ def _flat_exponents(biased: int = 127) -> np.ndarray:
 class ConvertExpertTest(unittest.TestCase):
     """The helper's contract, including the arity the caller depends on."""
 
+    def test_reconstructed_values_match_independent_e2m1_reference(self):
+        # Exercise every packed byte, including asymmetric low/high nibbles,
+        # signs and subnormals. Four blocks have different scale ranges so a
+        # permutation of either weights or block scales cannot pass.
+        n, k = 256, 256
+        packed = np.arange(n * k // 2, dtype=np.uint32).astype(np.uint8)
+        rows = np.arange(n)[:, None]
+        groups = np.arange(k // 32)[None, :]
+        exponents = (
+            123 + 3 * (rows // 128) + 2 * (groups // 4) + rows % 3 + groups % 4
+        ).astype(np.uint8)
+        raw = packed.reshape(n, k // 2)
+        codes = np.stack((raw % 16, raw // 16), axis=-1).reshape(n, k)
+        # E2M1 semantics, independent of the converter's LUT and unpack helper:
+        # exponent 0 is subnormal; other exponents have bias 1.
+        exponent = (codes.astype(np.int32) // 2) % 4
+        mantissa = codes % 2
+        magnitude = np.where(
+            exponent == 0,
+            mantissa * 0.5,
+            np.exp2(exponent - 1) * (1.0 + mantissa * 0.5),
+        )
+        signed = np.where(codes < 8, magnitude, -magnitude)
+        expected = signed * np.exp2(
+            np.repeat(exponents.astype(np.int32) - 127, 32, axis=1)
+        )
+        for verify in (False, True):
+            with self.subTest(verify=verify):
+                weight, scale, *_ = conv.convert_expert(
+                    packed.copy(),
+                    exponents.ravel().copy(),
+                    n,
+                    k // 2,
+                    "cpu",
+                    verify=verify,
+                )
+                quant = torch.frombuffer(bytearray(weight), dtype=torch.float8_e4m3fn)
+                quant = quant.float().reshape(n, k).numpy()
+                block_exp = np.frombuffer(scale, dtype=np.uint8).reshape(2, 2)
+                block_scale = np.exp2(block_exp.astype(np.int32) - 127)
+                actual = quant * block_scale.repeat(128, 0).repeat(128, 1)
+                np.testing.assert_array_equal(actual, expected)
+
     def _convert(self, codes, exponents, verify=True):
         weight_bytes, scale_bytes = _expert_pair(codes, exponents)
         return conv.convert_expert(

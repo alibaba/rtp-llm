@@ -161,6 +161,12 @@ py_library(
 )
 
 py_library(
+    name = "torch_patch",
+    srcs = ["utils/torch_patch.py"],
+    deps = [":torch"],
+)
+
+py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",

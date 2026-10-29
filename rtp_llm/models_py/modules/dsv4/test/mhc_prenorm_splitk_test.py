@@ -137,7 +137,7 @@ class MhcPrenormSplitKTest(unittest.TestCase):
         fn = self._fn(_MULT3, _H, seed=20260815)
         # 33 and 96 cross the kernel's 32-row token block; 33 also leaves the
         # last block partial, which is the store mask's path.
-        for tokens in (2, 8, 16, 32, 33, 96):
+        for tokens in (1, 2, 8, 16, 32, 33, 65, 96):
             for n_splits in (4, 16, 64):
                 with self.subTest(tokens=tokens, n_splits=n_splits):
                     x = self._inputs(tokens, _H, seed=1000 + tokens * 31 + n_splits)

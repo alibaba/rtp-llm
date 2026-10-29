@@ -130,10 +130,16 @@ class StrategyRegistry:
                 for s in strategies
                 if getattr(s, "skip_reason", None)
             ]
+            rejected = [
+                f"{s.__class__.__name__}: {s.rejection_reason}"
+                for s in strategies
+                if getattr(s, "rejection_reason", None)
+            ]
             logger.error(
                 "No suitable MOE strategy found. Config details: "
                 "quant_config=%r, ep_size=%r, world_size=%r, tp_size=%r, "
-                "use_deepep_low_latency=%r, skipped_for_missing_deps=%r",
+                "use_deepep_low_latency=%r, skipped_for_missing_deps=%r, "
+                "rejected_backends=%r",
                 quant_config,
                 getattr(config, "ep_size", None),
                 getattr(config, "world_size", None),
@@ -144,6 +150,7 @@ class StrategyRegistry:
                     False,
                 ),
                 skipped,
+                rejected,
             )
             if quant_method == "W8A8_INT8_PER_CHANNEL_COMPRESSED":
                 raise ValueError(
@@ -161,6 +168,11 @@ class StrategyRegistry:
                     f"(logical_experts={getattr(config, 'expert_num', None)}, "
                     "physical_experts="
                     f"{getattr(config, 'physical_expert_num', None)}). "
+                    f"{_requested_strategy_context(config)}"
+                )
+            if rejected:
+                raise ValueError(
+                    f"No suitable MOE strategy found. Rejected backends: {rejected}. "
                     f"{_requested_strategy_context(config)}"
                 )
             if skipped:

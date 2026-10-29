@@ -25,6 +25,7 @@ py_library(
         "modules/dsv4/decode/kv_write_decode_op.py",
         "modules/dsv4/fp8/__init__.py",
         "modules/dsv4/fp8/decode/__init__.py",
+        "modules/dsv4/fp8/decode/kv_write_decode_op.py",
         "modules/dsv4/fp8/decode/pool_slot_mapping.py",
         "modules/dsv4/kv_cache_utils.py",
     ],
@@ -34,6 +35,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm:torch_patch",
     ],
 )
 

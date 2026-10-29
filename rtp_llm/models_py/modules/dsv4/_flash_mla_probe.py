@@ -11,10 +11,9 @@ Availability is decided by whether the import succeeds, not by
 was *built*: the H20 DSV4 env loads a vendored flash_mla under torch 2.8.0+cu128
 and its sm_90a cubin fine, while gating on the runtime CUDA minor version made
 prefill succeed and the first decode step fail with "flash_mla wheel is required".
-A genuinely incompatible wheel makes the import itself raise, which is what the
-``except`` tuple is for -- including ``RuntimeError``, which is what a torch C++
-extension raises on an ABI mismatch or a duplicate op registration, and which used
-to escape and take the importing module down with it.
+An incompatible wheel can raise any ordinary exception during import, including
+an assertion or a torch extension registration error. Record that failure here;
+process-control exceptions such as KeyboardInterrupt and SystemExit propagate.
 """
 
 import logging
@@ -31,13 +30,7 @@ try:
     )
 
     FLASH_MLA_AVAILABLE = True
-except (
-    ImportError,
-    AttributeError,
-    OSError,
-    ValueError,
-    RuntimeError,
-) as exc:  # pragma: no cover - depends on the deployed wheel
+except Exception as exc:  # depends on the deployed wheel
     FLASH_MLA_IMPORT_ERROR = exc
     _log.warning(
         "[dsv4-fp8] flash_mla not available (%s); the FP8 sparse attention fast "

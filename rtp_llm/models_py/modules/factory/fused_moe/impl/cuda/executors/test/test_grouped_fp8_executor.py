@@ -7,11 +7,15 @@ import torch
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
+    FusedMoe,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors import grouped_fp8
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_router import (
+    Fp8Fp4Router,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeRuntimeConfig,
 )
@@ -21,15 +25,51 @@ from rtp_llm.utils.model_weight import W
 class _Backend(torch.nn.Module):
     def __init__(self, cfg):
         super().__init__()
+        self.rows = []
 
     def setup_weights(self, weights):
         self.weights = weights
 
     def forward(self, x, topk_weights, topk_ids):
+        self.rows.append(x.shape[0])
         return x.float() + 0.001
 
 
 class GroupedFp8ExecutorContractTest(unittest.TestCase):
+    def test_fused_moe_executes_empty_ep_rank(self):
+        cfg = Fp8Fp4MoeRuntimeConfig(
+            layer_id=0,
+            hidden_size=128,
+            moe_inter_dim=128,
+            expert_num=4,
+            moe_k=1,
+            n_shared_experts=0,
+            swiglu_limit=7.0,
+            ep_size=4,
+            ep_rank=0,
+            max_tokens_per_rank=8,
+            moe_strategy="grouped_fp8",
+            expert_dtype="fp8",
+            moe_w1_layout="gate_up",
+        )
+        weights = {
+            W.moe_w1: torch.zeros(1, 256, 128).to(torch.float8_e4m3fn),
+            W.moe_s1: torch.ones(1, 2, 1),
+            W.moe_w2: torch.zeros(1, 128, 128).to(torch.float8_e4m3fn),
+            W.moe_s2: torch.ones(1, 1, 1),
+        }
+        quant = FusedMoEQuantConfig()
+        with patch.object(grouped_fp8, "GroupedFP8Strategy", _Backend):
+            executor = grouped_fp8.GroupedFp8Executor(cfg, quant, weights)
+        moe = FusedMoe(Fp8Fp4Router(cfg, quant), executor, expert_num=4)
+        output = moe(
+            torch.empty(0, 128, dtype=torch.bfloat16),
+            torch.empty(0, 1),
+            torch.empty(0, 1, dtype=torch.int64),
+        )
+        self.assertEqual(output.shape, (0, 128))
+        self.assertEqual(executor.grouped.rows, [0])
+
     def test_factory_operands_preserve_gate_up_order_and_block_scales(self):
         for layout in ("gate_up", "up_gate"):
             with self.subTest(layout=layout):

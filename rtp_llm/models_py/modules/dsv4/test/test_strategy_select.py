@@ -100,6 +100,22 @@ class StrategySelectTest(unittest.TestCase):
             registry.register(cls())
         return registry
 
+    def test_factory_reports_ep_group_size_mismatch(self):
+        module = "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8"
+        with mock.patch(
+            module + "._has_grouped_fp8_kernel", return_value=True
+        ), mock.patch(module + "._ep_group_size", return_value=2):
+            with self.assertRaisesRegex(ValueError, r"Group.TP size=2 and ep_size=4"):
+                self._registry().get_strategy(self._config(ep=4))
+
+    def test_factory_reports_uninitialized_ep_group(self):
+        module = "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8"
+        with mock.patch(
+            module + "._has_grouped_fp8_kernel", return_value=True
+        ), mock.patch(module + "._ep_group_size", return_value=0):
+            with self.assertRaisesRegex(ValueError, "no initialized EP group"):
+                self._registry().get_strategy(self._config(ep=4))
+
     def test_factory_selects_hopper_for_local_and_ep_converted_experts(self):
         for ep in (1, 2, 4, 8):
             for requested in ("auto", "grouped_fp8"):
@@ -223,6 +239,14 @@ class GroupedFP8CaptureGuardTest(unittest.TestCase):
                 strat._assert_one_captured_size(16)
         self.assertIn("more than one batch size", str(cm.exception))
         self.assertIn("concurrency_limit", str(cm.exception))
+
+    def test_low_latency_accepts_different_rank_local_graph_sizes(self):
+        strat = self._strategy(ep_size=4, max_tokens_per_rank=8)
+        strat._ll_ok = True
+        with mock.patch(self.CAPTURING, return_value=True):
+            for rows in (1, 2, 4, 8):
+                strat._assert_one_captured_size(rows)
+        self.assertEqual(strat._captured_ns, set())
 
     def test_captured_size_below_scheduler_bound_raises(self):
         # A rank whose batch exceeds the graph falls back to eager while the others
