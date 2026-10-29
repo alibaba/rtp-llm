@@ -20,8 +20,7 @@ class RtpSchedulerTest {
     private RtpConfig config(String role, String expression, int batchSize, int tokenBudget) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         var config = (ObjectNode) root.path("component").path("config");
-        config.put("seq_size_per_block", 2).put("max_context_batch_size", batchSize)
-            .put("max_generate_batch_size", batchSize).put("max_batch_tokens_size", tokenBudget);
+        config.put("seq_size_per_block", 2).put("max_generate_batch_size", batchSize).put("max_batch_tokens_size", tokenBudget);
         ((ObjectNode) config.path("compute")).put("expression", expression);
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }

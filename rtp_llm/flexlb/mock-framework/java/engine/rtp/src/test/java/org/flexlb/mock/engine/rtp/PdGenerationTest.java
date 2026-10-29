@@ -339,6 +339,21 @@ class PdGenerationTest {
         }
     }
 
+    @Test void averageDecodeProgressDoesNotInventSpeculativeCompute() throws Exception {
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
+                Map.of("decode", Map.of("tokens_per_step", 2.6)));
+                var call = new Call(p, input(d, 1, 3, 8, 2000, true))) {
+            call.output(1, false, 1);
+            call.output(4, false, 3);
+            call.output(7, false, 3);
+            call.output(8, true, 1);
+            assertEquals("completed", call.next());
+            assertEquals(3, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            assertEquals(3, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
+            assertEquals(7, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+        }
+    }
+
     @Test void cumulativeNativeRequestTraversesPAndDWithActualPerTokenCompute() throws Exception {
         try (var p = node("prefill", 8, 15); var d = node("decode", 8, 15); var call = new Call(p, input(d, 1, 5, 4, 2000, false))) {
             long ttft = -1;

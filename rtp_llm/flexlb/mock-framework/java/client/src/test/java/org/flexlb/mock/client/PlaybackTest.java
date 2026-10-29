@@ -34,6 +34,8 @@ class PlaybackTest {
             assertTrue(result.done()); assertFalse(result.stopped()); assertTrue(result.errors().isEmpty(), result.toString());
             assertEquals(3, result.issued()); assertEquals(3, result.finished()); assertEquals(0, result.unsent());
             assertEquals(3, h.schedules.get());
+            assertTrue(h.generated.get().getGenerateConfig().getIgnoreEos());
+            assertEquals(input().getMaxNewTokens(), h.generated.get().getGenerateConfig().getMaxNewTokens());
         }
     }
     @Test void fullQueueFailsInsteadOfBlockingDroppingOrExceedingConcurrency() throws Exception {

@@ -2,7 +2,7 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、标准压缩输入播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集数据格式转换及 ViT/vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、标准压缩输入播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集格式仅支持离线转换，运行时只读新格式；ViT/vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## Scheduler 输入、执行完成、传输完成与状态查询
 
@@ -100,7 +100,7 @@ Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络�
 
 队列模型属于 Scheduler，不另建强制共享的 QueueModel 层。一个实现可以有独立 loading 队列，另一个可以把 loading 作为 waiting 成员的状态；抢占也可能回到 waiting 重新计算，而不是进入 swap。外部只通过操作和快照契约交互。公共请求事实需要逐步覆盖输入、缓存命中、已完成 Prefill、生成进度和本轮工作量；尚未实现分块 Prefill，不能把重复执行当作分块支持。
 
-当前 RTP 使用 FIFO waiting、持续 running 和请求上的容量/加载/输出/传输就绪状态。`max_context_batch_size`、`max_generate_batch_size` 控制 P/D 每批请求数，默认均为 1；`max_batch_tokens_size` 限制本轮 token 预算，0 表示当前 Mock 不额外限制；P 按完整输入长度准入，Compute 使用扣除命中后的长度，D 按本轮 verify token 数准入。P 初始分配遇到临时容量不足等待变化；D 初始分配也等待容量，已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP `GenerateStateMachine::handleRunning` 的行为。不是 vLLM 抢占/重算策略。
+当前 RTP 使用 FIFO waiting、持续 running 和请求上的容量/加载/输出/传输就绪状态。`max_generate_batch_size` 统一控制 P/D 每批请求数，默认 1；删除重复的 `max_context_batch_size`；`max_batch_tokens_size` 限制本轮 token 预算，0 表示当前 Mock 不额外限制；P 按完整输入长度准入，Compute 使用扣除命中后的长度，D 按本轮 verify token 数准入。P 初始分配遇到临时容量不足等待变化；D 初始分配也等待容量，已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP `GenerateStateMachine::handleRunning` 的行为。不是 vLLM 抢占/重算策略。
 
 按请求计数，不能直接使用 group/batch 容器的 size：
 
@@ -193,7 +193,7 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 `client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
 
-唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。当前 Request 仅实现文本请求：非空、非负 int32 token_ids，正 int32 max_new_tokens，可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。多模态、完整生成参数及真实观测尚未接通；不能把二进制格式接通等同于这些能力已实现。未知字段、非法请求及不支持的版本均拒绝。
+唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。当前 Request 仅实现文本请求：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。多模态、完整生成参数及真实观测尚未接通；不能把二进制格式接通等同于这些能力已实现。未知字段、非法请求及不支持的版本均拒绝。
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf Batch。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。Batch.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
 
@@ -640,19 +640,58 @@ environment:
       decode.seed: 42
 ```
 
-组件加载器负责读取自己的文件外壳。RTP 用 `RtpConfig.load()` 提取本组 compute，再调用 `ComputeModel.fromJson()`；共享 Compute 不认识 Runner 的 component/environment 格式，不再提供 fromComponentFile。测试探针自行提取配置。effective-config 保存补齐默认值后的结果。模型类型及语义校验来自 Java ComputeSpec/DecodeSpec/StoppingSpec，Python 不复制字段表；编译只处理组件配置结构，模型错误由 Java 启动加载器拒绝，编译通过不代表模型已验证。
+组件加载器负责读取自己的文件外壳。RTP 用 `RtpConfig.load()` 提取本组 compute，再调用 `ComputeModel.fromJson()`；共享 Compute 不认识 Runner 的 component/environment 格式，不再提供 fromComponentFile。测试探针自行提取配置。effective-config 顶层保存实际生效值，requested_config 保存规范化后的请求配置，pending_config 单列尚未实现的参数；启动日志同时打印待实现项。未实现值不混入生效字段。模型类型及语义校验来自 Java ComputeSpec/DecodeSpec/StoppingSpec，Python 不复制字段表；编译只处理组件配置结构，模型错误由 Java 启动加载器拒绝，编译通过不代表模型已验证。
 
 `ForwardBatch` 保留 DP、请求输入长度/cache 匹配/目标输出/已生成/stepTokens/优先级/图片原始 shape。Engine 构造 batch；ForwardModel 只返回 Duration。默认 FormulaForward 只接受一个非空 DP，不暗自合并多个 DP。
 
-公式复用生产 ArithmeticFormula 的函数、`param(name, value)`、`sum(...)`。param 初始值按解析时求值，只用常量；不新增参数映射。结果单位 ms，可保留到 ns，不设隐式 1ms 下限；未知变量、负数、非有限值和溢出报错。逐请求变量只能在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。`totalComputeTokens^2` 和 `sum(computeTokens^2)` 不等价。computeTokens=input−hit，contextTokens=input+generated，stepTokens 由 Engine 提供，图片不计算特征 token。
+公式复用生产 ArithmeticFormula 的函数、`param(name, value)`、`sum(...)`。param 初始值按解析时求值，只用常量；不新增参数映射。结果单位 ms，可保留到 ns，不设隐式 1ms 下限；未知变量、负数、非有限值和溢出报错。逐请求变量只能在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。RTP 另外绑定 cpSize、cpEnabled（0/1）、tpSize、dpSize，来自本实例实际配置；只有公式显式引用才参与求值，不自动按并行度缩放已有拟合公式。`totalComputeTokens^2` 和 `sum(computeTokens^2)` 不等价。computeTokens=input−hit，contextTokens=input+generated，stepTokens 由 Engine 提供，图片不计算特征 token。
 
 噪声先乘 scale，再加高斯；默认 scale=1，stddev_ms/stddev_ratio=0，二者按平方和开根合并。启用随机噪声须有 seed 与正的 max_deviation_ms，裁剪扰动后耗时下限为 0。按 seed、Engine 身份、角色和 batch 身份确定一次 Sample，不随调用顺序改变；不同真实 batch 使用不同身份。
 
 `plan()` 只算耗时，`SimulatedCompute.submit()` 才等待；Execution 可取消，唯一终态为 COMPLETED/CANCELLED。关闭取消未完成项并拒绝新任务，回调在独立虚拟线程执行。共享 Compute 不提交缓存、不释放 Engine 资源，也不把计时完成当请求成功。
 
-DecodeStepModel 默认每轮 1 token。显式 tokens_per_step（至少 1）表示确定性的平均 token 预算：第 n 轮提交 floor((n+1)*v)−floor(n*v)，最后一轮截断到剩余长度。它不能与非零推测参数组合，是 Mock 性能建模，不表示真实 MTP 的接受分布。推测配置用 draft_tokens、acceptance_rate、seed：按首次拒绝得到接受前缀 A，再提交纠正/奖励 token，即 C=A+1；固定独立接受率 α、草稿长 k 时是封顶几何模型，E[C]=1+α+…+α^k，见[经典推测解码论文](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)。这不宣称复现所有 MTP/EAGLE。计算按验证数收费，指标按实际提交数累计，KV 覆盖验证上下文，接近输出上限缩短草稿预算。
+DecodeStepModel 默认每轮 1 token。显式 tokens_per_step（至少 1）表示确定性的平均 token 预算：第 n 轮提交 ceil((n+1)*v)−ceil(n*v)，最后一轮截断到剩余长度。它不能与非零推测参数组合，是 Mock 性能建模，不表示真实 MTP 的接受分布。平均模型每请求每轮计一个 target 输入，不虚构 proposed/accepted 数量；KV 覆盖本轮产出之前的上下文，允许一次提交多个 token。真实投机模型仍按 draft 验证成本计数。推测配置用 draft_tokens、acceptance_rate、seed：按首次拒绝得到接受前缀 A，再提交纠正/奖励 token，即 C=A+1；固定独立接受率 α、草稿长 k 时是封顶几何模型，E[C]=1+α+…+α^k，见[经典推测解码论文](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)。这不宣称复现所有 MTP/EAGLE。计算按验证数收费，指标按实际提交数累计，KV 覆盖验证上下文，接近输出上限缩短草稿预算。
 
-StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概率要求 seed。固定 EOS hazard 是 Mock 的封顶几何近似，不是线上长度规律；遵守 min/max_new_tokens，ignore_eos 强制上限。P 按稳定请求身份只抽样一次，经 LOAD 传 stop_after，D 不重复抽样；跨过停止位置只提交允许部分，仍计验证成本。首 token 即结束时使用 PREFILL_COMPLETE 释放 D，不再执行 Decode。真实 observed 长度或输出覆盖由 Client 指定目标并 ignore_eos。
+StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概率要求 seed。固定 EOS hazard 是 Mock 的封顶几何近似，不是线上长度规律；遵守 min/max_new_tokens，ignore_eos 强制上限。P 按稳定请求身份只抽样一次，经 LOAD 传 stop_after，D 不重复抽样；跨过停止位置只提交允许部分，仍计验证成本。首 token 即结束时使用 PREFILL_COMPLETE 释放 D，不再执行 Decode。标准回放始终由 Client 指定固定目标并发送 ignore_eos=true，不再对已抽好的长度做第二次 EOS 抽样。当前 P 预抽整段停止长度仍是旧近似；将 EOS 决策归回实际产出 token 的 P/D 阶段属于后续重设计，不能把现有近似当成 real 的状态机。
+
+## P/D 配置治理
+
+组件只接受已登记、角色适用的原生参数；支持小写字段或对应大写环境变量名，两者同时出现、未知参数、已删除参数和错放角色的参数报错。Python 不复制这份字段表，RTP 的字段归属与待实现参数校验位于 RtpSettings，实际值解析位于 RtpConfig。没有静默透传一批未消费配置的入口。
+
+CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明。一个 Mock Engine 仍表示整体计算单元；不创建内部 rank，不模拟并行通信。当前执行域仍只支持 dp_size=1、dp_rank=0，其他值明确拒绝；保留 dp_size 并不表示已经支持内部多 DP。并行度作为公式输入，已校准的公式、容量和 block size 不再隐式换算。
+
+下表是当前 DeepSeek HA 配置的处理结果。待实现参数保留实际数值、校验类型与范围，但只进入 pending_config，不表示行为已经对齐。主动开启尚不存在的 Host/disk/remote cache 仍拒绝启动；其他待实现项允许保留并警告，相关调度、压力和超时结论不得作为已对齐结果。
+
+| 参数 | P | D | 当前处理 |
+| --- | --- | --- | --- |
+| cp_size / cp_enabled | 4 / true | 1 / false | 保留，公式可读取；不模拟内部 CP。 |
+| tp_size / dp_size | 4 / 1 | 1 / 1 | 保留；tp_size 还用于原生状态上报。 |
+| max_seq_len | 1048576 | 1048576 | 生效。 |
+| seq_size_per_block / test_block_num | 512 / 21554 | 128 / 221485 | 本地容量生效；PD 按 token 交接。 |
+| reserve_block_ratio | 1 | 8 | 生效，百分比。 |
+| max_generate_batch_size | 64 | 128 | P/D 统一入口，生效；删除 max_context_batch_size。 |
+| max_batch_tokens_size | 512000 | 1048576 | 生效。 |
+| max_batch_tokens_without_cache | 50000 | 不配置 | P 待实现准入限制；D 原值 0，省略。 |
+| max_inited_kv_cache_streams | 128 | 不配置 | P 待实现初始化 KV 请求限制；D 原值 0，省略。 |
+| reuse_cache / enable_device_cache / device_eviction_policy | false / true / lru | false / true / lru | 保留现有语义，不为接 Host 而打开 reuse。 |
+| enable_memory_cache / memory_cache_blocks | true / 52295 | false / 不配置 | P Host 组件待实现，当前拒绝启动。 |
+| memory_eviction_policy | lru | 不配置 | P 待实现；删除 D 无效项。 |
+| block_tree_device_evict_low/high_watermark_ratio | 0.82 / 0.9 | 0.82 / 0.9 | 待实现主动驱逐水位。 |
+| block_tree_memory_evict_low/high_watermark_ratio | 0.9 / 0.94 | 不配置 | P 待实现；删除 D 无效项。 |
+| block_tree_business_queue_max_size / block_tree_transfer_queue_max_size | 10000 / 10000 | 10000 / 10000 | 待实现队列背压，不以无界队列冒充等价实现。 |
+| memory_cache_sync_timeout_ms | 10000 | 不配置 | P 待实现 Host 传输超时。 |
+| enable_disk_cache / enable_remote_cache | false / false | false / false | 明确关闭；开启拒绝。 |
+| prefill_retry_times | 0 | 不配置 | 当前不重试；非零值列为待实现。 |
+| prefill_max_wait_timeout_ms | 600000 | 不配置 | P 待实现独立等待期限。 |
+| max_rpc_timeout_ms | 7200000 | 7200000 | 待实现独立 RPC 上限；已有请求总期限不因此失效。 |
+| load_cache_timeout_ms | 不配置 | 5000 | D 生效；删除 P 无效项。 |
+| compute | 原公式、scale=1.23 | 19.5+0.175*batchSize | 保留，不按 CP/TP 二次缩放。 |
+| generation | 不配置 | 不配置 | 本 Case 使用固定长度回放，不抽 EOS。 |
+| decode.tokens_per_step | 不配置 | 2.6 | D 平均进度模型，不等于真实投机参数。 |
+
+以下参数从当前 Case 删除，不复刻 native 线程池、轮询和描述符分批：block_tree_transfer_worker_count、memory_cache_max_descriptors_per_transfer_batch、prefill_prepare_resource_pool_size、prefill_stop_stream_wait_timeout_ms、decode_retry_interval_ms。取消、资源释放和有界请求生命周期仍必须实现，不能随这些参数一起删除。
+
+decode_retry_times、decode_retry_timeout_ms 在当前 real C++ 执行代码中没有读取处，不迁入 Mock。当前 P 的 cp_force_single_prefill=false、D 不执行对应 Prefill 准入，均省略；未来 P 启用该限制时只需增加逻辑调度约束。prefill_retry_timeout_ms 当前因重试次数为 0 省略，非零重试的次数与预算一起待实现。
 
 ## Client 原生收发核心
 
@@ -666,7 +705,7 @@ StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概�
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。文本请求列表/文件的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。Client 逐请求执行记录已接通；旧采集格式转换、Engine 与 Master 的完整服务端证据仍未接通。
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。文本请求列表/文件的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。Client 逐请求执行记录已接通；旧采集格式已有离线转换；Engine 与 Master 的完整服务端证据仍未接通。
 
 ## 指标、采集和查询
 

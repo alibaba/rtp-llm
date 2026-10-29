@@ -46,6 +46,21 @@ def test_ha_case_keeps_one_playback_and_full_rolling_order_without_progress_or_s
     assert p['config']['compute']['noise']['scale'] == preset['prefill']['scale']
     assert d['config']['decode']['tokens_per_step'] == preset['decode']['tokens_per_step']
     assert p['config']['enable_memory_cache'] is True
+    assert 'generation' not in p['config'] and 'generation' not in d['config']
+    assert (p['config']['cp_size'], p['config']['cp_enabled'], p['config']['tp_size'], p['config']['dp_size']) == (4, True, 4, 1)
+    assert (d['config']['cp_size'], d['config']['cp_enabled'], d['config']['tp_size'], d['config']['dp_size']) == (1, False, 1, 1)
+    assert p['config']['max_generate_batch_size'] == 64 and d['config']['max_generate_batch_size'] == 128
+    assert p['config']['max_batch_tokens_without_cache'] == 50000
+    assert p['config']['max_inited_kv_cache_streams'] == 128 and p['config']['memory_cache_blocks'] == 52295
+    assert 'load_cache_timeout_ms' not in p['config'] and d['config']['load_cache_timeout_ms'] == 5000
+    for config in (p['config'], d['config']):
+        assert not set(config) & {'max_context_batch_size', 'cp_force_single_prefill', 'decode_retry_times',
+                                  'decode_retry_timeout_ms', 'decode_retry_interval_ms', 'block_tree_transfer_worker_count',
+                                  'memory_cache_max_descriptors_per_transfer_batch', 'prefill_prepare_resource_pool_size',
+                                  'prefill_stop_stream_wait_timeout_ms'}
+    assert not set(d['config']) & {'memory_eviction_policy', 'memory_cache_sync_timeout_ms',
+                                  'block_tree_memory_evict_low_watermark_ratio', 'block_tree_memory_evict_high_watermark_ratio',
+                                  'prefill_retry_times', 'prefill_max_wait_timeout_ms', 'max_inited_kv_cache_streams'}
     traffic, = [step for step in steps if step.interface == 'client/start']
     assert traffic.args['replay_speed'] == 5 and 'qps' not in traffic.args
     assert traffic.args['concurrency'] == 4096

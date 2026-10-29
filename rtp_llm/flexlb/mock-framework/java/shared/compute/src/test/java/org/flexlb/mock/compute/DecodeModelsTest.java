@@ -48,10 +48,13 @@ class DecodeModelsTest {
         for (int round = 0; round < 100; round++) {
             var step = model.sample("r", round, 1000);
             assertTrue(step.committedTokens() == 2 || step.committedTokens() == 3);
-            assertEquals(step.committedTokens() - 1, step.proposedTokens());
+            assertEquals(0, step.proposedTokens()); assertEquals(0, step.acceptedTokens());
+            assertEquals(1, step.verifyTokens()); assertEquals(step.committedTokens() - 1, step.additionalKvTokens());
             committed += step.committedTokens();
         }
         assertEquals(260, committed);
+        assertArrayEquals(new int[]{3, 3, 2, 3, 2}, java.util.stream.IntStream.range(0, 5)
+            .map(round -> model.sample("r", round, 1000).committedTokens()).toArray());
         assertEquals(1, model.sample("r", 4, 1).committedTokens());
         assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(1, 1.0, null, 2.6));
         assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(null, null, null, Double.NaN));

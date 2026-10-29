@@ -99,7 +99,7 @@ final class LoadClient implements AutoCloseable {
                         var item = queue.remove();
                         var input = GenerateInputPB.newBuilder().setRequestId(item.request_id()).addAllTokenIds(item.input().getTokenIdsList())
                             .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().getMaxNewTokens())
-                                .setCanUsePdSeparation(true).setReturnIncremental(true)).build();
+                                .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true)).build();
                         var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.request_id())
                             .setSeqLen(item.input().getTokenIdsList().size()).setMaxNewTokens(item.input().getMaxNewTokens())
                             .setPriority(item.input().hasPriority() ? item.input().getPriority() : 50).setGenerateInput(input.toByteString()).build();

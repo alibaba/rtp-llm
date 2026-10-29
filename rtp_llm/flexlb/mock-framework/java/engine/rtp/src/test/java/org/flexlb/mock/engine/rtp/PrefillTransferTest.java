@@ -32,7 +32,7 @@ class PrefillTransferTest {
     }
     private Harness node(String role, int block, int millis) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
-        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", block).put("reuse_cache", true).put("load_cache_timeout_ms", 1200);
+        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", block).put("reuse_cache", true);
         ((ObjectNode) root.path("component").path("config").path("compute")).put("expression", Integer.toString(millis));
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
         return new Harness(RtpConfig.load(path));

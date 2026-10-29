@@ -6,7 +6,9 @@ import org.flexlb.mock.api.model.DecodeSpec;
 /** Speculative accepted-prefix sampling or an explicit deterministic mean-token budget. */
 public record DecodeStepModel(DecodeSpec configuration) {
     public DecodeStepModel { java.util.Objects.requireNonNull(configuration); }
-    public record Step(int proposedTokens, int acceptedTokens, int committedTokens, int verifyTokens) {}
+    public record Step(int proposedTokens, int acceptedTokens, int committedTokens, int verifyTokens) {
+        public int additionalKvTokens() { return Math.max(proposedTokens, committedTokens - 1); }
+    }
 
     public Step sample(String requestKey, long round, int remainingBudget) {
         if (round < 0 || remainingBudget < 1) throw new IllegalArgumentException("Invalid Decode round/budget");
@@ -14,10 +16,11 @@ public record DecodeStepModel(DecodeSpec configuration) {
         if (configuration.tokens_per_step() != null) {
             double mean = configuration.tokens_per_step();
             // Preserve fractional progress across rounds without request-local mutable state.
-            long committed = Math.round(Math.floor((round + 1.0) * mean) - Math.floor(round * mean));
+            long committed = Math.round(Math.ceil((round + 1.0) * mean) - Math.ceil(round * mean));
             if (committed < 1) throw new IllegalArgumentException("Decode round exceeds numeric progress precision");
             int count = (int) Math.min(remainingBudget, committed);
-            return new Step(count - 1, count - 1, count, count);
+            // An aggregate progress model does not imply draft/accept counts or multiple target inputs.
+            return new Step(0, 0, count, 1);
         }
         int proposed = Math.min(configuration.draft_tokens(), remainingBudget - 1);
         double alpha = configuration.acceptance_rate();

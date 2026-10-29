@@ -15,15 +15,15 @@ class RtpConfigTest {
     }
     private ObjectNode root() { return JSON.valueToTree(RtpNodeTest.configuration("prefill")); }
 
-    @Test void acceptsCopiedNativeEnvValuesAndPreservesNativePayloadWithoutRenaming() throws Exception {
+    @Test void normalizesRecognizedNativeEnvValuesAndKeepsAnImmutableRequestedConfiguration() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("seq_size_per_block"); config.put("SEQ_SIZE_PER_BLOCK", "32").put("REUSE_CACHE", "on")
-            .put("TP_SIZE", "2").put("DISABLE_DECODE_FIRST_MALLOC_DEVICE_REUSE", "true").put("MODEL_NATIVE_JSON", "{unmodified native payload}");
+            .put("TP_SIZE", "2").put("DISABLE_DECODE_FIRST_MALLOC_DEVICE_REUSE", "true");
         var parsed = load(root);
         assertEquals(32, parsed.blockSize()); assertTrue(parsed.reuseCache()); assertEquals(2, parsed.tpSize());
         assertTrue(parsed.disableDecodeFirstReuse());
-        assertEquals("{unmodified native payload}", parsed.business().path("MODEL_NATIVE_JSON").textValue());
-        assertEquals(config, parsed.business());
+        assertEquals("2", parsed.business().path("tp_size").textValue());
+        assertFalse(parsed.business().has("TP_SIZE"));
         ((ObjectNode) parsed.business()).removeAll(); assertFalse(parsed.business().isEmpty());
     }
 
@@ -83,7 +83,7 @@ class RtpConfigTest {
         var config = (ObjectNode) root.path("component").path("config");
         config.putObject("decode").put("tokens_per_step", 2.6);
         var model = load(root);
-        assertEquals(3, model.decodeModel().sample("r", 4, 10).committedTokens());
+        assertEquals(2, model.decodeModel().sample("r", 4, 10).committedTokens());
         config.set("decode", model.effective().get("decode"));
         assertEquals(2.6, load(root).decodeModel().configuration().tokens_per_step());
     }
@@ -100,5 +100,44 @@ class RtpConfigTest {
         for (String tier : java.util.List.of("enable_memory_cache", "enable_disk_cache", "enable_remote_cache")) {
             config.put(tier, true); assertThrows(IllegalArgumentException.class, () -> load(root)); config.remove(tier);
         }
+    }
+
+    @Test void bindsParallelismToTheFormulaWithoutImplicitScaling() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("cp_size", 4).put("cp_enabled", true).put("tp_size", 4).put("dp_size", 1);
+        config.putObject("compute").put("expression", "cpSize + tpSize + dpSize + cpEnabled");
+        var parsed = load(root);
+        var request = new org.flexlb.mock.compute.ForwardBatch.Request("r", 2, 0, 1, 0, 1, 50, java.util.List.of());
+        var batch = new org.flexlb.mock.compute.ForwardBatch("b", java.util.List.of(
+            new org.flexlb.mock.compute.ForwardBatch.Partition(0, java.util.List.of(request))));
+        assertEquals(java.time.Duration.ofMillis(10), parsed.compute().plan(parsed.role(), parsed.id(), batch).planned());
+        assertEquals(4, parsed.effective().path("cp_size").intValue()); assertTrue(parsed.effective().path("cp_enabled").booleanValue());
+        config.putObject("compute").put("expression", "2");
+        assertEquals(java.time.Duration.ofMillis(2), load(root).compute().plan(parsed.role(), parsed.id(), batch).planned());
+    }
+
+    @Test void deferredSettingsAreValidatedAndNeverReportedAsEffective() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("max_batch_tokens_without_cache", 50000).put("max_inited_kv_cache_streams", 128)
+            .put("prefill_retry_times", 3).put("block_tree_device_evict_low_watermark_ratio", .82)
+            .put("block_tree_device_evict_high_watermark_ratio", .9);
+        var effective = load(root).effective();
+        assertEquals(50000, effective.path("pending_config").path("max_batch_tokens_without_cache").intValue());
+        assertEquals(3, effective.path("pending_config").path("prefill_retry_times").intValue());
+        assertEquals(0, effective.path("prefill_retry_times").intValue());
+        assertFalse(effective.has("max_batch_tokens_without_cache")); assertFalse(effective.has("config"));
+        config.put("max_inited_kv_cache_streams", -1); assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("max_inited_kv_cache_streams", 128).put("block_tree_device_evict_low_watermark_ratio", .99);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
+    @Test void rejectsTyposRemovedKnobsAndSettingsCopiedToTheWrongRole() throws Exception {
+        for (String key : java.util.List.of("max_context_batch_size", "max_generate_batch_szie", "decode_retry_times", "load_cache_timeout_ms")) {
+            var root = root(); ((ObjectNode) root.path("component").path("config")).put(key, 10);
+            assertTrue(assertThrows(IllegalArgumentException.class, () -> load(root)).getMessage().contains(key));
+        }
+        var root = root(); root.put("component_role", "decode");
+        ((ObjectNode) root.path("component").path("config")).put("memory_cache_blocks", 100);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 }

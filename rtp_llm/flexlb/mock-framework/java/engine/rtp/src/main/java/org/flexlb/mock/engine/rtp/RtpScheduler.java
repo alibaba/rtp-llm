@@ -130,7 +130,7 @@ final class RtpScheduler implements Scheduler {
     @Override public Work schedule() {
         if (closed) return null;
         if (executing != null) throw new IllegalStateException("Forward already in flight");
-        int limit = prefill() ? config.maxContextBatchSize() : config.maxGenerateBatchSize();
+        int limit = config.maxGenerateBatchSize();
         long budget = config.maxBatchTokens() > 0 ? config.maxBatchTokens() : Long.MAX_VALUE;
         var selected = new ArrayList<Entry>();
         if (!prefill()) {
@@ -190,7 +190,7 @@ final class RtpScheduler implements Scheduler {
                 finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Prefill allocation exceeds capacity"));
             return failure == null;
         }
-        int demand = blocks(Math.addExact(Math.addExact(entry.input.tokens(), entry.state.snapshot().generated()), entry.nextStep.proposedTokens()));
+        int demand = blocks(Math.addExact(Math.addExact(entry.input.tokens(), entry.state.snapshot().generated()), entry.nextStep.additionalKvTokens()));
         var failure = entry.lease.growTo(Math.max(demand, entry.lease.blocks()));
         if (failure != null) {
             // RTP running streams fail KV growth; only admission waits for capacity.

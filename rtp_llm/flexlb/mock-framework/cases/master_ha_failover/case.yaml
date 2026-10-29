@@ -43,10 +43,9 @@ environment:
       enable_remote_cache: false
       device_eviction_policy: lru
       memory_eviction_policy: lru
-      block_tree_transfer_worker_count: 4
+      # 待实现的背压/驱逐参数仅进入 pending_config，不作为当前生效能力。
       block_tree_business_queue_max_size: 10000
       block_tree_transfer_queue_max_size: 10000
-      memory_cache_max_descriptors_per_transfer_batch: 8
       memory_cache_sync_timeout_ms: 10000
       block_tree_device_evict_low_watermark_ratio: 0.82
       block_tree_device_evict_high_watermark_ratio: 0.9
@@ -54,21 +53,13 @@ environment:
       block_tree_memory_evict_high_watermark_ratio: 0.94
       max_generate_batch_size: 64
       max_batch_tokens_size: 512000
+      # 待实现的准入限制保留原值，不能据此宣称已对齐原调度行为。
       max_batch_tokens_without_cache: 50000
       max_inited_kv_cache_streams: 128
-      cp_force_single_prefill: false
       prefill_retry_times: 0
-      prefill_retry_timeout_ms: 20
       prefill_max_wait_timeout_ms: 600000
-      decode_retry_interval_ms: 1
-      load_cache_timeout_ms: 5000
       max_rpc_timeout_ms: 7200000
-      prefill_prepare_resource_pool_size: 128
-      prefill_stop_stream_wait_timeout_ms: 2000
-      decode_retry_times: 100
-      decode_retry_timeout_ms: 100
       test_block_num: 21554
-      max_context_batch_size: 64
       # 原 preset 的显式 Host 块容量；Host 组件接线留待后续实现。
       memory_cache_blocks: 52295
       # 原 DSv4 legacy_unverified 校准公式；DeepSeek preset 通过 noise.scale 乘以 1.23。
@@ -92,9 +83,6 @@ environment:
           + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))
         noise:
           scale: 1.23
-      generation:
-        eos_probability: 0.0025
-        seed: 20260922
   decode:
     engine: rtp
     deployment:
@@ -113,33 +101,16 @@ environment:
       reserve_block_ratio: 8
       enable_remote_cache: false
       device_eviction_policy: lru
-      memory_eviction_policy: lru
-      block_tree_transfer_worker_count: 4
+      # 待实现的背压/驱逐参数仅进入 pending_config，不作为当前生效能力。
       block_tree_business_queue_max_size: 10000
       block_tree_transfer_queue_max_size: 10000
-      memory_cache_max_descriptors_per_transfer_batch: 8
-      memory_cache_sync_timeout_ms: 10000
       block_tree_device_evict_low_watermark_ratio: 0.82
       block_tree_device_evict_high_watermark_ratio: 0.9
-      block_tree_memory_evict_low_watermark_ratio: 0.9
-      block_tree_memory_evict_high_watermark_ratio: 0.94
       max_generate_batch_size: 128
       max_batch_tokens_size: 1048576
-      max_batch_tokens_without_cache: 0
-      max_inited_kv_cache_streams: 0
-      cp_force_single_prefill: true
-      prefill_retry_times: 0
-      prefill_retry_timeout_ms: 20
-      prefill_max_wait_timeout_ms: 600000
-      decode_retry_interval_ms: 1
       load_cache_timeout_ms: 5000
       max_rpc_timeout_ms: 7200000
-      prefill_prepare_resource_pool_size: 128
-      prefill_stop_stream_wait_timeout_ms: 2000
-      decode_retry_times: 100
-      decode_retry_timeout_ms: 100
       test_block_num: 221485
-      max_context_batch_size: 1
       compute:
         expression: 19.5 + 0.175 * batchSize
       decode:

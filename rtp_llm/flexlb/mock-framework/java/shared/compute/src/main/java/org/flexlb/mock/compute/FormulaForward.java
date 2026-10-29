@@ -25,11 +25,26 @@ public final class FormulaForward implements ForwardModel {
     }
 
     private final ArithmeticFormula formula;
+    private final Map<String, Integer> indices;
+    private final Map<String, Double> constants;
 
     public FormulaForward(String expression) {
+        this(expression, Map.of());
+    }
+
+    public FormulaForward(String expression, Map<String, Double> constants) {
         if (expression == null || expression.isBlank() || expression.length() > 32768)
             throw new IllegalArgumentException("Compute expression must contain 1..32768 characters");
-        formula = ArithmeticFormula.parse(expression, INDICES, BATCH_VARIABLES, true);
+        this.constants = Map.copyOf(constants);
+        var bindings = new LinkedHashMap<>(INDICES);
+        var batchVariables = new HashSet<>(BATCH_VARIABLES);
+        for (var entry : new TreeMap<>(constants).entrySet()) {
+            if (entry.getKey().isBlank() || !Double.isFinite(entry.getValue()) || bindings.containsKey(entry.getKey()))
+                throw new IllegalArgumentException("Invalid/conflicting formula constant: " + entry.getKey());
+            bindings.put(entry.getKey(), bindings.size()); batchVariables.add(entry.getKey());
+        }
+        indices = Map.copyOf(bindings);
+        formula = ArithmeticFormula.parse(expression, indices, batchVariables, true);
     }
 
     public static Set<String> variableNames() { return INDICES.keySet(); }
@@ -39,13 +54,14 @@ public final class FormulaForward implements ForwardModel {
             throw new IllegalArgumentException("FormulaForward currently supports one DP; multiple DPs need an explicit model");
         var dp = batch.dps().getFirst();
         if (dp.requests().isEmpty()) throw new IllegalArgumentException("Forward requires a nonempty batch");
-        double[] outer = new double[INDICES.size()];
+        double[] outer = new double[indices.size()];
         Arrays.fill(outer, Double.NaN); // Per-request names outside sum() are deliberately not batch totals.
-        outer[INDICES.get("batchSize")] = dp.requests().size();
-        outer[INDICES.get("dpRank")] = dp.rank();
+        outer[indices.get("batchSize")] = dp.requests().size();
+        outer[indices.get("dpRank")] = dp.rank();
+        constants.forEach((name, value) -> outer[indices.get(name)] = value);
         List<double[]> items = new ArrayList<>(dp.requests().size());
         for (var request : dp.requests()) {
-            double[] row = new double[INDICES.size()];
+            double[] row = new double[indices.size()];
             Arrays.fill(row, Double.NaN);
             for (var entry : REQUEST_VARIABLES.entrySet()) row[INDICES.get(entry.getKey())] = entry.getValue().applyAsDouble(request);
             items.add(row);

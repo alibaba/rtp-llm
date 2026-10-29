@@ -71,4 +71,15 @@ class FormulaForwardTest {
         assertThrows(IllegalArgumentException.class, () -> request("a", 1, 2));
         assertThrows(IllegalArgumentException.class, () -> new FormulaForward("1").estimate(batch()));
     }
+
+    @Test void formulaConstantsAreScopedValidatedAndDoNotChangeOtherModels() {
+        var constants = new HashMap<>(Map.of("cpSize", 4.0));
+        var model = new FormulaForward("cpSize + batchSize + totalComputeTokens", constants);
+        constants.put("cpSize", 100.0);
+        assertEquals(Duration.ofMillis(7), model.estimate(batch(request("a", 2, 0))));
+        assertThrows(IllegalArgumentException.class, () -> new FormulaForward("cpSize"));
+        assertThrows(IllegalArgumentException.class, () -> new FormulaForward("1", Map.of("batchSize", 2.0)));
+        assertThrows(IllegalArgumentException.class, () -> new FormulaForward("1", Map.of("cpSize", Double.NaN)));
+        assertThrows(IllegalArgumentException.class, () -> new FormulaForward("sum(cpSize)", Map.of("cpSize", 4.0)));
+    }
 }

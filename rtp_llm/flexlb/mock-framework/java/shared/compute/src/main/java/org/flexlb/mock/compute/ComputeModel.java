@@ -22,13 +22,21 @@ public final class ComputeModel {
     private final NoiseModel noise;
 
     public ComputeModel(ComputeSpec spec) {
+        this(spec, Map.of());
+    }
+
+    public ComputeModel(ComputeSpec spec, Map<String, Double> constants) {
         configuration = Objects.requireNonNull(spec);
-        forward = new FormulaForward(spec.expression()); noise = new NoiseModel(spec.noise());
+        forward = new FormulaForward(spec.expression(), constants); noise = new NoiseModel(spec.noise());
     }
 
     public static ComputeModel fromJson(JsonNode node) throws IOException {
+        return fromJson(node, Map.of());
+    }
+
+    public static ComputeModel fromJson(JsonNode node, Map<String, Double> constants) throws IOException {
         rejectNull(node);
-        return new ComputeModel(JSON.treeToValue(node, ComputeSpec.class));
+        return new ComputeModel(JSON.treeToValue(node, ComputeSpec.class), constants);
     }
 
     public ComputeSpec configuration() { return configuration; }
