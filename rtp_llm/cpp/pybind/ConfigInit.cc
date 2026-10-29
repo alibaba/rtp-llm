@@ -506,7 +506,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
-        .def_readwrite("linear_step", &KVCacheConfig::linear_step)
+        .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
+        .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
+        .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -575,7 +577,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      8,
+                                      9,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -584,7 +586,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.max_block_size_per_item,
                                       self.memory_cache_size_mb,
                                       self.memory_cache_sync_timeout_ms,
-                                      self.linear_step,
+                                      self.reuse_cache_tail_blocks,
                                       self.fp8_kv_cache,
                                       self.ssm_state_dtype,
                                       self.kv_cache_mem_mb,
@@ -643,9 +645,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
                                       self.kv_cache_event_host_ip_port,
-                                      self.enable_crc);
+                                      self.enable_crc,
+                                      self.linear_pool_blocks,
+                                      self.swa_pool_blocks);
             },
             [](py::tuple t) {
+                const py::tuple tail_state = t;
+                const bool has_tail_fields = t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                if (has_tail_fields) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
                 const py::tuple crc_state = t;
                 const bool has_crc_field  = t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
                 if (has_crc_field) {
@@ -696,7 +706,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.max_block_size_per_item              = value(5).cast<int>();
                 c.memory_cache_size_mb                 = value(6).cast<int64_t>();
                 c.memory_cache_sync_timeout_ms         = value(7).cast<int64_t>();
-                c.linear_step                          = value(8).cast<int>();
+                if (has_tail_fields) {
+                    c.reuse_cache_tail_blocks = tail_state[10].cast<int>();
+                    c.linear_pool_blocks      = tail_state[70].cast<uint32_t>();
+                    c.swa_pool_blocks         = tail_state[71].cast<uint32_t>();
+                    if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
+                        || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                        || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                        throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
+                    }
+                }
                 c.fp8_kv_cache                         = value(9).cast<int>();
                 c.ssm_state_dtype                      = value(10).cast<std::string>();
                 c.kv_cache_mem_mb                      = value(11).cast<int64_t>();

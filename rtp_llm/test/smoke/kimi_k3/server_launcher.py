@@ -286,7 +286,7 @@ def launch_config(args):
         "concurrency_limit": 64 if orthogonal_smoke and args.role == "DECODE" else 16,
         "seq_size_per_block": 1024 if model_type == "kimi_k31" else 4096,
         "kernel_seq_size_per_block": 128 if model_type == "kimi_k31" or fp8_kv_cache else 64,
-        "linear_step": 1,
+        "reuse_cache_tail_blocks": 2147483647,
         "ssm_state_dtype": "fp32",
         "fp8_kv_cache": int(fp8_kv_cache),
         # In the orthogonal PD profile, Decode receives the Prefill state

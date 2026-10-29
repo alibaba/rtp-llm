@@ -106,7 +106,7 @@ class KVCMIndependentPoolTest: public DeviceTestBase {
 protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        auto environment = makeMultiGroupBackendEnvironment("independent_config", 2, 1, 1);
+        auto environment = makeMultiGroupBackendEnvironment("independent_config", 2, 1);
         config_          = environment.cache_config;
         allocator_       = std::make_shared<CoordinatorCacheManager>(config_);
         ASSERT_TRUE(allocator_->init());

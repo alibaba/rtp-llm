@@ -579,7 +579,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     config.layer_num = static_cast<uint32_t>(layer_num);
 
     config.seq_size_per_block            = tokens_per_block;
-    config.linear_step                   = 2;
+    config.reuse_cache_tail_blocks       = 2;
     const int normalized_group_layer_num = std::max(group_layer_num, 1);
 
     if (layer_num <= 0 || (layer_num % normalized_group_layer_num) != 0

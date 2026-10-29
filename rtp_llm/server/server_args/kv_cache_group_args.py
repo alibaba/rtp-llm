@@ -1,4 +1,32 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _reuse_tail_blocks(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "reuse_cache_tail_blocks must be an integer"
+        ) from error
+    if not 0 < count <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            "reuse_cache_tail_blocks must be in [1, 2147483647]"
+        )
+    return count
+
+
+def _pool_blocks(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("pool blocks must be an integer") from error
+    if count != 0 and not 2 <= count <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            "pool blocks must be 0 or in [2, 2147483647], including block 0"
+        )
+    return count
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -147,12 +175,28 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Attention算子使用的kernel block大小（token数量）。0表示与seq_size_per_block相同。",
     )
     kv_cache_group.add_argument(
-        "--linear_step",
-        env_name="LINEAR_STEP",
-        bind_to=(kv_cache_config, "linear_step"),
-        type=int,
-        default=1,
-        help="线性注意力（Linear Attention）缓存重用的步长：每隔 linear_step 个 block 额外保留一个 block（>=1）。",
+        "--reuse_cache_tail_blocks",
+        env_name="REUSE_CACHE_TAIL_BLOCKS",
+        bind_to=(kv_cache_config, "reuse_cache_tail_blocks"),
+        type=_reuse_tail_blocks,
+        default=2147483647,
+        help="参与 reuse cache 的 Linear/SWA group 在 prefill 分配的尾部 block 数，至少保留该组 active_tail_blocks，再按实际 block 数截断；命中的复用状态单独保留；默认全保留。未参与复用的 group 和 decode 使用原有 active tail 策略。",
+    )
+    kv_cache_group.add_argument(
+        "--linear_pool_blocks",
+        env_name="LINEAR_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "linear_pool_blocks"),
+        type=_pool_blocks,
+        default=0,
+        help="每个 Linear 独立池的物理 block 总数（含 block 0）；0 表示自动计算，模型专用配置优先。",
+    )
+    kv_cache_group.add_argument(
+        "--swa_pool_blocks",
+        env_name="SWA_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "swa_pool_blocks"),
+        type=_pool_blocks,
+        default=0,
+        help="每个 SWA 独立池的物理 block 总数（含 block 0）；0 表示自动计算，模型专用配置优先。",
     )
     kv_cache_group.add_argument(
         "--ssm_state_dtype",
@@ -472,7 +516,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=0,
         help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
-        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
+        "不配置或配置为 0 时，这四个 pool 使用通用池配置或自动计算 block 数，并保持一致。",
     )
     kv_cache_group.add_argument(
         "--dsv4_hca_state_pool_blocks",
@@ -481,7 +525,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=0,
         help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
-        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
+        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或通用池配置/自动计算 block 数。",
     )
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_use_memory",

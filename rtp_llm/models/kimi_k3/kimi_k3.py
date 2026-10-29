@@ -101,23 +101,6 @@ class KimiK3(BaseModel):
     TARGET_MODEL_CLASS = None
     ENABLE_MULTIMODAL = True
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if not self.model_config.is_mtp:
-            parallelism = self.parallelism_config
-            cp = parallelism.prefill_cp_config
-            local_shards = parallelism.tp_size if cp.kv_cache_sharded else 1
-            upstream_shards = (
-                max(1, cp.prefill_cp_size)
-                if parallelism.role_type == RoleType.DECODE
-                else local_shards
-            )
-            # Keep basic-page indices; retain one checkpoint per CP stripe.
-            # Target and MLA-only MTP share this cache config, so scale once.
-            self.kv_cache_config.linear_step = max(
-                1, self.kv_cache_config.linear_step
-            ) * max(local_shards, upstream_shards)
-
     @classmethod
     def create_dash_sc_request_adapter(cls):
         from rtp_llm.models.kimi_k3.kimi_k3_dash_sc_adapter import (

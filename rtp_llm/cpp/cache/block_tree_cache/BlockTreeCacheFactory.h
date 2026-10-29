@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -14,7 +15,9 @@ namespace rtp_llm {
 class BroadcastManager;
 class StorageBackend;
 
-size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t stride_bytes);
+std::vector<size_t> computeTierBlockCounts(size_t                     capacity_bytes,
+                                           const std::vector<size_t>& device_block_counts,
+                                           const std::vector<size_t>& pool_strides);
 
 std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
 

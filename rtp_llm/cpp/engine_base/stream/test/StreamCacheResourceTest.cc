@@ -263,7 +263,7 @@ protected:
             torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
         ModelConfig model_config;
-        model_config.attn_config.tokens_per_block = 2;
+        model_config.attn_config.tokens_per_block = cache_config.seq_size_per_block;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
         stream_                  = std::make_shared<NormalGenerateStream>(
@@ -395,6 +395,57 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 
     stream_->fakeInitKVBlock(2);
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
+}
+
+TEST_F(StreamCacheResourceTest, OrdinaryLinearMtpReservesDecodeDestinationsAfterAdmission) {
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 3;
+    const int reserve_step        = static_cast<int>(speculative.speculativeReserveStep());
+    ASSERT_EQ(reserve_step, 4);
+    for (const int prompt_length : {3, 4, 5}) {
+        SCOPED_TRACE(prompt_length);
+        auto config = test::makeSimpleHybridMhaCacheConfig(4, 32, 4, DataType::TYPE_FP16, 2);
+        ASSERT_FALSE(config.linear_replay.enabled());
+        std::vector<int> input_tokens(prompt_length, 1);
+        prepareResourceWithCacheConfig(config, input_tokens, false, RoleType::DECODE);
+        stream_->setReserveStep(reserve_step);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        const size_t prompt_slots = (prompt_length + 3) / 4;
+        ASSERT_EQ(resource.kvCache().blocksNum(0, "linear"), prompt_slots);
+        EXPECT_GT(resource.singleBatchNeedBlocks(prompt_length, reserve_step), 0);
+
+        // DecodeRpcServer supplies the first generated token before enqueue.
+        // The scheduler's state-machine transition reserves the first MTP round.
+        stream_->setIsContextStream(false);
+        stream_->setSeqLength(prompt_length + 1);
+        stream_->generate_status_->status = StreamState::WAITING;
+        stream_->reportEvent(StreamEvents::LoadInitiated);
+        stream_->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+        const int    decode_length = prompt_length + 1;
+        const size_t decode_slots  = (decode_length + 3) / 4 + reserve_step - 1;
+        const auto   before        = resource.kvCache().blocks(0, "linear");
+        ASSERT_EQ(before.size(), decode_slots);
+        const size_t tail_begin = static_cast<size_t>((decode_length + 3) / 4 - 1);
+        for (size_t position = tail_begin; position < decode_slots; ++position) {
+            EXPECT_FALSE(isNullBlockIdx(before[position]));
+        }
+        EXPECT_EQ(resource.singleBatchNeedBlocks(decode_length, reserve_step), 0);
+
+        // Async MTP may publish a later length before host bookkeeping commits.
+        const int next_upper_bound = decode_length + reserve_step;
+        ASSERT_TRUE(resource.incrKVBlock(next_upper_bound, /*preserve_inflight=*/true).ok());
+        const auto& reserved = resource.kvCache().blocks(0, "linear");
+        ASSERT_EQ(reserved.size(), static_cast<size_t>((next_upper_bound + 3) / 4 + reserve_step - 1));
+        EXPECT_TRUE(std::equal(before.begin(), before.end(), reserved.begin()));
+        for (size_t position = before.size(); position < reserved.size(); ++position) {
+            EXPECT_FALSE(isNullBlockIdx(reserved[position]));
+        }
+        EXPECT_EQ(resource.singleBatchNeedBlocks(next_upper_bound, reserve_step), 0);
+        resource.releaseResource();
+    }
 }
 
 TEST_F(StreamCacheResourceTest, LinearReplayLeaseFollowsExecutorConfigAcrossRequestFlags) {
@@ -588,6 +639,72 @@ TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapSkipsReplayGroupsAcrossChec
     resource.swapLinearBlocks(0, 2, 3);
     for (const auto& group : config.topology().groups()) {
         EXPECT_EQ(batch.blocks(0, group.tag), (BlockIndicesType{0, 1, 2, 3, 4}));
+    }
+}
+
+TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReuseState) {
+    for (const int tail_blocks : {2, 8}) {
+        SCOPED_TRACE(tail_blocks);
+        auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+        config.reuse_cache_tail_blocks = tail_blocks;
+        KVCacheConfig tiered_config;
+        tiered_config.enable_device_cache  = false;
+        tiered_config.enable_memory_cache  = true;
+        tiered_config.memory_cache_size_mb = 1;
+        prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9}, true, RoleType::PDFUSION, tiered_config);
+        auto& resource                                         = stream_->streamCacheResource();
+        resource.resource_context_.enable_device_cache         = false;
+        resource.resource_context_.enable_memory_cache         = true;
+        stream_->generate_input_->generate_config->reuse_cache = true;
+        initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+        const auto&                                cache = cache_manager_->block_tree_cache_;
+        std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(cache->groupSets().size()));
+        for (const auto& group : cache->groupSets()) {
+            const auto host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_FALSE(isNullBlockIdx(host_block));
+            BlockIndicesType device_blocks;
+            for (const auto& pool : group->devicePools()) {
+                const auto allocated = pool->malloc(1);
+                ASSERT_TRUE(allocated.has_value());
+                pool->incRef(*allocated);
+                device_blocks.push_back(allocated->front());
+            }
+            ASSERT_TRUE(cache
+                            ->executeTransfer(TransferTask(
+                                {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, host_block)},
+                                std::chrono::seconds(30)))
+                            .ok());
+            for (size_t member = 0; member < device_blocks.size(); ++member) {
+                group->devicePools()[member]->decRef(device_blocks[member]);
+            }
+            slots[0][group->groupSetId()].host_block = host_block;
+        }
+        ASSERT_EQ(cache->tree()
+                      ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, slots, false, false)
+                      .accepted_resource_count,
+                  cache->groupSets().size());
+        for (const auto& group : cache->groupSets()) {
+            group->releaseSingleBlock(Tier::HOST, slots[0][group->groupSetId()].host_block, BlockTreeRefType::CACHE);
+        }
+
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_NE(resource.allocator_load_context_, nullptr);
+        resource.allocator_load_context_->waitDone();
+        ASSERT_TRUE(resource.loadCacheDone());
+        ASSERT_EQ(stream_->reuseLength(), 2);
+        ASSERT_TRUE(stream_->isContextStream());
+        ASSERT_FALSE(stream_->chunkedPrefillEnabled());
+        const auto before = resource.kvCache().blocks(0, "linear");
+        ASSERT_EQ(before.size(), 5u);
+        ASSERT_GT(before[0], 0);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        EXPECT_EQ(resource.kvCache().blocks(0, "linear"), before);
+        EXPECT_EQ(resource.kvCache().cacheResource(0).kernelBlocks("linear"), before);
+
+        stream_->setIsContextStream(false);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        EXPECT_TRUE(isNullBlockIdx(resource.kvCache().blocks(0, "linear")[0]));
+        resource.releaseResource();
     }
 }
 

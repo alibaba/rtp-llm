@@ -128,7 +128,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropNotDe
         EXPECT_EQ(device_after_pressure[static_cast<size_t>(group_id)].request_refs, allocated_for_request)
             << "group=" << group_id;
         if (isReusableGroup(cache_config_, cache_config_.groupTags()[static_cast<size_t>(group_id)])) {
-            EXPECT_EQ(allocated_for_request, 3u) << "linear_step=1 group=" << group_id;
+            const auto& group = cache_config_.groups()[static_cast<size_t>(group_id)];
+            EXPECT_EQ(allocated_for_request,
+                      isFullGroup(cache_config_, group.tag) ?
+                          3u :
+                          std::min(3u, static_cast<uint32_t>(cache_config_.reuse_cache_tail_blocks)));
             EXPECT_LT(device_after_pressure[static_cast<size_t>(group_id)].cache_refs,
                       device_before_pressure[static_cast<size_t>(group_id)].cache_refs)
                 << "group=" << group_id;

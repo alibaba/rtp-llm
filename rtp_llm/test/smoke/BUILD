@@ -1,4 +1,4 @@
-load(":defs.bzl", "custom_smoke_test", "smoke_test")
+load(":defs.bzl", "SMOKE_FRAMEWORK_DEPS", "custom_smoke_test", "smoke_test")
 
 custom_smoke_test(
     name = "chunked_multimodal",
@@ -48,6 +48,15 @@ py_test(
         "//rtp_llm:tiktoken",
         "//rtp_llm:uvicorn",
     ],
+)
+
+py_test(
+    name = "remote_cache_cleanup_test",
+    srcs = glob(["*.py"], exclude = ["entry.py"]),
+    main = "remote_cache_cleanup_test.py",
+    imports = [".."],
+    env = {"GPU_COUNT": "0"},
+    deps = SMOKE_FRAMEWORK_DEPS,
 )
 
 py_test(
