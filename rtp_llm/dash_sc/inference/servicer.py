@@ -31,6 +31,7 @@ from typing import (
     Protocol,
 )
 
+import grpc
 import torch
 
 from rtp_llm.config.exceptions import (
@@ -2405,6 +2406,10 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             # Keep whatever the chunk loop already recorded; only fill in when the
             # exception itself is the sole aux_info carrier.
             record.record_aux_info(getattr(e, "aux_info", None), overwrite=False)
+            if isinstance(e, asyncio.CancelledError):
+                await context.abort(
+                    grpc.StatusCode.CANCELLED, "Request handling cancelled"
+                )
             raise
         finally:
             try:
