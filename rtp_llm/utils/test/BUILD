@@ -278,3 +278,11 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+py_test(
+    name = "ppu_entrypoint_test",
+    srcs = ["ppu_entrypoint_test.py"],
+    deps = ["//rtp_llm:utils"],
+    # Exercise the same lightweight entrypoint used by the PPU model target.
+    data = ["//rtp_llm/models_py:ppu_entrypoint"],
+)

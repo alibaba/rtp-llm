@@ -165,6 +165,7 @@ py_library(
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
+    data = glob(["utils/moe_luts/*"]),
     deps = [
         ":jit_cache_env",
         ":torch",
@@ -308,6 +309,9 @@ py_library(
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
+        "@//:using_ppu": ["//rtp_llm/models_py:ppu_entrypoint"],
+        "//conditions:default": [],
+    }) + select({
         # cuda13 locks ship deep-gemm and deep-ep.
         "@//:using_cuda13_x86": deep,
         "@//:using_cuda13_arm": deep,
