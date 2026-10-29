@@ -38,8 +38,6 @@ public final class RoutingConfig {
     public static final class TokenBalanceConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
-        /** Exact sliding window of successful completion observations. */
-        private long windowMs;
         /** Backpressure at this pending uncached work; one oversized request may enter an empty worker. */
         private long maxPendingComputeTokens;
         /** Optional escape from an overloaded cache leader for small, aged requests. */

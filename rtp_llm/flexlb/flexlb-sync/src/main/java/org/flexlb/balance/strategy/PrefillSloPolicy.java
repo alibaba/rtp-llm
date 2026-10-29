@@ -26,6 +26,18 @@ public final class PrefillSloPolicy {
         return idle && predicted <= saturatedAdd(sloMs, sloMs) - elapsed;
     }
 
+    /** Lower-cache work waits globally once it would occupy the service feed reserved for competing work. */
+    public static boolean admitsCacheWork(long sloMs, long serviceWindowMs, long inputTokens, long hitTokens,
+                                          double competingHitFraction, long precedingMs, long ageMs, boolean idle) {
+        if (idle || inputTokens <= 0 || competingHitFraction <= 0) { return true; }
+        double relativeHit = Math.clamp((double) hitTokens / inputTokens / competingHitFraction, 0.0, 1.0);
+        long maximum = executionBudgetMs(sloMs);
+        double age = Math.clamp((double) Math.max(0L, ageMs) / Math.max(1L, sloMs), 0.0, 1.0);
+        double feed = Math.min(maximum, Math.max(1.0, serviceWindowMs * (1.0 - competingHitFraction)) * (1.0 + age));
+        double budget = feed + (maximum - feed) * relativeHit;
+        return precedingMs <= budget;
+    }
+
     public static long collectionWindowMs(long maximumMs, long budgetMs, long serviceMs) {
         // Keep one clock tick for very short requests; integer truncation must not disable batching.
         return Math.min(maximumMs, Math.min(Math.max(1, serviceMs / 10), Math.max(0, budgetMs - serviceMs)));

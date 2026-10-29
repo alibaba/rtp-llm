@@ -51,12 +51,13 @@ class PrefillSloRoutingTest {
         return (PrefillEndpoint)StrategyTestSupport.publishEndpoint(registry,RoleType.PREFILL,ip+":8080",
                 StrategyTestSupport.workerStatus(RoleType.PREFILL,null,ip,8080,8081,true,10_000_000,10_000_000));
     }
-    RequestRoute select(long tokens, long age, String session) {
+    RequestRoute select(long tokens, long age, String session) { return select(tokens, age, session, 50); }
+    RequestRoute select(long tokens, long age, String session, int priority) {
         long id=ids.incrementAndGet(), now=System.currentTimeMillis(), created=now-age;
         var request=Request.builder().requestId(id).sessionId(session).seqLen(tokens).apiKey("tenant").model("model")
                 .cacheKeyBlockSize(Math.max(1,tokens/10)).blockCacheKeys(List.of(1L,2L)).build();
         var ctx=new RequestContext(config); ctx.data().setRequest(request);
-        ctx.data().setSchedulingMetadata(SchedulingMetadata.explicit(50,config.resolveExpiresAtMs(created)));
+        ctx.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority,config.resolveExpiresAtMs(created)));
         ctx.register(id,created,config.resolveExpiresAtMs(created),config.queueScheduler().getQueueTimeoutMs());
         var route=new RequestRoute(ctx);
         var result=strategy.select(request,ctx.data().getSchedulingMetadata(),RoleType.PREFILL,null,route);
@@ -83,7 +84,7 @@ class PrefillSloRoutingTest {
         assertEquals(0,worker.requestLimit);
         assertEquals(0,QueueExecutionSettings.capture(config).maxOutstandingRequests());
         for(int i=0;i<64;i++) assertNotNull(select(700,0,null),"ten-ms work must not stop at legacy inflight=2");
-        assertEquals(640,worker.ownership.tokenWorkload(System.nanoTime()/1_000_000).plannedExecutionMs());
+        assertEquals(640,worker.ownership.tokenWorkload().plannedExecutionMs());
     }
     @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
     void oneLongPlanBlocksMoreWorkWhileEquivalentCountOfShortPlansFits(String mode) {
@@ -92,7 +93,7 @@ class PrefillSloRoutingTest {
         assertNull(select(14_000,0,null)); // total 2800ms exceeds 2700ms admission budget
         assertNotNull(select(700,0,null));
         held.forEach(RequestRoute::close);
-        assertEquals(0,worker.ownership.tokenWorkload(System.nanoTime()/1_000_000).plannedExecutionMs());
+        assertEquals(0,worker.ownership.tokenWorkload().plannedExecutionMs());
         assertNotNull(select(14_000,0,null));
     }
     @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
@@ -124,7 +125,7 @@ class PrefillSloRoutingTest {
             for(int i=0;i<80;i++) results.add(pool.submit(()->select(7000,0,null)));
             int count=0; for(var result:results) if(result.get()!=null) count++;
             assertTrue(count>=24 && count<=27,"unexpected admitted count="+count);
-            assertTrue(worker.ownership.tokenWorkload(System.nanoTime()/1_000_000).plannedExecutionMs()<=2700);
+            assertTrue(worker.ownership.tokenWorkload().plannedExecutionMs()<=2700);
         }
     }
     @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
@@ -140,6 +141,31 @@ class PrefillSloRoutingTest {
         assertNull(select(700,0,"session"));
         var rescued=select(700,1000,"session"); assertNotNull(rescued);
         assertSame(target,rescued.prefillEp()); assertEquals(0,rescued.hitCache());
-        assertEquals(700,target.ownership.tokenWorkload(System.nanoTime()/1_000_000).plannedTokens());
+        assertEquals(700,target.ownership.tokenWorkload().plannedTokens());
+    }
+    @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
+    void coldWorkWaitsBeforeItCanFillTheQueueAheadOfHotWork(String mode) {
+        setup(mode,30000);
+        when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of(worker.ipPort(),9));
+        for(int i=0;i<3;i++) assertNotNull(select(700000,0,null));
+        when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of());
+        assertNull(select(70000,0,null));
+        when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of(worker.ipPort(),9));
+        assertNotNull(select(700000,0,null));
+    }
+    @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
+    void lowPressureColdArrivalAndHigherPriorityColdWorkRemainAdmissible(String mode) {
+        setup(mode,30000);
+        when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of(worker.ipPort(),9));
+        assertNotNull(select(70000,0,null));
+        when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of());
+        assertNotNull(select(7000,0,null));
+        when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of(worker.ipPort(),9));
+        assertNotNull(select(700000,0,null));
+        when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of());
+        assertNotNull(select(70000,0,null,90));
+        held.forEach(RequestRoute::close);
+        assertEquals(0,worker.ownership.cacheWorkAtOrAbove(0).inputTokens());
+        assertNotNull(select(70000,0,null));
     }
 }

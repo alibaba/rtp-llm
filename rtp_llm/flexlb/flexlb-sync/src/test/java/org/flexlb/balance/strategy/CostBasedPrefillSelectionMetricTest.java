@@ -441,16 +441,16 @@ class CostBasedPrefillSelectionMetricTest {
             org.junit.jupiter.api.Assertions.assertNotEquals(first.prefillEp(), second.prefillEp(),
                     "parallel plans must balance before either admission commits");
             long now = System.nanoTime() / 1_000_000L;
-            assertEquals(2000, a.ownership.tokenWorkload(now).plannedTokens()
-                    + b.ownership.tokenWorkload(now).plannedTokens());
+            assertEquals(2000, a.ownership.tokenWorkload().plannedTokens()
+                    + b.ownership.tokenWorkload().plannedTokens());
             var accepted = first.prefillEp().ownership.reserveUnqueuedRoute(first, 1, 0).reservation();
-            assertEquals(0, first.prefillEp().ownership.tokenWorkload(now).plannedTokens());
-            assertEquals(1000, first.prefillEp().ownership.tokenWorkload(now).pendingTokens());
+            assertEquals(0, first.prefillEp().ownership.tokenWorkload().plannedTokens());
+            assertEquals(1000, first.prefillEp().ownership.tokenWorkload().pendingTokens());
             first.prefillEp().ownership.release(accepted, null);
         }
         long now = System.nanoTime() / 1_000_000L;
-        assertEquals(0, a.ownership.tokenWorkload(now).score());
-        assertEquals(0, b.ownership.tokenWorkload(now).score());
+        assertEquals(0, a.ownership.tokenWorkload().score());
+        assertEquals(0, b.ownership.tokenWorkload().score());
     }
 
     @Test

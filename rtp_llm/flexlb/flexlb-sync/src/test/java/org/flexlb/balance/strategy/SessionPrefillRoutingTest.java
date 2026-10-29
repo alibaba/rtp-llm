@@ -99,7 +99,7 @@ class SessionPrefillRoutingTest {
         try (var route = select(request, 0).value()) {
             assertSame(a, route.prefillEp());
             assertEquals(0, route.hitCache(), "session affinity must never invent cached tokens");
-            assertEquals(10_000, a.ownership.tokenWorkload(System.nanoTime() / 1_000_000).plannedTokens());
+            assertEquals(10_000, a.ownership.tokenWorkload().plannedTokens());
         }
     }
 
@@ -107,7 +107,8 @@ class SessionPrefillRoutingTest {
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         var ledger = (PrefillTokenWorkload) org.springframework.test.util.ReflectionTestUtils
                 .getField(a.ownership, "tokenWorkload");
-        ledger.complete(100_000L, System.nanoTime() / 1_000_000L);
+        ledger.accept(100_000L);
+        ledger.release(100_000L);
         var busy = mock(RequestRoute.class);
         when(busy.requestId()).thenReturn(100_001L);
         when(busy.seqLen()).thenReturn(1_000L);
@@ -152,13 +153,13 @@ class SessionPrefillRoutingTest {
             try (var route = select(request("session", 1_000), 10_000).value()) {
                 assertSame(b, route.prefillEp());
                 assertEquals(0, route.hitCache());
-                assertEquals(1_000, b.ownership.tokenWorkload(System.nanoTime() / 1_000_000).plannedTokens());
+                assertEquals(1_000, b.ownership.tokenWorkload().plannedTokens());
                 var target = b.ownership.reserveUnqueuedRoute(route, 1, 0).reservation();
-                assertEquals(0, b.ownership.tokenWorkload(System.nanoTime() / 1_000_000).plannedTokens());
-                assertEquals(1_000, b.ownership.tokenWorkload(System.nanoTime() / 1_000_000).pendingTokens());
+                assertEquals(0, b.ownership.tokenWorkload().plannedTokens());
+                assertEquals(1_000, b.ownership.tokenWorkload().pendingTokens());
                 b.ownership.release(target, null);
             }
-            assertEquals(0, b.ownership.tokenWorkload(System.nanoTime() / 1_000_000).score());
+            assertEquals(0, b.ownership.tokenWorkload().score());
         } finally { a.ownership.release(lease, null); }
     }
 
@@ -187,6 +188,29 @@ class SessionPrefillRoutingTest {
         try (var migrating = select(request("session", 1_000), 10_000, a).value()) {
             assertSame(b, migrating.prefillEp());
             assertEquals(0, migrating.hitCache());
+        }
+    }
+
+    @ParameterizedTest @ValueSource(ints = {0, 9})
+    void retiredSessionOwnerCannotReuseItsCacheOnAnotherWorker(int targetHitBlocks) {
+        remember();
+        var status = a.getStatus();
+        EndpointRegistry.Retirement retirement;
+        status.lock.lock();
+        try { retirement = registry.beginRetirement(RoleType.PREFILL, a.ipPort(), status); }
+        finally { status.lock.unlock(); }
+        try {
+            // Leave the old index entry visible while retirement cleanup has not run yet.
+            when(cache.findMatchingEngines(any(), any(), any())).thenReturn(
+                    Map.of(a.ipPort(), 9, b.ipPort(), targetHitBlocks));
+            try (var route = select(request("session", 1_000), 0).value()) {
+                assertSame(b, route.prefillEp());
+                assertEquals(targetHitBlocks * 100L, route.hitCache());
+                assertEquals(1_000L - targetHitBlocks * 100L,
+                        b.ownership.tokenWorkload().plannedTokens());
+            }
+        } finally {
+            retirement.complete(cache, org.slf4j.LoggerFactory.getLogger(getClass()));
         }
     }
 

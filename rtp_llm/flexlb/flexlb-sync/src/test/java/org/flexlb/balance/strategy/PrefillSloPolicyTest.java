@@ -9,33 +9,33 @@ import static org.junit.jupiter.api.Assertions.*;
 class PrefillSloPolicyTest {
     @Test
     void duplicatePlanTargetsReleaseExactlyOnceAndAdvanceToTheNextTarget() {
-        var ledger = new PrefillTokenWorkload(1000);
+        var ledger = new PrefillTokenWorkload();
         var first = ledger.plan(100, 10, 2000);
         var second = ledger.plan(200, 20, 2000);
         var third = ledger.plan(300, 30, 3000);
-        assertEquals(2000, ledger.snapshot(0).earliestPlannedTargetMs());
+        assertEquals(2000, ledger.snapshot().earliestPlannedTargetMs());
         assertTrue(first.release());
         assertFalse(first.release());
-        assertEquals(2000, ledger.snapshot(0).earliestPlannedTargetMs());
-        assertEquals(50, ledger.snapshot(0).plannedExecutionMs());
+        assertEquals(2000, ledger.snapshot().earliestPlannedTargetMs());
+        assertEquals(50, ledger.snapshot().plannedExecutionMs());
         second.close();
-        assertEquals(3000, ledger.snapshot(0).earliestPlannedTargetMs());
+        assertEquals(3000, ledger.snapshot().earliestPlannedTargetMs());
         third.close();
-        assertEquals(Long.MAX_VALUE, ledger.snapshot(0).earliestPlannedTargetMs());
-        assertEquals(0, ledger.snapshot(0).plannedTokens());
-        assertEquals(0, ledger.snapshot(0).plannedExecutionMs());
+        assertEquals(Long.MAX_VALUE, ledger.snapshot().earliestPlannedTargetMs());
+        assertEquals(0, ledger.snapshot().plannedTokens());
+        assertEquals(0, ledger.snapshot().plannedExecutionMs());
     }
 
     @Test
     void failedTimeReservationDoesNotPartiallyChangeTheLedger() {
-        var ledger = new PrefillTokenWorkload(1000);
+        var ledger = new PrefillTokenWorkload();
         var first = ledger.plan(10, Long.MAX_VALUE, 3000);
-        var before = ledger.snapshot(0);
+        var before = ledger.snapshot();
         assertThrows(ArithmeticException.class, () -> ledger.plan(20, 1, 2000));
-        assertEquals(before, ledger.snapshot(0));
+        assertEquals(before, ledger.snapshot());
         first.close();
-        assertEquals(0, ledger.snapshot(0).plannedTokens());
-        assertEquals(0, ledger.snapshot(0).plannedExecutionMs());
+        assertEquals(0, ledger.snapshot().plannedTokens());
+        assertEquals(0, ledger.snapshot().plannedExecutionMs());
     }
 
     RouteProjection.Inputs inputs(List<GroupPlanner.Item> items, boolean unknown) {
@@ -70,7 +70,7 @@ class PrefillSloPolicyTest {
         assertFalse(PrefillSloPolicy.admits(3000,10000,10000,Long.MAX_VALUE,10,inputs(List.of(),false),false));
     }
     @Test void randomWorkloadReservationLifecycleConservesPredictedTime() {
-        var ledger=new PrefillTokenWorkload(1000);
+        var ledger=new PrefillTokenWorkload();
         var random=new Random(19);
         var plans=new ArrayList<PrefillTokenWorkload.Reservation>();
         var durations=new ArrayList<Long>();
@@ -80,9 +80,21 @@ class PrefillSloPolicyTest {
             } else {
                 int i=random.nextInt(plans.size()); var plan=plans.remove(i); plan.close();plan.close();durations.remove(i);
             }
-            assertEquals(durations.stream().mapToLong(Long::longValue).sum(),ledger.snapshot(n).plannedExecutionMs());
+            assertEquals(durations.stream().mapToLong(Long::longValue).sum(),ledger.snapshot().plannedExecutionMs());
         }
         plans.forEach(PrefillTokenWorkload.Reservation::close);
-        assertEquals(0,ledger.snapshot(10001).plannedExecutionMs());
+        assertEquals(0,ledger.snapshot().plannedExecutionMs());
+    }
+    @Test void cacheProtectionRequiresQueuedCompetitionAndKeepsAnIdleWorkerUsable() {
+        assertTrue(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,0,.875,100,0,false));
+        assertFalse(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,0,.875,3000,0,false));
+        assertTrue(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,57344,.875,3000,0,false));
+        assertTrue(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,0,0,20000,0,false));
+        assertTrue(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,0,.875,3000,0,true));
+    }
+    @Test void agingExpandsColdFeedWithoutAllowingItToConsumeTheEntireSloBudget() {
+        assertTrue(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,0,.875,375,30000,false));
+        assertFalse(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,0,.875,20000,60000,false));
+        assertFalse(PrefillSloPolicy.admitsCacheWork(30000,2000,65536,0,.875,375,-1,false));
     }
 }

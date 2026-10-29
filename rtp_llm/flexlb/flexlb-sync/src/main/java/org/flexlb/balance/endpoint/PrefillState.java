@@ -289,21 +289,30 @@ public final class PrefillState {
     private LongSupplier pendingTokenLimit;
 
     /** Installed before this endpoint generation is published. */
-    void enableTokenWorkload(long windowMs, long pendingTokenLimit) {
-        enableTokenWorkload(windowMs, () -> pendingTokenLimit);
+    void enableTokenWorkload(long pendingTokenLimit) {
+        enableTokenWorkload(() -> pendingTokenLimit);
     }
 
-    void enableTokenWorkload(long windowMs, LongSupplier pendingTokenLimit) {
+    void enableTokenWorkload(LongSupplier pendingTokenLimit) {
         this.pendingTokenLimit = pendingTokenLimit;
-        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload(windowMs);
+        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload();
     }
 
-    public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload(long nowMs) {
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload() {
         lock.lock();
         try {
             return tokenWorkload == null
-                    ? new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L)
-                    : tokenWorkload.snapshot(nowMs);
+                    ? new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L)
+                    : tokenWorkload.snapshot();
+        } finally { lock.unlock(); }
+    }
+
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.CacheWork cacheWorkAtOrAbove(int priority) {
+        lock.lock();
+        try {
+            return tokenWorkload == null
+                    ? new org.flexlb.balance.strategy.PrefillTokenWorkload.CacheWork(0, 0)
+                    : tokenWorkload.cacheWorkAtOrAbove(priority);
         } finally { lock.unlock(); }
     }
 
@@ -312,7 +321,7 @@ public final class PrefillState {
     }
 
     private boolean tokenCapacityAvailable() {
-        return tokenWorkload == null || tokenWorkload.snapshot(System.nanoTime() / 1_000_000L).pendingTokens() < pendingTokenLimit.getAsLong();
+        return tokenWorkload == null || tokenWorkload.snapshot().pendingTokens() < pendingTokenLimit.getAsLong();
     }
 
     public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
@@ -323,9 +332,14 @@ public final class PrefillState {
         return tokenWorkload == null ? null : tokenWorkload.plan(tokens, executionMs, targetMs);
     }
 
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(
+            long tokens, long executionMs, long targetMs, long inputTokens, int priority) {
+        return tokenWorkload == null ? null : tokenWorkload.plan(tokens, executionMs, targetMs, inputTokens, priority);
+    }
+
     private void acceptTokenWork(RequestRoute route) {
         route.releaseTokenPlan();
-        if (tokenWorkload != null) { tokenWorkload.accept(computeTokens(route)); }
+        if (tokenWorkload != null) { tokenWorkload.accept(computeTokens(route), Math.max(0L, route.seqLen()), route.priority()); }
     }
     /** Monotonic ownership/work revision used by projection snapshots. */
     private volatile long mutationVersion;
@@ -424,7 +438,7 @@ public final class PrefillState {
         }
         if (entry.ownership == OwnershipStage.COMMITTED || entry.ownership == OwnershipStage.DIRECT_RESERVED) { committedWorkCapture = null; }
         boolean removed = requests.remove(entry.route.requestId(), entry);
-        if (removed && tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route)); }
+        if (removed && tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route), Math.max(0L, entry.route.seqLen()), entry.route.priority()); }
         return removed;
     }
 
@@ -854,10 +868,7 @@ public final class PrefillState {
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
         for (TerminalObservation terminal : reduction.terminals.values()) {
-            if (removeEntry(terminal.owner) && tokenWorkload != null && terminal.errorCode() == 0L
-                    && terminal.preemptionProgress() != PriorityPreemptionProgress.CANCELED) {
-                tokenWorkload.complete(terminal.computeTokens(), System.nanoTime() / 1_000_000L);
-            }
+            removeEntry(terminal.owner);
         }
         for (var phase : reduction.individualPhases.entrySet()) {
             var entry = phase.getKey();
@@ -921,7 +932,7 @@ public final class PrefillState {
             var retiredProgress = new Progress(activeIndex.version() + (activeIndex.isEmpty() ? 0L : 1L),
                     schedulingInputVersion, mutationVersion + 1L, 0, 0, 0L);
             for (RequestEntry entry : requests.values()) {
-                if (tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route)); }
+                if (tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route), Math.max(0L, entry.route.seqLen()), entry.route.priority()); }
                 if (entry.reservation != null) { entry.reservation.originalOwner = null; }
                 entry.reservation = null;
             }

@@ -72,12 +72,12 @@ class TokenPlanWakeupTest {
             if (admitted) {
                 assertNotNull(lease);
                 assertEquals(version, availability.sequence(), "transfer to owned work creates no capacity edge");
-                assertEquals(100L, endpoint.ownership.tokenWorkload(System.nanoTime() / 1_000_000L).pendingTokens());
-                assertEquals(0L, endpoint.ownership.tokenWorkload(System.nanoTime() / 1_000_000L).plannedTokens());
+                assertEquals(100L, endpoint.ownership.tokenWorkload().pendingTokens());
+                assertEquals(0L, endpoint.ownership.tokenWorkload().plannedTokens());
                 endpoint.ownership.release(lease, null);
                 return;
             }
-            assertEquals(0L, endpoint.ownership.tokenWorkload(System.nanoTime() / 1_000_000L).plannedTokens());
+            assertEquals(0L, endpoint.ownership.tokenWorkload().plannedTokens());
             if (beforePark) {
                 assertFalse(queue.park(waiter, key, version), "release racing with parking must force a retry");
             } else {

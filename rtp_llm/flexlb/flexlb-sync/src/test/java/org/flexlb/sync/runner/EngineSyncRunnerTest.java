@@ -212,6 +212,44 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void missingFreshWorkerRemainsRoutableUntilSuccessfulStatusExpires() {
+        ConfigService service = Mockito.mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":30000}"));
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(service);
+        String address = "127.0.0.1:8080";
+        WorkerStatus status = Mockito.spy(RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site"));
+        var elapsedUs = new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+        when(status.pollHealth()).thenAnswer(ignored -> new WorkerStatus.PollHealth(
+                System.nanoTime() / 1_000 - elapsedUs.get(), 20_000L, 0L, true, true));
+        discover(registry, status);
+        RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, address, status);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL)).thenReturn(List.of());
+        EngineSyncRunner runner = new EngineSyncRunner(modelName, registry, workerAddressService,
+                statusCheckExecutor, engineHealthReporter, workerStatusRpcClient, RoleType.PREFILL,
+                localKvCacheAwareManager, cacheIntervalService, syncRequestTimeoutMs, syncCount,
+                100L, false, 5_000_000L);
+        try {
+            runner.run();
+            assertTrue(status.isActiveGeneration());
+            assertNotNull(registry.get(RoleType.PREFILL, address),
+                    "discovery withdrawal alone currently leaves the fresh endpoint routable");
+            assertTrue(registry.prefillRoutingSnapshot(RoleType.PREFILL).stream()
+                    .anyMatch(entry -> entry.address().equals(address)));
+            verify(localKvCacheAwareManager, never()).removeEngineBlockCache(address);
+            Mockito.verifyNoInteractions(workerStatusRpcClient, statusCheckExecutor);
+
+            elapsedUs.set(6_000_000L);
+            runner.run();
+            assertFalse(status.isActiveGeneration());
+            assertNull(registry.get(RoleType.PREFILL, address));
+            verify(localKvCacheAwareManager).removeEngineBlockCache(address);
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void discoveryPublishesOnlyInactiveStatusUntilFirstResponseCommits() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         // Discovery alone never publishes an endpoint, so the registry never

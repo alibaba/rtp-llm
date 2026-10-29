@@ -38,7 +38,8 @@ public class PrefillBalanceSimulation {
         double busyUntil, pendingCompute, collectionDue;
         boolean collecting, running;
         long input, hit, compute, useful, count;
-        Worker(long window) { work=new PrefillTokenWorkload(window); }
+        // window remains only as a legacy experiment/CSV label; routing has no history window.
+        Worker(long window) { work=new PrefillTokenWorkload(); }
     }
     static final class Counters {
         long arrivals, completed, dropped, expired, coldArrivals, coldCompleted, coldDropped, coldExpired;
@@ -169,7 +170,7 @@ public class PrefillBalanceSimulation {
             // Scan all waiting requests once per 20ms scheduling round; blocked affinity cannot block cold work.
             // Optional ablation reorders only each already-present 32-item group, never defers an item.
             for(int i=0;i<N;i++) {
-                var snapshot=workers[i].work.snapshot((long)now);
+                var snapshot=workers[i].work.snapshot();
                 workScores[i]=snapshot.score();pendingTokens[i]=snapshot.pendingTokens();
             }
             var candidates=new ArrayList<>(waiting.values());
@@ -230,7 +231,6 @@ public class PrefillBalanceSimulation {
                     c.expiredCompute+=q.actualWork;w.compute+=q.actualWork;
                     continue;
                 }
-                w.work.complete(q.actualWork,(long)now);
                 Cache old=w.cache.get(q.session);
                 Cache updated=new Cache(Math.max(q.tokens,old==null?0:old.tokens),now);
                 w.cache.put(q.session,updated);
@@ -319,7 +319,7 @@ public class PrefillBalanceSimulation {
             for(int i=0;i<N;i++) {
                 Worker w=workers[i];long reserved=w.queue.stream().mapToLong(q->q.reserved).sum();
                 for(Event event:events)if(event.kind==3 && event.worker==i)reserved+=event.batch.stream().mapToLong(q->q.reserved).sum();
-                if(w.work.snapshot((long)endMs).pendingTokens()!=reserved)throw new AssertionError("reservation conservation");
+                if(w.work.snapshot().pendingTokens()!=reserved)throw new AssertionError("reservation conservation");
             }
             System.out.printf("PASS %s %s seed=%d window=%d cap=%d reorder=%s arrivals=%d success=%d drops=%d expire=%d inventory=%d%n",
                 policy,scene,seed,window,cap,reorder,c.arrivals,c.completed,c.dropped,c.expired,inventory());

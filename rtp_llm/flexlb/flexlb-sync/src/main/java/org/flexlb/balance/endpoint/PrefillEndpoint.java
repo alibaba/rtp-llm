@@ -83,9 +83,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public final PrefillState ownership;
     private final long configuredPendingTokens;
     public final long serviceWindowMs;
+    private final org.flexlb.balance.strategy.PrefillComputeCapacity computeCapacity;
     public final long ttftSloMs;
     private volatile long adaptivePendingTokens = 1;
     private volatile long budgetRefreshMs = Long.MIN_VALUE;
+
+    public long observedComputeMs(double tokens) { return computeCapacity.estimatedMs(tokens); }
 
     public long pendingComputeLimit() {
         if (ttftSloMs > 0) { return Long.MAX_VALUE; }
@@ -124,10 +127,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.ownership = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), System::currentTimeMillis);
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         serviceWindowMs = org.flexlb.balance.strategy.PrefillAdaptiveBudget.serviceWindowMs(config);
+        computeCapacity = new org.flexlb.balance.strategy.PrefillComputeCapacity(serviceWindowMs);
         configuredPendingTokens = balance == null ? 0 : balance.getMaxPendingComputeTokens();
         if (balance != null) {
-            ownership.enableTokenWorkload(balance.getWindowMs() > 0 ? balance.getWindowMs() : serviceWindowMs * 5,
-                    this::pendingComputeLimit);
+            ownership.enableTokenWorkload(this::pendingComputeLimit);
         }
 
     }
@@ -540,6 +543,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         batchId, predictedMs, actualMs, actualMs - predictedMs, completion.originalFeatures().batchSize(), getIp());
                 // A failed/removed member invalidates the original batch as a learning sample.
                 if (completion.learningEligible()) {
+                    long computeTokens = completion.originalFeatures().items().stream()
+                            .mapToLong(item -> item.seqLen() - item.hitCache()).sum();
+                    computeCapacity.observe(computeTokens, actualMs);
                     try {
                         if (predictor.learn(completion.originalFeatures(), predictedMs, actualMs)
                                 == PrefillTimePredictor.LearningResult.MODEL_UPDATED) { signal(Signal.INPUT); }

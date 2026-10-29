@@ -54,29 +54,29 @@ class PrefillStateSnapshotTest {
 
     @Test
     void tokenReservationsAreCanonicalAndBackpressureAllowsOneOversizedRequest() {
-        state.enableTokenWorkload(30_000, 90);
+        state.enableTokenWorkload(90);
         var first = item(1001);
         when(first.hitCache()).thenReturn(20L);
         enqueue(first);
-        assertEquals(80, state.tokenWorkload(0).pendingTokens());
+        assertEquals(80, state.tokenWorkload().pendingTokens());
         assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, first, 0, 0));
-        assertEquals(80, state.tokenWorkload(0).pendingTokens());
+        assertEquals(80, state.tokenWorkload().pendingTokens());
         var second = item(1002);
         enqueue(second); // admitted below the cap, then crosses it
-        assertEquals(180, state.tokenWorkload(0).pendingTokens());
+        assertEquals(180, state.tokenWorkload().pendingTokens());
         assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, item(1003), 0, 0));
         state.release(null, first); state.release(null, first);
-        assertEquals(100, state.tokenWorkload(0).pendingTokens());
+        assertEquals(100, state.tokenWorkload().pendingTokens());
         state.release(null, second);
-        assertEquals(0, state.tokenWorkload(0).score());
+        assertEquals(0, state.tokenWorkload().score());
         var big = item(1004);
         when(big.seqLen()).thenReturn(1_000_000L);
         var reservation = state.reserveUnqueuedRoute(big, 1, 0).reservation();
         assertNotNull(reservation);
-        assertEquals(1_000_000, state.tokenWorkload(0).pendingTokens());
+        assertEquals(1_000_000, state.tokenWorkload().pendingTokens());
         assertNull(state.reserveUnqueuedRoute(item(1005), 1, 0).reservation());
         state.release(reservation, null);
-        assertEquals(0, state.tokenWorkload(0).score());
+        assertEquals(0, state.tokenWorkload().score());
     }
 
     @ParameterizedTest
@@ -1311,21 +1311,20 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void tokenHistoryUsesActualEnginePrefixInsteadOfRoutingPrediction() {
-        state.enableTokenWorkload(30_000, 1_000_000);
+    void completionReleasesReservedTokensEvenWhenEnginePrefixDiffers() {
+        state.enableTokenWorkload(1_000_000);
         commitBatch(List.of(item(71)), 300L);
-        assertEquals(100, state.tokenWorkload(0).pendingTokens());
+        assertEquals(100, state.tokenWorkload().pendingTokens());
         var terminal = task(71, null, 0L, 50L);
         terminal.setInputLength(100L);
         terminal.setPrefixLength(90L);
         reconcile(Map.of("71", terminal), Map.of(), unused -> 0L);
-        assertEquals(0, state.tokenWorkload(System.nanoTime() / 1_000_000L).pendingTokens());
-        assertEquals(10, state.tokenWorkload(System.nanoTime() / 1_000_000L).completedTokens());
+        assertEquals(0, state.tokenWorkload().pendingTokens());
     }
 
     @Test
     void duplicateTerminalReportsMergeBeforeBatchAggregationAndReleaseOnce() {
-        state.enableTokenWorkload(30_000, 1_000_000);
+        state.enableTokenWorkload(1_000_000);
         commitBatch(List.of(item(1), item(2)), 300L);
         var finished = Map.of("first-success", task(1, null, 0L, 100L),
                 "first-failure", task(1, null, 500L, 700L),
@@ -1344,13 +1343,12 @@ class PrefillStateSnapshotTest {
         assertFalse(completion.learningEligible());
         assertTrue(result.capacityReleased());
         assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
-        assertEquals(100, state.tokenWorkload(System.nanoTime() / 1_000_000L).completedTokens());
-        assertEquals(0, state.tokenWorkload(System.nanoTime() / 1_000_000L).pendingTokens());
+        assertEquals(0, state.tokenWorkload().pendingTokens());
         var repeated = reconcile(finished, Map.of(), noRepacking);
-        assertEquals(100, state.tokenWorkload(System.nanoTime() / 1_000_000L).completedTokens());
         assertTrue(repeated.batchCompletions().isEmpty());
         assertTrue(repeated.requestStatuses().isEmpty());
         assertFalse(repeated.capacityReleased());
+        assertEquals(0, state.tokenWorkload().score());
     }
 
     @Test

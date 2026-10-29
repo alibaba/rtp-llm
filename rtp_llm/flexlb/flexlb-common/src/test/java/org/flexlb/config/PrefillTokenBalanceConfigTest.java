@@ -9,7 +9,6 @@ class PrefillTokenBalanceConfigTest {
     }
     @Test void optInDefaultsAndValidation() {
         assertNull(ConfigTestFixtures.parse("{}").getRouter().getRoles().getPrefill().getTokenBalance());
-        assertEquals(0, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getWindowMs());
         assertEquals(RoutingConfig.EstimatorType.LEARNING,
                 parse("{}").getRouter().getRoles().getPrefill().getExecutionTimeEstimator().getType());
         for (String value : new String[]{"{\"windowMs\":-1}", "{\"maxPendingComputeTokens\":-1}",
@@ -20,6 +19,14 @@ class PrefillTokenBalanceConfigTest {
                 {"router":{"roles":{"prefill":{"tokenBalance":{},"cacheAffinity":{}}}}}
                 """));
     }
+    @Test void completedWorkWindowIsNotAConfigurationOption() {
+        for (long window : new long[]{-1, 0, 1, 10000}) {
+            assertThrows(RuntimeException.class, () -> parse("{\"windowMs\":" + window + "}"));
+        }
+        assertNotNull(ConfigService.parse("{\"ttftSloMs\":30000}")
+                .getRouter().getRoles().getPrefill().getTokenBalance());
+    }
+
     @Test void validatesBoundedHotspotRescue() {
         var rescue = parse("{\"hotspotRescue\":{}}").getRouter().getRoles().getPrefill().getTokenBalance().getHotspotRescue();
         assertEquals(0, rescue.getMinWaitMs());
