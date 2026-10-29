@@ -9,14 +9,14 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.runtime.ApiServer;
 
 /** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
 public final class RtpNode implements AutoCloseable {
     private final RtpConfig config;
-    private final DeviceCache cache;
+    private final KvCache cache;
     private final RtpRpcService service;
     private final AtomicBoolean closed = new AtomicBoolean();
     private Server rpc;
@@ -25,7 +25,8 @@ public final class RtpNode implements AutoCloseable {
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
+        cache = new KvCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
+            config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark());
         try { service = new RtpRpcService(config, cache, schedulers); }
         catch (RuntimeException error) { cache.close(); throw error; }
     }
@@ -61,7 +62,7 @@ public final class RtpNode implements AutoCloseable {
         if (closed.get()) throw new IllegalStateException("Engine closed");
         service.scrapeMetrics();
     }
-    public DeviceCache cache() { return cache; }
+    public KvCache cache() { return cache; }
     public Map<String, Object> endpoints() {
         boolean prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill;
         var result = new LinkedHashMap<String, Object>();

@@ -5,7 +5,7 @@ import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
 import org.flexlb.mock.api.model.Types.Role;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.compute.*;
 
 /** Event/deadline driven execution. Only short state transitions hold the scheduling lock. */
@@ -14,7 +14,7 @@ public final class EngineLoop implements AutoCloseable {
     private final java.util.concurrent.locks.ReentrantLock signal = new java.util.concurrent.locks.ReentrantLock();
     private final java.util.concurrent.locks.Condition changed = signal.newCondition();
     private final Scheduler scheduler;
-    private final DeviceCache cache;
+    private final KvCache cache;
     private final ComputeModel model;
     private final Role role;
     private final String identity;
@@ -32,7 +32,7 @@ public final class EngineLoop implements AutoCloseable {
         Pending(Scheduler.Work work) { this.work = work; }
     }
 
-    public EngineLoop(Object lock, Scheduler scheduler, DeviceCache cache, ComputeModel model, Role role, String identity) {
+    public EngineLoop(Object lock, Scheduler scheduler, KvCache cache, ComputeModel model, Role role, String identity) {
         this.lock = Objects.requireNonNull(lock);
         this.scheduler = Objects.requireNonNull(scheduler);
         this.cache = Objects.requireNonNull(cache);

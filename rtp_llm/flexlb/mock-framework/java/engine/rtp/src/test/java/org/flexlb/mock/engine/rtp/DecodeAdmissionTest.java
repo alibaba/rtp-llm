@@ -135,7 +135,9 @@ class DecodeAdmissionTest {
             try (var node = node(disabled); var call = new Call(node, 0)) {
                 var input = input("p", 1, 5, 0);
                 var keys = PrefixKeys.completeBlocks(input.getInput(), 2);
-                node.node.cache().acquire(3, List.of()).lease().complete(keys);
+                try (var lease = node.node.cache().acquire(3, List.of()).lease()) {
+                    lease.markValid(keys.size()); lease.publish(keys);
+                }
                 call.request.onNext(input); call.ack();
                 assertEquals(disabled ? 0 : 4, node.status().getRunningTaskInfo(0).getPrefixLength());
                 call.close(); await(() -> node.status().getWaitingQueryLen() == 0);

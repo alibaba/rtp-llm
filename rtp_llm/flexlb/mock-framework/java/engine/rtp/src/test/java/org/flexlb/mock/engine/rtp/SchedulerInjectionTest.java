@@ -10,7 +10,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.compute.SimulatedCompute;
 import org.flexlb.mock.engine.*;
 import org.junit.jupiter.api.Test;
@@ -64,7 +64,7 @@ class SchedulerInjectionTest {
     @Test void bothNativeAdaptersUseTheInjectedSchedulerAndKeepTheirOwnLock() throws Exception {
         for (String role : List.of("prefill", "decode")) {
             var created = new AtomicReference<RejectingScheduler>();
-            var resource = new AtomicReference<DeviceCache>();
+            var resource = new AtomicReference<KvCache>();
             try (var node = RtpNode.start(config(role), (lock, cache) -> {
                 assertNull(created.get(), "One scheduler per Engine instance");
                 resource.set(cache);
@@ -119,7 +119,7 @@ class SchedulerInjectionTest {
 
     @Test void factoryFailureOrNullPolicyClosesTheNewInstancesCache() throws Exception {
         for (boolean returnsNull : List.of(false, true)) {
-            var resource = new AtomicReference<DeviceCache>();
+            var resource = new AtomicReference<KvCache>();
             var config = config("prefill");
             var error = assertThrows(RuntimeException.class,
                 () -> RtpNode.start(config, (lock, cache) -> {

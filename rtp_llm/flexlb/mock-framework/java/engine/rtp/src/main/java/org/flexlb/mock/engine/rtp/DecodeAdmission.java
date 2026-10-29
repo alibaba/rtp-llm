@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.rtp.transfer.*;
 
 /** Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler. */
@@ -17,7 +17,7 @@ final class DecodeAdmission implements AutoCloseable {
     private final RpcChannels channels = new RpcChannels();
     private boolean closed;
 
-    DecodeAdmission(RtpConfig config, DeviceCache cache, Scheduler.Factory schedulers) {
+    DecodeAdmission(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config;
         engine = new EngineLoop(this, schedulers.create(this, cache), cache, config.compute(), config.role(), config.id());
     }

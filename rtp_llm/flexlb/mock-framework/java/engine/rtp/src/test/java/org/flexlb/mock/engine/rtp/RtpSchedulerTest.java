@@ -8,7 +8,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.mock.compute.SimulatedCompute;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -58,7 +58,7 @@ class RtpSchedulerTest {
 
     @Test void retainedPrefillKeepsKvThroughReadUntilTransferAcknowledgement() throws Exception {
         var config = config("prefill", "1", 2); var listener = new Listener();
-        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(8, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var request = scheduler.input(input(1, true), listener);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
@@ -76,7 +76,7 @@ class RtpSchedulerTest {
 
     @Test void decodeBatchRetainsRunningAndCancellationCannotDamageAnotherMember() throws Exception {
         var config = config("decode", "1", 2); var first = new Listener(); var second = new Listener();
-        try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(12, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var a = scheduler.input(input(1, false), first); var b = scheduler.input(input(2, false), second);
             scheduler.maintain(); drain(scheduler); generate(scheduler, a); generate(scheduler, b);
@@ -101,7 +101,7 @@ class RtpSchedulerTest {
 
     @Test void closingEngineDefersCleanupUntilOutstandingReadReturns() throws Exception {
         Object lock = new Object(); var config = config("prefill", "1", 1); var listener = new Listener();
-        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(8, 0, KvCache.EvictionPolicy.LRU);
              var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, true), listener);
             listener.output.get(2, TimeUnit.SECONDS);
@@ -117,7 +117,7 @@ class RtpSchedulerTest {
 
     @Test void transferAndGenerationAreIndependentRequirementsAndOldHandlesCannotStopNewRequests() throws Exception {
         var config = config("decode", "1", 2); var listener = new Listener();
-        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(8, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var old = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler);
@@ -135,7 +135,7 @@ class RtpSchedulerTest {
 
     @Test void prefillAdmissionWaitsForCapacityAndBatchesAccordingToConfiguredLimit() throws Exception {
         var config = config("prefill", "1", 2);
-        try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(12, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var held = cache.acquire(12, List.of()).lease();
             var first = new Listener(); scheduler.input(input(1, false), first); scheduler.input(input(2, false), new Listener());
@@ -158,7 +158,7 @@ class RtpSchedulerTest {
                 super.output(request, output);
             }
         };
-        try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(12, 0, KvCache.EvictionPolicy.LRU);
              var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
             engine.input(input(1, false), slow);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
@@ -172,7 +172,7 @@ class RtpSchedulerTest {
         var config = config("decode", "1", 1); var listener = new Listener() {
             @Override public void output(Scheduler.Request request, Scheduler.Output output) { throw new IllegalStateException("closed"); }
         };
-        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(8, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var request = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler); generate(scheduler, request);
@@ -184,7 +184,7 @@ class RtpSchedulerTest {
 
     @Test void tokenBudgetDoesNotReserveKvForUnselectedRequests() throws Exception {
         var config = config("prefill", "1", 2, 5);
-        try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(12, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(input(1, false), new Listener());
             var waiting = scheduler.input(input(2, false), new Listener());
@@ -212,7 +212,7 @@ class RtpSchedulerTest {
                 throw new IllegalStateException("Transport closed while sending");
             }
         };
-        try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(12, 0, KvCache.EvictionPolicy.LRU);
              var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
             var request = engine.input(input(1, false), listener);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
@@ -236,7 +236,7 @@ class RtpSchedulerTest {
             }
         };
         var lock = new Object();
-        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(8, 0, KvCache.EvictionPolicy.LRU);
              var loop = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
             loop.input(input(1, false), listener);
             assertTrue(entered.await(2, TimeUnit.SECONDS));
@@ -250,7 +250,7 @@ class RtpSchedulerTest {
 
     @Test void statusIsReadOnlyAndWaitingTimeFreezesAtResourceAdmission() throws Exception {
         var config = config("prefill", "1", 1);
-        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+        try (var cache = new KvCache(8, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             scheduler.input(input(1, true), new Listener());
             var before = scheduler.status(0);
@@ -265,6 +265,39 @@ class RtpSchedulerTest {
             assertEquals(ready.waitingMillis(), later.waitingMillis());
             assertTrue(later.executionMillis() >= ready.executionMillis() + 10);
             assertEquals(Scheduler.ReportedPhase.RECEIVED, before.tasks().getFirst().phase(), "Snapshots must not change later");
+        }
+    }
+
+    @Test void speculativeWindowIsReservedBeforeAcceptanceAndGrowthFailureEndsOnlyThatRequest() throws Exception {
+        for (int capacity : List.of(1, 2)) {
+            var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("decode"));
+            var settings = (ObjectNode) root.path("component").path("config");
+            settings.put("seq_size_per_block", 128);
+            ((ObjectNode) settings.path("compute")).putObject("decode").put("draft_tokens", 4).put("acceptance_rate", 0);
+            var path = directory.resolve("spec-" + capacity + ".json"); json.writeValue(path.toFile(), root);
+            var config = RtpConfig.load(path);
+            try (var cache = new KvCache(capacity, 0, KvCache.EvictionPolicy.LRU)) {
+                var scheduler = new RtpScheduler(new Object(), config, cache); var listener = new Listener();
+                try {
+                    var request = scheduler.input(new Scheduler.Input("r", 1, 0, 123, 10, 0, System.nanoTime(),
+                        Long.MAX_VALUE, List.of(), false, false, 0, true), listener);
+                    scheduler.maintain(); drain(scheduler); generate(scheduler, request);
+                    var work = scheduler.schedule();
+                    if (capacity == 1) {
+                        assertNull(work); drain(scheduler);
+                        assertEquals(RequestFailure.Reason.CAPACITY, listener.terminal.get(1, TimeUnit.SECONDS).reason());
+                        assertEquals(1, cache.snapshot(-1, false).freeBlocks());
+                    } else {
+                        assertNotNull(work); assertEquals(0, cache.snapshot(-1, false).availableBlocks());
+                        assertEquals(5, work.batch().dps().getFirst().requests().getFirst().stepTokens());
+                        complete(scheduler, work, config); drain(scheduler);
+                        assertEquals(2, request.snapshot().generated());
+                        assertEquals(0, cache.snapshot(-1, false).availableBlocks(), "Rejected drafts do not shrink the reserved window");
+                        scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+                        assertEquals(2, cache.snapshot(-1, false).freeBlocks());
+                    }
+                } finally { scheduler.close(); }
+            }
         }
     }
 

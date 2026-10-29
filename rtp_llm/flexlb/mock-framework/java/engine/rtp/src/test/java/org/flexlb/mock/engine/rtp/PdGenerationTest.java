@@ -337,7 +337,8 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
                 Map.of("decode", Map.of("draft_tokens", 2147483646, "acceptance_rate", 0)));
                 var call = new Call(p, input(d, 1, 5, 4, 2000, true))) {
-            call.output(1, false, 1); assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
             await(() -> d.status().getAvailableKvCache() == 16);
             assertTrue(d.status().getAlive());
         }

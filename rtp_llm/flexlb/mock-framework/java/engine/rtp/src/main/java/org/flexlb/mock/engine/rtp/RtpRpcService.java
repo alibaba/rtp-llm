@@ -7,13 +7,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.engine.Scheduler;
 
 /** Native RPC adapter; P and D owners manage request state and KV independently. */
 public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final RtpConfig config;
-    private final DeviceCache cache;
+    private final KvCache cache;
     private final LocalPrefill requests;
     private final DecodeAdmission decode;
     private final PrefillTransfer transfer;
@@ -21,7 +21,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
-    public RtpRpcService(RtpConfig config, DeviceCache cache, Scheduler.Factory schedulers) {
+    public RtpRpcService(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config; this.cache = cache;
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
         decode = requests == null ? new DecodeAdmission(config, cache, schedulers) : null;

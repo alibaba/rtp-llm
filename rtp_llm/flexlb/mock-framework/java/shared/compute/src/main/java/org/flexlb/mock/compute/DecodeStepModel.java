@@ -8,6 +8,8 @@ public record DecodeStepModel(DecodeSpec configuration) {
     public DecodeStepModel { java.util.Objects.requireNonNull(configuration); }
     public record Plan(int proposedTokens, int verifyTokens, int additionalKvTokens, int fixedCandidates) {}
 
+    public int reserveTokens() { return configuration.draft_tokens() == 0 ? 0 : configuration.draft_tokens() + 1; }
+
     public Plan plan(long round, int remaining) {
         if (round < 0 || remaining < 1) throw new IllegalArgumentException("Invalid Decode round/budget");
         if (configuration.tokens_per_step() != null) {
@@ -19,7 +21,7 @@ public record DecodeStepModel(DecodeSpec configuration) {
         }
         // RTP verifies the full fixed-width window; output limits are applied after acceptance.
         int proposed = configuration.draft_tokens();
-        return new Plan(proposed, proposed + 1, proposed, 0);
+        return new Plan(proposed, proposed + 1, reserveTokens(), 0);
     }
 
     public int candidates(Plan plan, String requestKey, long round) {

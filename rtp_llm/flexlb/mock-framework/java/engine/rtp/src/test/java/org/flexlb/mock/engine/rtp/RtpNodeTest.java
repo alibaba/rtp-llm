@@ -40,7 +40,7 @@ class RtpNodeTest {
                 assertTrue(rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getStatusVersion() > status.getStatusVersion());
                 var lease = node.cache().acquire(2, List.of()).lease();
                 assertEquals(96, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
-                lease.complete(List.of(1L, -2L));
+                lease.markValid(2); lease.publish(List.of(1L, -2L)); lease.close();
                 var snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 assertEquals(Set.of(1L, -2L), snapshot.getCacheKeysMap().keySet());
                 assertEquals(16, snapshot.getBlockSize()); assertEquals(128, snapshot.getAvailableKvCache());

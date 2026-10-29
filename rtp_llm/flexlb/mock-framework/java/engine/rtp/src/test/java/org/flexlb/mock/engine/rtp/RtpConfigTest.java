@@ -139,7 +139,21 @@ class RtpConfigTest {
             assertTrue(assertThrows(IllegalArgumentException.class, () -> load(root)).getMessage().contains(key));
         }
         var root = root(); root.put("component_role", "decode");
-        ((ObjectNode) root.path("component").path("config")).put("memory_cache_blocks", 100);
+        ((ObjectNode) root.path("component").path("config")).put("prefill_retry_timeout_ms", 100);
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
+    @Test void enablesHostAndReportsStorageSettingsAsEffective() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("enable_memory_cache", true).put("memory_cache_blocks", 32).put("memory_eviction_policy", "fifo");
+        var parsed = load(root); var effective = parsed.effective();
+        assertEquals(32, parsed.hostBlocks()); assertEquals("fifo", effective.path("memory_eviction_policy").asText());
+        assertTrue(effective.path("enable_memory_cache").booleanValue());
+        assertFalse(effective.path("pending_config").has("memory_cache_blocks"));
+        assertFalse(effective.path("pending_config").has("memory_eviction_policy"));
+        assertFalse(effective.path("pending_config").has("block_tree_device_evict_low_watermark_ratio"));
+        config.put("memory_cache_blocks", 0); assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("memory_cache_blocks", 32).put("block_tree_memory_evict_low_watermark_ratio", .95);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
 }

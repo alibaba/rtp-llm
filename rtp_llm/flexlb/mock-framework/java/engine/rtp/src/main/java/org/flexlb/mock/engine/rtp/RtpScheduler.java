@@ -4,7 +4,7 @@ import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.cache.KvCache;
 import org.flexlb.mock.metrics.EngineMetrics;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.rtp.RtpScheduler.Phase.*;
@@ -15,7 +15,7 @@ final class RtpScheduler implements Scheduler {
     private final TaskHistory history = new TaskHistory();
     private final Object lock;
     private final RtpConfig config;
-    private final DeviceCache cache;
+    private final KvCache cache;
     private final EngineMetrics metrics;
     private final Map<String, Entry> active = new LinkedHashMap<>();
     private final Set<Entry> owned = new LinkedHashSet<>();
@@ -31,7 +31,7 @@ final class RtpScheduler implements Scheduler {
         final Listener listener;
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
-        DeviceCache.Lease lease;
+        KvCache.Lease lease;
         int reused;
         boolean prefillFinished;
         long admittedAt = Long.MIN_VALUE, attemptedGeneration = Long.MIN_VALUE;
@@ -60,7 +60,7 @@ final class RtpScheduler implements Scheduler {
         return (lock, cache) -> new RtpScheduler(lock, config, cache);
     }
 
-    RtpScheduler(Object lock, RtpConfig config, DeviceCache cache) {
+    RtpScheduler(Object lock, RtpConfig config, KvCache cache) {
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
@@ -120,7 +120,7 @@ final class RtpScheduler implements Scheduler {
                 if (failure == null) {
                     entry.phase = LOADING;
                     enqueue(entry, () -> { if (liveForDelivery(entry)) entry.listener.allocated(entry); }, false);
-                } else if (failure == DeviceCache.Failure.PERMANENT) {
+                } else if (failure == KvCache.Failure.PERMANENT) {
                     finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode allocation exceeds capacity"));
                 }
             }
@@ -188,7 +188,7 @@ final class RtpScheduler implements Scheduler {
     private boolean reserve(Entry entry) {
         if (prefill()) {
             var failure = acquire(entry);
-            if (failure == DeviceCache.Failure.PERMANENT)
+            if (failure == KvCache.Failure.PERMANENT)
                 finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Prefill allocation exceeds capacity"));
             return failure == null;
         }
@@ -224,6 +224,7 @@ final class RtpScheduler implements Scheduler {
                 var result = config.compute().completed(member.step());
                 int committed = result.committedTokens();
                 entry.state.commit(committed, outcome.elapsedNanos());
+                entry.lease.markValid((int) (((long) entry.input.tokens() + entry.state.snapshot().generated() - 1) / config.blockSize()));
                 entry.nextStep = null;
                 output += committed;
                 if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
@@ -284,6 +285,7 @@ final class RtpScheduler implements Scheduler {
         if (!prefill()) {
             if (entry.lease == null || entry.loaded || entry.generating)
                 throw new RequestFailure(INVALID, "Unexpected KV load completion");
+            entry.lease.markValid(entry.input.tokens() / config.blockSize());
             entry.loaded = true;
             entry.prefillFinished = transferred.prefillFinished();
         }
@@ -354,22 +356,24 @@ final class RtpScheduler implements Scheduler {
         return entry;
     }
     private boolean prefill() { return config.role() == Role.prefill; }
-    private int blocks(int tokens) { return (int) (((long) tokens + config.blockSize() - 1) / config.blockSize()); }
-    private DeviceCache.Failure acquire(Entry entry) {
+    private KvCache.Failure acquire(Entry entry) {
         if (entry.lease != null) return null;
         long generation = cache.allocationGeneration();
-        if (entry.attemptedGeneration == generation) return DeviceCache.Failure.RETRYABLE;
-        boolean reuse = config.reuseCache() && config.deviceCache() && entry.input.reuse()
+        if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
+        boolean reuse = config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse()
             && (prefill() || !config.disableDecodeFirstReuse());
         int matched = Math.min(entry.input.keys().size(), (entry.input.tokens() - 1) / config.blockSize());
-        var admission = cache.acquire(blocks(entry.input.tokens()), reuse ? entry.input.keys().subList(0, matched) : List.of());
+        long capacityTokens = (long) entry.input.tokens() + (prefill() ? 0 : config.compute().kvReserveTokens());
+        long demand = (capacityTokens + config.blockSize() - 1) / config.blockSize();
+        if (demand > Integer.MAX_VALUE) return KvCache.Failure.PERMANENT;
+        var admission = cache.acquire((int) demand, reuse ? entry.input.keys().subList(0, matched) : List.of());
         entry.attemptedGeneration = admission.generation();
         if (admission.lease() == null) return admission.failure();
         if (entry.admittedAt == Long.MIN_VALUE) entry.admittedAt = System.nanoTime();
         entry.lease = admission.lease();
         entry.reused = admission.lease().reusedBlocks() * config.blockSize();
-        entry.state.attach(entry.lease, () -> entry.lease.complete(
-            config.reuseCache() && config.deviceCache() && entry.input.reuse() ? entry.input.keys() : List.of()));
+        entry.state.attach(entry.lease, () -> entry.lease.publish(
+            config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse() ? entry.input.keys() : List.of()));
         metrics.cacheLookup(entry.input.tokens(), entry.reused);
         return null;
     }
@@ -416,9 +420,10 @@ final class RtpScheduler implements Scheduler {
         synchronized (lock) {
             var counts = queues();
             var kv = cache.snapshot(0, false);
+            var host = cache.hostSnapshot();
             long block = config.blockSize();
             return new EngineMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block);
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block);
         }
     }
     @Override public String scrapeMetrics() { return metrics.scrape(); }
