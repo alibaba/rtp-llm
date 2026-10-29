@@ -1,4 +1,4 @@
-"""mHC Decode and MTP batching must preserve the one-token FP32 reduction."""
+"""GLM53 Prefill, Decode and MTP must preserve the one-token mHC reduction."""
 
 import importlib
 import unittest
@@ -128,7 +128,30 @@ class TestGlm53MhcBatchInvariance(unittest.TestCase):
         self.assert_bits(actual, expected)
 
     @torch.inference_mode()
-    def test_initial_pre_preserves_prefill_reduction(self):
+    def test_initial_pre_prefill_token_shards_preserve_single_tokens(self):
+        values, weights = self.inputs(4)
+        needles = values[1]
+        model = _InitialPreModel()
+        single = [model(_inputs(), row, weights) for row in needles.split(1)]
+        expected = tuple(torch.cat([row[k] for row in single]) for k in range(3))
+        # ceil(1948/8), ceil(15*1948/8), ceil(51738/8): the real
+        # short serial/concurrent and long TP8 Prefill shard lengths.
+        for mtp in (False, True):
+            model = _InitialPreModel(mtp=mtp)
+            for count in (244, 3653, 6468):
+                with self.subTest(mtp=mtp, local_tokens=count):
+                    residual = torch.zeros(
+                        count, 4, 4096, device="cuda", dtype=torch.bfloat16
+                    )
+                    positions = torch.tensor(
+                        [0, count // 3, count // 2, count - 1], device="cuda"
+                    )
+                    residual[positions] = needles
+                    actual = model(_inputs(prefill=True), residual, weights)
+                    self.assert_bits(tuple(x[positions] for x in actual), expected)
+
+    @torch.inference_mode()
+    def test_initial_pre_preserves_other_models_prefill_reduction(self):
         from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_pre
 
         values, weights = self.inputs(256)
@@ -141,11 +164,9 @@ class TestGlm53MhcBatchInvariance(unittest.TestCase):
             sinkhorn_eps=1e-6,
             sinkhorn_iters=20,
         )
-        for mtp in (False, True):
-            self.assert_bits(
-                _InitialPreModel(mtp=mtp)(_inputs(prefill=True), residual, weights),
-                expected,
-            )
+        model = _InitialPreModel()
+        model.config = SimpleNamespace(model_type="dsv4", is_glm53_mtp=False)
+        self.assert_bits(model(_inputs(prefill=True), residual, weights), expected)
 
     @torch.inference_mode()
     def test_batch_size_order_and_ownership(self):

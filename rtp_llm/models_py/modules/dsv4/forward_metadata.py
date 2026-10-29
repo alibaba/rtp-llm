@@ -6,6 +6,7 @@ from functools import wraps
 
 _FORWARD_METADATA = ContextVar("glm53_forward_metadata", default=None)
 _TOKENWISE_ROUTER = ContextVar("glm53_tokenwise_router", default=False)
+_BATCH_INVARIANT_MHC = ContextVar("glm53_batch_invariant_mhc", default=False)
 _SCORE_WORKSPACE_MB = 8192
 _SCORE_WORKSPACE_DEMAND = os.environ.get("GLM53_DEMAND_SCORE_BUDGET", "0") == "1"
 
@@ -16,6 +17,10 @@ def metadata_cache():
 
 def tokenwise_router_enabled():
     return _TOKENWISE_ROUTER.get()
+
+
+def mhc_batch_invariant_enabled():
+    return _BATCH_INVARIANT_MHC.get()
 
 
 def score_workspace_fits(device, required_bytes):
@@ -93,12 +98,17 @@ def scoped_forward_metadata(function):
             # Decode batches and MTP verification may regroup the same tokens
             # between steps. Keep the router's FP32 reduction independent of M.
             router_token = _TOKENWISE_ROUTER.set(True)
+            mhc_token = _BATCH_INVARIANT_MHC.set(True)
             try:
                 return function(self, inputs, *args, **kwargs)
             finally:
                 _TOKENWISE_ROUTER.reset(router_token)
+                _BATCH_INVARIANT_MHC.reset(mhc_token)
         token = _FORWARD_METADATA.set({})
         router_token = _TOKENWISE_ROUTER.set(False)
+        # TP Prefill changes the local token count when requests are batched.
+        # mHC must keep its reduction independent of that shard size too.
+        mhc_token = _BATCH_INVARIANT_MHC.set(True)
         try:
             import torch
 
@@ -121,6 +131,7 @@ def scoped_forward_metadata(function):
             # is reused by the executor for another forward.
             _FORWARD_METADATA.reset(token)
             _TOKENWISE_ROUTER.reset(router_token)
+            _BATCH_INVARIANT_MHC.reset(mhc_token)
 
     return wrapped
 

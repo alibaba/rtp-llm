@@ -234,6 +234,69 @@ class ForwardMetadataTest(unittest.TestCase):
         forward(self.model, self.inputs)
         self.query.assert_not_called()
 
+    def test_mhc_scope_prefill_decode_verify_and_mtp(self):
+        @meta.scoped_forward_metadata
+        def forward(_, inputs, fail=False):
+            self.assertTrue(meta.mhc_batch_invariant_enabled())
+            attention = inputs.attention_inputs
+            self.assertEqual(
+                meta.tokenwise_router_enabled(),
+                not attention.is_prefill or attention.is_target_verify,
+            )
+            if fail:
+                raise ValueError("test mHC scope failure")
+
+        for mtp in (False, True):
+            self.model.config = SimpleNamespace(
+                model_type="glm_5_mtp" if mtp else "glm5_3_flash",
+                is_glm53_mtp=mtp,
+            )
+            for prefill, verify in ((True, False), (False, False), (True, True)):
+                self.inputs.attention_inputs = SimpleNamespace(
+                    is_prefill=prefill, is_target_verify=verify
+                )
+                for fail in (False, True):
+                    with self.subTest(
+                        mtp=mtp, prefill=prefill, verify=verify, fail=fail
+                    ):
+                        if fail:
+                            with self.assertRaisesRegex(ValueError, "mHC scope"):
+                                forward(self.model, self.inputs, fail=True)
+                        else:
+                            forward(self.model, self.inputs)
+                        self.assertFalse(meta.mhc_batch_invariant_enabled())
+                        self.assertFalse(meta.tokenwise_router_enabled())
+
+    def test_mhc_scope_does_not_enable_other_models(self):
+        self.model.config.model_type = "dsv4"
+
+        @meta.scoped_forward_metadata
+        def forward(_, inputs):
+            self.assertFalse(meta.mhc_batch_invariant_enabled())
+
+        forward(self.model, self.inputs)
+        self.query.assert_not_called()
+
+    def test_nested_mhc_scope_restores_outer_state_on_failure(self):
+        @meta.scoped_forward_metadata
+        def inner(_, inputs):
+            self.assertTrue(meta.mhc_batch_invariant_enabled())
+            self.assertTrue(meta.tokenwise_router_enabled())
+            raise ValueError("nested mHC failure")
+
+        @meta.scoped_forward_metadata
+        def outer(_, inputs):
+            with self.assertRaisesRegex(ValueError, "nested mHC"):
+                inner(
+                    self.model,
+                    SimpleNamespace(attention_inputs=SimpleNamespace(is_prefill=False)),
+                )
+            self.assertTrue(meta.mhc_batch_invariant_enabled())
+            self.assertFalse(meta.tokenwise_router_enabled())
+
+        outer(self.model, self.inputs)
+        self.assertFalse(meta.mhc_batch_invariant_enabled())
+
     def test_other_models_do_not_query_memory(self):
         self.model.config.model_type = "kimi_linear"
 
