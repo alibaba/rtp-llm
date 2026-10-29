@@ -176,6 +176,34 @@ class Fp8SmallQuantTest(unittest.TestCase):
             for a, b in zip(actual, expected):
                 self.assertTrue(torch.equal(a.view(torch.uint8), b.view(torch.uint8)))
 
+    def test_fused_shared_projection_graph_refreshes_quantized_values(self):
+        import flashinfer
+
+        layer = Fp8Linear(
+            (torch.randn(2560, 640, device="cuda") * 0.1).to(torch.float8_e4m3fn),
+            torch.tensor([0.11743], device="cuda"),
+            role="DECODE",
+        )
+        for rows in (4, 8, 12, 16):
+            gate_up = torch.randn(rows, 1280, device="cuda", dtype=torch.bfloat16)
+            for _ in range(3):
+                layer.forward_silu_and_mul(gate_up)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = layer.forward_silu_and_mul(gate_up)
+            pointer = actual.data_ptr()
+            for magnitude in (0.0, 1.0e-12, 0.01, 1.0, 100.0):
+                gate_up.normal_().mul_(magnitude)
+                layer.scale.fill_(0.013475 + magnitude * 0.001)
+                activated = flashinfer.activation.silu_and_mul(gate_up)
+                expected = layer(activated)
+                graph.replay()
+                self.assertEqual(actual.data_ptr(), pointer)
+                self.assertTrue(
+                    torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+                )
+            graph.reset()
+
     def test_unsupported_domains_return_without_writing(self):
         good = torch.ones(4, 2560, device="cuda", dtype=torch.bfloat16)
         for x in (

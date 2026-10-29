@@ -112,7 +112,7 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         width,
         output.numel(),
         block,
-        num_warps=4 if block <= 8192 else 16,
+        num_warps=16,
         enable_fp_fusion=False,
     )
     return output, scale
@@ -129,10 +129,7 @@ def is_supported(x, output=None):
         and 1 <= x.shape[0] <= 32
         and (
             x.shape[1] in (320, 2560, 10240)
-            or (
-                x.shape[1] == 640
-                and x.shape[0] in (4, 8, 12, 16)
-            )
+            or (x.shape[1] == 640 and x.shape[0] in (4, 8, 12, 16))
         )
         and x.numel() <= 65536
         and torch.cuda.get_device_capability(x.device) == (12, 0)
