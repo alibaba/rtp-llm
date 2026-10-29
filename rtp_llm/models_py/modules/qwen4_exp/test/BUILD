@@ -727,3 +727,20 @@ py_test(
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
+
+# Kernel-only prefill-score targets: deps pull the real production scorer
+# through //rtp_llm/models_py:qsa_prefill_score_testlib (torch+triton only),
+# not the //rtp_llm:testlib engine closure or :math_references.
+py_test(
+    name = "indexer_prefill_score_integration_test",
+    srcs = [
+        "indexer_prefill_score_integration_test.py",
+        "indexer_prefill_score_preintegration.py",
+        "indexer_prefill_score_test_utils.py",
+    ],
+    main = "indexer_prefill_score_integration_test.py",
+    deps = ["//rtp_llm/models_py:qsa_prefill_score_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)

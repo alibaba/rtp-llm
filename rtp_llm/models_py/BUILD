@@ -240,3 +240,26 @@ py_library(
 )
 
 exports_files(["utils/cutlass.py"])
+
+# Kernel-only test closure for the qwen4_exp qsa prefill-score scorer: the
+# real production module plus its package init chain (models_py and qwen4_exp
+# are namespace packages at this revision), carrying only the torch and triton
+# wheels the module imports. Not //rtp_llm:testlib: its runfiles drag in the
+# th_transformer/rtp_compute_ops engine closure these kernel tests never load.
+py_library(
+    name = "qsa_prefill_score_testlib",
+    testonly = True,
+    srcs = [
+        "modules/__init__.py",
+        "modules/qwen4_exp/qsa/__init__.py",
+        "modules/qwen4_exp/qsa/indexer_prefill_score.py",
+    ],
+    data = [
+        "//rtp_llm:__init__.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
