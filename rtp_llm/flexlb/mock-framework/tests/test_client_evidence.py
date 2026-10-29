@@ -113,7 +113,7 @@ def test_collect_rejects_missing_evidence_even_when_rpc_summary_passes(monkeypat
 def test_cli_partial_output_is_nonzero_and_explicit(evidence, tmp_path, monkeypatch, capsys):
     directory, batch = evidence()
     batch.ClearField('seal'); (directory / 'requests.binpb.zst').write_bytes(frame(batch))
-    (tmp_path / 'topology-history.json').write_text(json.dumps([dict(id='client-0', role='client', rpc='c:0')]))
+    (tmp_path / 'components/client-0/endpoints.json').write_text(json.dumps(dict(id='client-0', role='client', rpc='c:0')))
     monkeypatch.setattr('sys.argv', ['mock-requests', str(tmp_path)])
     with pytest.raises(SystemExit) as error: main()
     assert error.value.code == 2

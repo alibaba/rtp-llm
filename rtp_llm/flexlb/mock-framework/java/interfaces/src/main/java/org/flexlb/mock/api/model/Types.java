@@ -15,10 +15,8 @@ public final class Types {
     public record Latest() implements TimeRange {}
     public record Interval(Duration start, Duration end) implements TimeRange {}
     public record MasterRef(String id) {}
-    public record EngineRef(String id) {}
     public record MasterSet(List<MasterRef> instances) {}
-    public record EngineSet(List<EngineRef> instances) {}
-    public record PerMasterEngines(Map<String, EngineSet> instances) {}
+    public record PerMasterEngines(Map<String, List<String>> instances) {}
     public record MasterReceipt(MasterSet affected) {}
     public record MetricValue(double value, String unit) {}
     public record QuerySample(Map<String, String> labels, double value, String sample_time) {}

@@ -215,14 +215,15 @@ def adapter_context():
         {'id': 'master-1', 'rpc': 'm1:1', 'control': 'http://m1', 'role': 'master'},
         {'id': 'p0', 'rpc': 'p0:1', 'role': 'prefill'}]
     return SimpleNamespace(runtime=SimpleNamespace(topology=SimpleNamespace(
-        active=lambda role=None: [item for item in topology if role is None or item['role'] == role],
-        history=lambda: topology)), query_time='2026-10-28T00:00:00Z', timeout=2)
+        active=lambda role=None: [item for item in topology if role is None or item['role'] == role])), query_time='2026-10-28T00:00:00Z', timeout=2)
 
 
 @pytest.mark.parametrize('operation,responses,expected', [
     ('leadership', [{'instances': [{'id': 'master-0'}]}, {'instances': []}], ['m0:1']),
-    ('engines', [{'instances': {'master-0': {'instances': [{'id': 'p0'}]}}},
-                 {'instances': {'master-1': {'instances': []}}}], {'m0:1': ['p0:1'], 'm1:1': []}),
+    ('engines', [{'instances': {'master-0': ['removed:1']}},
+                 {'instances': {'master-1': []}}], {'m0:1': ['removed:1'], 'm1:1': []}),
+    ('engines', [{'instances': {'master-0': ['p0:1']}},
+                 {'instances': {'master-1': []}}], {'m0:1': ['p0:1'], 'm1:1': []}),
 ])
 def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses, expected):
     import asyncio
@@ -239,11 +240,11 @@ def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses
 
 @pytest.mark.parametrize('operation,response', [
     ('leadership', {'instances': [{'id': 'master-1'}]}),
-    ('engines', {'instances': {'master-1': {'instances': []}}}),
-    ('engines', {'instances': {'master-0': {'instances': [{'id': 'unknown'}]}}}),
-    ('engines', {'instances': {'master-0': {'instances': [{'id': 'p0'}, {'id': 'p0'}]}}}),
+    ('engines', {'instances': {'master-1': []}}),
+    ('engines', {'instances': {'master-0': [None]}}),
+    ('engines', {'instances': {'master-0': ['p0:1', 'p0:1']}}),
 ])
-def test_adapter_rejects_wrong_identity_and_unknown_or_duplicate_engine(monkeypatch, operation, response):
+def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(monkeypatch, operation, response):
     import asyncio
     from mock_framework.interfaces import master
     async def post(url, payload):

@@ -54,7 +54,7 @@ public final class TransportProbe {
                 new Types.QuerySample(Map.of("node", "b"), 2, context.queryTime().toString())), context.queryTime().toString());
         }
         @Override public Types.PerMasterEngines engines(Types.None args) {
-            var engines = new Types.EngineSet(List.of(new Types.EngineRef("prefill-1"), new Types.EngineRef("prefill-0")));
+            var engines = List.of("127.0.0.1:9002", "127.0.0.1:9001");
             return new Types.PerMasterEngines(Map.of("master-0", engines, "master-1", engines));
         }
         @Override public Echo echo(Types.EngineRange args) {

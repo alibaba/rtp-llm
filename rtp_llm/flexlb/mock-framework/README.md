@@ -2,7 +2,7 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、文本请求列表/文件播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集数据格式转换、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、文本请求列表/文件播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集数据格式转换及 ViT/vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## 设计边界
 
@@ -132,7 +132,7 @@ Runner 在动作前登记预期停止，结合子进程退出和有界健康检�
 
 进程启动材料和实例产物分目录保存。每个输出文件只有一个写入者，不让多个 Engine 共享同一个输出目录并各自覆盖 `endpoints.json`；宿主若汇总多个实例端点，由宿主统一写。ready/endpoints 采用临时文件加原子替换发布，部分启动失败要回收已经启动的对象。沿用 `components/<角色>-<序号>/` 保存每个实例的 config、effective-config 和 endpoints；共享宿主自己的启动材料、stdout/stderr 单独保存，不能把宿主日志冒充某个 Engine 的专属日志。聚合 topology/discovery 由 Python 单写，实例不得各自覆盖这份文件。
 
-Python 维护一份权威的当前发现信息，增加、移除和重启换地址均更新该信息；历史端点保留在实验记录中。Master 等消费者能否动态加载发现变更由其自身实现负责，Case 可检查传播结果，框架不替消费者伪造路由更新。显式引用旧地址不能偷偷改指向新实例；一次运行内，Engine 的业务 RPC、控制/metrics 和宿主控制端口统一不复用，跨用途也不能复用，例如不能把旧 metrics 端口分给新 RPC。该约束只覆盖本次 Runner 管理的 Engine 和宿主，不是操作系统级端口预留。
+Python 维护一份权威的当前发现信息，增加、移除和重启换地址均更新该信息。Master 等消费者能否动态加载发现变更由其自身实现负责，Case 可检查传播结果，框架不替消费者伪造路由更新。显式引用旧地址不能偷偷改指向新实例；一次运行内，Engine 的业务 RPC、控制/metrics 和宿主控制端口统一不复用，跨用途也不能复用，例如不能把旧 metrics 端口分给新 RPC。该约束只覆盖本次 Runner 管理的 Engine 和宿主，不是操作系统级端口预留。
 
 ### Client：播放器控速，Client 发送与管理生命周期
 
@@ -259,15 +259,15 @@ client0 在 start 的步骤预算内逐条校验输入，并按全局序号 `k %
   args: {outcome: error, limit: 20}
 ```
 
-离线工具从 `topology-history.json` 读取历史 Client 地址，因此收尾清空当前发现不影响查询。离线查看：`uv run mock-requests <Case输出目录> --playback 1 --outcome timeout`；可重复 `--target <Client地址>` 或 `--request-id <ID>`。命令流式输出 JSON 到终端，需要时可重定向导出；遇到坏尾部会非零退出，已输出部分仅作为恢复前缀，不能当作完整结果。
+离线工具直接读取各 Client 目录中的 endpoints.json，不依赖拓扑历史文件。离线查看：`uv run mock-requests <Case输出目录> --playback 1 --outcome timeout`；可重复 `--target <Client地址>` 或 `--request-id <ID>`。命令流式输出 JSON 到终端，需要时可重定向导出；遇到坏尾部会非零退出，已输出部分仅作为恢复前缀，不能当作完整结果。
 
 ### Python 指标查询与公共指标
 
-Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API，不经过 Engine 查询代理，也不新增 Java 查询服务。Engine 全部停止后，仍能在 Prometheus 存活期间查询历史窗口。
+Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API，不经过 Engine 查询代理，也不新增 Java 查询服务。原始 PromQL 可在 Prometheus 存活期间查询其已采集的数据，框架不维护实例历史。
 
 公共 Engine 使用同一组指标含义和采集事件，Python 默认只实现一套公共语义查询。公共客户端处理 HTTP、超时和响应解析，指标函数处理 PromQL、单位、目标范围和结果形态。确有后端原生指标差异时，映射和公式放在 RTP/vLLM 对应 Python 模块中，Runner 直接调用；不为相同指标复制两份实现。原始 `prometheus/query` 走公共查询客户端，不进行后端改写或自动附加过滤。
 
-指标按实例上报、按查询语义聚合：总 QPS 求和；成功率和命中率分别汇总分子/分母后求比率；平均值按样本数加权；p99 不能平均各实例 p99，须合并兼容直方图或使用完整请求记录。时间窗口、目标覆盖和采样完整性要校验，缺数据不补零。窗口查询包含范围内已退役实例的历史，不能只看当前存活发现集合。不同 Master 的状态保留逐实例结果，不取并集掩盖差异。
+指标按实例上报、按查询语义聚合：总 QPS 求和；成功率和命中率分别汇总分子/分母后求比率；平均值按样本数加权；p99 不能平均各实例 p99，须合并兼容直方图或使用完整请求记录。时间窗口、目标覆盖和采样完整性要校验，缺数据不补零。语义查询只使用当前活动实例；显式 targets 也必须仍然活动，不根据时间窗重建过去的成员集合。需要查询已下线地址时，直接使用原始 PromQL。不同 Master 的状态保留逐实例结果，不取并集掩盖差异。
 
 去掉业务指标上的 RTP/vLLM `engine`、逻辑 `node`、JVM 和主动添加的实验 ID 标签，保留必要的角色与实例地址区分。独立采集端点可使用 Prometheus `instance`；共享 `/metrics` 时必须在样本上区分实例服务地址，不能让同名同标签序列碰撞或重复采集。`host_ip`/`container_ip` 保持物理含义，共 JVM 时不能仅靠相同 IP 区分 Engine。实验默认独占 Prometheus，跨实验合并分析时再补来源标签，不能在合并后无法区分数据来源。
 
@@ -287,7 +287,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 
 本批落实公共 Scheduler 操作、私有队列、持续 running、有界多请求 Forward、部分批次取消和 PD 确认后释放。强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本及 connector 范围仍待确定。
 
-验收关注可观察行为：两种 JVM 放置下缩容数量和流量总量一致；共 JVM 停单实例不影响其他实例；不同队列容器报告相同请求数；batch 内取消不损伤其他请求；取消/抢占无 KV 泄漏或提前复用；每批 Forward 只记一次；退役实例的历史仍可查询；任一基础设施失败不产生虚假的整体 PASS。共享宿主的实际延迟可以不同，不承诺两种放置方式性能相同。
+验收关注可观察行为：两种 JVM 放置下缩容数量和流量总量一致；共 JVM 停单实例不影响其他实例；不同队列容器报告相同请求数；batch 内取消不损伤其他请求；取消/抢占无 KV 泄漏或提前复用；每批 Forward 只记一次；任一基础设施失败不产生虚假的整体 PASS。共享宿主的实际延迟可以不同，不承诺两种放置方式性能相同。
 
 ## 当前代码职责
 
@@ -317,7 +317,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/runner.py` | Step 的引用、参数、预算、调用、返回校验、断言、等待与结果；不判断具体接口名。 |
 | `execution/environment.py` | `RunEnvironment` 的静态装配、启动与收尾顺序。 |
 | `execution/processes.py` | `ProcessSupervisor` 的子进程所有权、退出监视、操作中断和回收；不识别 Master、Engine 或 Client 业务。 |
-| `execution/topology.py` | `Topology` 的当前实例端点、历史生命期及文件发布；读者拿到独立快照。 |
+| `execution/topology.py` | `Topology` 的当前实例端点及文件发布；读者拿到独立快照。 |
 | `execution/components.py` | Master/Client 通用的配置文件、进程启动、ready 检查与端点登记；原生配置与端点额外校验由调用方提供。 |
 | `execution/master.py` | `MasterGroup` 的 ZK 选举环境、独立 JVM 增减、原生配置和 Master discovery 发布。 |
 | `execution/engines.py` | `EngineHosts` 的实例分配、JVM 放置、扩缩容、成员检查和宿主退出影响范围。 |
@@ -326,9 +326,9 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/launch.py` | 启动配方的结构校验与规范化，不持有运行状态。 |
 | `interfaces/` | Case 参数/返回契约及操作组合；调用对应服务或传输/查询函数。运行时服务不反向导入这一层。 |
 
-拓扑是 Python 根据已校验的实例端点生产的运行记录，不代表生产 Master 的成员状态或主备判断。`Topology` 统一登记与退役，发布当前/历史文件，并把快照交给 `MasterGroup` 更新活动 Master 的 discovery。Master、Client 等消费者自行加载配置；Python 不替它们推导主节点。发布失败使实验报错，保留已登记状态与进程所有权，随后清理；不宣称多个文件的发布是一个事务。
+拓扑是 Python 根据已校验的实例端点生产的运行记录，不代表生产 Master 的成员状态或主备判断。`Topology` 统一登记与退役，发布当前 topology.json，并把快照交给 `MasterGroup` 更新活动 Master 的 discovery。Master、Client 等消费者自行加载配置；Python 不替它们推导主节点。发布失败使实验报错，保留已登记状态与进程所有权，随后清理；不宣称多个文件的发布是一个事务。
 
-启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先停止 Engine 健康检查，再收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑，保留历史。
+启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先停止 Engine 健康检查，再收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑。
 
 新增 Case 操作在 `interfaces/` 用现有装饰器注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
@@ -466,17 +466,17 @@ Engine JAR 的默认入口为 `EngineHost`。共享模式下 P/D 的 command、c
 
 主动下线会终止该实例的在途请求；生产 Master 淘汰旧地址前仍可能有路由失败，不能将当前操作称为无损缩容。Case 应按场景判断过渡期错误和收敛后的成功率。生命周期验收持续记录请求结果，验证两种 JVM 放置下剩余实例继续服务、真实 Master 最终移除旧地址、新实例能接请求，以及历史指标仍可查询。另用故意保留旧 Prometheus target 的场景检查采集不会串到新实例，并注入第二个创建/停止失败，检查已完成操作不重放、整次实验报错并清理。
 
-共享宿主关闭最后一个 Engine 后仍保留，允许再次扩容；独立宿主在关闭实例后回收进程。每次新增使用新编号、目录和未用过的监听地址。编号表示一次创建，例如删除 prefill-0 后再次扩容会创建 prefill-2，不填补旧编号；创建失败也不回收编号。它只用于内部对象映射和产物路径，Case 仍使用服务地址，不增加 node/generation 标签或选择器。实验目录和实例目录拒绝覆盖；Java 以 CREATE_NEW 写入 effective-config.json，另一宿主也不能重新使用旧实例目录。重新创建必须使用新编号与新目录，Runner 断点恢复、同身份原地重启不在当前能力范围。`hosts/engine-shared/` 或 `hosts/engine-<实例>/` 保存 JVM 日志，`components/<实例>/` 保存 config、effective-config、endpoints 和 ready，不复制宿主日志到各实例。下线删除 ready，保留 endpoints 作为历史。
+共享宿主关闭最后一个 Engine 后仍保留，允许再次扩容；独立宿主在关闭实例后回收进程。每次新增使用新编号、目录和未用过的监听地址。编号表示一次创建，例如删除 prefill-0 后再次扩容会创建 prefill-2，不填补旧编号；创建失败也不回收编号。它只用于内部对象映射和产物路径，Case 仍使用服务地址，不增加 node/generation 标签或选择器。实验目录和实例目录拒绝覆盖；Java 以 CREATE_NEW 写入 effective-config.json，另一宿主也不能重新使用旧实例目录。重新创建必须使用新编号与新目录，Runner 断点恢复、同身份原地重启不在当前能力范围。`hosts/engine-shared/` 或 `hosts/engine-<实例>/` 保存 JVM 日志，`components/<实例>/` 保存 config、effective-config、endpoints 和 ready，不复制宿主日志到各实例。下线删除 ready；endpoints、日志和配置作为该组件的原始产物保留，不另行维护实例历史。
 
-`topology.json` 保存当前实例，`topology-history.json` 保存历史端点和起止时间；两者由 Python 原子发布。活动 Master 的 discovery.json 随活动 Engine 更新，停止后保留最后一份发现快照，角色缩到零时写空地址列表。Master 读取接口动态加载历史地址映射，所以仍能如实报告尚未清除的旧地址；是否完成刷新由生产发现实现决定。本仓 Master 的 workerRegistry.health.statusStaleAfterMs 默认 10000，下线后的短期旧地址仍如实返回，验收需覆盖淘汰窗口。最终清理后清空当前发现，历史记录保留。
+`topology.json` 只保存当前活动实例，不生成 topology-history.json，不保存实例起止时间或退役台账。活动 Master 的 discovery.json 随当前 Engine 更新，角色缩到零时写空地址列表。Master 查询直接返回生产 WorkerDirectory 当前观察到的地址，不经实例 ID 或历史地址表转换；因此生产发现尚未淘汰的旧地址仍会如实返回。消费者的刷新和淘汰由自身实现负责，Case 检查其收敛结果。最终清理清空当前拓扑。
 
-Prometheus 对每个实例独立抓取，以 RPC 地址作为 instance；宿主不重复输出业务指标。新增实例先完成采集基线，下线前完成末次抓取再移出目标，保留退役目标与历史数据。语义查询按固定时间窗选择生命期有交集的实例，显式 targets 不能引用该窗口内从未存在的实例，覆盖不足仍报错。
+Prometheus 对每个实例独立抓取，以 RPC 地址作为 instance；宿主不重复输出业务指标。新增实例先完成采集基线，下线前完成末次抓取再移出目标；不保留退役目标、实例生命期或退役实例的末次采样台账。语义查询按当前活动实例选择范围并检查采样覆盖；时间窗只限定指标数据，不改变成员选择。原始 PromQL 直接查询 Prometheus 已采集的数据。
 
 Runner 每秒开始一轮宿主健康检查，单次 HTTP 调用限时 10 秒，检查实际成员与 Engine 状态；进程退出另行实时监视。操作期间用同一管理锁隔离成员变更与健康快照。共享宿主意外退出记录受影响实例并使整个实验 ERROR；预期停止仅登记将回收的独立宿主，不屏蔽共享 JVM 意外退出。Master 始终单独 spawn，不进入 EngineHost。
 
 Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退出，各角色服务负责自己的生命周期，`RunEnvironment` 统一安排最终清理。进程监督器不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `interfaces/master.py` 按 targets 逐实例调用，并保留每个 Master 的独立结果。
 
-`master/stop(targets)` 由 Python 停止选定的独立 Master JVM，省略 targets 时停止全部活动 Master；空集合、重复或失效地址在任何停止前报错。停止前完成末次采样、登记预期退出，确认退出后移出活动发现与 Prometheus 目标，删除 ready，保留原 endpoints、日志、配置和历史生命期。意外退出仍使整个实验 ERROR；强制 SIGKILL、部分停止失败同样报错，不重放已完成动作。
+`master/stop(targets)` 由 Python 停止选定的独立 Master JVM，省略 targets 时停止全部活动 Master；空集合、重复或失效地址在任何停止前报错。停止前完成末次采样、登记预期退出，确认退出后移出活动发现与 Prometheus 目标，删除 ready，保留原 endpoints、日志和配置。意外退出仍使整个实验 ERROR；强制 SIGKILL、部分停止失败同样报错，不重放已完成动作。
 
 `master/start(count=1)` 的 count 范围为 1–1024，从 environment.master 的配置创建新 JVM，复用本实验的 ZK、HIPPO_ROLE 和公共服务端口，使用递增编号、新回环 IP、新产物目录。控制 HTTP 也绑定新 IP，防止旧控制引用命中新进程。初始启动和动态启动共用同一路径；补回时允许某个 Engine 角色已缩到零，按当前空发现启动。返回新 RPC 地址列表，选举和采集基线完成才返回。这里的 start 是新增/补回，不恢复旧身份。旧 step 引用始终指向旧地址，不能自动替换成新地址。Java 不提供 Master 集群生命周期服务。
 
@@ -509,7 +509,7 @@ Engine 独立宿主在对象关闭后登记预期退出并回收；其他运行�
 
 进程退出、调用异常、空指标结果或门禁失败都会中止后续步骤并收尾。收尾对本次拥有的进程组先 TERM 后 KILL；主动取消也清理。结果为 PASS/FAIL/ERROR/CANCELLED，清理或采集异常不能得到 PASS。
 
-运行目录不覆盖已有目录，保存原始 Case、编译配置、启动配方、接口清单、代码版本和工作区差异、组件配置和日志、phase/step 时间线、门禁查询时刻/真实值/阈值/结果及实际 PromQL。Client 逐请求记录和离线读取已接入，Engine 全链路记录与正式历史查看服务尚未实现。测试 TransportProbe 只验证进程与传输，不替代业务实现。
+运行目录不覆盖已有目录，保存原始 Case、编译配置、启动配方、接口清单、代码版本和工作区差异、组件配置和日志、phase/step 时间线、门禁查询时刻/真实值/阈值/结果及实际 PromQL。Client 逐请求记录和离线读取已接入，Engine 全链路记录尚未实现。测试 TransportProbe 只验证进程与传输，不替代业务实现。
 
 ## 真实 Master 适配
 
@@ -530,7 +530,7 @@ Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书�
 
 Master 使用 127.0.0.1、127.0.0.2 等地址，相同 HTTP 端口，gRPC=HTTP+2，适配生产以 IP 作为身份和共用转发端口的约束。端口启动时被抢占则失败，不静默换协议。Linux 默认支持 127/8；macOS 缺少别名时明确报错。实验之间不共享 ZK 或选举路径。清理先停止组件，再停止 ZK，最后停止 Prometheus，保留日志和数据。
 
-接线测试分别覆盖 DIRECT/NON_BATCH 的 Generate、QUEUE/FIXED_WINDOW/BATCH 的 Enqueue→Fetch。`tests/test_master_lifecycle.py` 在两种模式下持续运行同一 Client 计划，停止主节点、补回新 IP 的 Master、再停止旧节点；在旧请求 deadline 之后检查新主持续成功接流，并检查独立进程退出、历史产物和采集目标退役。切换错误如实保留，不要求整个过渡期零错误。协议夹具测试和真实 Master 接线测试分开；用生产 pre_stop 钩子观察选举不等于完成 Master 生命周期动作。
+接线测试分别覆盖 DIRECT/NON_BATCH 的 Generate、QUEUE/FIXED_WINDOW/BATCH 的 Enqueue→Fetch。`tests/test_master_lifecycle.py` 在两种模式下持续运行同一 Client 计划，停止主节点、补回新 IP 的 Master、再停止旧节点；在旧请求 deadline 之后检查新主持续成功接流，并检查独立进程退出、各组件独立产物和当前采集目标。切换错误如实保留，不要求整个过渡期零错误。协议夹具测试和真实 Master 接线测试分开；用生产 pre_stop 钩子观察选举不等于完成 Master 生命周期动作。
 
 ## RTP 节点与公共校验
 
@@ -682,7 +682,7 @@ prometheus:
 
 Runner 不下载 binary；默认 scrape 1s、startup 30s，目前验证 Prometheus 3.5.0。它在独立运行目录启动采集器，从结构化日志读取系统分配端口，URL 仅保存在 Python 运行上下文与采集产物中，不向 Engine 配置注入查询地址。
 
-组件 ready 后必须提供合法 metrics URL。Runner 原子更新 file discovery，初始节点全部成功抓取两次才执行 phase；新增 Engine 完成两次基线采样后扩容操作才返回，下线前完成最后采样，再从活动 targets 移除，历史采集记录保留。每次独立 TSDB、job=mock，不要求用户定义实验 ID。当前 Python 查询只支持 Runner 托管 Prometheus，不接受组件内 prometheus.url/job 作为备用入口。
+组件 ready 后必须提供合法 metrics URL。Runner 原子更新 file discovery，初始节点全部成功抓取两次才执行 phase；新增 Engine 完成两次基线采样后扩容操作才返回，下线前完成最后采样，再从活动 targets 移除，不另建采集历史台账。每次独立 TSDB、job=mock，不要求用户定义实验 ID。当前 Python 查询只支持 Runner 托管 Prometheus，不接受组件内 prometheus.url/job 作为备用入口。
 
 收尾等待每个目标在收尾开始后成功采样，再停止组件、ZK，最后 TERM Prometheus，超时才 KILL。最后采样失败、采集器异常退出会标记数据不完整并令实验 ERROR。启动失败/取消仍清理并保留现场。
 

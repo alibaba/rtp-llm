@@ -188,7 +188,8 @@ def test_client_playback_through_real_master(tmp_path, replicas, file_input):
                 seen.add(index)
     if file_input: assert seen == set(range(count))
     from mock_framework.evidence import playback_directories, read_requests
-    topology = json.loads((output / 'topology-history.json').read_text())
+    assert not (output / 'topology-history.json').exists()
+    topology = [json.loads(path.read_text()) for path in sorted(output.glob('components/client-*/endpoints.json'))]
     records = [record for directory in playback_directories(output, topology) for record in read_requests(directory)]
     assert len(records) == count and {record.request_id for record in records} == set(range(1, count + 1))
     assert all(record.outcome == 'success' and record.ttft_nanos is not None and record.output_tokens == 3 for record in records)

@@ -33,10 +33,6 @@ async def read(ctx, master, operation, args):
                     'timeout_ms': max(1, int(ctx.timeout * 1000))}})
 
 
-def identities(ctx):
-    return {item['id']: item['rpc'] for item in ctx.runtime.topology.history()}
-
-
 @case_interface('master/leadership/get', effect='read')
 async def leadership(ctx, args: Targets) -> list[str]:
     """Return each selected Master's actual leadership claim; do not invent a unique leader."""
@@ -54,15 +50,14 @@ async def leadership(ctx, args: Targets) -> list[str]:
 @case_interface('master/engine/get', effect='read')
 async def engines(ctx, args: EngineSelection) -> dict[str, list[str]]:
     """Keep each Master's discovered Engine addresses separate."""
-    known, result = identities(ctx), {}
+    result = {}
     for master in selected(ctx, args.targets):
         value = await read(ctx, master, 'master/engine/get', {'role': args.role})
         if set(value['instances']) != {master['id']}:
             raise ExecutionError('Master returned another instance observation')
-        try:
-            addresses = [known[item['id']] for item in value['instances'][master['id']]['instances']]
-        except KeyError as error:
-            raise ExecutionError('Master reported an unknown Engine') from error
+        addresses = value['instances'][master['id']]
+        if not isinstance(addresses, list) or any(not isinstance(address, str) or not address for address in addresses):
+            raise ExecutionError('Master reported invalid Engine addresses')
         if len(set(addresses)) != len(addresses):
             raise ExecutionError('Master reported duplicate Engines')
         result[master['rpc']] = sorted(addresses)

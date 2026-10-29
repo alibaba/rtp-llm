@@ -116,8 +116,8 @@ class Prometheus:
         self.save()
 
     def retire(self, node):
-        target = self.targets.pop(node)
-        self.metadata.setdefault('retired_targets', {})[node] = {**target, 'stopped_at': timestamp()}
+        self.targets.pop(node)
+        self.metadata.get('final_scrapes', {}).pop(node, None)
         write_json(self.directory / 'targets.json', list(self.targets.values()))
         self.metadata['targets'] = dict(self.targets)
         self.save()

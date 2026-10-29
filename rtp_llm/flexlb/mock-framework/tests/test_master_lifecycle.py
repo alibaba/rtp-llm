@@ -52,7 +52,7 @@ time.sleep(120)
     return case, registry, launch
 
 
-def test_stop_selection_and_replacement_preserve_identity_and_history(tmp_path):
+def test_stop_selection_and_replacement_preserve_identity_and_artifacts(tmp_path):
     case, registry, launch = generic(tmp_path, [
         step('one', 'master/stop', args={'targets': ['127.0.0.1:12000']}),
         step('added', 'master/start', args={'count': 2}),
@@ -63,9 +63,8 @@ def test_stop_selection_and_replacement_preserve_identity_and_history(tmp_path):
     completed = {v['step']: v['result'] for v in logs(output) if v['event'] == 'step_finished'}
     assert completed == {'one': ['127.0.0.1:12000'], 'added': ['127.0.0.1:12002', '127.0.0.1:12003'],
                          'all': ['127.0.0.1:12001', '127.0.0.1:12002', '127.0.0.1:12003']}
-    history = json.loads((output / 'topology-history.json').read_text())
-    assert len(history) == 4 and len({v['rpc'] for v in history}) == 4
-    assert all(v['stopped_at'] >= v['started_at'] for v in history)
+    endpoints = [json.loads(path.read_text()) for path in sorted(output.glob('components/master-*/endpoints.json'))]
+    assert len(endpoints) == 4 and len({v['rpc'] for v in endpoints}) == 4
     assert json.loads((output / 'topology.json').read_text()) == []
     assert len({v['pid'] for v in logs(output) if v['event'] == 'process_started'}) == 4
     assert_reaped(output)
@@ -180,7 +179,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     assert values['before'] < values['after_first'] <= values['before_second'] < values['after_second'] < values['steady']
     assert values['engines'] == {values['replacement'][0]: [json.loads((output / 'components/prefill-0/endpoints.json').read_text())['rpc']]}
     assert all(v['done'] and not v['errors'] and v['issued'] == v['finished'] for v in values['collected'].values())
-    masters = [v for v in json.loads((output / 'topology-history.json').read_text()) if v['role'] == 'master']
+    masters = [json.loads(path.read_text()) for path in sorted(output.glob('components/master-*/endpoints.json'))]
     assert len(masters) == 3 and len({v['rpc'] for v in masters}) == 3 and len({v['control'] for v in masters}) == 3
     native_envs = [json.loads((output / f"components/{v['id']}/native-environment.json").read_text()) for v in masters]
     assert len({v['HIPPO_ROLE'] for v in native_envs}) == 1
@@ -190,6 +189,6 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
     assert all(not (output / f'components/{node}/ready.json').exists() for node in ('master-0', 'master-1'))
     if 'prometheus' in recipe:
         collection = json.loads((output / 'prometheus/collection.json').read_text())
-        assert set(collection['retired_targets']) == {'master-0', 'master-1'}
+        assert not {'master-0', 'master-1'} & collection['targets'].keys()
         assert 'master-2' in collection['targets'] and collection['complete']
     assert_reaped(output)

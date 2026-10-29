@@ -60,6 +60,7 @@ def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False,
 
 
 def no_children(output):
+    assert not (output / 'topology-history.json').exists()
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
     for event in events:
         if event['event'] == 'process_started':
@@ -75,7 +76,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         owner = ctx.runtime
         assert len(owner.engines.hosts) == (1 if mode == 'shared' else 3)
         original = ctx.globals()['prefill']
-        first = next(item for item in owner.topology.history() if item['rpc'] == original[0])
+        first = next(item for item in owner.topology.active('prefill') if item['rpc'] == original[0])
         original_files = {name: (ctx.records.directory / 'components' / first['id'] / name).read_bytes()
                           for name in ('config.json', 'effective-config.json', 'endpoints.json')}
         removed = await scale_in(ctx, ScaleIn(count=1))
@@ -102,7 +103,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             from mock_framework.execution.records import write_json
             from mock_framework.execution.monitoring import _get
             prom = owner.monitoring
-            retired = prom.metadata['retired_targets'][first['id']]
+            retired = {'targets': [urllib.parse.urlsplit(first['metrics']).netloc], 'labels': {'instance': first['rpc'], '__metrics_path__': '/metrics'}}
             write_json(prom.directory / 'targets.json', list(prom.targets.values()) + [{key: retired[key] for key in ('targets', 'labels')}])
             expression = 'up{job="mock",instance="' + first['rpc'] + '"}'
             async with asyncio.timeout(5):
@@ -119,10 +120,11 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         assert len(ctx.globals()['prefill']) == 3 and not set(created) & set(original)
         assert await scale_in(ctx, ScaleIn(targets=created[:1])) == created[:1]
         assert len(ctx.globals()['prefill']) == 2
-        for item in owner.topology.history():
+        endpoints = [json.loads(path.read_text()) for path in sorted(ctx.records.directory.glob('components/*/endpoints.json'))]
+        for item in endpoints:
             folder = ctx.records.directory / 'components' / item['id']
             assert json.loads((folder / 'endpoints.json').read_text())['rpc'] == item['rpc']
-            assert (folder / 'ready.json').exists() == ('stopped_at' not in item)
+            assert (folder / 'ready.json').exists() == (item['id'] in {node['id'] for node in owner.topology.active()})
         # Exercise real TCP request traffic after removal and subsequent creation.
         classpath = (ROOT / 'java/engine/rtp/target/rtp-classpath.txt').read_text().strip()
         probe = await asyncio.to_thread(subprocess.run, [str(Path(os.environ['JAVA_HOME']) / 'bin/java'),
@@ -131,7 +133,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         assert probe.returncode == 0, probe.stderr
         if owner.monitoring:
             samples = await query(replace(ctx, query_time=timestamp()), Promql('count_over_time(mock_engine_requests_started_total[1m])'))
-            assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in owner.topology.history()}
+            assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in endpoints}
         assert len(await scale_in(ctx, ScaleIn())) == 2
         assert ctx.globals()['prefill'] == []
         assert len(await scale_out(ctx, ScaleOut())) == 1
@@ -144,16 +146,16 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
     events = no_children(output)
     assert len([event for event in events if event['event'] == 'instance_stopped']) == 4
     assert json.loads((output / 'topology.json').read_text()) == []
-    history = json.loads((output / 'topology-history.json').read_text())
-    assert len(history) == 6 and len({item['rpc'] for item in history}) == 6
-    listeners = [urllib.parse.urlsplit('//'+item['rpc']).port for item in history]
-    listeners += [urllib.parse.urlsplit(item['control']).port for item in history]
+    endpoints = [json.loads(path.read_text()) for path in sorted(output.glob('components/*/endpoints.json'))]
+    assert len(endpoints) == 6 and len({item['rpc'] for item in endpoints}) == 6
+    listeners = [urllib.parse.urlsplit('//'+item['rpc']).port for item in endpoints]
+    listeners += [urllib.parse.urlsplit(item['control']).port for item in endpoints]
     listeners += [urllib.parse.urlsplit(event['url']).port for event in events
                   if event['event'] == 'process_ready' and event['node'].startswith('engine-')]
     assert len(listeners) == len(set(listeners))
     if monitor:
         metadata = json.loads((output / 'prometheus/collection.json').read_text())
-        assert metadata['complete'] and len(metadata['retired_targets']) == 4
+        assert metadata['complete'] and len(metadata['targets']) == 2
 
 
 @pytest.mark.parametrize('invalid', [False, True])

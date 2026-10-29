@@ -199,7 +199,7 @@ def main():
     parser.add_argument('--outcome', choices=sorted(OUTCOMES))
     args = parser.parse_args()
     try:
-        topology = json.loads((args.output / 'topology-history.json').read_text())
+        topology = [json.loads(path.read_text()) for path in sorted(args.output.glob('components/client-*/endpoints.json'))]
         for directory in playback_directories(args.output, topology, args.targets, args.playback):
             for record in read_requests(directory):
                 if (args.request_id is None or record.request_id in args.request_id) and (args.outcome is None or record.outcome == args.outcome):

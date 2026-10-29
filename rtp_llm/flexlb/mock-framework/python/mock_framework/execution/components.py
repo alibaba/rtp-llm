@@ -23,7 +23,6 @@ class ComponentLauncher:
         env = {} if configure is None else configure(directory)
         await self.supervisor.spawn(name, recipe['command'], recipe['cwd'],
             {**os.environ, **recipe['env'], **env, 'MOCK_TOPOLOGY_FILE': str(self.topology.directory / 'topology.json'),
-             'MOCK_TOPOLOGY_HISTORY_FILE': str(self.topology.directory / 'topology-history.json'),
              'MOCK_NODE_ID': name, 'MOCK_COMPONENT': role, 'MOCK_CONFIG_FILE': str(config),
              'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}, directory)
         async def await_ready():

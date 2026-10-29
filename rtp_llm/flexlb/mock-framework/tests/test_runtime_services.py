@@ -12,7 +12,7 @@ from mock_framework.execution.topology import Topology
 from mock_framework.execution.transport import ExecutionError
 
 
-def test_topology_readers_and_publishers_cannot_mutate_current_or_retired_instances(tmp_path):
+def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_path):
     topology = Topology(tmp_path)
     received = []
     topology.add_publisher(lambda nodes: nodes[0].update(rpc='corrupted') if nodes else None)
@@ -21,24 +21,20 @@ def test_topology_readers_and_publishers_cannot_mutate_current_or_retired_instan
     topology.register('prefill-0', 'prefill', endpoint['control'], endpoint)
     endpoint['extra']['value'] = 2
     topology.active()[0]['extra']['value'] = 3
-    topology.history()[0]['rpc'] = 'changed'
     assert topology.active('decode') == []
     assert topology.active()[0]['extra']['value'] == 1
     assert received[-1][0]['rpc'] == '127.0.0.1:1001'
-    topology.retire('prefill-0')
-    assert topology.active() == []
-    history = topology.history()
-    assert history[0]['stopped_at'] >= history[0]['started_at']
-    assert json.loads((tmp_path / 'topology.json').read_text()) == []
-    assert json.loads((tmp_path / 'topology-history.json').read_text()) == history
     with pytest.raises(ExecutionError, match='identity'):
-        topology.register('prefill-0', 'prefill', 'http://127.0.0.1:1002', endpoint)
+        topology.register('prefill-0', 'prefill', endpoint['control'], endpoint)
     with pytest.raises(ExecutionError, match='RPC address'):
         topology.register('prefill-1', 'prefill', endpoint['control'], endpoint)
-    assert topology.active() == [] and topology.history() == history
+    topology.retire('prefill-0')
+    assert topology.active() == []
+    assert json.loads((tmp_path / 'topology.json').read_text()) == []
+    assert not (tmp_path / 'topology-history.json').exists()
 
 
-def test_discovery_failure_after_launch_still_reaps_process_and_retains_history(tmp_path, monkeypatch):
+def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatch):
     from mock_framework.execution import run_case
     from mock_framework.execution.master import MasterGroup
     from test_master_lifecycle import generic, logs, assert_reaped, step
@@ -56,8 +52,7 @@ def test_discovery_failure_after_launch_still_reaps_process_and_retains_history(
     assert not any(e['event'] == 'step_started' for e in events)
     assert_reaped(output)
     assert json.loads((output / 'topology.json').read_text()) == []
-    history = json.loads((output / 'topology-history.json').read_text())
-    assert len(history) == 1 and 'stopped_at' in history[0]
+    assert not (output / 'topology-history.json').exists()
 
 
 def test_cancelled_spawn_remains_owned_until_final_cleanup(tmp_path, monkeypatch):
@@ -135,3 +130,23 @@ def test_health_failure_at_teardown_still_fails_without_a_process_exit(tmp_path)
         runtime.supervisor.fail('Engine membership differs')
         assert await runtime.close() == ['Engine membership differs']
     asyncio.run(exercise())
+
+
+def test_collection_removes_retired_target_without_retaining_a_ledger(tmp_path):
+    from mock_framework.execution.monitoring import Prometheus
+    monitor = Prometheus(None, SimpleNamespace(directory=tmp_path),
+        {'startup_timeout': '1s', 'scrape_interval': '100ms'})
+    monitor.directory.mkdir()
+    for index in range(2):
+        directory = tmp_path / f'prefill-{index}'
+        directory.mkdir()
+        (directory / 'endpoints.json').write_text(json.dumps({'id': directory.name,
+            'rpc': f'127.0.0.1:{1000 + index}', 'metrics': f'http://127.0.0.1:{2000 + index}/metrics'}))
+        monitor.discover(directory.name, directory)
+    monitor.metadata['final_scrapes'] = {'prefill-0': 'old', 'prefill-1': 'current'}
+    monitor.retire('prefill-0')
+    metadata = json.loads((monitor.directory / 'collection.json').read_text())
+    assert set(metadata['targets']) == {'prefill-1'}
+    assert metadata['final_scrapes'] == {'prefill-1': 'current'}
+    assert 'retired_targets' not in metadata
+    assert len(json.loads((monitor.directory / 'targets.json').read_text())) == 1
