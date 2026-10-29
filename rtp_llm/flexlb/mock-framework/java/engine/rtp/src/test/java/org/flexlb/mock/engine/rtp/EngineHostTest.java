@@ -30,7 +30,7 @@ class EngineHostTest {
     private void config(String id, String role) throws Exception {
         var json = new ObjectMapper(); ObjectNode value = json.valueToTree(RtpNodeTest.configuration(role));
         value.put("id", id);
-        ((ObjectNode)value.path("component").path("config").path("compute")).put("expression", "1000");
+        ((ObjectNode)value.path("component").path("config").path("compute").path("forward")).put("expression", "1000");
         var path = directory.resolve(id); Files.createDirectory(path);
         json.writeValue(path.resolve("config.json").toFile(), value);
     }

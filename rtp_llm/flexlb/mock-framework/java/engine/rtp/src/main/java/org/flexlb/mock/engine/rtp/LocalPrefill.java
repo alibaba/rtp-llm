@@ -32,14 +32,14 @@ final class LocalPrefill implements AutoCloseable {
         void preempt() { finish(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429); }
         void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
         private void finish(Status status, long code) { engine.finish(request, RtpErrors.scheduling(status, code)); }
-        private Result success(Scheduler.Request request) {
-            return new Result(LocalResponse.oneToken(input, request.reused(), System.nanoTime() - request.input().started()), Status.OK, 0);
+        private Result success(Scheduler.Request request, boolean finished) {
+            return new Result(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
         @Override public void output(Scheduler.Request request, Scheduler.Output output) {
-            if (retained) result.complete(success(request));
+            if (retained) result.complete(success(request, output.finished()));
         }
         @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
-            var ended = failure == null ? success(request) : new Result(null, RtpErrors.status(failure), RtpErrors.code(failure));
+            var ended = failure == null ? success(request, true) : new Result(null, RtpErrors.status(failure), RtpErrors.code(failure));
             result.complete(ended);
             termination.complete(ended);
         }

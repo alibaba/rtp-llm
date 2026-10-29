@@ -58,12 +58,14 @@ class RtpConfigTest {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         ((ObjectNode) root.path("environment")).putObject("compute");
         assertThrows(IllegalArgumentException.class, () -> load(root)); ((ObjectNode) root.path("environment")).remove("compute");
-        config.putObject("generation").put("eos_probability", .1);
+        var compute = (ObjectNode) config.path("compute");
+        compute.putObject("eos").put("probability", .1);
         assertThrows(Exception.class, () -> load(root));
-        ((ObjectNode) config.path("generation")).put("seed", 42);
-        assertEquals(.1, load(root).stoppingModel().configuration().eos_probability());
-        ((ObjectNode) config.path("generation")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
-        config.remove("generation"); config.putObject("decode"); assertThrows(IllegalArgumentException.class, () -> load(root));
+        ((ObjectNode) compute.path("eos")).put("seed", 42);
+        assertEquals(.1, load(root).compute().configuration().eos().probability());
+        ((ObjectNode) compute.path("eos")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
+        compute.remove("eos"); compute.putObject("decode").put("tokens_per_step", 2.6);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
     @Test void componentLoaderOwnsDuplicateFieldsAndEnvelopeValidation() throws Exception {
@@ -81,11 +83,11 @@ class RtpConfigTest {
     @Test void fractionalDecodeModelLoadsAndItsEffectiveConfigurationCanBeReadBack() throws Exception {
         var root = root(); root.put("component_role", "decode");
         var config = (ObjectNode) root.path("component").path("config");
-        config.putObject("decode").put("tokens_per_step", 2.6);
+        ((ObjectNode) config.path("compute")).putObject("decode").put("tokens_per_step", 2.6);
         var model = load(root);
-        assertEquals(2, model.decodeModel().sample("r", 4, 10).committedTokens());
-        config.set("decode", model.effective().get("decode"));
-        assertEquals(2.6, load(root).decodeModel().configuration().tokens_per_step());
+        assertEquals(2.6, model.compute().configuration().decode().tokens_per_step());
+        config.set("compute", model.effective().get("compute"));
+        assertEquals(2.6, load(root).compute().configuration().decode().tokens_per_step());
     }
     @Test void nativeEvictionOrderingUsesOnlyTreeAndRejectsUnimplementedTiers() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
@@ -105,14 +107,14 @@ class RtpConfigTest {
     @Test void bindsParallelismToTheFormulaWithoutImplicitScaling() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.put("cp_size", 4).put("cp_enabled", true).put("tp_size", 4).put("dp_size", 1);
-        config.putObject("compute").put("expression", "cpSize + tpSize + dpSize + cpEnabled");
+        config.putObject("compute").putObject("forward").put("expression", "cpSize + tpSize + dpSize + cpEnabled");
         var parsed = load(root);
         var request = new org.flexlb.mock.compute.ForwardBatch.Request("r", 2, 0, 1, 0, 1, 50, java.util.List.of());
         var batch = new org.flexlb.mock.compute.ForwardBatch("b", java.util.List.of(
             new org.flexlb.mock.compute.ForwardBatch.Partition(0, java.util.List.of(request))));
         assertEquals(java.time.Duration.ofMillis(10), parsed.compute().plan(parsed.role(), parsed.id(), batch).planned());
         assertEquals(4, parsed.effective().path("cp_size").intValue()); assertTrue(parsed.effective().path("cp_enabled").booleanValue());
-        config.putObject("compute").put("expression", "2");
+        config.putObject("compute").putObject("forward").put("expression", "2");
         assertEquals(java.time.Duration.ofMillis(2), load(root).compute().plan(parsed.role(), parsed.id(), batch).planned());
     }
 

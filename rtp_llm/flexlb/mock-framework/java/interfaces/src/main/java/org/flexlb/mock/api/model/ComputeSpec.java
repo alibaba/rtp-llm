@@ -2,12 +2,21 @@ package org.flexlb.mock.api.model;
 
 import org.flexlb.mock.api.Argument;
 
-/** One component's formula and noise; constants live in expression param(name, value). */
-public record ComputeSpec(String expression, @Argument(optional=true) Noise noise) {
+/** One component's Forward, Decode progress and EOS models. */
+public record ComputeSpec(Forward forward, @Argument(optional=true) DecodeSpec decode,
+                          @Argument(optional=true) StoppingSpec eos) {
     public ComputeSpec {
-        if (expression == null || expression.isBlank() || expression.length() > 32768)
-            throw new IllegalArgumentException("Compute expression must contain 1..32768 characters");
-        noise = noise == null ? new Noise(null, null, null, null) : noise;
+        if (forward == null) throw new IllegalArgumentException("Compute requires forward");
+        decode = decode == null ? new DecodeSpec(null, null, null, null) : decode;
+        eos = eos == null ? new StoppingSpec(null, null) : eos;
+    }
+
+    public record Forward(String expression, @Argument(optional=true) Noise noise) {
+        public Forward {
+            if (expression == null || expression.isBlank() || expression.length() > 32768)
+                throw new IllegalArgumentException("Compute expression must contain 1..32768 characters");
+            noise = noise == null ? new Noise(null, null, null, null) : noise;
+        }
     }
 
     public record Noise(@Argument(optional=true, minimum=0) Double stddev_ms,
@@ -24,7 +33,8 @@ public record ComputeSpec(String expression, @Argument(optional=true) Noise nois
         }
         private static double number(Double value, double fallback) {
             if (value == null) return fallback;
-            if (!Double.isFinite(value) || value < 0) throw new IllegalArgumentException("Noise values must be finite and nonnegative");
+            if (!Double.isFinite(value) || value < 0)
+                throw new IllegalArgumentException("Noise values must be finite and nonnegative");
             return value;
         }
     }

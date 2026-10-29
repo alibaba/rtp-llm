@@ -43,7 +43,7 @@ class EngineLoopTest {
         public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
     }
     private EngineLoop engine(Object lock, Policy policy, String expression) {
-        return new EngineLoop(lock, policy, new org.flexlb.mock.cache.DeviceCache(1, 0, org.flexlb.mock.cache.DeviceCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(expression, null)), Role.prefill, "test");
+        return new EngineLoop(lock, policy, new org.flexlb.mock.cache.DeviceCache(1, 0, org.flexlb.mock.cache.DeviceCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
     }
 
     @Test void idleLoopsCannotExhaustVirtualThreadCarriers() throws Exception {
@@ -175,7 +175,7 @@ class EngineLoopTest {
                     lease.close(); super.computeCompleted(work, result);
                 }
             };
-            try (var loop = new EngineLoop(policy, policy, cache, new ComputeModel(new ComputeSpec("1", null)), Role.prefill, "capacity")) {
+            try (var loop = new EngineLoop(policy, policy, cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
                 loop.wake();
                 assertTrue(tried.await(2, TimeUnit.SECONDS));
                 Thread.sleep(100);

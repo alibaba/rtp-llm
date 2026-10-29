@@ -15,7 +15,7 @@ environment:
       test_block_num: 4096
       reserve_block_ratio: 0
       max_seq_len: 4096
-      compute.expression: 1 + batchSize
+      compute.forward.expression: 1 + batchSize
   decode:
     engine: rtp
     config:
@@ -23,7 +23,7 @@ environment:
       test_block_num: 4096
       reserve_block_ratio: 0
       max_seq_len: 4096
-      compute.expression: 1 + batchSize
+      compute.forward.expression: 1 + batchSize
   client:
     config: {}
 phases:

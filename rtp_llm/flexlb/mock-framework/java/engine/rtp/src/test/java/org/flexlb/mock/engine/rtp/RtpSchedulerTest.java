@@ -21,11 +21,11 @@ class RtpSchedulerTest {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         var config = (ObjectNode) root.path("component").path("config");
         config.put("seq_size_per_block", 2).put("max_generate_batch_size", batchSize).put("max_batch_tokens_size", tokenBudget);
-        ((ObjectNode) config.path("compute")).put("expression", expression);
+        ((ObjectNode) config.path("compute").path("forward")).put("expression", expression);
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
     private static Scheduler.Input input(long id, boolean retained) {
-        return new Scheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, retained);
+        return new Scheduler.Input(Long.toString(id), id, 0, 5, 3, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, retained, 0, false);
     }
     private static class Listener implements Scheduler.Listener {
         final CompletableFuture<Scheduler.Request> allocated = new CompletableFuture<>();
@@ -48,7 +48,7 @@ class RtpSchedulerTest {
     }
     private static void loaded(Scheduler scheduler, Scheduler.Request request) {
         try (var use = scheduler.beginTransfer(request)) {
-            scheduler.transferCompleted(request, new RtpTransferResult(3, null));
+            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
         }
     }
     private static void generate(Scheduler scheduler, Scheduler.Request request) {
@@ -66,7 +66,7 @@ class RtpSchedulerTest {
             assertFalse(listener.terminal.isDone()); assertEquals(5, cache.snapshot(0, false).availableBlocks());
             assertThrows(RequestFailure.class, () -> scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED));
             var read = scheduler.beginTransfer(request);
-            scheduler.transferCompleted(request, new RtpTransferResult(3, null));
+            scheduler.transferCompleted(request, new RtpTransferResult(false, null));
             scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED);
             assertEquals(5, cache.snapshot(0, false).availableBlocks()); assertFalse(listener.terminal.isDone());
             read.close(); drain(scheduler);
@@ -194,7 +194,7 @@ class RtpSchedulerTest {
             complete(scheduler, work, config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(12, cache.snapshot(0, false).availableBlocks());
-            var oversized = new Scheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, false);
+            var oversized = new Scheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, false, 0, false);
             assertEquals(RequestFailure.Reason.INVALID,
                 assertThrows(RequestFailure.class, () -> scheduler.input(oversized, new Listener())).reason());
             assertTrue(scheduler.requests().isEmpty());

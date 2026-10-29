@@ -12,15 +12,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize('compute', [
-    {'expression': '1', 'unexpected': 1},
-    {'expression': '1', 'noise': {'stddev_ms': -1}},
-    {'expression': '1', 'noise': {'scale': 2}},
-    {'expression': '1', 'scale': 2},
-    {'expression': '1', 'noise': {'scale': '2'}},
-    {'expression': '1', 'noise': {'seed': 1.5}},
-    {'expression': '1', 'noise': {'seed': 2 ** 63}},
-    {'prefill': {'expression': '1'}},
-    {'expression': '1', 'noise': None},
+    {'expression': '1'},
+    {'forward': {'expression': '1', 'unexpected': 1}},
+    {'forward': {'expression': '1', 'noise': {'stddev_ms': -1}}},
+    {'forward': {'expression': '1', 'noise': {'scale': 2}}},
+    {'forward': {'expression': '1', 'scale': 2}},
+    {'forward': {'expression': '1', 'noise': {'seed': 1.5}}},
+    {'forward': {'expression': '1', 'noise': {'seed': 2 ** 63}}},
+    {'forward': {'expression': '1', 'noise': None}},
+    {'forward': None},
 ])
 def test_java_loader_rejects_invalid_compute_configuration(case_data, compile_data, compute, tmp_path):
     case_data['environment']['prefill']['config']['compute'] = compute
@@ -44,7 +44,7 @@ def test_top_level_compute_is_rejected(case_data, compile_data):
 
 def test_python_compile_to_java_formula_noise_and_timer(case_data, compile_data, tmp_path):
     case_data['environment']['prefill']['config'].update({
-        'compute.expression': '2 * (param(baseMs, 1) + 0.5*totalComputeTokens)',
+        'compute.forward.expression': '2 * (param(baseMs, 1) + 0.5*totalComputeTokens)',
     })
     compiled = compile_data(case_data)
     config = tmp_path / 'component.json'
@@ -58,20 +58,20 @@ def test_python_compile_to_java_formula_noise_and_timer(case_data, compile_data,
     assert result['state'] == 'COMPLETED'
     assert result['base_ns'] == 10_000_000 and result['planned_ns'] == 10_000_000
     assert result['elapsed_ns'] >= 10_000_000
-    assert result['effective']['noise'] == {'stddev_ms': 0.0, 'stddev_ratio': 0.0,
+    assert result['effective']['forward']['noise'] == {'stddev_ms': 0.0, 'stddev_ratio': 0.0,
                                             'max_deviation_ms': 0.0, 'seed': 0}
-    assert result['effective']['expression'].startswith('2 * (param(baseMs')
+    assert result['effective']['forward']['expression'].startswith('2 * (param(baseMs')
 
 
 @pytest.mark.parametrize('key,value', [
     ('decode', {'draft_tokens': -1}), ('decode', {'acceptance_rate': 1.01}),
-    ('decode', {'seed': 1.5}), ('generation', {'eos_probability': -0.1}),
-    ('generation', {'eos_probability': 1.1}), ('generation', {'unknown': 1}),
+    ('decode', {'seed': 1.5}), ('eos', {'probability': -0.1}),
+    ('eos', {'probability': 1.1}), ('eos', {'unknown': 1}),
 ])
 def test_java_loader_rejects_invalid_generation_models(case_data, compile_data, key, value, tmp_path):
     role = 'decode' if key == 'decode' else 'prefill'
     case_data['environment'][role] = {'engine': 'rtp', 'config': {
-        'seq_size_per_block': 16, 'test_block_num': 9, 'max_seq_len': 4096, 'compute': {'expression': '1'}, key: value}}
+        'seq_size_per_block': 16, 'test_block_num': 9, 'max_seq_len': 4096, 'compute': {'forward': {'expression': '1'}, key: value}}}
     compiled = compile_data(case_data)
     config = tmp_path / 'component.json'
     write_json(config, {'id': role + '-0', 'component_role': role, 'component': compiled.environment[role]})

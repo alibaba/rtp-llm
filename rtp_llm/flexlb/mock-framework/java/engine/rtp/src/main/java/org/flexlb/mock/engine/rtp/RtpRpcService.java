@@ -25,7 +25,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         this.config = config; this.cache = cache;
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
         decode = requests == null ? new DecodeAdmission(config, cache, schedulers) : null;
-        transfer = requests == null ? null : new PrefillTransfer(config, requests);
+        transfer = requests == null ? null : new PrefillTransfer(requests);
         generation = transfer == null ? null : new PrefillGeneration(config, transfer);
     }
     io.grpc.BindableService transfer() { return transfer; }

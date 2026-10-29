@@ -85,7 +85,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
         native['scheduler']['decision'] = {'type': 'FIXED_WINDOW', 'maxRequests': 2, 'maxCollectionWaitMs': 20}
     master_config = configuration(); master_config['FLEXLB_CONFIG'] = json.dumps(native)
     engine_config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0,
-                     'max_seq_len': 4096, 'compute.expression': '1 + batchSize'}
+                     'max_seq_len': 4096, 'compute.forward.expression': '1 + batchSize'}
     document = {'id': 'production_master_probe', 'describe': '真实Master与新P/D及Client接线验证',
         'environment': {'master': {'deployment': {'replicas': replicas}, 'config': master_config},
                         'prefill': {'engine': 'rtp', 'config': engine_config},

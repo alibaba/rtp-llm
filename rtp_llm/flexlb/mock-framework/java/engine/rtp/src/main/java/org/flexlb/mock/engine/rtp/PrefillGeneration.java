@@ -189,16 +189,17 @@ final class PrefillGeneration implements AutoCloseable {
                 var first = source.ready().toCompletableFuture().get();
                 if (!first.status().isOk()) throw RtpErrors.failure(first.status(), first.engineCode());
                 long ttft = System.nanoTime() - started;
+                boolean prefillFinished = first.output().getFlattenOutput().getFinished(0);
                 int prefillReuse = first.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen();
-                send(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, prefillReuse, ttft, source.stopAfter() == 1, true));
+                send(LocalResponse.token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, prefillReuse, ttft, prefillFinished, true));
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
                 source.acknowledged();
-                if (source.stopAfter() == 1) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
+                if (prefillFinished) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
                 else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(input.getTokenIds(input.getTokenIdsCount() - 1)).build());
                 stream.onCompleted();
-                boolean finished = source.stopAfter() == 1;
+                boolean finished = prefillFinished;
                 for (GenerateOutputsPB output; (output = inbox.next()) != null;) {
                     if (finished || output.getRequestId() != input.getRequestId() || !output.hasFlattenOutput() || output.getFlattenOutput().getFinishedCount() != 1)
                         throw Status.DATA_LOSS.withDescription("Invalid Decode output stream").asRuntimeException();

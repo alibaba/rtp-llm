@@ -183,6 +183,10 @@ public final class NativeClient implements AutoCloseable {
                                     || length <= outputTokens || length > input.getGenerateConfig().getMaxNewTokens()) {
                                 finish(Status.DATA_LOSS.withDescription("Invalid text output stream"), 0, Outcome.error); return;
                             }
+                            if (flat.getFinished(0) && (length < input.getGenerateConfig().getMinNewTokens()
+                                    || input.getGenerateConfig().getIgnoreEos() && length != input.getGenerateConfig().getMaxNewTokens())) {
+                                finish(Status.DATA_LOSS.withDescription("Final output violates requested length"), 0, Outcome.error); return;
+                            }
                             outputTokens = flat.getAuxInfo(0).getOutputLen(); finalFrame = flat.getFinished(0);
                             if (ttft == null) { ttft = System.nanoTime() - started; emit(Event.Kind.FIRST_TOKEN); firstToken.complete(ttft); }
                             if (!terminal) stream.request(1);

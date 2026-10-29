@@ -124,7 +124,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         'requestLifecycle': {'request': {'timeoutMs': 5000}},
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 4096,
-              'reserve_block_ratio': 0, 'max_seq_len': 4096, 'compute.expression': '1 + batchSize'}}
+              'reserve_block_ratio': 0, 'max_seq_len': 4096, 'compute.forward.expression': '1 + batchSize'}}
     data = {'id': 'client_playback', 'describe': 'Client0 coordinates native playback',
         'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine,
                         'client': {'deployment': {'replicas': replicas}, 'config': {}}},

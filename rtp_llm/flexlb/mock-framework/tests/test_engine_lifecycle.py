@@ -28,7 +28,7 @@ class Args:
 def setup_case(tmp_path, operation, mode='shared', monitor=False, invalid=False, master=False):
     registry = Registry.standard(); registry.register(operation)
     config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0, 'max_seq_len': 4096,
-              'compute.expression': '1'}
+              'compute.forward.expression': '1'}
     env = {role: {'engine': 'rtp', 'deployment': {'replicas': 2 if role == 'prefill' else 1}, 'config': dict(config)}
            for role in ('prefill', 'decode')}
     if invalid:

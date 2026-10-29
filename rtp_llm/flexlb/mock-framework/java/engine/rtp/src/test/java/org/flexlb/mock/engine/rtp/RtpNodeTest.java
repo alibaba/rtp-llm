@@ -18,7 +18,7 @@ class RtpNodeTest {
     static Map<String, Object> configuration(String role) {
         return Map.of("id", role + "-0", "component_role", role,
             "component", Map.of("engine", "rtp", "config", Map.of("seq_size_per_block", 16,
-                "max_seq_len", 4096, "test_block_num", 9, "reserve_block_ratio", 0, "compute", Map.of("expression", "1 + batchSize"))),
+                "max_seq_len", 4096, "test_block_num", 9, "reserve_block_ratio", 0, "compute", Map.of("forward", Map.of("expression", "1 + batchSize")))),
             "environment", Map.of());
     }
     private RtpConfig config(String role) throws Exception {

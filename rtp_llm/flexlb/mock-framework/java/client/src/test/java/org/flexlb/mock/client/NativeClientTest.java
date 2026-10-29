@@ -127,6 +127,19 @@ class NativeClientTest {
             assertEquals(RoleAddrPB.RoleType.PREFILL, h.generated.get().getGenerateConfig().getRoleAddrs(0).getRole());
         }
     }
+
+    @Test void finalLengthMustRespectIgnoreEosAndMinimumButAllowsAnActualEos() throws Exception {
+        for (int mode = 0; mode < 3; mode++) try (var h = new Harness()) {
+            h.output = (id, response) -> {
+                response.onNext(token(id, 1, false)); response.onNext(token(id, 2, true)); response.onCompleted();
+            };
+            var request = request(1).toBuilder(); var input = GenerateInputPB.parseFrom(request.getGenerateInput()).toBuilder();
+            input.getGenerateConfigBuilder().setIgnoreEos(mode == 0).setMinNewTokens(mode == 1 ? 3 : 0);
+            request.setGenerateInput(input.build().toByteString());
+            var result = h.result(h.client.send(request.build(), Duration.ofSeconds(2)));
+            assertEquals(mode == 2 ? NativeClient.Outcome.success : NativeClient.Outcome.error, result.outcome());
+        }
+    }
     @Test void enqueuedRouteAlwaysFetchesAndConsumesToFinalCompletion() throws Exception {
         try (var h = new Harness()) {
             h.batched = true;

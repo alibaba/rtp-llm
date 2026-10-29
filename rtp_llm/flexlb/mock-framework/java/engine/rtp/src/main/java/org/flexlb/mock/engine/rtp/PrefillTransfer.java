@@ -13,17 +13,15 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
     private record Key(String client, long request) {}
     private static final class Entry {
         final TransferRequest request;
-        final TransferMetadata metadata;
         final CompletableFuture<LocalPrefill.Result> ready = new CompletableFuture<>();
         final AtomicBoolean reader = new AtomicBoolean();
         LocalPrefill.Session session;
         volatile KvTransfer.Execution execution;
-        Entry(TransferRequest request, TransferMetadata metadata) { this.request = request; this.metadata = metadata; }
+        Entry(TransferRequest request) { this.request = request; }
     }
     final class Source implements AutoCloseable {
         private final Entry entry;
         Source(Entry entry) { this.entry = entry; }
-        int stopAfter() { return entry.metadata.getStopAfter(); }
         CompletionStage<LocalPrefill.Result> ready() { return entry.ready.minimalCompletionStage(); }
         void preempt() { entry.session.preempt(); }
         void expire() { entry.session.expire(); }
@@ -32,16 +30,15 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
     }
     private final KvTransfer model = new KvTransfer();
     private boolean closed;
-    private final RtpConfig config;
     private final LocalPrefill requests;
     private final ConcurrentMap<Key, Entry> active = new ConcurrentHashMap<>();
 
-    PrefillTransfer(RtpConfig config, LocalPrefill requests) { this.config = config; this.requests = requests; }
+    PrefillTransfer(LocalPrefill requests) { this.requests = requests; }
 
     void validate(GenerateInputPB input) { requests.validate(input, true); }
 
     Source start(TransferRequest request, long deadline) {
-        var key = key(request); requests.validate(request.getInput(), true); var entry = new Entry(request, metadata(request));
+        var key = key(request); requests.validate(request.getInput(), true); var entry = new Entry(request);
         synchronized (entry) {
             synchronized (active) {
                 if (closed) throw Status.UNAVAILABLE.withDescription("Transfer service closed").asRuntimeException();
@@ -74,6 +71,11 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                 if (entry.session == null) throw Status.NOT_FOUND.withDescription("Prefill preparation failed").asRuntimeException();
                 if (!entry.request.getInput().getTokenIdsList().equals(request.getInput().getTokenIdsList()))
                     throw Status.FAILED_PRECONDITION.withDescription("Prefill/Decode prompt differs").asRuntimeException();
+                var original = entry.request.getInput().getGenerateConfig();
+                var incoming = request.getInput().getGenerateConfig();
+                if (original.getMinNewTokens() != incoming.getMinNewTokens() || original.getMaxNewTokens() != incoming.getMaxNewTokens()
+                        || original.getIgnoreEos() != incoming.getIgnoreEos())
+                    throw Status.FAILED_PRECONDITION.withDescription("Prefill/Decode generation limits differ").asRuntimeException();
                 if (!entry.reader.compareAndSet(false, true))
                     throw Status.ALREADY_EXISTS.withDescription("Prefill transfer already has a reader").asRuntimeException();
             }
@@ -82,6 +84,8 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         entry.ready.thenAccept(result -> {
             if (response.isCancelled()) { entry.session.cancel(); return; }
             if (!result.status().isOk()) { response.onError(RtpErrors.failure(result.status(), result.engineCode())); return; }
+            var metadata = TransferMetadata.newBuilder().setInputTokens(entry.request.getInput().getTokenIdsCount())
+                .setPrefillFinished(result.output().getFlattenOutput().getFinished(0)).build();
             RequestState.Use use;
             try { use = requests.beginTransfer(entry.session); }
             catch (RuntimeException error) { cancel(entry); response.onError(error); return; }
@@ -95,11 +99,11 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                     outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
                     "KV transfer " + outcome.state(), outcome.error());
                 try {
-                    requests.transferCompleted(entry.session, new RtpTransferResult(entry.metadata.getStopAfter(), failure));
+                    requests.transferCompleted(entry.session, new RtpTransferResult(metadata.getPrefillFinished(), failure));
                     if (response.isCancelled()) return;
                     if (failure != null) throw RtpErrors.failure(failure);
                     if (entry.session.request.snapshot().terminating()) throw Status.CANCELLED.asRuntimeException();
-                    response.onNext(entry.metadata); response.onCompleted();
+                    response.onNext(metadata); response.onCompleted();
                 } catch (RuntimeException error) { cancel(entry); if (!response.isCancelled()) response.onError(error); }
             });
         });
@@ -125,12 +129,6 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         if (request.getClientId().isBlank() || !request.hasInput())
             throw Status.INVALID_ARGUMENT.withDescription("Transfer requires client identity and native input").asRuntimeException();
         return new Key(request.getClientId(), request.getInput().getRequestId());
-    }
-    private TransferMetadata metadata(TransferRequest request) {
-        return TransferMetadata.newBuilder().setInputTokens(request.getInput().getTokenIdsCount())
-            .setStopAfter(config.stoppingModel().length(Long.toString(request.getInput().getRequestId()),
-                request.getInput().getGenerateConfig().getMinNewTokens(), request.getInput().getGenerateConfig().getMaxNewTokens(),
-                request.getInput().getGenerateConfig().getIgnoreEos())).build();
     }
     static long deadline(Context context) {
         if (context.getDeadline() == null) return Long.MAX_VALUE;

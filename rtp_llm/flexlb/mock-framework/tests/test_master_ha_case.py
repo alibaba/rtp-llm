@@ -42,11 +42,12 @@ def test_ha_case_keeps_one_playback_and_full_rolling_order_without_progress_or_s
     assert (p['deployment']['replicas'], d['deployment']['replicas']) == (48, 192)
     assert (p['config']['seq_size_per_block'], d['config']['seq_size_per_block']) == (512, 128)
     assert (p['config']['test_block_num'], d['config']['test_block_num']) == (21554, 221485)
-    assert p['config']['compute']['expression'] == f"{preset['prefill']['scale']} * ({calibration['prefill_expression']})"
-    assert 'noise' not in p['config']['compute']
-    assert d['config']['decode']['tokens_per_step'] == preset['decode']['tokens_per_step']
+    assert p['config']['compute']['forward']['expression'] == f"{preset['prefill']['scale']} * ({calibration['prefill_expression']})"
+    assert 'noise' not in p['config']['compute']['forward']
+    assert d['config']['compute']['decode']['tokens_per_step'] == preset['decode']['tokens_per_step']
     assert p['config']['enable_memory_cache'] is True
-    assert 'generation' not in p['config'] and 'generation' not in d['config']
+    assert 'generation' not in p['config'] and 'decode' not in d['config']
+    assert p['config']['compute']['eos'] == d['config']['compute']['eos'] == {'probability': .0025, 'seed': 20260922}
     assert (p['config']['cp_size'], p['config']['cp_enabled'], p['config']['tp_size'], p['config']['dp_size']) == (4, True, 4, 1)
     assert (d['config']['cp_size'], d['config']['cp_enabled'], d['config']['tp_size'], d['config']['dp_size']) == (1, False, 1, 1)
     assert p['config']['max_generate_batch_size'] == 64 and d['config']['max_generate_batch_size'] == 128

@@ -33,7 +33,7 @@ class PrefillTransferTest {
     private Harness node(String role, int block, int millis) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", block).put("reuse_cache", true);
-        ((ObjectNode) root.path("component").path("config").path("compute")).put("expression", Integer.toString(millis));
+        ((ObjectNode) root.path("component").path("config").path("compute").path("forward")).put("expression", Integer.toString(millis));
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
         return new Harness(RtpConfig.load(path));
     }
@@ -117,7 +117,7 @@ class PrefillTransferTest {
     @Test void readyDataRemainsPinnedWithoutAReader() throws Exception {
         try (var p = node("prefill", 2, 1); var source = prepare(p, input(1, 5, 2000))) {
             ready(source);
-            assertEquals(4, source.stopAfter());
+            assertFalse(source.ready().toCompletableFuture().join().output().getFlattenOutput().getFinished(0));
             assertEquals(10, p.status().getAvailableKvCache());
             assertEquals(TaskPhase.TASK_PHASE_KV_ALLOCATED, p.status().getRunningTaskInfo(0).getPhase());
             assertTrue(p.status().getRunningTaskInfo(0).getExecutionTimeMs() > 0);
@@ -185,7 +185,7 @@ class PrefillTransferTest {
         var peer = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
             .addService(new PrefillTransferGrpc.PrefillTransferImplBase() {
                 @Override public void read(TransferRequest request, StreamObserver<TransferMetadata> response) {
-                    response.onNext(TransferMetadata.newBuilder().setInputTokens(4).setStopAfter(4).build());
+                    response.onNext(TransferMetadata.newBuilder().setInputTokens(4).setPrefillFinished(false).build());
                     response.onCompleted();
                 }
             }).build().start();

@@ -136,7 +136,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         native['scheduler']['decision'] = {'type': 'FIXED_WINDOW', 'maxRequests': 2, 'maxCollectionWaitMs': 20}
         config['FLEXLB_CONFIG'] = json.dumps(native)
     engine = {'engine': 'rtp', 'config': {'seq_size_per_block': 16, 'test_block_num': 256,
-        'reserve_block_ratio': 0, 'max_seq_len': 4096, 'compute.expression': '1 + batchSize'}}
+        'reserve_block_ratio': 0, 'max_seq_len': 4096, 'compute.forward.expression': '1 + batchSize'}}
     from mock_framework.input import write_inputs, pb
     source = tmp_path / 'traffic.binpb.zst'
     write_inputs(source, (pb.Request(token_ids=[1, 2, 3], max_new_tokens=3) for _ in range(800)))

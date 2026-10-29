@@ -21,7 +21,7 @@ class LocalPrefillTest {
     RtpConfig config(String expression) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
-        ((ObjectNode) root.path("component").path("config").path("compute")).put("expression", expression);
+        ((ObjectNode) root.path("component").path("config").path("compute").path("forward")).put("expression", expression);
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
 

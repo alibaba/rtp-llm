@@ -12,7 +12,7 @@ final class RtpTasks {
             : after(started, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
         return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, deadline,
-            PrefixKeys.completeBlocks(input, blockSize), input.getGenerateConfig().getReuseCache(), retained);
+            PrefixKeys.completeBlocks(input, blockSize), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
     }
     static TaskInfoPB task(Scheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())

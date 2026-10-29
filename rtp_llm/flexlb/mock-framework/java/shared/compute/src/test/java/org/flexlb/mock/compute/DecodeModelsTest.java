@@ -8,66 +8,73 @@ class DecodeModelsTest {
     private DecodeStepModel step(int k, double alpha, long seed) { return new DecodeStepModel(new DecodeSpec(k, alpha, seed, null)); }
     private StoppingModel stopping(double p, long seed) { return new StoppingModel(new StoppingSpec(p, seed)); }
 
-    @Test void ordinaryAllRejectedAllAcceptedAndBudgetTail() {
-        assertEquals(new DecodeStepModel.Step(0, 0, 1, 1), step(0, 0, 1).sample("r", 0, 8));
-        assertEquals(new DecodeStepModel.Step(3, 0, 1, 4), step(3, 0, 1).sample("r", 0, 8));
-        assertEquals(new DecodeStepModel.Step(3, 3, 4, 4), step(3, 1, 1).sample("r", 0, 8));
-        assertEquals(new DecodeStepModel.Step(1, 1, 2, 2), step(3, 1, 1).sample("r", 0, 2));
+    @Test void verificationPlanIsIndependentOfAcceptanceAndOutputTruncation() {
+        var rejected = step(4, 0, 1); var accepted = step(4, 1, 1);
+        var plan = rejected.plan(0, 10);
+        assertEquals(plan, accepted.plan(0, 10));
+        assertEquals(5, plan.verifyTokens()); assertEquals(4, plan.additionalKvTokens());
+        assertEquals(1, rejected.candidates(plan, "r", 0)); assertEquals(5, accepted.candidates(plan, "r", 0));
+        var tail = accepted.plan(0, 4);
+        assertEquals(5, tail.verifyTokens()); assertEquals(4, tail.additionalKvTokens());
+        assertEquals(5, accepted.candidates(tail, "r", 0));
     }
-    @Test void cappedGeometricHasTheExpectedPrefixDistribution() {
-        var model = step(3, .8, 42); double sum = 0; int[] counts = new int[4]; int samples = 20000;
-        for (int i = 0; i < samples; i++) { var plan = model.sample("r" + i, 0, 100); sum += plan.committedTokens(); counts[plan.acceptedTokens()]++; }
-        assertEquals(1 + .8 + .64 + .512, sum / samples, .035);
-        assertEquals(.2, counts[0] / (double) samples, .02);
-        assertEquals(.512, counts[3] / (double) samples, .02);
+    @Test void cappedGeometricHasTheExpectedAcceptedOutputDistribution() {
+        var model = step(3, .8, 42); var plan = model.plan(0, 100); double sum = 0; int[] counts = new int[5];
+        for (int i = 0; i < 20000; i++) { int n = model.candidates(plan, "r" + i, 0); sum += n; counts[n]++; }
+        assertEquals(1 + .8 + .64 + .512, sum / 20000, .035);
+        assertEquals(.2, counts[1] / 20000.0, .02); assertEquals(.512, counts[4] / 20000.0, .02);
     }
-    @Test void stoppingRespectsLimitsIgnoreEosAndTheGeometricMean() {
-        assertEquals(20, stopping(0, 1).length("r", 3, 20, false));
-        assertEquals(3, stopping(1, 1).length("r", 3, 20, false));
-        assertEquals(20, stopping(1, 1).length("r", 3, 20, true));
-        double sum = 0; var model = stopping(.1, 42);
-        for (int i = 0; i < 20000; i++) sum += model.length("r" + i, 1, 100, false);
+    @Test void eosAndLengthClampOnlyAcceptedOutput() {
+        assertEquals(new ComputeModel.Result(4, true), stopping(0, 1).complete("r", 0, 5, 0, 4, false));
+        assertEquals(new ComputeModel.Result(3, true), stopping(1, 1).complete("r", 0, 5, 3, 10, false));
+        assertEquals(new ComputeModel.Result(5, false), stopping(1, 1).complete("r", 0, 5, 0, 10, true));
+        assertEquals(new ComputeModel.Result(1, true), stopping(0, 1).complete("r", 3, 5, 0, 4, true));
+        assertEquals(new ComputeModel.Result(2, true), stopping(1, 1).complete("r", 0, 5, 9, 2, false));
+        var rejected = step(4, 0, 1); var plan = rejected.plan(0, 10);
+        assertEquals(new ComputeModel.Result(1, false), stopping(1, 1).complete("r", 0,
+            rejected.candidates(plan, "r", 0), 2, 10, false));
+    }
+    @Test void perTokenEosHasGeometricMeanAndIsStableAcrossRoundWidths() {
+        var stop = stopping(.1, 42); double sum = 0;
+        for (int i = 0; i < 20000; i++) sum += stop.complete("r" + i, 0, 100, 1, 100, false).committedTokens();
         assertEquals(10, sum / 20000, .3);
-    }
-    @Test void randomResultsAreKeyedAndSpeculationDoesNotResampleTheStopLength() {
-        var stop = stopping(.07, 31); var slow = step(0, 0, 42); var fast = step(5, .8, 42);
-        int expected = stop.length("r", 1, 100, false);
-        for (var model : new DecodeStepModel[]{slow, fast}) {
-            int generated = 0, round = 0;
-            while (generated < expected) generated += Math.min(expected - generated, model.sample("r", round++, 100 - generated).committedTokens());
-            assertEquals(expected, generated);
+        for (int i = 0; i < 100; i++) {
+            String key = "r" + i;
+            int expected = stop.complete(key, 0, 100, 3, 100, false).committedTokens();
+            for (int width : new int[]{1, 2, 5, 13}) {
+                int generated = 0;
+                while (true) {
+                    var result = stop.complete(key, generated, width, 3, 100, false);
+                    generated += result.committedTokens(); if (result.finished()) break;
+                }
+                assertEquals(expected, generated);
+            }
         }
-        var model = step(4, .6, 42); var original = model.sample("r", 7, 80);
-        for (int i = 0; i < 100; i++) model.sample("other" + i, i, 40);
-        assertEquals(original, model.sample("r", 7, 80));
-        assertEquals(expected, stop.length("r", 1, 100, false));
     }
-    @Test void fractionalTokenBudgetPreservesMeanAndClampsTheFinalRound() {
-        var model = new DecodeStepModel(new DecodeSpec(null, null, null, 2.6));
-        int committed = 0;
+    @Test void fractionalProgressIsAnAggregateModelAndTheTailCanProduceFiveButCommitFour() {
+        var model = new DecodeStepModel(new DecodeSpec(null, null, null, 2.6)); int total = 0;
         for (int round = 0; round < 100; round++) {
-            var step = model.sample("r", round, 1000);
-            assertTrue(step.committedTokens() == 2 || step.committedTokens() == 3);
-            assertEquals(0, step.proposedTokens()); assertEquals(0, step.acceptedTokens());
-            assertEquals(1, step.verifyTokens()); assertEquals(step.committedTokens() - 1, step.additionalKvTokens());
-            committed += step.committedTokens();
+            var plan = model.plan(round, 1000); int count = model.candidates(plan, "r", round);
+            assertEquals(1, plan.verifyTokens()); assertEquals(0, plan.proposedTokens());
+            assertEquals(count - 1, plan.additionalKvTokens()); total += count;
         }
-        assertEquals(260, committed);
-        assertArrayEquals(new int[]{3, 3, 2, 3, 2}, java.util.stream.IntStream.range(0, 5)
-            .map(round -> model.sample("r", round, 1000).committedTokens()).toArray());
-        assertEquals(1, model.sample("r", 4, 1).committedTokens());
-        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(1, 1.0, null, 2.6));
-        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(null, null, null, Double.NaN));
-        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(null, null, null, .5));
+        assertEquals(260, total);
+        var mean = new DecodeStepModel(new DecodeSpec(null, null, null, 5.0)); var plan = mean.plan(0, 4);
+        assertEquals(5, mean.candidates(plan, "r", 0)); assertEquals(3, plan.additionalKvTokens());
+        assertEquals(new ComputeModel.Result(4, true), stopping(0, 1).complete("r", 0, 5, 0, 4, false));
     }
-    @Test void invalidProbabilitiesMissingSeedsAndLimitsAreRejected() {
+    @Test void randomAcceptanceIsKeyedAndInvalidParametersAreRejected() {
+        var model = step(4, .6, 42); var plan = model.plan(7, 80); int expected = model.candidates(plan, "r", 7);
+        for (int i = 0; i < 100; i++) model.candidates(model.plan(i, 40), "other" + i, i);
+        assertEquals(expected, model.candidates(plan, "r", 7));
         assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, .8, null, null));
         assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, null, 1L, null));
         assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, 1.1, 1L, null));
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(1, 1.0, null, 2.6));
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(null, null, null, Double.NaN));
         assertThrows(IllegalArgumentException.class, () -> new StoppingSpec(.1, null));
         assertThrows(IllegalArgumentException.class, () -> new StoppingSpec(Double.NaN, 1L));
-        assertThrows(IllegalArgumentException.class, () -> step(1, .5, 1).sample("r", 0, 0));
-        assertThrows(IllegalArgumentException.class, () -> stopping(.1, 1).length("r", 11, 10, false));
-        assertThrows(IllegalArgumentException.class, () -> stopping(.1, 1).length("", 0, 10, false));
+        assertThrows(IllegalArgumentException.class, () -> model.plan(0, 0));
+        assertThrows(IllegalArgumentException.class, () -> stopping(.1, 1).complete("", 0, 1, 0, 10, false));
     }
 }

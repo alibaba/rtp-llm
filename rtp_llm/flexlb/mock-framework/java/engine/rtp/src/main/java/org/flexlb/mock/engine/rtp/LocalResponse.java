@@ -19,7 +19,4 @@ final class LocalResponse {
             .setInt32Data(ByteString.copyFrom(tokens.array())));
         return GenerateOutputsPB.newBuilder().setRequestId(input.getRequestId()).setFlattenOutput(output).build();
     }
-    static GenerateOutputsPB oneToken(GenerateInputPB input, int reused, long elapsedNanos) {
-        return token(input, input.getTokenIds(input.getTokenIdsCount() - 1), 1, 1, reused, elapsedNanos, true, false);
-    }
 }

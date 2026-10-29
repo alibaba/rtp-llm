@@ -3,18 +3,24 @@ package org.flexlb.mock.compute;
 import java.util.SplittableRandom;
 import org.flexlb.mock.api.model.StoppingSpec;
 
-/** shortcut: constant EOS hazard, replace with observed lengths when calibrating a real workload. */
+/** shortcut: constant per-output-token EOS probability; calibrate a richer model when workload data requires it. */
 public record StoppingModel(StoppingSpec configuration) {
     public StoppingModel { java.util.Objects.requireNonNull(configuration); }
-    public int length(String requestKey, int minimum, int maximum, boolean ignoreEos) {
-        if (minimum < 0 || maximum < 1 || minimum > maximum) throw new IllegalArgumentException("Invalid output limits");
-        if (requestKey == null || requestKey.isBlank()) throw new IllegalArgumentException("Request key is required");
-        double p = configuration.eos_probability();
-        if (ignoreEos || p == 0) return maximum;
-        int first = Math.max(1, minimum);
-        if (p == 1) return first;
-        double u = 1 - new SplittableRandom(NoiseModel.keyedSeed(configuration.seed(), "stop/" + requestKey)).nextDouble();
-        int failures = (int) Math.min(maximum - first, Math.floor(Math.log(u) / Math.log1p(-p)));
-        return first + failures;
+
+    public ComputeModel.Result complete(String requestKey, int generated, int candidates, int minimum, int maximum, boolean ignoreEos) {
+        if (requestKey == null || requestKey.isBlank() || generated < 0 || candidates < 1
+                || minimum < 0 || maximum < 1 || generated >= maximum)
+            throw new IllegalArgumentException("Invalid output identity/limits");
+        int count = Math.min(candidates, maximum - generated);
+        double p = configuration.probability();
+        if (!ignoreEos && p > 0 && (long) generated + count >= Math.max(1, minimum)) {
+            long seed = NoiseModel.keyedSeed(configuration.seed(), "eos/" + requestKey);
+            for (long offset = Math.max(1, minimum - generated); offset <= count; offset++) {
+                // Absolute output position makes EOS independent of batch membership and Decode round width.
+                if (p == 1 || new SplittableRandom(seed ^ ((long) generated + offset)).nextDouble() < p)
+                    return new ComputeModel.Result((int) offset, true);
+            }
+        }
+        return new ComputeModel.Result(count, generated + count == maximum);
     }
 }

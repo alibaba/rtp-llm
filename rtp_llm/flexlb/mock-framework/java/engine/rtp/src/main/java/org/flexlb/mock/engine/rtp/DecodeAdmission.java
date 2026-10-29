@@ -39,7 +39,8 @@ final class DecodeAdmission implements AutoCloseable {
         List<String> peers;
         Context.CancellableContext source;
         RequestState.Use transferUse;
-        int token, stopAfter;
+        int token;
+        boolean prefillFinished;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
@@ -96,7 +97,7 @@ final class DecodeAdmission implements AutoCloseable {
             if (frame.getStage() == RemoteStage.LOAD && call.acknowledged && !call.loading && !call.loaded) {
                 startLoad(call);
             } else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE && call.loaded && !call.generating) {
-                if (call.stopAfter != 1 || !frame.getClientId().equals(call.client))
+                if (!call.prefillFinished || !frame.getClientId().equals(call.client))
                     throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
                 engine.control(call.request, RtpControl.PREFILL_COMPLETE);
             } else if (frame.getStage() == RemoteStage.GENERATE && call.loaded && !call.generating) {
@@ -176,7 +177,7 @@ final class DecodeAdmission implements AutoCloseable {
         try {
             synchronized (this) {
                 if (call.request != null)
-                    engine.transferCompleted(call.request, new RtpTransferResult(0, RtpErrors.scheduling(status, code)));
+                    engine.transferCompleted(call.request, new RtpTransferResult(false, RtpErrors.scheduling(status, code)));
             }
         } finally { releaseTransfer(call); }
     }
@@ -189,18 +190,18 @@ final class DecodeAdmission implements AutoCloseable {
         synchronized (this) {
             if (!live(call)) return;
             if (metadata == null
-                    || metadata.getStopAfter() < Math.max(1, call.input.getGenerateConfig().getMinNewTokens())
-                    || metadata.getStopAfter() > call.input.getGenerateConfig().getMaxNewTokens()
-                    || call.input.getGenerateConfig().getIgnoreEos() && metadata.getStopAfter() != call.input.getGenerateConfig().getMaxNewTokens()
+                    || metadata.getPrefillFinished() && (call.input.getGenerateConfig().getIgnoreEos()
+                        ? call.input.getGenerateConfig().getMaxNewTokens() != 1 : call.input.getGenerateConfig().getMinNewTokens() > 1)
+                    || !metadata.getPrefillFinished() && call.input.getGenerateConfig().getMaxNewTokens() == 1
                     || metadata.getInputTokens() != call.input.getTokenIdsCount()) {
                 stop(call, Status.FAILED_PRECONDITION.withDescription("P-to-D token coverage or generation length differs"), 8212);
                 return;
             }
-            try { engine.transferCompleted(call.request, new RtpTransferResult(metadata.getStopAfter(), null)); }
+            try { engine.transferCompleted(call.request, new RtpTransferResult(metadata.getPrefillFinished(), null)); }
             catch (RequestFailure failure) { stop(call, RtpErrors.status(failure), RtpErrors.code(failure)); return; }
             call.loading = false;
             call.loaded = true;
-            call.stopAfter = metadata.getStopAfter();
+            call.prefillFinished = metadata.getPrefillFinished();
             call.source.cancel(null);
             call.source = null;
         }

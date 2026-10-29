@@ -23,8 +23,12 @@ class PdGenerationTest {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
         ((ObjectNode) root.path("component").path("config")).put("test_block_num", blocks + 1);
-        ((ObjectNode) root.path("component").path("config").path("compute")).put("expression", Integer.toString(millis));
-        models.forEach((key, value) -> ((ObjectNode) root.path("component").path("config")).set(key, json.valueToTree(value)));
+        ((ObjectNode) root.path("component").path("config").path("compute").path("forward")).put("expression", Integer.toString(millis));
+        models.forEach((key, value) -> {
+            var compute = (ObjectNode) root.path("component").path("config").path("compute");
+            if (key.equals("compute")) compute.setAll((ObjectNode) json.valueToTree(value));
+            else compute.set(key, json.valueToTree(value));
+        });
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
         return new Harness(RtpNode.start(RtpConfig.load(path)));
     }
@@ -298,27 +302,49 @@ class PdGenerationTest {
     }
 
     @Test void acceptedDraftsAdvanceSeveralTokensWhileBudgetTailStaysExact() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 1)));
+        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 1)));
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4); call.output(10, true, 1);
             assertEquals("completed", call.next()); assertEquals(3, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
             assertEquals(9, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+            assertEquals(12, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
             assertEquals(3, d.status().getFinishedTaskList(0).getIterateCount());
         }
     }
 
     @Test void rejectedDraftsStillPayForAllVerificationWork() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 0),
-                "compute", Map.of("expression", "totalStepTokens"))); var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 0),
+                "compute", Map.of("forward", Map.of("expression", "totalStepTokens")))); var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             for (int n = 1; n <= 10; n++) call.output(n, n == 10, 1);
             assertEquals("completed", call.next()); assertEquals(9, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
-            assertEquals(30, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
-            assertTrue(metric(d, "mock_engine_forward_seconds_sum", "role=\"decode\"") >= .030);
+            assertEquals(36, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
+            assertTrue(metric(d, "mock_engine_forward_seconds_sum", "role=\"decode\"") >= .036);
+        }
+    }
+
+    @Test void tailMustReserveTheFullVerificationWindowEvenWhenOnlyOneOutputFits() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
+                Map.of("decode", Map.of("draft_tokens", 3, "acceptance_rate", 1)));
+                var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
+            call.output(1, false, 1); call.output(5, false, 4); call.output(9, false, 4);
+            assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            assertEquals(2, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
+            await(() -> d.status().getAvailableKvCache() == 16);
+        }
+    }
+
+    @Test void excessiveDraftLookaheadFailsTheRequestWithoutIntegerOverflowOrEngineFailure() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1,
+                Map.of("decode", Map.of("draft_tokens", 2147483646, "acceptance_rate", 0)));
+                var call = new Call(p, input(d, 1, 5, 4, 2000, true))) {
+            call.output(1, false, 1); assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            await(() -> d.status().getAvailableKvCache() == 16);
+            assertTrue(d.status().getAlive());
         }
     }
 
     @Test void eosOnFirstTokenCompletesDWithoutADuplicateTokenOrForward() throws Exception {
-        try (var p = node("prefill", 8, 1, Map.of("generation", Map.of("eos_probability", 1))); var d = node("decode", 8, 1);
+        try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1))); var d = node("decode", 8, 1);
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
             call.output(1, true, 1); assertEquals("completed", call.next());
             assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
@@ -327,10 +353,10 @@ class PdGenerationTest {
     }
 
     @Test void eosLengthIsStableAcrossSpeculationAndNeverOvershootsTheLastRound() throws Exception {
-        int expected = new org.flexlb.mock.compute.StoppingModel(new org.flexlb.mock.api.model.StoppingSpec(.2, 42L)).length("77", 3, 20, false);
+        int expected = new org.flexlb.mock.compute.StoppingModel(new org.flexlb.mock.api.model.StoppingSpec(.2, 42L)).complete("77", 0, 20, 3, 20, false).committedTokens();
         for (int draft : new int[]{0, 3}) {
-            try (var p = node("prefill", 16, 1, Map.of("generation", Map.of("eos_probability", .2, "seed", 42)));
-                    var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", draft, "acceptance_rate", 1)))) {
+            try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
+                    var d = node("decode", 16, 1, Map.of("decode", Map.of("draft_tokens", draft, "acceptance_rate", 1), "eos", Map.of("probability", .2, "seed", 42)))) {
                 var input = input(d, 77, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
                 try (var call = new Call(p, input.build())) {
                     int sum = 0; boolean finished = false;
@@ -346,9 +372,35 @@ class PdGenerationTest {
     }
 
     @Test void ignoreEosKeepsAnExplicitOutputLengthAuthoritative() throws Exception {
-        try (var p = node("prefill", 8, 1, Map.of("generation", Map.of("eos_probability", 1))); var d = node("decode", 8, 1)) {
+        try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1)));
+                var d = node("decode", 8, 1, Map.of("eos", Map.of("probability", 1)))) {
             var input = input(d, 1, 3, 4, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setIgnoreEos(true);
             try (var call = new Call(p, input.build())) { for (int n = 1; n <= 4; n++) call.output(n, n == 4, 1); assertEquals("completed", call.next()); }
+        }
+    }
+
+    @Test void decodeOwnsItsEosAndTruncationDoesNotRefundSpeculativeVerification() throws Exception {
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
+                Map.of("decode", Map.of("draft_tokens", 4, "acceptance_rate", 1), "eos", Map.of("probability", 1)))) {
+            var input = input(d, 1, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
+            try (var call = new Call(p, input.build())) {
+                call.output(1, false, 1); call.output(3, true, 2); assertEquals("completed", call.next());
+                assertEquals(5, metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
+                assertEquals(2, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+            }
+            await(() -> p.status().getAvailableKvCache() == 32 && d.status().getAvailableKvCache() == 32);
+        }
+    }
+
+    @Test void candidateFiveWithFourPositionsLeftFinishesWithoutOvershoot() throws Exception {
+        for (var progress : List.<Map<String, Object>>of(Map.of("tokens_per_step", 5), Map.of("draft_tokens", 4, "acceptance_rate", 1))) {
+            try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1, Map.of("decode", progress));
+                    var call = new Call(p, input(d, 1, 5, 5, 2000, true))) {
+                call.output(1, false, 1); call.output(5, true, 4); assertEquals("completed", call.next());
+                assertEquals(4, metric(d, "mock_engine_forward_tokens_total", "kind=\"output\""));
+                assertEquals(progress.containsKey("draft_tokens") ? 5 : 1,
+                    metric(d, "mock_engine_forward_tokens_total", "kind=\"compute\""));
+            }
         }
     }
 

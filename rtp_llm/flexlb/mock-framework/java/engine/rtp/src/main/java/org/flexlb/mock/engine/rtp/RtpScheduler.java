@@ -32,12 +32,13 @@ final class RtpScheduler implements Scheduler {
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
         DeviceCache.Lease lease;
-        int reused, stopAfter;
+        int reused;
+        boolean prefillFinished;
         long admittedAt = Long.MIN_VALUE, attemptedGeneration = Long.MIN_VALUE;
         Phase phase = QUEUED;
         ReportedPhase finalPhase;
         boolean loaded, generating, outputPending, delivering, readStarted;
-        DecodeStepModel.Step nextStep;
+        ComputeModel.Plan nextStep;
 
         Entry(Input input, Listener listener) {
             this.input = input;
@@ -50,7 +51,7 @@ final class RtpScheduler implements Scheduler {
         @Override public int reused() { synchronized (lock) { return reused; } }
 
     }
-    private record Member(Entry request, RequestState.Use use, DecodeStepModel.Step step) {}
+    private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
     private record Batch(List<Member> members) {}
     private record Notice(Runnable action, boolean terminal) {}
 
@@ -90,15 +91,14 @@ final class RtpScheduler implements Scheduler {
         if (!(control instanceof RtpControl event)) throw new RequestFailure(INVALID, "Foreign RTP control");
         switch (event) {
             case GENERATE -> {
-                if (prefill() || !entry.loaded || entry.generating)
+                if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished)
                     throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
                 entry.generating = true;
                 entry.state.transferred(1);
-                if (entry.stopAfter == 1) emit(entry, 1, true);
-                else { entry.phase = QUEUED; waiting.addLast(entry); }
+                entry.phase = QUEUED; waiting.addLast(entry);
             }
             case PREFILL_COMPLETE -> {
-                if (prefill() || !entry.loaded || entry.generating || entry.stopAfter != 1)
+                if (prefill() || !entry.loaded || entry.generating || !entry.prefillFinished)
                     throw new RequestFailure(INVALID, "Unexpected Prefill-only completion");
                 entry.state.transferred(1);
                 finish(entry, null);
@@ -172,10 +172,12 @@ final class RtpScheduler implements Scheduler {
     private int workTokens(Entry entry) {
         if (!live(entry) || entry.outputPending) return 0;
         if (!entry.listener.writable()) { entry.phase = OUTPUT; return 0; }
-        if (prefill()) return entry.input.tokens();
         var progress = entry.state.snapshot();
         if (entry.nextStep == null)
-            entry.nextStep = config.decodeModel().sample(Long.toString(entry.input.requestId()), progress.iterations(), entry.stopAfter - progress.generated());
+            entry.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
+                Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
+                entry.input.minNewTokens(), entry.input.maxNewTokens(), config.maxSeqLen(), entry.input.ignoreEos()));
+        if (prefill()) return entry.input.tokens();
         if (config.maxBatchTokens() > 0 && entry.nextStep.verifyTokens() > config.maxBatchTokens()) {
             finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode step exceeds batch token budget"));
             return 0;
@@ -190,8 +192,13 @@ final class RtpScheduler implements Scheduler {
                 finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Prefill allocation exceeds capacity"));
             return failure == null;
         }
-        int demand = blocks(Math.addExact(Math.addExact(entry.input.tokens(), entry.state.snapshot().generated()), entry.nextStep.additionalKvTokens()));
-        var failure = entry.lease.growTo(Math.max(demand, entry.lease.blocks()));
+        long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
+        long demand = (tokens + config.blockSize() - 1) / config.blockSize();
+        if (demand > Integer.MAX_VALUE) {
+            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode verification window exceeds representable KV capacity"));
+            return false;
+        }
+        var failure = entry.lease.growTo(Math.max((int) demand, entry.lease.blocks()));
         if (failure != null) {
             // RTP running streams fail KV growth; only admission waits for capacity.
             finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode KV growth failed: " + failure));
@@ -214,13 +221,13 @@ final class RtpScheduler implements Scheduler {
                     finish(entry, new RequestFailure(CANCELLED, "Forward cancelled"));
                     continue;
                 }
-                int committed = prefill() ? 1 : Math.min(member.step().committedTokens(), entry.stopAfter - entry.state.snapshot().generated());
+                var result = config.compute().completed(member.step());
+                int committed = result.committedTokens();
                 entry.state.commit(committed, outcome.elapsedNanos());
                 entry.nextStep = null;
                 output += committed;
-                boolean done = prefill() || entry.state.snapshot().generated() >= entry.stopAfter;
-                if (prefill()) { running.remove(entry); entry.phase = READY; }
-                emit(entry, committed, done);
+                if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
+                emit(entry, committed, result.finished());
             }
             if (outcome.state() == SimulatedCompute.State.COMPLETED)
                 metrics.forwardCompleted(outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output);
@@ -253,7 +260,7 @@ final class RtpScheduler implements Scheduler {
             synchronized (lock) {
                 entry.outputPending = false;
                 if (!live(entry)) return;
-                if (done && !entry.input.retained()) finish(entry, null);
+                if ((prefill() || done) && !entry.input.retained()) finish(entry, null);
                 else if (!prefill()) entry.phase = RUNNING;
             }
         }, false);
@@ -275,11 +282,10 @@ final class RtpScheduler implements Scheduler {
         if (!entry.readStarted || entry.phase != TRANSFERRING)
             throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");
         if (!prefill()) {
-            if (entry.lease == null || entry.loaded || entry.generating || transferred.stopAfter() < 1
-                    || transferred.stopAfter() > entry.input.maxNewTokens())
+            if (entry.lease == null || entry.loaded || entry.generating)
                 throw new RequestFailure(INVALID, "Unexpected KV load completion");
             entry.loaded = true;
-            entry.stopAfter = transferred.stopAfter();
+            entry.prefillFinished = transferred.prefillFinished();
         }
         entry.phase = TRANSFERRED;
     }

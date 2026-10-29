@@ -576,7 +576,7 @@ environment:
       REUSE_CACHE: "true"
       TEST_BLOCK_NUM: "1025"
       RESERVE_BLOCK_RATIO: "5"
-      compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
+      compute.forward.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
 ```
 
 原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`；P/D 批量上限取 1–1024，默认 1。Mock 一个 Engine 表示完整计算体，不拆 CP/TP/DP rank 或模拟 rank 间通信；内部并行的影响由整 Engine 的性能公式、容量和调度配置表达。block size 是本 Engine 的逻辑分配粒度，PD 不根据 CP 数乘除。配置导入时应先统一容量口径。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
@@ -591,7 +591,7 @@ RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token�
 
 P 的内部 `PrefillTransfer.start()` 注册活跃来源并复用 LocalPrefill 计算。Forward 完成后 KV 仍由请求持有；网络 `Read` 交付结束后仍保留来源，P 收到 D 的 LOAD ACK 后才完成计算阶段并释放。正式服务**只保留 Read RPC，没有外部 Prepare RPC**；测试从包内 start 建立来源或调用正式生成链路，不为探针注册额外协议。
 
-D 的 LOAD 从 peer_addrs 对应 P 发起真实网络 Read，校验 client/request 身份、完整 prompt 和单 Reader 所有权；不能用缓存中存在的 key 冒充活跃来源。PD 按完整输入的 token 覆盖范围交接，返回元数据只有 input_tokens 和 stop_after，不传 block size、块编号或 cache keys。P/D 各自按本地 block size 分配和生成前缀 keys，两端块大小不要求相同或成倍数；最后不足一块的 token 也纳入交接。D 验证 token 数、生成长度及预算后才能确认 LOAD，传入 KV 不算 D 历史命中，也不提前提交为缓存。不复制 KV 张量，不模拟 RDMA/TCP cache-store 或带宽。
+D 的 LOAD 从 peer_addrs 对应 P 发起真实网络 Read，校验 client/request 身份、完整 prompt 和单 Reader 所有权；不能用缓存中存在的 key 冒充活跃来源。PD 按完整输入的 token 覆盖范围交接，返回元数据只有 input_tokens 和 prefill_finished（首 token 是否已经使请求结束），不传 block size、块编号或 cache keys。P/D 各自按本地 block size 分配和生成前缀 keys，两端块大小不要求相同或成倍数；最后不足一块的 token 也纳入交接。D 验证 token 数、min/max/ignore_eos 一致性、首 token 结束事实及预算后才能确认 LOAD，传入 KV 不算 D 历史命中，也不提前提交为缓存。不复制 KV 张量，不模拟 RDMA/TCP cache-store 或带宽。
 
 Read 等待计算就绪；D 取消/超时会取消 P 来源，P 取消/关闭也使 LOAD 失败。`load_cache_timeout_ms` 默认 5s，非正值按原生回退 5s，同时受总 deadline 限制。没有 Reader 或 Read 入口校验失败时，来源仍由正式 P 请求所有者管理，受请求取消、timeout/deadline 和节点关闭约束。
 
@@ -615,43 +615,53 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 仅缓存完整块，命中排除 prompt 最后 token；遵守全局/请求 reuse 和 device 开关，D 还遵守 disable_decode_first_malloc_device_reuse。成功完成才提交新 key，取消不提交。当前只有 Full-attention device 池；host/disk/remote 尚未接通，显式开启对应 enable_*_cache 会拒绝启动。共享容量类可供各层使用，迁移与驱逐策略仍由 Engine 实现。
 
-## Compute、Decode 和停止模型
+## Compute、Forward、Decode 和 EOS
 
-每个组只在自己的 config 中放一份模型，没有 `environment.compute` 或覆盖优先级：
+每个组件只配置一份 Compute；Forward、Decode 进度和 EOS 都归 Compute，不再配置组级 decode/generation，也不保留旧 compute.expression 入口。
 
 ```yaml
 environment:
   prefill:
     engine: rtp
     config:
-      compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
-      compute.noise.stddev_ratio: 0.05
-      compute.noise.max_deviation_ms: 20
-      compute.noise.seed: 42
-      generation.eos_probability: 0.01
-      generation.seed: 42
+      compute:
+        forward:
+          expression: "1.23 * (1 + 0.01*totalComputeTokens)"
+        eos:
+          probability: 0.0025
+          seed: 20260922
   decode:
     engine: rtp
     config:
-      compute.expression: "1 + 0.1*totalStepTokens + 0.001*totalContextTokens"
-      decode.draft_tokens: 3
-      decode.acceptance_rate: 0.8
-      decode.seed: 42
+      compute:
+        forward:
+          expression: "19.5 + 0.175*batchSize"
+        decode:
+          tokens_per_step: 2.6
+        eos:
+          probability: 0.0025
+          seed: 20260922
 ```
 
-组件加载器负责读取自己的文件外壳。RTP 用 `RtpConfig.load()` 提取本组 compute，再调用 `ComputeModel.fromJson()`；共享 Compute 不认识 Runner 的 component/environment 格式，不再提供 fromComponentFile。测试探针自行提取配置。effective-config 顶层保存实际生效值，requested_config 保存规范化后的请求配置，pending_config 单列尚未实现的参数；启动日志同时打印待实现项。未实现值不混入生效字段。模型类型及语义校验来自 Java ComputeSpec/DecodeSpec/StoppingSpec，Python 不复制字段表；编译只处理组件配置结构，模型错误由 Java 启动加载器拒绝，编译通过不代表模型已验证。
+RtpConfig 只加载 ComputeSpec；ComputeModel 组合 ForwardModel、可选噪声、DecodeStepModel 和 StoppingModel。非默认 Decode 进度参数只允许配置在 D，P/D 都可以配置 EOS。旧字段、未知字段、null、错误类型或缺少必要 seed 明确拒绝，没有别名和兼容分支。模型校验来自 Java，Python 只编译组件配置结构。effective-config 顶层保存生效值，requested_config 保存请求配置，pending_config 单列仍未实现的原生参数。
 
-`ForwardBatch` 保留 DP、请求输入长度/cache 匹配/目标输出/已生成/stepTokens/优先级/图片原始 shape。Engine 构造 batch；ForwardModel 只返回 Duration。默认 FormulaForward 只接受一个非空 DP，不暗自合并多个 DP。
+调度前 Compute.prepare 固定请求快照和本轮验证量/KV 需求，不抽投机接受量。Forward 完成后 Compute.completed 依次计算接受后的候选产出、EOS 和长度截断，返回 committedTokens/finished。Scheduler 只校验请求仍有效并提交结果、更新队列、处理资源和 PD；不判断正常结束是 EOS 还是达到上限。取消、超时、关闭和计算失败仍走独立失败路径，不能成为正常 finished，也不能因旧回调再提交 token。
 
-公式复用生产 ArithmeticFormula 的函数、`param(name, value)`、`sum(...)`。param 初始值按解析时求值，只用常量；不新增参数映射。结果单位 ms，可保留到 ns，不设隐式 1ms 下限；未知变量、负数、非有限值和溢出报错。逐请求变量只能在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。RTP 另外绑定 cpSize、cpEnabled（0/1）、tpSize、dpSize，来自本实例实际配置；只有公式显式引用才参与求值，不自动按并行度缩放已有拟合公式。`totalComputeTokens^2` 和 `sum(computeTokens^2)` 不等价。computeTokens=input−hit，contextTokens=input+generated，stepTokens 由 Engine 提供，图片不计算特征 token。
+P 每轮只产首 token，finished 表示整个请求是否结束，不表示 Prefill 阶段是否完成。P 阶段完成后退出计算集合，保留传输需要的 KV；即使首 token EOS，也仍完成 LOAD 确认，再通过 PREFILL_COMPLETE 让 D 结束，不启动 D Forward。PD 不再传预测的 stop_after，不由 P 决定 D 的未来停止长度。
 
-倍率直接乘入 expression，例如 `1.23 * (原公式)`；不提供独立的 scale 或 noise.scale 配置。噪声只在公式结果上加高斯扰动；默认 stddev_ms/stddev_ratio=0，二者按平方和开根合并。启用随机噪声须有 seed 与正的 max_deviation_ms，裁剪扰动后耗时下限为 0。按 seed、Engine 身份、角色和 batch 身份确定一次 Sample，不随调用顺序改变；不同真实 batch 使用不同身份。
+ForwardBatch 保留请求长度、实际缓存命中、已生成长度、stepTokens、优先级和图片 shape。ForwardModel 只计算 Duration，SimulatedCompute 只执行可取消等待；公共 Compute 的产出计算不修改请求或队列。一个 Engine 同时至多一个 Forward，完成结果只提交一次。
 
-`plan()` 只算耗时，`SimulatedCompute.submit()` 才等待；Execution 可取消，唯一终态为 COMPLETED/CANCELLED。关闭取消未完成项并拒绝新任务，回调在独立虚拟线程执行。共享 Compute 不提交缓存、不释放 Engine 资源，也不把计时完成当请求成功。
+公式复用生产 ArithmeticFormula 的 param(name, value)、sum 等函数，单位 ms，保留到 ns；非法变量、负值、非有限值和溢出拒绝。逐请求变量只在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。RTP 额外绑定 cpSize、cpEnabled（0/1）、tpSize、dpSize，只有显式引用才参与计算，不自动缩放已有拟合公式。默认 FormulaForward 不猜测多个 DP 的组合方式。
 
-DecodeStepModel 默认每轮 1 token。显式 tokens_per_step（至少 1）表示确定性的平均 token 预算：第 n 轮提交 ceil((n+1)*v)−ceil(n*v)，最后一轮截断到剩余长度。它不能与非零推测参数组合，是 Mock 性能建模，不表示真实 MTP 的接受分布。平均模型每请求每轮计一个 target 输入，不虚构 proposed/accepted 数量；KV 覆盖本轮产出之前的上下文，允许一次提交多个 token。真实投机模型仍按 draft 验证成本计数。推测配置用 draft_tokens、acceptance_rate、seed：按首次拒绝得到接受前缀 A，再提交纠正/奖励 token，即 C=A+1；固定独立接受率 α、草稿长 k 时是封顶几何模型，E[C]=1+α+…+α^k，见[经典推测解码论文](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)。这不宣称复现所有 MTP/EAGLE。计算按验证数收费，指标按实际提交数累计，KV 覆盖验证上下文，接近输出上限缩短草稿预算。
+倍率直接乘入 forward.expression，不提供独立 scale/noise.scale。噪声位于 forward.noise，默认 stddev_ms/stddev_ratio=0；启用时要求 seed 和正 max_deviation_ms，扰动有界、最终耗时不小于 0。seed、Engine 身份、角色和 batch 身份固定一次耗时样本，取消批次不补完成指标。当前 DeepSeek Case 不启用噪声。
 
-StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概率要求 seed。固定 EOS hazard 是 Mock 的封顶几何近似，不是线上长度规律；遵守 min/max_new_tokens，ignore_eos 强制上限。P 按稳定请求身份只抽样一次，经 LOAD 传 stop_after，D 不重复抽样；跨过停止位置只提交允许部分，仍计验证成本。首 token 即结束时使用 PREFILL_COMPLETE 释放 D，不再执行 Decode。标准回放始终由 Client 指定固定目标并发送 ignore_eos=true，不再对已抽好的长度做第二次 EOS 抽样。当前 P 预抽整段停止长度仍是旧近似；将 EOS 决策归回实际产出 token 的 P/D 阶段属于后续重设计，不能把现有近似当成 real 的状态机。
+Decode 有两种互斥模型。默认普通模式每轮一个 token；平均模式 tokens_per_step>=1 按 ceil((n+1)*v)−ceil(n*v) 产生候选数量，每轮每请求计一个 target 输入，不虚构 draft/accept 统计。显式投机模式配置 draft_tokens、acceptance_rate、seed：抽取接受前缀 A，候选产出为 A+1；固定独立接受率 α、草稿长 k 时 E[C]=1+α+…+α^k。这是可复现的统计近似，不模拟真实 MTP 的 logits、draft 张量和独立 draft KV；P 的初始化成本包含在 P 整体公式中。
+
+长度边界在接受结果后统一处理。显式投机模式按固定 k 个草稿、k+1 个验证位置及对应 KV 前瞻执行，对齐当前 RTP 的固定验证窗口；不能因为只剩 R 个输出位置就提前缩小验证量。候选产出 5 个而只剩 4 个时，只提交 4 个并返回 finished=true，验证成本仍按完整计划累计。平均进度模型每轮仍计一个 target 输入，KV 仅覆盖最终可能提交的输出前缀。EOS 只检查接受后的候选 token，按绝对输出位置生成固定概率事件；相同 seed、请求身份和概率下，改变 batch、轮宽、接受模型或调用顺序不会重抽已经走过的位置。拒绝的草稿不参与结束判断。
+
+StoppingModel 遵守 min_new_tokens，ignore_eos 只屏蔽 EOS，不屏蔽长度上限。完成判定的上限同时受 max_new_tokens 与 maxSequence−inputTokens 约束；RTP 接入仍保留前述较严格的序列准入规则，尚未模拟 real reserveStep。EOS 位于本轮中间时截断实际产出，但本轮已执行的验证成本和在途资源引用不撤销。固定概率只是 Mock EOS hazard，不宣称真实输出分布。标准回放发送 ignore_eos=true，所以 Case 可保留 P/D 的 EOS 参数而不再次缩短数据中的目标长度。
+
+real 依据：MtpExecutor::decodeStep 先 target verify Forward，再执行 speculative_sampler；MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo 提取接受后的 token，GenerateStream::specUpdate 经 NormalGenerateStream::updateOutput 检查 EOS/max；CompleteTokenIds::matchEosToken 截断到第一个 EOS。PrefillRpcServer::remoteLoadCacheEnd 保留 LOAD ACK、释放源 KV 和 PREFILL_COMPLETE 顺序。当前 Mock 不支持 stop words/beam search 等未实现条件，显式请求会拒绝。
 
 ## P/D 配置治理
 
@@ -685,8 +695,8 @@ CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明�
 | max_rpc_timeout_ms | 7200000 | 7200000 | 待实现独立 RPC 上限；已有请求总期限不因此失效。 |
 | load_cache_timeout_ms | 不配置 | 5000 | D 生效；删除 P 无效项。 |
 | compute | 1.23 * (原公式)，不配噪声 | 19.5+0.175*batchSize | 保留，不按 CP/TP 二次缩放。 |
-| generation | 不配置 | 不配置 | 本 Case 使用固定长度回放，不抽 EOS。 |
-| decode.tokens_per_step | 不配置 | 2.6 | D 平均进度模型，不等于真实投机参数。 |
+| compute.eos | probability=0.0025，seed=20260922 | 同 P | 参数保留；固定长度回放通过 ignore_eos 屏蔽 EOS。 |
+| compute.decode.tokens_per_step | 不配置 | 2.6 | D 平均进度模型，不等于真实投机参数。 |
 
 以下参数从当前 Case 删除，不复刻 native 线程池、轮询和描述符分批：block_tree_transfer_worker_count、memory_cache_max_descriptors_per_transfer_batch、prefill_prepare_resource_pool_size、prefill_stop_stream_wait_timeout_ms、decode_retry_interval_ms。取消、资源释放和有界请求生命周期仍必须实现，不能随这些参数一起删除。
 
@@ -700,7 +710,7 @@ decode_retry_times、decode_retry_timeout_ms 在当前 real C++ 执行代码中�
 
 发送边界对齐 `server/master_client.py`：只有 Schedule 的传输失败尝试一次备节点；业务拒绝、deadline 和取流失败不尝试其他 Master。整个请求仍受同一个总 deadline 约束，重试消耗剩余预算。这个策略不承诺 exactly-once：响应丢失后原主可能已经接收请求，保留与 real Frontend 相同的传输重试风险。Client QPS 仍按逻辑请求 issued 计一次，备节点尝试不会再发放流量预算。
 
-每次只预取一个响应，验证身份、INT32 载荷/形状、递增长度和终态；finished 后仍须正常结束，空流/截断/终态后额外帧均失败，不保留全部输出。firstToken 从发送的单调时钟到实际收到首 token，包含调度和网络；没有首 token 就没有数值。completion 记录发送墙钟、可空 TTFT、总耗时、收到 token 数及终态/错误码；后续失败保留已观测 TTFT，不读取 aux 耗时代替。
+每次只预取一个响应，验证身份、INT32 载荷/形状、递增长度和终态；最终长度必须达到 min_new_tokens，ignore_eos 时必须等于 max_new_tokens，提前 finished 不能冒充固定长度回放成功；finished 后仍须正常结束，空流/截断/终态后额外帧均失败，不保留全部输出。firstToken 从发送的单调时钟到实际收到首 token，包含调度和网络；没有首 token 就没有数值。completion 记录发送墙钟、可空 TTFT、总耗时、收到 token 数及终态/错误码；后续失败保留已观测 TTFT，不读取 aux 耗时代替。
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 

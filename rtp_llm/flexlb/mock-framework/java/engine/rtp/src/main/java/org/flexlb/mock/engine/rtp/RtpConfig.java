@@ -10,20 +10,16 @@ import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 import org.flexlb.mock.cache.DeviceCache.EvictionPolicy;
 import org.flexlb.mock.api.model.DecodeSpec;
-import org.flexlb.mock.api.model.StoppingSpec;
 
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int cpSize, boolean cpEnabled, int tpSize, int dpSize, int loadTimeoutMs,
-                        JsonNode business, ComputeModel compute, DecodeStepModel decodeModel, StoppingModel stoppingModel) {
+                        JsonNode business, ComputeModel compute) {
     public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
-
-    private static final ObjectMapper MODELS_JSON = JSON.copy().disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
-        .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS);
 
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
@@ -31,7 +27,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
                 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || cpSize < 1 || tpSize < 1 || dpSize < 1 || loadTimeoutMs < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
-        Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(compute); Objects.requireNonNull(decodeModel); Objects.requireNonNull(stoppingModel);
+        Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(compute);
     }
 
     @Override public JsonNode business() { return business.deepCopy(); }
@@ -70,8 +66,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
         var compute = ComputeModel.fromJson(config.path("compute"), Map.of(
             "cpSize", (double) cpSize, "cpEnabled", cpEnabled ? 1.0 : 0.0, "tpSize", (double) tpSize, "dpSize", (double) dpSize));
-        var decode = new DecodeStepModel(model(config.path("decode"), DecodeSpec.class));
-        var stopping = new StoppingModel(model(config.path("generation"), StoppingSpec.class));
+        if (role == Role.prefill && !compute.configuration().decode().equals(new DecodeSpec(null, null, null, null)))
+            throw new IllegalArgumentException("Decode progress settings belong in Decode compute");
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
         if (!pending.isEmpty()) System.err.println("RTP " + root.path("id").asText() + " settings pending implementation (not effective): " + pending);
         return new RtpConfig(root.path("id").textValue(), role,
@@ -82,7 +78,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_generate_batch_size", 1, 1, REQUEST_LIMIT),
             cpSize, cpEnabled, tpSize, dpSize,
-            loadTimeout(config), config, compute, decode, stopping);
+            loadTimeout(config), config, compute);
     }
 
     public ObjectNode effective() {
@@ -100,16 +96,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         result.put("max_generate_batch_size", maxGenerateBatchSize).put("local_request_limit", REQUEST_LIMIT);
         result.set("requested_config", business()); result.set("pending_config", RtpSettings.pending(business));
         result.set("compute", compute.effectiveConfiguration());
-        if (role == Role.prefill) result.set("generation", MODELS_JSON.valueToTree(stoppingModel.configuration()));
-        else result.set("decode", MODELS_JSON.valueToTree(decodeModel.configuration()));
         return result;
-    }
-
-    private static <T> T model(JsonNode node, Class<T> type) throws IOException {
-        if (node.isMissingNode()) node = MODELS_JSON.createObjectNode();
-        if (!node.isObject()) throw new IllegalArgumentException("Model config must be an object");
-        for (var field : node) if (field.isNull()) throw new IllegalArgumentException("Model config cannot contain null");
-        return MODELS_JSON.treeToValue(node, type);
     }
 
     private static int loadTimeout(JsonNode config) {

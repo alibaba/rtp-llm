@@ -12,10 +12,10 @@ message TransferRequest {
   reserved "block_size";
 }
 message TransferMetadata {
-  reserved 1, 3;
-  reserved "block_size", "cache_keys";
+  reserved 1, 3, 4;
+  reserved "block_size", "cache_keys", "stop_after";
   uint32 input_tokens = 2;
-  uint32 stop_after = 4; // Resolved once by P, independent of Decode round size.
+  bool prefill_finished = 5; // Actual first-token completion, never a predicted future stop length.
 }
 service PrefillTransfer {
   // Waits for the matching local source to finish its Forward; never accepts mere LRU cache presence.

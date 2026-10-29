@@ -15,10 +15,10 @@ final class RtpSettings {
         "block_tree_device_evict_low_watermark_ratio", "block_tree_device_evict_high_watermark_ratio",
         "block_tree_business_queue_max_size", "block_tree_transfer_queue_max_size");
     private static final Set<String> PREFILL = Set.of(
-        "generation", "prefill_retry_times", "prefill_retry_timeout_ms", "prefill_max_wait_timeout_ms",
+        "prefill_retry_times", "prefill_retry_timeout_ms", "prefill_max_wait_timeout_ms",
         "max_batch_tokens_without_cache", "max_inited_kv_cache_streams", "memory_cache_blocks", "memory_eviction_policy",
         "memory_cache_sync_timeout_ms", "block_tree_memory_evict_low_watermark_ratio", "block_tree_memory_evict_high_watermark_ratio");
-    private static final Set<String> DECODE = Set.of("decode", "load_cache_timeout_ms");
+    private static final Set<String> DECODE = Set.of("load_cache_timeout_ms");
     private static final Set<String> PENDING_INTS = Set.of(
         "prefill_retry_timeout_ms", "prefill_max_wait_timeout_ms", "max_batch_tokens_without_cache",
         "max_inited_kv_cache_streams", "memory_cache_blocks", "memory_cache_sync_timeout_ms", "max_rpc_timeout_ms",
