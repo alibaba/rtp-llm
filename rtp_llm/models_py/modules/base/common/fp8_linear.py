@@ -73,9 +73,18 @@ class Fp8Linear(nn.Module):
         """Consume a gated projection with fused activation and FP8 quantization."""
         if (
             self.compute_weight is None
-            and self.role in ("PREFILL", "PDFUSION")
             and gate_up.ndim == 2
-            and 4093 <= gate_up.shape[0] <= 16384
+            and (
+                (
+                    self.role in ("PREFILL", "PDFUSION")
+                    and 4093 <= gate_up.shape[0] <= 16384
+                )
+                or (
+                    self.role in ("DECODE", "PDFUSION")
+                    and gate_up.shape[0] in (20, 24, 28, 32)
+                    and self.weight.shape[1] == 640
+                )
+            )
             and gate_up.shape[1] == self.weight.shape[1] * 2
             and gate_up.is_cuda
             and torch.version.hip is None

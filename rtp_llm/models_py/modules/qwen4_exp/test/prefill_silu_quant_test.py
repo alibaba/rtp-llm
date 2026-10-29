@@ -140,6 +140,42 @@ class PrefillSiluQuantTest(unittest.TestCase):
             self.assertIsNone(try_silu_mul_quant(good, output=output))
             self.assertTrue(torch.equal(output.view(torch.uint8), before))
 
+    def test_decode_native_codes_scale_and_graph(self):
+        for rows in (20, 24, 28, 32):
+            layer = Fp8Linear(
+                (torch.randn(2560, 640, device="cuda") * 0.1).to(torch.float8_e4m3fn),
+                torch.tensor([0.11743], device="cuda"),
+                role="DECODE",
+            )
+            x = torch.randn(rows, 1280, device="cuda", dtype=torch.bfloat16)
+            for _ in range(3):
+                layer.forward_silu_and_mul(x)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = layer.forward_silu_and_mul(x)
+            for magnitude in (0.0, 1.0e-38, 0.01, 1.0, 100.0):
+                x.normal_().mul_(magnitude)
+                quant, scale = try_silu_mul_quant(x)
+                activated = flashinfer.activation.silu_and_mul(x)
+                reference = scaled_fp8_per_tensor_quant(
+                    activated, output=torch.empty_like(quant)
+                )
+                for a, b in zip((quant, scale), reference):
+                    self.assertTrue(
+                        torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+                    )
+                layer.scale.fill_(0.013475 + magnitude * 0.001)
+                expected = layer(activated)
+                graph.replay()
+                self.assertTrue(torch.equal(actual, expected))
+            graph.reset()
+        for rows, width in ((16, 1280), (19, 1280), (25, 1280), (33, 1280), (24, 640)):
+            self.assertIsNone(
+                try_silu_mul_quant(
+                    torch.empty(rows, width, device="cuda", dtype=torch.bfloat16)
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

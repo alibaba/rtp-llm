@@ -59,7 +59,10 @@ def is_supported(gate_up, output=None):
         and gate_up.ndim == 2
         and gate_up.is_contiguous()
         and not gate_up.requires_grad
-        and 4093 <= gate_up.shape[0] <= 16384
+        and (
+            4093 <= gate_up.shape[0] <= 16384
+            or (gate_up.shape[0] in (20, 24, 28, 32) and gate_up.shape[1] == 1280)
+        )
         and gate_up.shape[1] in (640, 1280)
         and torch.cuda.get_device_capability(gate_up.device) == (12, 0)
     ):
@@ -80,7 +83,7 @@ def try_silu_mul_quant(gate_up, *, output=None):
         return None
     rows, width = gate_up.shape[0], gate_up.shape[1] // 2
     size = rows * width
-    producer_block = 2048 if size <= 4 * 1024 * 1024 else 4096
+    producer_block = 512 if rows <= 32 else (2048 if size <= 4 * 1024 * 1024 else 4096)
     parts = triton.cdiv(size, producer_block)
     activated = torch.empty((rows, width), device=gate_up.device, dtype=torch.bfloat16)
     partial = torch.empty(parts, device=gate_up.device, dtype=torch.float32)
@@ -98,7 +101,7 @@ def try_silu_mul_quant(gate_up, *, output=None):
         N=size,
         D=width,
         BLOCK=producer_block,
-        num_warps=4 if producer_block == 2048 else 8,
+        num_warps=4 if producer_block <= 2048 else 8,
         enable_fp_fusion=False,
     )
     _partial_quant[(triton.cdiv(output.numel(), 4096),)](
