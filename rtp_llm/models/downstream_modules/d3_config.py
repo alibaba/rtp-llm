@@ -28,6 +28,22 @@ from typing import Any
 FORMAT_VERSION = 1
 FORMAT_ID = "d3-code-readout-v1"
 PROMPTS = ("d3",)
+# Joint inline-readout checkpoints (pplx-decider-v1.2 and successors) declare
+# decision_config.json format_version 2 plus a joint_config.json protocol
+# block; the sidecar fields follow the official pplx_decider package.
+JOINT_FORMAT_VERSION = 2
+JOINT_CONFIG_FILE = "joint_config.json"
+JOINT_PROTOCOL_VERSION = 3
+JOINT_TEMPLATE = "joint-question-inline-readout-v1"
+JOINT_MARKER = "<|fim_suffix|>"
+JOINT_READOUT_OFFSET = 0
+JOINT_USAGE = "nonpadding_joint_sequence_including_template_and_image_positions"
+JOINT_BACKBONE_LIMIT = 262_144
+# Official image pixel bounds of the joint protocol: the smaller bound is the
+# processor floor for every image, the larger the default cap when the sidecar
+# carries no max_pixels (text-trained checkpoints).
+JOINT_MIN_PIXELS = 65_536
+JOINT_LEGACY_MAX_PIXELS = 262_144
 ATTENTION_MODES = ("causal", "noncausal_full_attention")
 POOLINGS = ("last",)
 READOUT_DTYPES = ("float32", "bfloat16")
@@ -83,6 +99,56 @@ def _number(value: Any, name: str, *, positive: bool = False) -> float:
 
 
 @dataclass(frozen=True)
+class D3JointConfig:
+    """The joint inline-readout protocol of a version-2 sidecar.
+
+    The fields mirror the official joint_config.json, which the official
+    runtime requires to equal its protocol constant exactly; a joint prompt
+    holds the state and every question of a request, one ``<|fim_suffix|>``
+    marker per question, with the readout applied at each marker.
+    """
+
+    marker: str
+    readout_offset: int
+    max_questions: int | None
+    max_pixels: int | None
+
+    @classmethod
+    def load(cls, checkpoint: str | Path) -> D3JointConfig:
+        """Read and validate joint_config.json beside the weights.
+
+        Raises ValueError when the file is missing, malformed or does not
+        declare the joint inline-readout protocol this runtime serves.
+        """
+        root = Path(checkpoint)
+        protocol_file = root / JOINT_CONFIG_FILE
+        if not protocol_file.is_file():
+            raise ValueError(f"joint decision_config requires {JOINT_CONFIG_FILE}")
+        with protocol_file.open() as file:
+            protocol = json.load(file)
+        expected = {
+            "version": JOINT_PROTOCOL_VERSION,
+            "template": JOINT_TEMPLATE,
+            "marker": JOINT_MARKER,
+            "readout_offset": JOINT_READOUT_OFFSET,
+            "max_questions": None,
+            "max_length": None,
+            "usage": JOINT_USAGE,
+        }
+        if not isinstance(protocol, dict) or protocol != expected:
+            raise ValueError(
+                f"{JOINT_CONFIG_FILE} must declare the joint inline-readout "
+                f"protocol {expected}"
+            )
+        return cls(
+            marker=JOINT_MARKER,
+            readout_offset=JOINT_READOUT_OFFSET,
+            max_questions=None,
+            max_pixels=None,
+        )
+
+
+@dataclass(frozen=True)
 class D3Config:
     format_version: int
     format_id: str
@@ -96,32 +162,55 @@ class D3Config:
     hidden_size: int
     readout_file: str = READOUT_FILE
     readout_key: str = READOUT_KEY
+    joint: D3JointConfig | None = None
+    max_pixels: int | None = None
 
     @classmethod
     def load(cls, checkpoint: str | Path) -> D3Config:
         """Read and validate ``decision_config.json`` and the backbone config.
 
         Raises ValueError (including JSONDecodeError) for a malformed or
-        incompatible checkpoint; filesystem errors propagate. The sidecar
-        fields follow the official d3 runtime, including their defaults.
+        incompatible checkpoint; filesystem errors propagate. Version-1
+        sidecars follow the official d3 runtime; version-2 sidecars follow the
+        official joint inline-readout protocol (pplx_decider), including
+        their defaults.
         """
         root = Path(checkpoint)
         with (root / SIDE_FILE).open() as file:
             data = json.load(file)
         if not isinstance(data, dict):
             raise ValueError(f"{SIDE_FILE} must contain a JSON object")
-        for key, expected in (
-            ("format_version", FORMAT_VERSION),
-            ("format_id", FORMAT_ID),
-            ("prompt", PROMPTS[0]),
-        ):
-            if type(data.get(key)) is not type(expected) or data[key] != expected:
-                raise ValueError(f"{SIDE_FILE} requires {key}={expected!r}")
+        version = data.get("format_version")
+        if type(version) is not int:
+            raise ValueError(f"{SIDE_FILE} requires an integer format_version")
+        if version not in (FORMAT_VERSION, JOINT_FORMAT_VERSION):
+            raise ValueError(
+                f"{SIDE_FILE} format_version {version} is not supported "
+                f"(this runtime reads {FORMAT_VERSION} and {JOINT_FORMAT_VERSION})"
+            )
+        joint: D3JointConfig | None = None
+        if version == FORMAT_VERSION:
+            for key, expected in (
+                ("format_version", FORMAT_VERSION),
+                ("format_id", FORMAT_ID),
+                ("prompt", PROMPTS[0]),
+            ):
+                if type(data.get(key)) is not type(expected) or data[key] != expected:
+                    raise ValueError(f"{SIDE_FILE} requires {key}={expected!r}")
+        else:
+            # A joint sidecar identifies itself through joint_config.json
+            # instead of the version-1 format_id/prompt fields.
+            joint = D3JointConfig.load(root)
         attention_mode = data.get("attention_mode", "causal")
         if attention_mode not in ATTENTION_MODES:
             raise ValueError(
                 f"{SIDE_FILE}: attention_mode must be one of "
                 f"{', '.join(ATTENTION_MODES)}, got {attention_mode!r}"
+            )
+        if version == JOINT_FORMAT_VERSION and attention_mode != "noncausal_full_attention":
+            raise ValueError(
+                f"{SIDE_FILE}: the joint protocol requires "
+                f"attention_mode=noncausal_full_attention, got {attention_mode!r}"
             )
         pooling = data.get("pooling", "last")
         if pooling not in POOLINGS:
@@ -143,6 +232,17 @@ class D3Config:
             max_length = None
         else:
             max_length = _integer(limit, f"{SIDE_FILE}: max_length")
+        if version == JOINT_FORMAT_VERSION:
+            if max_length is not None:
+                raise ValueError(
+                    f"{SIDE_FILE}: the joint protocol carries its length limit "
+                    f"in {JOINT_CONFIG_FILE}, not max_length"
+                )
+            max_pixels = data.get("max_pixels")
+            if max_pixels is not None:
+                max_pixels = _integer(max_pixels, f"{SIDE_FILE}: max_pixels")
+        else:
+            max_pixels = None
         codes = _strings(data.get("codes"), f"{SIDE_FILE}: codes")
         token_ids = _integers(data.get("token_ids"), f"{SIDE_FILE}: token_ids")
         if len(codes) != MAX_OPTIONS or len(token_ids) != MAX_OPTIONS:
@@ -150,9 +250,17 @@ class D3Config:
                 f"{SIDE_FILE}: codes and token_ids must each hold {MAX_OPTIONS} entries"
             )
         hidden_size = cls._load_hidden_size(root, attention_mode)
+        if version == JOINT_FORMAT_VERSION:
+            # The joint protocol's own length limit is unbounded (null); the
+            # backbone's position limit is the default per-sequence bound.
+            max_length = min(
+                cls._load_position_limit(root), JOINT_BACKBONE_LIMIT
+            )
         return cls(
-            format_version=FORMAT_VERSION,
-            format_id=FORMAT_ID,
+            format_version=version,
+            format_id=(
+                FORMAT_ID if version == FORMAT_VERSION else JOINT_TEMPLATE
+            ),
             codes=codes,
             token_ids=token_ids,
             temperature=temperature,
@@ -161,6 +269,25 @@ class D3Config:
             max_length=max_length,
             readout_dtype=readout_dtype,
             hidden_size=hidden_size,
+            joint=joint,
+            max_pixels=max_pixels,
+        )
+
+    @staticmethod
+    def _load_position_limit(root: Path) -> int:
+        """The backbone's max_position_embeddings, the official joint default bound."""
+        config_file = root / "config.json"
+        if not config_file.is_file():
+            raise ValueError(f"D3 checkpoints require a config.json beside {SIDE_FILE}")
+        with config_file.open() as file:
+            backbone = json.load(file)
+        text = backbone.get("text_config") if isinstance(backbone, dict) else None
+        text_config = backbone if not isinstance(text, dict) else text
+        position_limit = text_config.get("max_position_embeddings")
+        if position_limit is None:
+            return JOINT_BACKBONE_LIMIT
+        return _integer(
+            position_limit, "config.json text_config.max_position_embeddings"
         )
 
     @staticmethod

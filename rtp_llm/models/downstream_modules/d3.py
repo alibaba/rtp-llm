@@ -1,11 +1,14 @@
-"""D3 code-readout prefill-only last-token readout.
+"""D3 code-readout prefill-only readout (last token, or joint markers).
 
 The backbone supplies final-normalized activations, including expanded media
-positions. This module projects only the final text token of each complete
-row with the checkpoint's fp32 ``[255, hidden]`` readout weight and returns
-raw logits for every answer code in sidecar order. Candidate masking,
-temperature scaling and softmax belong to the frontend and run exactly once;
-the engine never normalizes.
+positions. A single-question (version 1) checkpoint projects only the final
+text token of each complete row with the checkpoint's fp32 ``[255, hidden]``
+readout weight; a joint (version 2) checkpoint projects the hidden state at
+every ``<|fim_suffix|>`` readout marker of a row instead and packs each
+row's question readouts side by side into that row's single engine output
+row. Both return raw logits for every answer code in sidecar order;
+candidate masking, temperature scaling and softmax belong to the frontend
+and run exactly once; the engine never normalizes.
 
 Rows are complete prompts: the handler supports no prefix reuse and no
 chunked prefill (``supports_prefix_cache`` is False, so the engine rejects
@@ -31,8 +34,17 @@ class D3Handler:
     supports_prefix_cache = False
     need_post_process = False
 
-    def __init__(self, config: D3Config):
+    def __init__(self, config: D3Config, marker_id: int | None = None):
         self.config = config
+        self.joint = config.joint is not None
+        if self.joint:
+            if type(marker_id) is not int or marker_id < 0:
+                raise ValueError(
+                    "a joint D3 handler requires the marker token id"
+                )
+        elif marker_id is not None:
+            raise ValueError("only joint D3 checkpoints take a marker token id")
+        self.marker_id = marker_id
         self._weight: torch.Tensor | None = None
         self._device: torch.device | None = None
 
@@ -52,13 +64,17 @@ class D3Handler:
             )
         weight = tensors[self.config.readout_key]
         shape = (len(self.config.codes), self.config.hidden_size)
-        if weight.dtype != torch.float32 or tuple(weight.shape) != shape:
+        allowed = (torch.float32, torch.bfloat16) if self.joint else (torch.float32,)
+        if weight.dtype not in allowed or tuple(weight.shape) != shape:
             raise ValueError(
-                f"D3 {self.config.readout_key} must be fp32 with shape {shape}"
+                f"D3 {self.config.readout_key} must be "
+                f"{'fp32 or bf16' if self.joint else 'fp32'} with shape {shape}"
             )
-        if not torch.isfinite(weight).all().item():
+        if not torch.isfinite(weight.float()).all().item():
             raise ValueError(f"D3 {self.config.readout_key} contains nonfinite weights")
-        self._weight = weight.detach()
+        # The joint reference checkpoints ship a bf16 readout and the engine
+        # computes the projection in fp32 either way, so upcast once here.
+        self._weight = weight.detach().to(dtype=torch.float32)
         self._device = None
 
     def extend_forward_args(self) -> list[str]:
@@ -103,6 +119,13 @@ class D3Handler:
                     "D3 text_tokens_mask must align with expanded tokens "
                     "and end in text"
                 )
+        if self.joint:
+            markers = (input_ids == self.marker_id).nonzero().flatten()
+            if markers.numel() < 1:
+                raise ValueError(
+                    "a joint row requires at least one readout marker token"
+                )
+            return int(markers[-1].item())
         return input_ids.numel() - 1
 
     def extend_forward(
@@ -163,11 +186,58 @@ class D3Handler:
             self._device = device
         with torch.no_grad(), torch.autocast(device_type=device.type, enabled=False):
             # Lengths describe expanded, executed rows, never raw prompt
-            # tokenizer lengths. The readout is the last token's hidden state
-            # times the fp32 weight: raw logits, no mask, temperature or softmax.
+            # tokenizer lengths. The readout is raw logits, no mask,
+            # temperature or softmax.
             lengths = input_lengths.to(device=device, dtype=torch.int64)
+            if self.joint:
+                return self._joint_readout(hidden_states, input_ids, lengths)
+            # The single-question readout is the last token's hidden state
+            # times the fp32 weight.
             last = hidden_states.index_select(0, lengths.cumsum(0) - 1).float()
             return functional.linear(last, self._weight)
+
+    def _joint_readout(
+        self,
+        hidden_states: "torch.Tensor",
+        input_ids: "torch.Tensor",
+        lengths: "torch.Tensor",
+    ) -> "torch.Tensor":
+        """Read out at every joint marker and pack one row per sequence.
+
+        The engine contract returns exactly one row per sequence, so a joint
+        row of ``N`` questions packs its ``N`` readouts side by side: the row
+        is ``[255 * max_question_count]`` wide, each question's 255 logits at
+        its own block offset, zero padded. The frontend knows each row's own
+        question count and slices its blocks; rows never share markers.
+        """
+        import torch
+        import torch.nn.functional as functional
+
+        rows = int(lengths.numel())
+        ids = input_ids.to(device=lengths.device)
+        markers = (ids == self.marker_id).nonzero().flatten()
+        if markers.numel() < rows:
+            raise ValueError(
+                "every joint row requires at least one readout marker token"
+            )
+        row_of_marker = torch.searchsorted(lengths.cumsum(0), markers, right=True)
+        counts = torch.bincount(row_of_marker, minlength=rows)
+        if not bool((counts > 0).all().item()):
+            raise ValueError(
+                "every joint row requires at least one readout marker token"
+            )
+        gathered = hidden_states.index_select(0, markers).float()
+        logits = functional.linear(gathered, self._weight)
+        width = int(counts.max().item()) * len(self.config.codes)
+        starts = counts.cumsum(0) - counts
+        within = (
+            torch.arange(markers.numel(), device=lengths.device) - starts[row_of_marker]
+        )
+        packed = torch.zeros(
+            (rows, width), device=lengths.device, dtype=torch.float32
+        )
+        packed.view(rows, -1, len(self.config.codes))[row_of_marker, within] = logits
+        return packed
 
 
 class D3Module:
@@ -233,8 +303,26 @@ class D3Module:
         self.d3_config = D3Config.load(config.ckpt_path)
         if config.hidden_size != self.d3_config.hidden_size:
             raise ValueError("D3 readout hidden_size does not match the backbone")
-        if self.d3_config.readout_dtype != "float32":
+        if self.d3_config.readout_dtype != "float32" and self.d3_config.joint is None:
             raise ValueError("this engine computes the D3 readout in float32")
+        marker_id: int | None = None
+        if self.d3_config.joint is not None:
+            if tokenizer is None:
+                raise ValueError(
+                    "a joint D3 checkpoint requires a tokenizer to resolve "
+                    "its readout marker"
+                )
+            real = tokenizer
+            if hasattr(real, "get_real_tokenizer"):
+                real = real.get_real_tokenizer()
+            marker = self.d3_config.joint.marker
+            ids = real.encode(marker, add_special_tokens=False)
+            if len(ids) != 1 or real.convert_ids_to_tokens(ids[0]) != marker:
+                raise ValueError(
+                    f"the joint readout marker {marker!r} must be a single "
+                    "existing token"
+                )
+            marker_id = ids[0]
         # The noncausal hookup lives in Qwen35Dense._create_config; refusing a
         # mismatched wiring here keeps a sidecar on a wrong model class from
         # silently running causal (or bidirectional) attention.
@@ -262,7 +350,7 @@ class D3Module:
                         f"D3 answer code {code!r} does not match the "
                         "checkpoint tokenizer"
                     )
-        self.handler = D3Handler(self.d3_config)
+        self.handler = D3Handler(self.d3_config, marker_id=marker_id)
 
     def get_handler(self) -> D3Handler:
         return self.handler

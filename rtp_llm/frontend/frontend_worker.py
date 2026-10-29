@@ -399,6 +399,7 @@ class FrontendWorker:
             IMAGE_MAX_PIXELS,
             IMAGE_MIN_PIXELS,
             MAX_OPTIONS,
+            D3JointRow,
             D3RowResult,
         )
         from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
@@ -464,11 +465,18 @@ class FrontendWorker:
             # implements (over the question's own masked answer codes, exactly
             # like the official product_answer); rejecting them here would
             # pre-empt that with a whole-request 500.
-            if (
-                not result.finished
-                or logits is None
-                or logits.shape != (1, MAX_OPTIONS)
-            ):
+            if not result.finished or logits is None or logits.ndim != 2 or logits.shape[0] != 1:
+                raise RuntimeError("D3 backend returned invalid readout logits")
+            if isinstance(rows[index], D3JointRow):
+                # A joint row packs one 255-logit block per question side by
+                # side, its own questions first, zero padded to the batch's
+                # widest row; the executor slices each question's block.
+                if (
+                    logits.shape[1] % MAX_OPTIONS
+                    or logits.shape[1] < MAX_OPTIONS * len(rows[index].question_ids)
+                ):
+                    raise RuntimeError("D3 backend returned invalid joint readout logits")
+            elif logits.shape != (1, MAX_OPTIONS):
                 raise RuntimeError("D3 backend returned invalid readout logits")
             reuse_len = result.aux_info.reuse_len if result.aux_info else 0
             if reuse_len:

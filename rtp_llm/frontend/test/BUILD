@@ -30,6 +30,24 @@ py_test(
 )
 
 py_test(
+    name = "d3_joint_test",
+    srcs = ["d3_joint_test.py"],
+    deps = [
+        "//rtp_llm:frontend",
+        # models/__init__.py imports rtp_llm.model_factory_register eagerly;
+        # this target's runfiles must provide it (see //rtp_llm:model_factory_register).
+        "//rtp_llm:model_factory_register",
+        "//rtp_llm:models",
+        # the joint image tests decode real data-URL images
+        "//rtp_llm:Pillow",
+        # ...and base_model_datatypes -> generate_config imports pydantic from
+        # the pinned wheel set (see the d3_test target note).
+        "//rtp_llm:pydantic",
+    ],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "d3_systemone_test",
     srcs = ["d3_systemone_test.py"],
     deps = [

@@ -24,3 +24,13 @@ py_test(
     ],
     env = {"GPU_COUNT": "0"},
 )
+
+py_test(
+    name = "d3_joint_test",
+    srcs = ["d3_joint_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:safetensors",
+    ],
+    env = {"GPU_COUNT": "0"},
+)
