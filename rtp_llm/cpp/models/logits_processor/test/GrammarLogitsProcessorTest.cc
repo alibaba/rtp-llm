@@ -6,10 +6,14 @@
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "kmonitor/client/metric/GaugeMetric.h"
+#include "kmonitor/client/metric/QpsMetric.h"
 
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -162,6 +166,80 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     expectTokenMasked(values, kB);
     expectTokenMasked(values, kX);
     EXPECT_FALSE(error.has_value());
+}
+
+TEST(GrammarLogitsProcessorTest, UpdateTimeoutDisablesCachedDecodeAndSpeculativeMasks) {
+    auto backend = makeBackend();
+    auto proc    = makeProcessor(backend, "ab");
+    auto logits  = torch::zeros({1, 128}, torch::kFloat32);
+    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+    expectTokenMasked(logitsVec(logits), kX);
+
+    // The service validates a positive budget. Override it only in this test to
+    // exercise the real timed update without sleeps or a machine-speed assumption.
+    proc->update_timeout_ms_ = 0;
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+    ASSERT_TRUE(proc->updateTimedOut());
+    EXPECT_FALSE(proc->isStateful());
+    EXPECT_FALSE(proc->committedOutputLen().has_value());
+    const auto accepted_count = proc.matcher->numAcceptedTokens();
+
+    // Invalid tokens no longer reach xgrammar, and cached masks cannot force EOS.
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kX, kX}}, torch::kInt32), 2).has_value());
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), accepted_count);
+    logits.fill_(1.0f);
+    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+    EXPECT_TRUE(torch::equal(logits, torch::ones_like(logits)));
+
+    const size_t               words    = SpecLogitsProcessorRequest::bitmaskWordCount(128);
+    const int32_t              drafts[] = {kX, kX};
+    std::vector<int32_t>       mask(3 * words, 0);
+    SpecLogitsProcessorRequest request{drafts, 2, mask.data(), words, 128};
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(request)), 2);
+    for (auto word : mask) {
+        EXPECT_EQ(word, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+    }
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), accepted_count);
+}
+
+TEST(GrammarLogitsProcessorTest, UpdateReportsOnlyTheFirstTimeout) {
+    auto monitor = std::make_shared<kmonitor::KMonitor>("grammar_update_test");
+    monitor->SetServiceName("");
+    auto  reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto* metrics  = reporter->getMetricsGroup<RtpLLMGrammarMetrics>();
+    auto* compile_latency =
+        dynamic_cast<kmonitor::GaugeMetric*>(metrics->compile_latency_us_metric->DeclareMetric(&reporter->getTags()));
+    auto* timeout =
+        dynamic_cast<kmonitor::QpsMetric*>(metrics->update_timeout_qps_metric->DeclareMetric(&reporter->getTags()));
+    ASSERT_NE(compile_latency, nullptr);
+    ASSERT_NE(timeout, nullptr);
+
+    auto proc                = makeProcessor(makeBackend(), "aaaa");
+    proc->metrics_reporter_  = reporter;
+    proc->update_timeout_ms_ = std::numeric_limits<int>::max();
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA, kA}}, torch::kInt32), 2).has_value());
+    EXPECT_FALSE(proc->updateTimedOut());
+    EXPECT_EQ(proc->committedOutputLen(), 2);
+    EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+    EXPECT_EQ(timeout->value_, 0);
+
+    // A rejection without a timeout retains the existing error and emits no metric.
+    auto error = proc->updateStatus(torch::tensor({{kX}}, torch::kInt32), 1);
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+    EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+    EXPECT_EQ(timeout->value_, 0);
+
+    proc->update_timeout_ms_ = 0;
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kA}}, torch::kInt32), 1).has_value());
+    ASSERT_TRUE(proc->updateTimedOut());
+    EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+    EXPECT_EQ(timeout->value_, 1);
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({{kX}}, torch::kInt32), 1).has_value());
+    EXPECT_EQ(compile_latency->calculator_.Count(), 0);
+    EXPECT_EQ(timeout->value_, 1);
+    metrics->compile_latency_us_metric->UndeclareMetric(compile_latency);
+    metrics->update_timeout_qps_metric->UndeclareMetric(timeout);
 }
 
 TEST(GrammarLogitsProcessorTest, ProcessRejectsGrammarVocabExceedingModelVocab) {

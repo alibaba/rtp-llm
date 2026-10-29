@@ -166,6 +166,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
             generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
+            generate_output.aux_info.xgrammar_update_timeout             = xgrammarUpdateTimedOut();
             generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
             generate_output.aux_info.generation_prefill_cuda_graph_status =
                 generationPrefillCudaGraphStatusString(generation_prefill_cuda_graph_status_);

@@ -1714,6 +1714,7 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.compile_timeout_ms, 2000)
         self.assertEqual(g.compile_concurrency, 1)
         self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.update_timeout_ms, 10)
         self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_parser_defaults_override_config_initial_values(self):
@@ -1732,6 +1733,7 @@ class ServerArgsGrammarConfigTest(TestCase):
         g.compile_timeout_ms = 1
         g.compile_concurrency = 2
         g.compile_queue_size = 3
+        g.update_timeout_ms = 1
         g.compiler_cache_bytes = 1
 
         parser = EnvArgumentParser()
@@ -1745,6 +1747,7 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.compile_timeout_ms, 2000)
         self.assertEqual(g.compile_concurrency, 1)
         self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.update_timeout_ms, 10)
         self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_cmd_args(self):
@@ -1763,6 +1766,8 @@ class ServerArgsGrammarConfigTest(TestCase):
             "3",
             "--grammar_compile_queue_size",
             "5",
+            "--grammar_update_timeout_ms",
+            "25",
             "--grammar_compiler_cache_bytes",
             "67108864",
         ]
@@ -1775,6 +1780,7 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.compile_timeout_ms, 1234)
         self.assertEqual(g.compile_concurrency, 3)
         self.assertEqual(g.compile_queue_size, 5)
+        self.assertEqual(g.update_timeout_ms, 25)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
 
     def test_grammar_env_args(self):
@@ -1784,6 +1790,7 @@ class ServerArgsGrammarConfigTest(TestCase):
                 "GRAMMAR_COMPILE_TIMEOUT_MS": "3456",
                 "GRAMMAR_COMPILE_CONCURRENCY": "4",
                 "GRAMMAR_COMPILE_QUEUE_SIZE": "6",
+                "GRAMMAR_UPDATE_TIMEOUT_MS": "35",
                 "GRAMMAR_COMPILER_CACHE_BYTES": "33554432",
             }
         )
@@ -1793,7 +1800,32 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.compile_timeout_ms, 3456)
         self.assertEqual(g.compile_concurrency, 4)
         self.assertEqual(g.compile_queue_size, 6)
+        self.assertEqual(g.update_timeout_ms, 35)
         self.assertEqual(g.compiler_cache_bytes, 33554432)
+
+    def test_grammar_update_timeout_cli_overrides_env(self):
+        os.environ["GRAMMAR_UPDATE_TIMEOUT_MS"] = "35"
+        for timeout in (10, 25):
+            with self.subTest(timeout=timeout):
+                sys.argv = ["prog", "--grammar_update_timeout_ms", str(timeout)]
+                self.assertEqual(
+                    self._setup().grammar_config.update_timeout_ms, timeout
+                )
+
+    def test_invalid_grammar_update_timeout_is_rejected(self):
+        for timeout in ("0", "-1", "invalid", "1.5"):
+            with self.subTest(timeout=timeout, source="cli"):
+                sys.argv = ["prog", "--grammar_update_timeout_ms", timeout]
+                with self.assertRaises(SystemExit):
+                    self._setup()
+
+            os.environ["GRAMMAR_UPDATE_TIMEOUT_MS"] = timeout
+            for argv in (["prog"], ["prog", "--grammar_num_workers", "1"]):
+                with self.subTest(timeout=timeout, source="env", argv=argv):
+                    sys.argv = argv
+                    with self.assertRaises(SystemExit):
+                        self._setup()
+            del os.environ["GRAMMAR_UPDATE_TIMEOUT_MS"]
 
     def test_non_positive_bounded_compile_args_are_rejected(self):
         for flag in (

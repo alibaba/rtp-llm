@@ -1532,6 +1532,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("compile_queue_size", &GrammarConfig::compile_queue_size)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
+        .def_readwrite("update_timeout_ms", &GrammarConfig::update_timeout_ms)
         .def("to_string", &GrammarConfig::to_string)
         .def("__repr__",
              [](const GrammarConfig& c) {
@@ -1542,7 +1543,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                      << ", num_workers=" << c.num_workers << ", compile_timeout_ms=" << c.compile_timeout_ms
                      << ", compile_concurrency=" << c.compile_concurrency
                      << ", compile_queue_size=" << c.compile_queue_size
-                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
+                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes
+                     << ", update_timeout_ms=" << c.update_timeout_ms << ")";
                  return oss.str();
              })
         .def(py::pickle(
@@ -1554,10 +1556,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.terminate_without_stop_token,
                                       self.compile_timeout_ms,
                                       self.compile_concurrency,
-                                      self.compile_queue_size);
+                                      self.compile_queue_size,
+                                      self.update_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 6 && t.size() != 8)
+                if (t.size() != 5 && t.size() != 6 && t.size() != 8 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1575,13 +1578,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
                         c.num_workers                             = t[1].cast<int>();
                         c.tokenizer_info_json                     = t[2].cast<std::string>();
-                        if (t.size() == 8) {
-                            // Current layout appends compile controls after the prior five-field state.
+                        if (t.size() == 8 || t.size() == 9) {
+                            // Compile controls follow the prior five-field state; update timeout was added last.
                             c.compiler_cache_bytes         = t[3].cast<int64_t>();
                             c.terminate_without_stop_token = t[4].cast<bool>();
                             c.compile_timeout_ms           = t[5].cast<int>();
                             c.compile_concurrency          = t[6].cast<int>();
                             c.compile_queue_size           = t[7].cast<int>();
+                            if (t.size() == 9) {
+                                c.update_timeout_ms = t[8].cast<int>();
+                            }
                         } else if (t.size() == 6) {
                             // Previous layout:
                             // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,

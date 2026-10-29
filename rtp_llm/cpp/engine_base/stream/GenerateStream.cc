@@ -17,6 +17,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
@@ -168,7 +169,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), processor_eos_token_id);
+        generate_input_, init_batch_size, maxBatchSize(), processor_eos_token_id, streamLogTag());
     if (processors_result.ok()) {
         auto processors = std::move(processors_result.value());
         if (output_vocab_size_ > 0) {
@@ -1389,6 +1390,16 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch:
         }
     }
     return validateLogitsProcessorState();
+}
+
+bool GenerateStream::xgrammarUpdateTimedOut() const {
+    for (const auto& processor : logits_processor_list_) {
+        const auto* grammar = dynamic_cast<GrammarLogitsProcessor*>(processor.get());
+        if (grammar && grammar->updateTimedOut()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {

@@ -4,7 +4,10 @@ from rtp_llm.server.server_args.util import str2bool
 
 
 def _positive_int(value: str) -> int:
-    parsed = int(value)
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("value must be a positive integer") from error
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be greater than 0")
     return parsed
@@ -79,6 +82,18 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         help=(
             "Total byte cap shared by xgrammar's compiler cache and the engine verdict "
             "LRU (split evenly between them); <=0 makes both caches unlimited."
+        ),
+    )
+    grammar_group.add_argument(
+        "--grammar_update_timeout_ms",
+        env_name="GRAMMAR_UPDATE_TIMEOUT_MS",
+        bind_to=(grammar_config, "update_timeout_ms"),
+        type=_positive_int,
+        default=10,
+        help=(
+            "Positive wall-clock budget in milliseconds for one stream's CPU grammar state update. "
+            "An update exceeding the budget disables grammar for the rest of that stream; "
+            "non-positive values are rejected."
         ),
     )
     grammar_group.add_argument(

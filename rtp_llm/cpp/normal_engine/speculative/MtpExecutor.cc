@@ -874,7 +874,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
                                                               params.sp_config,
-                                                              warm_up_));
+                                                              warm_up_,
+                                                              isTpRank0() && !warm_up_ ? metrics_reporter_ : nullptr));
 
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
