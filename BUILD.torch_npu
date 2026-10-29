@@ -12,7 +12,7 @@ cc_library(
         "@local_config_python//:python_headers",
         "@torch_cpu_ascend//:torch",
     ],
-    strip_include_prefix = "torch_npu/include",
+    includes = ["torch_npu/include"],
     visibility = ["//visibility:public"],
 )
 
@@ -25,6 +25,6 @@ cc_library(
     deps = [
         "@local_config_python//:python_headers",
     ],
-    strip_include_prefix = "torch_npu/include",
+    includes = ["torch_npu/include"],
     visibility = ["//visibility:public"],
 )

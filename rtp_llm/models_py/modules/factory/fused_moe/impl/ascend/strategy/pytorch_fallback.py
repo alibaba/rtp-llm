@@ -1,35 +1,45 @@
-"""Ascend MoE placeholder: rejects all MoE configurations.
+"""Ascend BF16 fallback MoE strategy using naive PyTorch implementation.
 
-No NPU-capable MoE executor exists (Triton is excluded from Ascend deps),
-and Ascend TP (tp_size > 1) is not implemented. MoE models fail fast at
-strategy selection instead of crashing or silently dropping experts. Dense
-(non-MoE) models never reach this path.
+This is a pure PyTorch fallback for Ascend (no Triton dependency).
+For production use, replace with a properly optimized executor.
 """
 
-from typing import Any
+from typing import Any, Dict
+
+import torch
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 
 
 class AscendBf16FallbackStrategy(MoeStrategy):
-    """Placeholder that rejects all MoE configurations on Ascend."""
+    """Ascend BF16 fallback MoE strategy using pure PyTorch."""
 
-    _REJECT_MSG = (
-        "Ascend MoE is not supported yet: no NPU-capable MoE executor is "
-        "available (Triton-based executors are excluded from Ascend deps), "
-        "and Ascend TP (tp_size > 1) is not implemented either. MoE models "
-        "are rejected on Ascend; use tp_size=1 dense models or wait for a "
-        "native Ascend MoE executor."
-    )
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
+            BatchedTritonExperts,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
+            BatchedDataRouter,
+        )
+
+        quant_config = FusedMoEQuantConfig(quant_dtype=None)
+        return StrategyAttributes(
+            router_class=BatchedDataRouter,
+            executor_class=BatchedTritonExperts,
+            quant_config=quant_config,
+        )
 
     @classmethod
     def check_conditions(cls, checker: Any, config: Any) -> None:
-        raise ValueError(cls._REJECT_MSG)
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
+        )
 
-    def get_attributes(self) -> StrategyAttributes:
-        # Never reached: can_handle calls check_conditions first, which
-        # raises before attributes are consulted.
-        raise RuntimeError(self._REJECT_MSG)
+        resolver = MoeConfigResolver()
+        checker.check(not resolver.has_quantization(config))

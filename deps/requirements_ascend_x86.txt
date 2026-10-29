@@ -1,5 +1,8 @@
 -r requirements_base.txt
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl
-https://files.pythonhosted.org/packages/78/f3/1e957440f30c48077dceadbe6ad92ec6651628db020a958bdf7ecc00558e/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl
+https://gitcode.com/Ascend/pytorch/releases/download/v26.1.0-beta.1-pytorch2.9.0/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl
 torchvision==0.24.0
+triton==3.2.0
+triton-ascend==3.2.2
 numpy==1.26.4

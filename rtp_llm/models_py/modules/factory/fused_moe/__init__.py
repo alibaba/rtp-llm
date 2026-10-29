@@ -75,9 +75,12 @@ elif device_type == DeviceType.Ascend:
 
     from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy import (
         AscendBf16FallbackStrategy,
+        AscendCannStrategy,
     )
 
     registry = StrategyRegistry()
+    # CANN first; the PyTorch fallback covers CANN opt-out configs.
+    registry.register(AscendCannStrategy())
     registry.register(AscendBf16FallbackStrategy())
     FusedMoeFactory.set_registry(registry)
 

@@ -101,9 +101,9 @@ def http_deps():
 
     http_archive(
         name = "torch_npu_ascend",
-        sha256 = "3d436f74af70089b4320e6dae374641ddfb76712cdd593e67763ded33cf31a2a",
+        sha256 = "dcdcddbc2756bcdc7da1c84cca0a124e1f3d8b4695d3f524c8e628001f070f17",
         urls = [
-            "https://files.pythonhosted.org/packages/78/f3/1e957440f30c48077dceadbe6ad92ec6651628db020a958bdf7ecc00558e/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl"
+            "https://gitcode.com/Ascend/pytorch/releases/download/v26.1.0-beta.1-pytorch2.9.0/torch_npu-2.9.0.post3-cp310-cp310-manylinux_2_28_x86_64.whl"
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.torch_npu"),

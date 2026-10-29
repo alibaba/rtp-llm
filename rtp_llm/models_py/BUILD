@@ -146,10 +146,21 @@ py_library(
 
 py_library(
     name = "kernels",
-    srcs = glob([
-        "kernels/*.py",
-        "kernels/**/*.py",
-    ]),
+    srcs = glob(
+        [
+            "kernels/*.py",
+            "kernels/**/*.py",
+        ],
+        exclude = [
+            "kernels/ascend/**/*.py",
+        ],
+    ),
+)
+
+filegroup(
+    name = "qwen3_next_source",
+    srcs = ["model_desc/qwen3_next.py"],
+    visibility = ["//rtp_llm/models_py/kernels/ascend/test:__pkg__"],
 )
 
 py_library(
@@ -175,6 +186,12 @@ py_library(
         "//rtp_llm:warmup",
         "//rtp_llm/model_loader:loader",
     ] + select({
+        # Ascend GDN/conv/chunk operators (Qwen3.5 linear attention).
+        "@//:using_ascend": [
+            "//rtp_llm/models_py/kernels/ascend:qwen3_next_ops",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "@//:using_cuda12": [
             ":modules_cuda",
         ],
