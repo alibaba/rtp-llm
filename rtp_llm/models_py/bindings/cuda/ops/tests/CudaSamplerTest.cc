@@ -638,17 +638,6 @@ TEST_F(CudaSamplerTest, testDoSample) {
 
 TEST_F(CudaSamplerTest, testTopPOneRenormPreservesUnfilteredDistribution) {
     torch::manual_seed(76103);
-    const char* previous = std::getenv("RTP_LLM_TOP_P_ONE_RENORM");
-    const auto  saved = previous == nullptr ? std::optional<std::string>() : std::make_optional(std::string(previous));
-    struct RestoreFlag {
-        std::optional<std::string> previous;
-        ~RestoreFlag() {
-            if (previous.has_value())
-                setenv("RTP_LLM_TOP_P_ONE_RENORM", previous->c_str(), 1);
-            else
-                unsetenv("RTP_LLM_TOP_P_ONE_RENORM");
-        }
-    } restore{saved};
     for (int64_t batch : {1, 4, 17, 32}) {
         for (int64_t vocab : {257, 248320}) {
             for (bool mask_padding : {false, true}) {
@@ -664,8 +653,7 @@ TEST_F(CudaSamplerTest, testTopPOneRenormPreservesUnfilteredDistribution) {
                 auto temperature = torch::ones_like(top_p);
                 std::vector<torch::Tensor> distributions, samples;
                 auto                       cum_log_probs = torch::zeros({batch}, logits.options());
-                for (const char* flag : {"0", "1"}) {
-                    setenv("RTP_LLM_TOP_P_ONE_RENORM", flag, 1);
+                for (int repetition = 0; repetition < 2; ++repetition) {
                     auto output_probs = torch::empty_like(logits);
                     auto tokens       = torch::zeros({batch, 1}, logits.options().dtype(torch::kInt32));
                     cum_log_probs.zero_();
@@ -696,13 +684,15 @@ TEST_F(CudaSamplerTest, testTopPOneRenormPreservesUnfilteredDistribution) {
                     auto         result = execSampleGreedy(params);
                     check_cuda_error();
                     ASSERT_TRUE(!result.success.defined() || result.success.all().item<bool>());
+                    for (auto& generator : generators) {
+                        ASSERT_EQ(generator.get_offset(), 32);
+                    }
                     distributions.push_back(output_probs);
                     samples.push_back(tokens);
                 }
                 ASSERT_TRUE(torch::equal(samples[0], samples[1]));
+                ASSERT_TRUE(torch::equal(distributions[0], distributions[1]));
                 // Independent FP64 reference: top_p=1 keeps every nonzero probability.
-                // The old non-deterministic AIR threshold can truncate a small tail even
-                // at p=1; it is diagnostic data, not the correctness oracle here.
                 auto expected = torch::softmax(logits.to(torch::kFloat64), -1).to(torch::kFloat32);
                 ASSERT_TRUE(torch::allclose(distributions[1], expected, 1e-6, 1e-8));
                 ASSERT_TRUE(torch::equal(distributions[1] == 0, expected == 0));
@@ -710,10 +700,6 @@ TEST_F(CudaSamplerTest, testTopPOneRenormPreservesUnfilteredDistribution) {
                     torch::allclose(distributions[1].sum(-1), torch::ones({batch}, logits.options()), 2e-6, 2e-6));
                 auto selected_probs = distributions[1].gather(1, samples[1].to(torch::kLong)).squeeze(1);
                 ASSERT_TRUE(torch::allclose(cum_log_probs, selected_probs.log(), 1e-6, 1e-8));
-                auto difference = (distributions[1] - distributions[0]).abs();
-                std::cout << "TOP_P_ONE_REFERENCE batch=" << batch << " vocab=" << vocab << " masked=" << mask_padding
-                          << " old_difference_max_abs=" << difference.max().item<double>()
-                          << " old_difference_l1=" << difference.sum(-1).max().item<double>() << std::endl;
             }
         }
     }
