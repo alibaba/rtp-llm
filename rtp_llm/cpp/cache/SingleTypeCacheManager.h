@@ -63,6 +63,10 @@ public:
         return malloc(block_ids, seq_len, enable_reuse_cache, reserve_step, backfilled_positions);
     }
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    // Collapse request-owned references down to the retained decode tail.
+    // Used for tail-only handoff layouts whose sparse state never accumulates
+    // history slots.
+    virtual void releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step = 0) {}
     // Exclusive checkpoint position safe to retire after committed GPU work.
     virtual size_t historyReclaimEnd(int committed_tokens) const {
         return 0;

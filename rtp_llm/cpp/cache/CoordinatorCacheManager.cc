@@ -966,10 +966,24 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
                 const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-                kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, tag),
-                    reuseEnabledForGroup(malloc_info, config_, tag),
-                    reserve_step);
+                auto& block_ids = kv_resource->mutableBlockIds(b, tag);
+                if (skipLinearForRequest(malloc_info, config_, tag)) {
+                    // Tail-only handoff state collapses to the decode tail: the
+                    // sparse layout never accumulates history slots.
+                    kv_cache_groups_[static_cast<size_t>(group_id)]->releaseRequestStateToDecodeTail(block_ids,
+                                                                                                      reserve_step);
+                } else if (config_.group(tag).policy.group_type == CacheGroupType::LINEAR
+                           && malloc_info.enable_cache_lookup
+                           && config_.reuse_cache_tail_blocks == std::numeric_limits<int>::max()) {
+                    // A cache-lookup request with an unbounded reuse tail keeps
+                    // its whole linear prefill as reusable cache content: the
+                    // decode path must not free it, history retirement belongs
+                    // to the committed-watermark reclaim path instead.
+                    continue;
+                } else {
+                    kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
+                        block_ids, reuseEnabledForGroup(malloc_info, config_, tag), reserve_step);
+                }
             }
         }
         return {true, 0};
@@ -1852,7 +1866,7 @@ bool CoordinatorCacheManager::doInit() {
         SingleTypeCacheManagerPtr group;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearCacheManager>(
-                cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
+                cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks, config_.enable_linear_cache_reclaim);
             linear_group_ids_.push_back(group_id);
         } else if (group_type == CacheGroupType::SWA) {
             group =

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/LinearCacheManager.h"
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <unordered_set>
 
@@ -46,6 +47,28 @@ int estimatePeakFromSlotCosts(std::vector<int> block_costs,
 }
 
 }  // namespace
+
+void LinearCacheManager::releaseRequestStateToDecodeTail(BlockIds& block_ids, int reserve_step) {
+    const auto& block_indices = block_ids.blocks();
+    if (block_indices.empty()) {
+        return;
+    }
+    const int block_size = static_cast<int>(block_indices.size());
+
+    BlockIndicesType    blocks_to_free;
+    std::vector<size_t> pos_to_remove;
+    for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step), block_size) - 1; i >= 0; i--) {
+        if (isNullBlockIdx(block_indices[static_cast<size_t>(i)])) {
+            continue;
+        }
+        blocks_to_free.push_back(block_indices[static_cast<size_t>(i)]);
+        pos_to_remove.push_back(static_cast<size_t>(i));
+    }
+    if (!blocks_to_free.empty()) {
+        block_pool_->decRef(blocks_to_free);
+        block_ids.remove(pos_to_remove);
+    }
+}
 
 int LinearCacheManager::retainedDecodeBlocks(int reserve_step) const {
     return std::max(2, static_cast<int>(activeTailBlocks())) + reserve_step;
@@ -185,17 +208,25 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
             std::move(block_costs), seq_len, remaining_tokens, reserve_step, enable_reuse_cache, false);
     }
 
-    // Main #1574 slot-cost peak model (no reclaim).
+    // Main #1574 slot-cost peak model (no reclaim). With reclaim configured
+    // but unavailable for this request (KEEP_HISTORY) and an unbounded reuse
+    // tail, no release path applies: the fresh prompt plus every decode slot
+    // below the needed boundary stays materialized, so the initial peak is the
+    // full accumulation to the final length. Otherwise the walk releases
+    // everything below the retained decode window.
     if (remaining_tokens <= 0) {
         return std::accumulate(block_costs.begin(), block_costs.end(), 0);
     }
+    const int retained_tail_blocks = enable_linear_cache_reclaim_ && tail_blocks_ == std::numeric_limits<int>::max() ?
+                                        std::numeric_limits<int>::max() :
+                                        retainedDecodeBlocks(reserve_step);
     return estimatePeakFromSlotCosts(
         std::move(block_costs),
         needBlocksNum(seq_len + 1, 0, reserve_step),
         std::max(needBlocksNum(seq_len + 1, 0) - static_cast<int>(std::max<size_t>(1, activeTailBlocks())), 0),
         final_total,
         batch_size,
-        retainedDecodeBlocks(reserve_step));
+        retained_tail_blocks);
 }
 
 int LinearCacheManager::estimateHistoryReclaimPeak(std::vector<int> block_costs,
@@ -413,10 +444,10 @@ void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
     for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step), block_size) - 1; i >= 0; i--) {
-        if (isNullBlockIdx(block_indices[i])) {
+        if (isNullBlockIdx(block_indices[static_cast<size_t>(i)])) {
             continue;
         }
-        blocks_to_free.push_back(block_indices[i]);
+        blocks_to_free.push_back(block_indices[static_cast<size_t>(i)]);
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {

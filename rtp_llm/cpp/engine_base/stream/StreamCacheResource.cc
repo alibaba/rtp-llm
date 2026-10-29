@@ -502,8 +502,12 @@ bool StreamCacheResource::canReclaimLinearHistory(int target_batch_size) const {
 }
 
 void StreamCacheResource::drainLinearHistory() {
+    // The scheduler owns block-table mutation, so the pending watermark drains
+    // here, at the next allocation — context streams included: the linear
+    // attention only needs the retained tail, so committed checkpoints are
+    // reclaimable even while the chunked prefill is still running.
     if (pending_linear_history_committed_tokens_ <= 0 || !canReclaimLinearHistory(stream_->maxBatchSize())
-        || isContextStream() || curBlocksNum() == 0) {
+        || curBlocksNum() == 0) {
         return;
     }
     const bool reuse_cache = reuseCache();
