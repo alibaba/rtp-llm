@@ -174,13 +174,16 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_WRONG_FORMAT_ERROR, DASH_ERROR_BAD_REQUEST),
             (ExceptionType.MM_DOWNLOAD_FAILED, DASH_ERROR_BAD_REQUEST),
             (ExceptionType.MM_PROCESS_ERROR, DASH_ERROR_INTERNAL),
             (ExceptionType.MM_EMPTY_ENGINE_ERROR, DASH_ERROR_INTERNAL),
             (ExceptionType.MM_REMOTE_RPC_FAILED, DASH_ERROR_INTERNAL),
             (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
+            (ExceptionType.MM_LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
             (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
+            (ExceptionType.CONCURRENCY_LIMIT_ERROR, DASH_ERROR_CAPACITY),
             (
                 ExceptionType.GRAMMAR_COMPILE_OVERLOADED,
                 DASH_ERROR_ADMISSION_OVERLOADED,
