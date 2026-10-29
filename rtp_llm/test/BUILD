@@ -58,6 +58,16 @@ py_test(
 )
 
 py_test(
+    name = "dummy_health_server_test",
+    srcs = [
+        "dummy_health_server_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "renderer_stop_words_test",
     srcs = [
         "renderer_stop_words_test.py",

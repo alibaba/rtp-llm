@@ -5,6 +5,15 @@ import sys
 import time
 import traceback
 
+# RTP_DUMMY_SERVE=1: serve the zero-GPU dummy health server instead of the
+# engine so a Whale pod stays alive as a dev container without loading any
+# model. The check must run before the torch import below; the dummy server
+# is stdlib-only. See rtp_llm/utils/dummy_health_server.py.
+if os.environ.get("RTP_DUMMY_SERVE", "").strip().lower() in ("1", "true"):
+    from rtp_llm.utils.dummy_health_server import run_dummy_server
+
+    raise SystemExit(run_dummy_server())
+
 import requests
 import torch
 
