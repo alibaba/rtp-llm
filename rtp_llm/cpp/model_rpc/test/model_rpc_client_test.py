@@ -51,6 +51,7 @@ from rtp_llm.config.generate_config import (
     ThinkingMode,
 )
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -1226,7 +1227,10 @@ class ModelRpcClientTest(TestCase):
             max_thinking_tokens=16,
         )
         config.finalize_response_format(
-            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+            reasoning_format=ReasoningFormat(
+                tag_begin="",
+                tag_end="</think>",
+            )
         )
         config_before_rpc = config.model_dump()
 
@@ -1237,7 +1241,45 @@ class ModelRpcClientTest(TestCase):
         elements = structural_tag["format"]["elements"]
         self.assertEqual(len(elements), 2)
         self.assertEqual(elements[0]["type"], "tag")
+        self.assertNotIn("excludes", elements[0]["content"])
         self.assertEqual(elements[1]["type"], "json_schema")
+
+    def test_trans_input_preserves_disabled_think_processor_and_explicit_format(self):
+        for fields in ({}, {"response_format": {"type": "json_object"}}):
+            with self.subTest(fields=fields):
+                config = GenerateConfig(max_thinking_tokens=16, **fields)
+                env = GenerateEnvConfig()
+                env.enable_think_processor = False
+                env.think_mode = "enabled"
+                env.think_end_token_id = 7
+                config.add_thinking_params(None, env)
+                config = config.model_copy(deep=True)
+                config_before_rpc = config.model_dump()
+                first_pb = trans_input(
+                    self._make_generate_input(config)
+                ).generate_config
+                second_pb = trans_input(
+                    self._make_generate_input(config)
+                ).generate_config
+                self.assertEqual(config.model_dump(), config_before_rpc)
+                self.assertEqual(first_pb, second_pb)
+                self.assertTrue(first_pb.in_think_mode)
+                self.assertEqual(first_pb.thinking_mode, int(ThinkingMode.ENABLED))
+                self.assertEqual(list(first_pb.end_think_token_ids), [7])
+                self.assertFalse(first_pb.HasField("structural_tag"))
+                self.assertFalse(first_pb.HasField("regex"))
+                self.assertFalse(first_pb.HasField("ebnf"))
+                self.assertEqual(first_pb.HasField("json_schema"), bool(fields))
+                if fields:
+                    self.assertEqual(
+                        json.loads(first_pb.json_schema.value),
+                        {"anyOf": [{"type": "object"}, {"type": "array"}]},
+                    )
+                self.assertFalse(config._enable_think_processor)
+                self.assertFalse(config._reasoning_envelope_applied)
+                self.assertNotIn(
+                    "enable_think_processor", first_pb.DESCRIPTOR.fields_by_name
+                )
 
     def test_trans_output_preserves_speculative_acceptance_counters(self):
         input_py = GenerateInput(

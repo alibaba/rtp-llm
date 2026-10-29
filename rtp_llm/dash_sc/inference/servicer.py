@@ -624,12 +624,7 @@ def _dash_sc_reasoning_format(
                 "think_start_tag is required when thinking is enabled and "
                 "input_ids do not end with the think begin tokens",
             )
-    return ReasoningFormat(
-        tag_begin=tag_begin,
-        tag_end=base_format.tag_end,
-        suffix=base_format.suffix,
-        no_think_excludes=base_format.no_think_excludes,
-    )
+    return replace(base_format, tag_begin=tag_begin)
 
 
 @dataclass(frozen=True)
@@ -651,10 +646,10 @@ class _ThinkRuntime:
       ``terminate_token_id`` token id that signals "stop thinking immediately" mid-
                              stream (DSV4: 1). ``None`` disables the token-terminate
                              branch (the regular ``</think>`` path keeps working).
-      ``phase2_enabled``     model type is in ``_EMPTY_THINK_PHASE2_MODEL_TYPES``
-                             and ``empty_tokens`` is available. ``terminate_token_id``
-                             is a separate request-path gate for actually entering
-                             phase-2.
+      ``phase2_enabled``     deployment enables EOS-triggered phase-2, model type
+                             is in ``_EMPTY_THINK_PHASE2_MODEL_TYPES``, and
+                             ``empty_tokens`` is available. ``terminate_token_id``
+                             is a separate request-path gate for entering phase-2.
       ``eos_token_id``       tokenizer.eos_token_id; written to dashllm
                              ``stop_token_id`` response param
       ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
@@ -684,7 +679,10 @@ def build_think_runtime(
 
     ``terminate_token_id`` defaults to ``_DEFAULT_TERMINATE_TOKEN_ID`` (1, the
     DSV4 convention). Pass ``None`` or any value ``<= 0`` to disable the
-    token-terminate branch entirely.
+    token-terminate branch entirely. The independent deployment switch
+    ``enable_dash_sc_think_eos_phase2`` also disables that branch, preserving
+    the backend's EOS and completion without adding a close tag or a second
+    request. Thinking boundary metadata remains available in either case.
 
     ``eos_token_id`` / ``max_token_id`` of ``None`` fall back to tokenizer-derived
     values; explicit values from the caller win.
@@ -718,7 +716,11 @@ def build_think_runtime(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
-    phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(empty_tokens)
+    phase2_enabled = (
+        bool(getattr(generate_env_config, "enable_dash_sc_think_eos_phase2", True))
+        and _uses_dash_sc_empty_think_phase2(model_type)
+        and bool(empty_tokens)
+    )
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
@@ -1214,8 +1216,8 @@ async def iter_real_model_stream_infer(
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
         max_new_tokens = int(generate_config.max_new_tokens or 0)
-        # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
-        # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
+        # ``runtime.phase2_enabled`` is the init-time deployment/model/token gate.
+        # ``in_think_mode`` is per-request — ``add_thinking_params``
         # sets it from generate_config and a request can override it.
         phase2_enabled = runtime.phase2_enabled and (
             configured_thinking_mode == ThinkingMode.ENABLED

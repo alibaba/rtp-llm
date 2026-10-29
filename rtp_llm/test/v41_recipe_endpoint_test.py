@@ -160,6 +160,87 @@ class EndpointConfigTest(unittest.TestCase):
                 self.assertFalse(config.begin_think_token_ids)
                 self.assertTrue(config.end_think_token_ids)
 
+    def test_v41_default_processor_requires_complete_reasoning(self):
+        self.renderer.generate_env_config.think_end_tag = "</think>"
+        config = self.endpoint._extract_generation_config(
+            request(reasoning_effort="low")
+        )
+        self.assertEqual(config.structural_tag["format"]["type"], "sequence")
+        tag, final = config.structural_tag["format"]["elements"]
+        self.assertEqual(tag["end"], "</think>")
+        self.assertEqual(tag["content"]["max_tokens"], config.max_thinking_tokens)
+        self.assertEqual(final, {"type": "any_text"})
+        self.assertNotIn("｜DSML｜", config.stop_words_str)
+
+    def test_disabled_processor_preserves_thinking_and_native_eos(self):
+        self.endpoint.generate_env_config.enable_think_processor = False
+        req = request(reasoning_effort="low")
+        config = self.endpoint._extract_generation_config(req)
+        self.assertTrue(config.in_think_mode)
+        self.assertTrue(self.renderer.in_think_mode(req))
+        self.assertTrue(config.end_think_token_ids)
+        self.assertIsNone(config.structural_tag)
+        self.assertIsNone(config.json_schema)
+        self.assertIn([0], config.stop_words_list)
+
+    def test_disabled_processor_keeps_explicit_response_format(self):
+        self.endpoint.generate_env_config.enable_think_processor = False
+        schema = {"type": "object", "properties": {"answer": {"type": "integer"}}}
+        config = self.endpoint._extract_generation_config(
+            request(
+                reasoning_effort="low",
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "answer", "schema": schema},
+                },
+            )
+        )
+        self.assertTrue(config.in_think_mode)
+        self.assertEqual(config.json_schema, schema)
+        self.assertIsNone(config.structural_tag)
+
+    def test_v41_explicit_final_schema_still_requires_complete_reasoning(self):
+        self.renderer.generate_env_config.think_end_tag = "</think>"
+        schema = {"type": "object", "properties": {"answer": {"type": "integer"}}}
+        req = request(
+            reasoning_effort="low",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": schema},
+            },
+        )
+        config = self.endpoint._extract_generation_config(req)
+        self.assertEqual(config.structural_tag["format"]["type"], "sequence")
+        tag, final = config.structural_tag["format"]["elements"]
+        self.assertNotIn("excludes", tag["content"])
+        self.assertEqual(
+            final, {"type": "json_schema", "json_schema": schema, "style": "json"}
+        )
+
+    def test_default_processor_preserves_zero_or_unlimited_budget(self):
+        self.renderer.generate_env_config.think_end_tag = "</think>"
+        disabled = self.endpoint._extract_generation_config(
+            request(thinking={"type": "enabled"}, thinking_budget=0)
+        )
+        self.assertFalse(disabled.in_think_mode)
+        self.assertIsNone(disabled.structural_tag)
+        unlimited = self.endpoint._extract_generation_config(
+            request(reasoning_effort="low", thinking_budget=-1)
+        )
+        self.assertEqual(unlimited.max_thinking_tokens, 2147483647)
+        tag = unlimited.structural_tag["format"]["elements"][0]
+        self.assertEqual(tag["content"]["max_tokens"], 2147483647)
+
+    def test_v41_custom_closing_protocols_keep_original_strict_grammar(self):
+        for token_id, text in ((128822, "</think>"), (-1, "</think>\n\n")):
+            with self.subTest(token_id=token_id, text=text):
+                self.renderer.generate_env_config.think_end_token_id = token_id
+                self.renderer.generate_env_config.think_end_tag = text
+                config = self.endpoint._extract_generation_config(
+                    request(reasoning_effort="low")
+                )
+                self.assertEqual(config.structural_tag["format"]["type"], "sequence")
+
     def test_forced_prefix_preserves_explicit_grammar(self):
         req = request(
             tools=[

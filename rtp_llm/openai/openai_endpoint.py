@@ -2,6 +2,7 @@ import asyncio
 import itertools
 import json
 import logging
+from dataclasses import replace
 from functools import partial
 from typing import Any, AsyncGenerator, List, Optional
 
@@ -210,11 +211,8 @@ class OpenaiEndpoint(object):
         if config.thinking_mode == ThinkingMode.ADAPTIVE and prompt_has_begin:
             config.thinking_mode = ThinkingMode.ENABLED
             config.in_think_mode = True
-        return ReasoningFormat(
-            tag_begin="" if prompt_has_begin else think_start_tag,
-            tag_end=base_format.tag_end,
-            suffix=base_format.suffix,
-            no_think_excludes=base_format.no_think_excludes,
+        return replace(
+            base_format, tag_begin="" if prompt_has_begin else think_start_tag
         )
 
     def _tokenize_request_stop_words(self, stop_words: List[str]) -> List[List[int]]:
