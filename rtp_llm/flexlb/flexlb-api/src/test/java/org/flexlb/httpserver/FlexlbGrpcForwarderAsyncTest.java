@@ -20,7 +20,9 @@ import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import org.flexlb.config.ConfigService;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.InternalRuntimeSettings;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -69,8 +71,10 @@ class FlexlbGrpcForwarderAsyncTest {
                             RpcFixture.start(
                                     (request, observer) -> {
                                         serverContext.set(
-                                                FlexlbTrace.spanContext(
-                                                        GrpcTraceInterceptor.getOtelContext()));
+                                                Span.fromContext(
+                                                                GrpcTraceInterceptor
+                                                                        .getOtelContext())
+                                                        .getSpanContext());
                                         response.set(observer);
                                         received.countDown();
                                     })) {
@@ -190,8 +194,8 @@ class FlexlbGrpcForwarderAsyncTest {
                                     assertFalse(Context.current().isCancelled());
                                     assertEquals(
                                             "one",
-                                            FlexlbTrace.spanContext(
-                                                            GrpcTraceInterceptor.getOtelContext())
+                                            Span.fromContext(GrpcTraceInterceptor.getOtelContext())
+                                                    .getSpanContext()
                                                     .getTraceState()
                                                     .get("vendor"));
                                     observer.onNext(
@@ -513,12 +517,18 @@ class FlexlbGrpcForwarderAsyncTest {
                             observer.onCompleted();
                         })) {
             FlexlbGrpcForwarder forwarder =
-                    forwarder(fixture.channel, mock(EngineHealthReporter.class), "10.0.0.9:7001");
+                    forwarder(
+                            fixture.channel,
+                            mock(EngineHealthReporter.class),
+                            "10.0.0.9:7001",
+                            1000L);
 
             FlexlbGrpcForwarder.CancelForwardResult result =
                     awaitCancel(
                             forwarder.forwardCompensatingCancelToMaster(
-                                    cancelRequest(107L), MASTER_HTTP_ADDRESS, 1000L));
+                                    cancelRequest(107L),
+                                    MASTER_HTTP_ADDRESS,
+                                    io.opentelemetry.context.Context.current()));
 
             assertNotNull(result.response());
             assertTrue(result.response().getFound());
@@ -535,12 +545,15 @@ class FlexlbGrpcForwarderAsyncTest {
         try (RpcFixture fixture =
                 RpcFixture.startCancel((request, observer) -> masterReceivedRequest.countDown())) {
             EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-            FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
+            FlexlbGrpcForwarder forwarder =
+                    forwarder(fixture.channel, reporter, MASTER_HTTP_ADDRESS, 100L);
 
             FlexlbGrpcForwarder.CancelForwardResult result =
                     awaitCancel(
                             forwarder.forwardCompensatingCancelToMaster(
-                                    cancelRequest(108L), MASTER_HTTP_ADDRESS, 100L));
+                                    cancelRequest(108L),
+                                    MASTER_HTTP_ADDRESS,
+                                    io.opentelemetry.context.Context.current()));
 
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertEquals("DEADLINE_EXCEEDED", result.failure());
@@ -569,11 +582,28 @@ class FlexlbGrpcForwarderAsyncTest {
     private static FlexlbGrpcForwarder forwarder(
             ManagedChannel channel, EngineHealthReporter reporter, String currentMaster)
             throws Exception {
-        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+        return forwarder(
+                channel,
+                reporter,
+                currentMaster,
+                new InternalRuntimeSettings().getMasterForwardRpcTimeoutMs());
+    }
+
+    private static FlexlbGrpcForwarder forwarder(
+            ManagedChannel channel,
+            EngineHealthReporter reporter,
+            String currentMaster,
+            long timeoutMs)
+            throws Exception {
+        MasterStatusService consistency = mock(MasterStatusService.class);
         when(consistency.getMasterHostIpPort()).thenReturn(currentMaster);
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(new org.flexlb.config.FlexlbConfig());
+        FlexlbConfig loadBalanceConfig = mock(FlexlbConfig.class);
+        InternalRuntimeSettings runtime = mock(InternalRuntimeSettings.class);
+        when(runtime.getMasterForwardRpcTimeoutMs()).thenReturn(timeoutMs);
+        when(loadBalanceConfig.getInternalRuntime()).thenReturn(runtime);
+        when(config.loadBalanceConfig()).thenReturn(loadBalanceConfig);
         FlexlbGrpcForwarder forwarder =
                 new FlexlbGrpcForwarder(
                         consistency,
@@ -621,10 +651,15 @@ class FlexlbGrpcForwarderAsyncTest {
     private static final class RpcFixture implements AutoCloseable {
         private final Server server;
         private final ManagedChannel channel;
+        private final io.netty.channel.nio.NioEventLoopGroup transport;
 
-        private RpcFixture(Server server, ManagedChannel channel) {
+        private RpcFixture(
+                Server server,
+                ManagedChannel channel,
+                io.netty.channel.nio.NioEventLoopGroup transport) {
             this.server = server;
             this.channel = channel;
+            this.transport = transport;
         }
 
         static RpcFixture start(ScheduleHandler handler) throws Exception {
@@ -655,8 +690,12 @@ class FlexlbGrpcForwarderAsyncTest {
 
         private static RpcFixture startService(FlexlbServiceGrpc.FlexlbServiceImplBase service)
                 throws Exception {
+            var transport = new io.netty.channel.nio.NioEventLoopGroup(1);
             Server server =
-                    NettyServerBuilder.forPort(0)
+                    NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0))
+                            .channelType(io.netty.channel.socket.nio.NioServerSocketChannel.class)
+                            .bossEventLoopGroup(transport)
+                            .workerEventLoopGroup(transport)
                             .directExecutor()
                             .intercept(new GrpcTraceInterceptor())
                             .addService(service)
@@ -664,10 +703,19 @@ class FlexlbGrpcForwarderAsyncTest {
                             .start();
             ManagedChannel channel =
                     NettyChannelBuilder.forAddress("127.0.0.1", server.getPort())
+                            .channelType(io.netty.channel.socket.nio.NioSocketChannel.class)
+                            .eventLoopGroup(transport)
                             .directExecutor()
                             .usePlaintext()
                             .build();
-            return new RpcFixture(server, channel);
+            var fixture = new RpcFixture(server, channel, transport);
+            try {
+                GrpcReceivingGuardRepro.awaitReady(channel);
+                return fixture;
+            } catch (Exception | Error failure) {
+                fixture.close();
+                throw failure;
+            }
         }
 
         @Override
@@ -676,6 +724,7 @@ class FlexlbGrpcForwarderAsyncTest {
             channel.awaitTermination(5, TimeUnit.SECONDS);
             server.shutdownNow();
             server.awaitTermination(5, TimeUnit.SECONDS);
+            transport.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
         }
     }
 }

@@ -1,13 +1,67 @@
 package org.flexlb.cache.core;
 
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Array;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class RecentCacheKeyWindowTest {
+
+    @Test
+    void disabledWindowAllocatesNoPoolAndIgnoresRecords() throws Exception {
+        var config = new FlexlbConfig();
+        config.getObservability().getCacheHit().getRecentKeyWindow().setWriteEnabled(false);
+        var service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        var window = new RecentCacheKeyWindow(service);
+
+        for (var field : RecentCacheKeyWindow.class.getDeclaredFields()) {
+            if (field.getType().isArray()) {
+                field.setAccessible(true);
+                assertEquals(0, Array.getLength(field.get(window)), field.getName());
+            }
+        }
+        List<Long> keys = mock();
+        var snapshot = window.record(keys);
+        assertEquals(RecentCacheKeyWindow.DEFAULT_TIME_WINDOW_MS, snapshot.getTimeWindowMs());
+        assertEquals(0L, snapshot.getRequestOccurrences());
+        assertEquals(0L, snapshot.getRequestHitOccurrences());
+        assertEquals(0L, window.record(List.of(11L)).getRequestOccurrences());
+        assertEquals(0L, window.record(List.of(11L)).getRequestHitOccurrences());
+        verifyNoInteractions(keys);
+    }
+
+    @Test
+    void enabledWindowRetainsConfiguredHistoryWhenMetricsAreDisabled() {
+        var config = new FlexlbConfig();
+        var cacheHit = config.getObservability().getCacheHit();
+        cacheHit.setMetricsEnabled(false);
+        cacheHit.getRecentKeyWindow().setDurationMs(60_000L);
+        cacheHit.getRecentKeyWindow().setMaxKeyOccurrences(3L);
+        var service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        var window = new RecentCacheKeyWindow(service);
+
+        assertEquals(0L, window.record(List.of(11L, 22L)).getRequestHitOccurrences());
+        var next = window.record(List.of(22L, 33L));
+        assertEquals(60_000L, next.getTimeWindowMs());
+        assertEquals(2L, next.getRequestOccurrences());
+        assertEquals(1L, next.getRequestHitOccurrences());
+        assertEquals(0L, window.record(List.of(11L)).getRequestHitOccurrences());
+    }
 
     @Test
     void should_count_request_hits_against_prior_pool() {
@@ -77,5 +131,97 @@ class RecentCacheKeyWindowTest {
 
         assertEquals(2L, snapshot.getRequestOccurrences());
         assertEquals(0L, snapshot.getRequestHitOccurrences());
+    }
+
+    @Test
+    void should_share_history_across_requests() {
+        AtomicLong now = new AtomicLong(0L);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 320L, now::get);
+
+        RecentCacheKeyWindow.Snapshot first = window.record(List.of(11L, 22L, 33L));
+        assertEquals(0L, first.getRequestHitOccurrences());
+
+        now.set(10L);
+        RecentCacheKeyWindow.Snapshot second = window.record(List.of(11L, 22L, 44L));
+        assertEquals(3L, second.getRequestOccurrences());
+        assertEquals(2L, second.getRequestHitOccurrences());
+    }
+
+    @Test
+    void should_count_all_request_occurrences() {
+        AtomicLong now = new AtomicLong(0L);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 40L, now::get);
+
+        window.record(List.of(1L, 2L, 3L, 4L, 5L));
+        now.set(10L);
+        RecentCacheKeyWindow.Snapshot snapshot = window.record(List.of(1L, 2L, 3L, 4L, 5L, 6L));
+
+        assertEquals(6L, snapshot.getRequestOccurrences());
+        assertEquals(5L, snapshot.getRequestHitOccurrences());
+    }
+
+    @Test
+    void should_expire_shared_history_before_matching() {
+        AtomicLong now = new AtomicLong(0L);
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 40L, now::get);
+
+        window.record(List.of(11L));
+        now.set(999L);
+        assertEquals(1L, window.record(List.of(11L)).getRequestHitOccurrences());
+        now.set(1999L);
+        assertEquals(0L, window.record(List.of(11L)).getRequestHitOccurrences());
+    }
+
+    @Test
+    void should_apply_capacity_to_the_global_history() {
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 4L, () -> 0L);
+
+        window.record(List.of(11L, 22L));
+        window.record(List.of(33L, 44L));
+        assertEquals(1L, window.record(List.of(33L)).getRequestHitOccurrences());
+        // The oldest whole request was evicted to retain the preceding record.
+        assertEquals(2L, window.record(List.of(11L, 22L, 33L, 44L)).getRequestHitOccurrences());
+    }
+
+    @Test
+    void should_not_count_duplicate_keys_as_hits_within_the_same_request() {
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, 40L, () -> 0L);
+
+        assertEquals(0L, window.record(List.of(11L, 11L)).getRequestHitOccurrences());
+        assertEquals(2L, window.record(List.of(11L, 11L)).getRequestHitOccurrences());
+    }
+
+    @Test
+    void should_atomically_match_and_retain_concurrent_requests() throws Exception {
+        int requestCount = 32;
+        RecentCacheKeyWindow window = new RecentCacheKeyWindow(1000L, requestCount * 3L, () -> 0L);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<RecentCacheKeyWindow.Snapshot>> results = new ArrayList<>();
+        var executor = Executors.newFixedThreadPool(8);
+        try {
+            for (long requestId = 0; requestId < requestCount; requestId++) {
+                results.add(
+                        executor.submit(
+                                () -> {
+                                    start.await();
+                                    return window.record(List.of(11L, 22L, 11L));
+                                }));
+            }
+            start.countDown();
+            int coldRequests = 0;
+            for (Future<RecentCacheKeyWindow.Snapshot> result : results) {
+                RecentCacheKeyWindow.Snapshot snapshot = result.get(5, TimeUnit.SECONDS);
+                assertEquals(3L, snapshot.getRequestOccurrences());
+                if (snapshot.getRequestHitOccurrences() == 0L) {
+                    coldRequests++;
+                } else {
+                    assertEquals(3L, snapshot.getRequestHitOccurrences());
+                }
+            }
+            assertEquals(1, coldRequests);
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
     }
 }

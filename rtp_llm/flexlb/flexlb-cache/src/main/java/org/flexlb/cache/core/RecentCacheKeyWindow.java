@@ -1,8 +1,11 @@
 package org.flexlb.cache.core;
 
+import com.google.common.math.IntMath;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.function.LongSupplier;
@@ -11,6 +14,7 @@ import java.util.function.LongSupplier;
  * Fixed-size recent cache-key pool for request-level cache hit metrics.
  */
 @Slf4j
+@Component
 public class RecentCacheKeyWindow {
 
     public static final long DEFAULT_TIME_WINDOW_MS = 30L * 60L * 1000L;
@@ -40,12 +44,33 @@ public class RecentCacheKeyWindow {
     private int keySize;
     private int uniqueSize;
 
+    @Autowired
+    public RecentCacheKeyWindow(ConfigService configService) {
+        this(
+                resolveTimeWindowMs(configService),
+                resolveMaxCacheKeys(configService),
+                configService == null
+                        || configService.loadBalanceConfig() == null
+                        || configService
+                                .loadBalanceConfig()
+                                .getObservability()
+                                .getCacheHit()
+                                .getRecentKeyWindow()
+                                .isWriteEnabled(),
+                System::currentTimeMillis);
+    }
+
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
+        this(timeWindowMs, maxCacheKeys, true, nowSupplier);
+    }
+
+    private RecentCacheKeyWindow(
+            long timeWindowMs, long maxCacheKeys, boolean writeEnabled, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
-        this.maxCacheKeys = normalizeCapacity(maxCacheKeys);
+        this.maxCacheKeys = writeEnabled ? normalizeCapacity(maxCacheKeys) : 0;
         this.nowSupplier = nowSupplier;
 
-        int hashTableCapacity = hashTableCapacityFor(this.maxCacheKeys);
+        int hashTableCapacity = writeEnabled ? hashTableCapacityFor(this.maxCacheKeys) : 0;
         this.tableMask = hashTableCapacity - 1;
         this.cacheKeyRing = new long[this.maxCacheKeys];
         this.entryTimestampMs = new long[this.maxCacheKeys];
@@ -56,7 +81,8 @@ public class RecentCacheKeyWindow {
         this.tableStates = new byte[hashTableCapacity];
 
         log.info(
-                "Recent cache-key pool config: timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
+                "Recent cache-key pool config: writeEnabled={}, timeWindowMs={}, maxCacheKeys={}, hashTableCapacity={}",
+                writeEnabled,
                 this.timeWindowMs,
                 this.maxCacheKeys,
                 hashTableCapacity);
@@ -67,6 +93,9 @@ public class RecentCacheKeyWindow {
     }
 
     Snapshot record(List<Long> cacheKeys, long nowMs) {
+        if (maxCacheKeys == 0) {
+            return new Snapshot(timeWindowMs, 0L, 0L);
+        }
         long requestOccurrences;
         long requestHitOccurrences;
         synchronized (this) {
@@ -158,7 +187,7 @@ public class RecentCacheKeyWindow {
     }
 
     private void addEntry(long timestampMs, int start, int length) {
-        int tail = ringIndex(entryHead + entrySize);
+        int tail = Math.floorMod(entryHead + entrySize, maxCacheKeys);
         entryTimestampMs[tail] = timestampMs;
         entryStart[tail] = start;
         entryLength[tail] = length;
@@ -167,7 +196,7 @@ public class RecentCacheKeyWindow {
 
     private void appendKey(long cacheKey) {
         cacheKeyRing[keyTail] = cacheKey;
-        keyTail = ringIndex(keyTail + 1);
+        keyTail = Math.floorMod(keyTail + 1, maxCacheKeys);
         keySize++;
     }
 
@@ -178,10 +207,10 @@ public class RecentCacheKeyWindow {
         int start = entryStart[entryHead];
         int length = entryLength[entryHead];
         for (int i = 0; i < length; i++) {
-            decrementCount(cacheKeyRing[ringIndex(start + i)]);
+            decrementCount(cacheKeyRing[Math.floorMod(start + i, maxCacheKeys)]);
         }
         keySize -= length;
-        entryHead = ringIndex(entryHead + 1);
+        entryHead = Math.floorMod(entryHead + 1, maxCacheKeys);
         entrySize--;
         return true;
     }
@@ -326,16 +355,7 @@ public class RecentCacheKeyWindow {
     private static int hashTableCapacityFor(int maxCacheKeys) {
         long needed =
                 Math.max(MIN_HASH_TABLE_SIZE, (long) Math.ceil(maxCacheKeys / HASH_LOAD_FACTOR));
-        int capacity = MIN_HASH_TABLE_SIZE;
-        while (capacity < needed && capacity < (1 << 30)) {
-            capacity <<= 1;
-        }
-        return capacity;
-    }
-
-    private int ringIndex(int index) {
-        int result = index % maxCacheKeys;
-        return result >= 0 ? result : result + maxCacheKeys;
+        return IntMath.ceilingPowerOfTwo(Math.clamp(needed, MIN_HASH_TABLE_SIZE, 1 << 30));
     }
 
     private static int hashIndex(long value, int mask) {

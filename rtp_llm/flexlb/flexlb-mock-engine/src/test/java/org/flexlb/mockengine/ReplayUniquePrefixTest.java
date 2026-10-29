@@ -26,7 +26,8 @@ class ReplayUniquePrefixTest {
     @TempDir Path tempDir;
 
     private static JavaLoadClient.TraceRecord rec(List<Long> blockKeys) {
-        return new JavaLoadClient.TraceRecord(1L, "rid-0", "trace-0", 0L, 128, 16, blockKeys, null);
+        return new JavaLoadClient.TraceRecord(
+                1L, "rid-0", "trace-0", 0L, 128, 16, blockKeys, null, 0);
     }
 
     private JavaLoadClient client(boolean replayUniquePrefix) {
@@ -67,7 +68,9 @@ class ReplayUniquePrefixTest {
                         0,
                         "replay",
                         0.0,
-                        replayUniquePrefix);
+                        0.0,
+                        replayUniquePrefix,
+                        List.of());
         return new JavaLoadClient(config);
     }
 
@@ -170,7 +173,14 @@ class ReplayUniquePrefixTest {
                         "",
                         false,
                         "",
-                        true);
+                        true,
+                        0,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
         JavaLoadClient.TraceRecord sent =
                 new JavaLoadClient(config).makeLoopRequest(rec(List.of(7L)), 1, 0);
         assertNotEquals(

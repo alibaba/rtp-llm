@@ -56,6 +56,11 @@ public class EngineStatusConverter {
      * Convert CacheStatusPB to CacheStatus
      */
     public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
+        return convertToCacheStatus(cacheStatusPB, null);
+    }
+
+    public static CacheStatus convertToCacheStatus(
+            EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> retainedKeys) {
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
         cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
@@ -65,9 +70,10 @@ public class EngineStatusConverter {
         Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
         // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
         // the whole WorkerStatusPB message graph reachable until the next sync.
-        Set<Long> cachedKeysSet = new HashSet<>(cacheKeysMap.keySet());
+        Set<Long> cachedKeysSet =
+                retainedKeys != null ? retainedKeys : new HashSet<>(cacheKeysMap.keySet());
         cacheStatus.setCachedKeys(cachedKeysSet);
-        cacheStatus.setCacheKeySize(cacheKeysMap.size());
+        cacheStatus.setCacheKeySize(cachedKeysSet.size());
         return cacheStatus;
     }
 

@@ -1,6 +1,6 @@
 package org.flexlb.service.grace;
 
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -28,7 +29,7 @@ import static org.mockito.Mockito.when;
 class ApplicationLifecycleTest {
     @Test
     void contextCloseDrainsTransportBeforeDestroyingServingResources() throws Exception {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         var draining = new CountDownLatch(1);
         var complete = new CountDownLatch(1);
@@ -64,12 +65,12 @@ class ApplicationLifecycleTest {
             closing.get(3, TimeUnit.SECONDS);
         }
         assertTrue(destroyed.get());
-        assertTrue(lifecycle.shutdownCompletedSuccessfully());
+        verify(grpc).drain();
     }
 
     @Test
     void childContextCloseDoesNotStopTheServingContext() {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         try (var context = new AnnotationConfigApplicationContext();
                 var child = new AnnotationConfigApplicationContext()) {
@@ -92,8 +93,7 @@ class ApplicationLifecycleTest {
     @Test
     void springCanWireProductionConstructor() {
         try (var context = new AnnotationConfigApplicationContext()) {
-            context.registerBean(
-                    LBStatusConsistencyService.class, () -> mock(LBStatusConsistencyService.class));
+            context.registerBean(MasterStatusService.class, () -> mock(MasterStatusService.class));
             context.registerBean(FlexlbGrpcServer.class, () -> mock(FlexlbGrpcServer.class));
             context.registerBean(
                     GracefulLifecycleReporter.class, () -> mock(GracefulLifecycleReporter.class));
@@ -105,7 +105,7 @@ class ApplicationLifecycleTest {
 
     @Test
     void normalServiceDoesNotDrainAndRepeatedOfflineIsIdempotent() {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         var reporter = mock(GracefulLifecycleReporter.class);
         var environment = mock(Environment.class);
@@ -119,6 +119,10 @@ class ApplicationLifecycleTest {
         assertFalse(lifecycle.isHealthy());
         verify(consistency).offline();
         verify(grpc).drain();
-        verify(reporter).reportShutdownComplete(anyLong());
+        verify(reporter)
+                .reportDuration(
+                        org.mockito.ArgumentMatchers.eq(
+                                GracefulLifecycleReporter.Event.SHUTDOWN_COMPLETE),
+                        anyLong());
     }
 }

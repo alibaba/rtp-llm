@@ -6,6 +6,9 @@ import org.flexlb.enums.FlexPriorityType;
 /**
  * FlexMonitor - Unified monitoring interface
  *
+ * <p>Operations are best-effort: backend failures must not escape to business callers.
+ * Use {@link SafeFlexMonitor#wrap(FlexMonitor)} for external implementations.
+ *
  * @author saichen.sm
  */
 public interface FlexMonitor extends AutoCloseable {
@@ -62,6 +65,14 @@ public interface FlexMonitor extends AutoCloseable {
      */
     default void prepare(String metricName, FlexMetricTags metricsTags) {
         // No-op by default.
+    }
+
+    /**
+     * Withdraw one gauge source after its owner stops reporting. A later report registers it anew.
+     * Backends without source removal at least clear its contribution.
+     */
+    default void removeGauge(String metricName, FlexMetricTags metricsTags) {
+        report(metricName, metricsTags, 0.0);
     }
 
     @Override

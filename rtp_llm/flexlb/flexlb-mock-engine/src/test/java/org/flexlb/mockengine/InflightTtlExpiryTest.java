@@ -65,7 +65,7 @@ class InflightTtlExpiryTest {
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             service.checkLeakDrain(60_000_000_000L);
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "leak should NOT be detected during grace window on port "
                             + service.getGrpcPort());
         }
@@ -73,12 +73,16 @@ class InflightTtlExpiryTest {
         // ── Phase 3: Simulate TTL expiry (0 grace) — leak detected on prefill ──
         prefill.checkLeakDrain(0);
         assertTrue(
-                prefill.isLeakDetected(),
+                MockEngineTestSupport.isLeakDetected(prefill),
                 "leak should be detected when TTL expires and inflight > 0 on prefill");
 
         // Decode engines should NOT have leak (they may not have started decode yet)
-        assertFalse(decode0.isLeakDetected(), "decode engine 0 should not have leak detected");
-        assertFalse(decode1.isLeakDetected(), "decode engine 1 should not have leak detected");
+        assertFalse(
+                MockEngineTestSupport.isLeakDetected(decode0),
+                "decode engine 0 should not have leak detected");
+        assertFalse(
+                MockEngineTestSupport.isLeakDetected(decode1),
+                "decode engine 1 should not have leak detected");
 
         // ── Phase 4: Wait for TTL cleanup (scheduled completions fire, inflight → 0) ──
         cluster.awaitAllInflightZero(5_000);
@@ -86,9 +90,11 @@ class InflightTtlExpiryTest {
 
         // ── Phase 5: Decode engines remain clean — TTL cleanup is not a leak ──
         assertFalse(
-                decode0.isLeakDetected(), "decode engine 0 should not have leak after TTL cleanup");
+                MockEngineTestSupport.isLeakDetected(decode0),
+                "decode engine 0 should not have leak after TTL cleanup");
         assertFalse(
-                decode1.isLeakDetected(), "decode engine 1 should not have leak after TTL cleanup");
+                MockEngineTestSupport.isLeakDetected(decode1),
+                "decode engine 1 should not have leak after TTL cleanup");
 
         // ── Phase 6: Inject noRespond on decode engine 0 via HTTP /inject ──
         MockEngineTestSupport.httpPost(
@@ -110,9 +116,11 @@ class InflightTtlExpiryTest {
         // Decode engine 0 with noRespond should still NOT have a leak
         // (scheduled completions fire regardless of noRespond)
         assertFalse(
-                decode0.isLeakDetected(),
+                MockEngineTestSupport.isLeakDetected(decode0),
                 "decode engine 0 should not have leak despite noRespond injection");
-        assertFalse(decode1.isLeakDetected(), "decode engine 1 should not have leak");
+        assertFalse(
+                MockEngineTestSupport.isLeakDetected(decode1),
+                "decode engine 1 should not have leak");
 
         // ── Phase 8: Clear injection via HTTP /clear_inject ──
         MockEngineTestSupport.httpPost(
@@ -128,9 +136,11 @@ class InflightTtlExpiryTest {
 
         // Decode engines should still have no leak after recovery
         assertFalse(
-                decode0.isLeakDetected(), "decode engine 0 should not have leak after recovery");
+                MockEngineTestSupport.isLeakDetected(decode0),
+                "decode engine 0 should not have leak after recovery");
         assertFalse(
-                decode1.isLeakDetected(), "decode engine 1 should not have leak after recovery");
+                MockEngineTestSupport.isLeakDetected(decode1),
+                "decode engine 1 should not have leak after recovery");
 
         // ── Phase 10: HTTP snapshot verification ──
         JsonNode snapshot = cluster.snapshot();

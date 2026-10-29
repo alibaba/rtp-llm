@@ -10,15 +10,15 @@ import io.grpc.ServerInterceptors;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.config.ConfigService;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleResponsePB;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RouteService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -54,19 +54,21 @@ class FlexlbGrpcDrainTest {
                 {"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":100}}
                 """));
-        var routes = mock(RouteService.class);
+        var routes = mock(org.flexlb.balance.scheduler.RequestScheduler.class);
         var success = new Response();
         success.setSuccess(true);
         success.setCode(200);
-        when(routes.route(any())).thenReturn(CompletableFuture.completedFuture(success));
+        when(routes.submit(any())).thenReturn(CompletableFuture.completedFuture(success));
         var service =
-                new FlexlbServiceImpl(
+                FlexlbServiceTestSupport.create(
                         routes,
-                        mock(LBStatusConsistencyService.class),
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                mock(AbstractRequestScheduler.class)),
+                        mock(MasterStatusService.class),
                         mock(EngineHealthReporter.class),
                         mock(FlexlbGrpcForwarder.class),
                         config,
-                        mock(BatchSchedulerReporter.class),
+                        mock(DeliveryMetricsReporter.class),
                         mock(ServerScheduleLatencyRecorder.class),
                         mock(RequestSchedulerReporter.class));
         ServerInterceptor pauseBeforeSchedule =
@@ -94,7 +96,7 @@ class FlexlbGrpcDrainTest {
                     }
                 };
         var server =
-                NettyServerBuilder.forPort(0)
+                NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0))
                         .addService(
                                 ServerInterceptors.intercept(service, pauseBeforeSchedule, timing))
                         .build()
@@ -125,7 +127,7 @@ class FlexlbGrpcDrainTest {
             assertTrue(drainer.isAlive());
             resume.countDown();
             assertTrue(pending.get(3, TimeUnit.SECONDS).getSuccess());
-            verify(routes, times(1)).route(any());
+            verify(routes, times(1)).submit(any());
             drainer.join(3000);
             assertFalse(drainer.isAlive());
         } finally {
@@ -217,7 +219,7 @@ class FlexlbGrpcDrainTest {
                     new FlexlbGrpcServer(
                             null, configService, new MockEnvironment(), null, null, timing, null);
             server =
-                    NettyServerBuilder.forPort(0)
+                    NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0))
                             .addService(
                                     ServerInterceptors.intercept(
                                             new FlexlbServiceGrpc.FlexlbServiceImplBase() {

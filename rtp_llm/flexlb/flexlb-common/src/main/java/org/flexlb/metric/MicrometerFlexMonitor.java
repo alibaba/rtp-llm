@@ -1,6 +1,5 @@
 package org.flexlb.metric;
 
-import com.google.common.util.concurrent.AtomicDouble;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -10,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 
+import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -25,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  * <p>Metric type mapping:
  * <ul>
  *   <li>{@link FlexMetricType#QPS} / {@link FlexMetricType#COUNTER} → micrometer Counter (increment)</li>
- *   <li>{@link FlexMetricType#GAUGE} → micrometer Gauge (absolute value via AtomicDouble)</li>
+ *   <li>{@link FlexMetricType#GAUGE} → micrometer Gauge (sum of latest source values)</li>
  *   <li>{@link FlexMetricType#TIMER} → micrometer Timer (duration distribution with p50/p90/p95/p99)</li>
  *   <li>Unknown types default to Gauge</li>
  * </ul>
@@ -51,14 +52,20 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public static void setAllowedMetrics(Set<String> metrics) {
         ALLOWED_METRICS = metrics;
-        log.info(
-                "MicrometerFlexMonitor allowlist set: {} metrics",
-                metrics == null ? "unlimited" : metrics.size());
+        try {
+            log.info(
+                    "MicrometerFlexMonitor allowlist set: {} metrics",
+                    metrics == null ? "unlimited" : metrics.size());
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure("allowlist", failure);
+        }
     }
 
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, GaugeEntry> gaugeCache = new ConcurrentHashMap<>();
+    // This monitor serializes only source registration/removal, never cached reports or scrapes.
+    private final Map<Gauge, GaugeSources> gaugeSources = new IdentityHashMap<>();
     private final ConcurrentHashMap<MetricKey, Counter> counterCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<MetricKey, Timer> timerCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<FlexMetricTags, Tags> tagsCache = new ConcurrentHashMap<>();
@@ -70,18 +77,19 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public MicrometerFlexMonitor(MeterRegistry meterRegistry) {
         this.meterRegistry = meterRegistry;
-        log.debug(
-                "MicrometerFlexMonitor initialized with MeterRegistry: {}",
-                meterRegistry.getClass().getSimpleName());
     }
 
     @Override
     public void register(String metricName, FlexMetricType metricType) {
-        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
-            return;
+        try {
+            Set<String> allowedMetrics = ALLOWED_METRICS;
+            if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
+                return;
+            }
+            metricTypes.put(metricName, metricType);
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
         }
-        metricTypes.put(metricName, metricType);
-        log.debug("Registered metric: {} as type {}", metricName, metricType);
     }
 
     @Override
@@ -102,14 +110,13 @@ public class MicrometerFlexMonitor implements FlexMonitor {
 
     @Override
     public void report(String metricName, FlexMetricTags metricsTags, double value) {
-        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
-            return;
-        }
-        String prefixedName = METRIC_PREFIX + metricName;
-        FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
-        MetricKey key = new MetricKey(prefixedName, metricsTags);
-
         try {
+            Set<String> allowedMetrics = ALLOWED_METRICS;
+            if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
+                return;
+            }
+            FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
+            MetricKey key = new MetricKey(metricName, metricsTags);
             switch (metricType) {
                 case QPS:
                 case COUNTER:
@@ -126,23 +133,23 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     break;
                 case GAUGE:
                 default:
-                    reportGauge(key, value);
+                    gaugeEntry(key).value = value;
                     break;
             }
-        } catch (Exception e) {
-            log.debug("Failed to report metric {}: {}", metricName, e.getMessage());
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
         }
     }
 
     @Override
     public void prepare(String metricName, FlexMetricTags metricsTags) {
-        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
-            return;
-        }
-        String prefixedName = METRIC_PREFIX + metricName;
-        FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
-        MetricKey key = new MetricKey(prefixedName, metricsTags);
         try {
+            Set<String> allowedMetrics = ALLOWED_METRICS;
+            if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
+                return;
+            }
+            FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
+            MetricKey key = new MetricKey(metricName, metricsTags);
             switch (metricType) {
                 case QPS:
                 case COUNTER:
@@ -156,8 +163,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     gaugeEntry(key);
                     break;
             }
-        } catch (Exception e) {
-            log.debug("Failed to prepare metric {}: {}", metricName, e.getMessage());
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
         }
     }
 
@@ -171,7 +178,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return counterCache.computeIfAbsent(
                 key,
                 ignored ->
-                        Counter.builder(key.name())
+                        Counter.builder(METRIC_PREFIX + key.name())
                                 .tags(resolveTags(key.metricsTags()))
                                 .register(meterRegistry));
     }
@@ -180,37 +187,66 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return timerCache.computeIfAbsent(
                 key,
                 ignored ->
-                        Timer.builder(key.name())
+                        Timer.builder(METRIC_PREFIX + key.name())
                                 .tags(resolveTags(key.metricsTags()))
                                 .publishPercentileHistogram(true)
                                 .publishPercentiles(0.5, 0.9, 0.95, 0.99)
                                 .register(meterRegistry));
     }
 
-    /**
-     * Report a gauge value. Uses an AtomicDouble per metric-name+tags combination
-     * as the gauge reference object, so each unique tag set gets its own gauge.
-     *
-     * @param value absolute gauge value
-     */
-    private void reportGauge(MetricKey key, double value) {
-        GaugeEntry entry = gaugeEntry(key);
-        if (entry != null) {
-            entry.value().set(value);
+    private GaugeEntry gaugeEntry(MetricKey key) {
+        GaugeEntry cached = gaugeCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (gaugeSources) {
+            cached = gaugeCache.get(key);
+            if (cached != null) {
+                return cached;
+            }
+            var created = new GaugeSources();
+            Gauge gauge =
+                    Gauge.builder(METRIC_PREFIX + key.name(), created, GaugeSources::read)
+                            .tags(resolveTags(key.metricsTags()))
+                            .register(meterRegistry);
+            // Registration resolves all tag filters; the canonical group owns the gauge callback.
+            GaugeSources sources = gaugeSources.get(gauge);
+            if (sources == null) {
+                sources = created;
+                sources.meter = gauge;
+                gaugeSources.put(gauge, sources);
+            }
+            var entry = new GaugeEntry(sources);
+            sources.add(entry);
+            gaugeCache.put(key, entry);
+            return entry;
         }
     }
 
-    private GaugeEntry gaugeEntry(MetricKey key) {
-        return gaugeCache.computeIfAbsent(
-                key,
-                ignored -> {
-                    AtomicDouble value = new AtomicDouble(0.0);
-                    Gauge gauge =
-                            Gauge.builder(key.name(), value, AtomicDouble::get)
-                                    .tags(resolveTags(key.metricsTags()))
-                                    .register(meterRegistry);
-                    return new GaugeEntry(value, gauge);
-                });
+    @Override
+    public void removeGauge(String metricName, FlexMetricTags metricsTags) {
+        try {
+            var key = new MetricKey(metricName, metricsTags);
+            synchronized (gaugeSources) {
+                GaugeEntry entry = gaugeCache.remove(key);
+                if (entry == null) {
+                    return;
+                }
+                GaugeSources sources = entry.sources;
+                sources.remove(entry);
+                if (key.metricsTags() != null) {
+                    tagsCache.remove(key.metricsTags());
+                }
+                if (sources.entries == null) {
+                    // Retain an empty group if backend removal fails, so a later report can reuse
+                    // it.
+                    meterRegistry.remove(sources.meter);
+                    gaugeSources.remove(sources.meter);
+                }
+            }
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
+        }
     }
 
     /**
@@ -230,14 +266,71 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         return tags;
     }
 
-    private record MetricKey(String name, FlexMetricTags metricsTags) {}
+    private record MetricKey(String name, FlexMetricTags metricsTags) {
+        private MetricKey {
+            if (metricsTags != null && metricsTags.isEmpty()) {
+                metricsTags = null;
+            }
+        }
+    }
 
-    private record GaugeEntry(AtomicDouble value, Gauge gauge) {}
+    private static final class GaugeEntry {
+        private volatile double value;
+        private final GaugeSources sources;
+
+        private GaugeEntry(GaugeSources sources) {
+            this.sources = sources;
+        }
+    }
+
+    private static final class GaugeSources {
+        private Gauge meter;
+        // Null, one entry, or an immutable array of two or more entries.
+        private volatile Object entries;
+
+        // Writers hold gaugeSources. Readers capture one published membership value.
+        private void add(GaugeEntry entry) {
+            if (entries instanceof GaugeEntry[] current) {
+                var next = Arrays.copyOf(current, current.length + 1);
+                next[next.length - 1] = entry;
+                entries = next;
+            } else {
+                entries = entries == null ? entry : new GaugeEntry[] {(GaugeEntry) entries, entry};
+            }
+        }
+
+        private void remove(GaugeEntry entry) {
+            if (entries == entry) {
+                entries = null;
+                return;
+            }
+            var current = (GaugeEntry[]) entries;
+            for (int i = 0; i < current.length; i++) {
+                if (current[i] == entry) {
+                    var next = new GaugeEntry[current.length - 1];
+                    System.arraycopy(current, 0, next, 0, i);
+                    System.arraycopy(current, i + 1, next, i, next.length - i);
+                    entries = next.length == 1 ? next[0] : next;
+                    return;
+                }
+            }
+        }
+
+        private double read() {
+            Object current = entries;
+            if (current instanceof GaugeEntry entry) return entry.value;
+            double total = 0.0;
+            if (current instanceof GaugeEntry[] group) {
+                for (GaugeEntry entry : group) total += entry.value;
+            }
+            return total;
+        }
+    }
 
     @Override
     public String toString() {
         return "MicrometerFlexMonitor{meterRegistry="
-                + meterRegistry.getClass().getSimpleName()
+                + (meterRegistry == null ? "disabled" : meterRegistry.getClass().getSimpleName())
                 + "}";
     }
 }

@@ -5,7 +5,7 @@ import io.grpc.Server;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.mock.TestFlexlbConfigs;
@@ -73,7 +73,7 @@ class FlexlbGrpcPayloadTest {
                         null,
                         new GrpcServerTimingInterceptor(),
                         new GrpcQosHeaderInterceptor());
-        LBStatusConsistencyService election = mock(LBStatusConsistencyService.class);
+        MasterStatusService election = mock(MasterStatusService.class);
         FlexlbGrpcForwarder forwarder =
                 new FlexlbGrpcForwarder(
                         election,

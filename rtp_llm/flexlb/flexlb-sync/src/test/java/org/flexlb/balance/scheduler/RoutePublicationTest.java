@@ -1,0 +1,411 @@
+package org.flexlb.balance.scheduler;
+
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.List;
+import java.util.OptionalLong;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
+import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isA;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.argThat;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.isA;
+import static org.mockito.Mockito.isNull;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+/** NON_BATCH contracts run through the same real Worker preparation/commit path. */
+@Timeout(15)
+class RoutePublicationTest {
+    @Test
+    void nonBatchBudgetUsesTheSumOfIndividualPredictions() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        false,
+                        config -> {
+                            config.decisionPolicy().setMaxRequests(2);
+                            config.decisionPolicy().setMaxCollectionWaitMs(60_000L);
+                            config.decisionPolicy().setMaxPredictedExecutionMs(25L);
+                        })) {
+            var first = f.item(1L, 10L);
+            var second = f.item(2L, 20L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            assertEquals(List.of(first), f.committedItems);
+            assertEquals(List.of(1L), f.claimIds());
+            assertArrayEquals(new long[] {10L}, f.committedRoutePredictions);
+            verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
+            verify(f.evaluator, never()).predictBatchMs(any());
+            verifyNoInteractions(f.grpc);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0L, 1_000L})
+    void invalidSuffixPredictionFailsThatRequestWithoutTerminatingTheValidPrefix(long budget) {
+        try (var f =
+                new LinearDeliveryFixture(
+                        false,
+                        config -> {
+                            config.decisionPolicy().setMaxRequests(2);
+                            config.decisionPolicy().setMaxCollectionWaitMs(0L);
+                            config.decisionPolicy()
+                                    .setMaxPredictedExecutionMs(budget == 0L ? null : budget);
+                        })) {
+            var first = f.item(1L, 10L);
+            var second = f.item(2L, 20L);
+            org.mockito.Mockito.doReturn(-1L).when(f.evaluator).estimateMs(20L, 0L);
+            when(f.handoff.removedFailedMember()).thenReturn(budget == 0L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            if (budget > 0L) {
+                assertEquals(List.of(first), f.queueOwnership.captureQueue(10).items());
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                        f.worker, "processQueue");
+            }
+            assertEquals(List.of(1L), f.claimIds());
+            assertEquals(java.util.Set.of(2L), f.preparationFailures.keySet());
+            verify(f.owner, times(1)).onDeliveryFact(isA(PreparationFailure.class));
+            verify(f.decode, never()).acquireDispatchPermit(eq(second.decodeReservation()), any());
+            verify(f.permits.get(1L)).release();
+        }
+    }
+
+    @Test
+    void fixedWindowGroupsRouteDecisionsWithoutCreatingAnEngineBatch() {
+        try (var f =
+                new LinearDeliveryFixture(
+                        false,
+                        config -> {
+                            config.decisionPolicy().setMaxRequests(2);
+                            config.decisionPolicy().setMaxCollectionWaitMs(60_000L);
+                            config.decisionPolicy().setMaxPredictedExecutionMs(1_000L);
+                        })) {
+            var first = f.item(1L, 10L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            assertTrue(f.claims.isEmpty(), "NON_BATCH must still honor its decision window");
+            var second = f.item(2L, 20L);
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                    f.worker, "processQueue");
+            assertEquals(List.of(first, second), f.committedItems);
+            assertEquals(List.of(1L, 2L), f.claimIds());
+            assertArrayEquals(new long[] {10L, 20L}, f.committedRoutePredictions);
+            assertEquals(10L, f.predictions.get(1L));
+            assertEquals(30L, f.predictions.get(2L));
+            verify(f.evaluator, never()).predictBatchMs(any());
+            verify(f.prefill, never())
+                    .reserveBatch(any(), anyLong(), org.mockito.ArgumentMatchers.anyInt());
+            verify(f.runtime.deliveries(), never()).tryReserveDelivery();
+            verify(f.runtime.deliveries(), never()).nextBatchId();
+            verifyNoInteractions(f.grpc);
+        }
+    }
+
+    @Test
+    void removingFailedSuffixPublishesCapacityChangeOnceAndStillDeliversPrefix() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var first = f.item(1, 10);
+            var failed = f.item(2, 20);
+            var failure = new IllegalStateException("Decode preparation failed");
+            doThrow(failure)
+                    .when(f.decode)
+                    .acquireDispatchPermit(eq(failed.decodeReservation()), any());
+            when(f.handoff.removedFailedMember()).thenReturn(true);
+            assertNull(f.process(List.of(first, failed), OptionalLong.empty()));
+            assertEquals(List.of(first), f.committedItems);
+            verify(f.owner)
+                    .onDeliveryFact(
+                            argThat(
+                                    e ->
+                                            e instanceof PreparationFailure evidence
+                                                    && evidence.route() == failed
+                                                    && evidence.detail()
+                                                            .equals(failure.getMessage())));
+            verify(f.owner)
+                    .onDeliveryFact(
+                            argThat(
+                                    e ->
+                                            e instanceof RouteDelivered delivered
+                                                    && f.duration(
+                                                                    delivered.predictedAtMs(),
+                                                                    delivered.nowMs())
+                                                            == 10L));
+            verify(f.prefill, times(1))
+                    .signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.PLACEMENT);
+            verify(f.handoff, times(1)).close();
+        }
+    }
+
+    @Test
+    void wholeGroupIsClaimedBeforeFirstPublicationAndPredictionsAccumulateInOrder() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var first = f.item(1, 10);
+            var second = f.item(2, 20);
+            var published = new CopyOnWriteArrayList<Long>();
+            doAnswer(
+                            call -> {
+                                RouteDelivered delivered = call.getArgument(0);
+                                DeliveryClaim claim = delivered.delivery();
+                                assertEquals(
+                                        List.of(1L, 2L),
+                                        f.claimIds(),
+                                        "publication must not race the next claim");
+                                assertFalse(Thread.holdsLock(claim.item().ctx()));
+                                assertFalse(f.queueLock.isHeldByCurrentThread());
+                                assertFalse(f.handoffClosed.get());
+                                published.add(claim.item().requestId());
+                                f.predictions.put(
+                                        claim.item().requestId(),
+                                        f.duration(
+                                        ((RouteDelivered) call.getArgument(0))
+                                                        .predictedAtMs(),
+                                        ((RouteDelivered) call.getArgument(0)).nowMs()));
+                                return null;
+                            })
+                    .when(f.owner)
+                    .onDeliveryFact(isA(RouteDelivered.class));
+            assertNull(f.process(List.of(first, second), OptionalLong.empty()));
+            assertEquals(List.of(1L, 2L), published);
+            assertEquals(10, f.predictions.get(1L).longValue());
+            assertEquals(30, f.predictions.get(2L).longValue());
+            assertArrayEquals(new long[] {10, 20}, f.committedRoutePredictions);
+            verify(f.permits.get(1L)).release();
+            verify(f.permits.get(2L)).release();
+            verify(f.handoff, times(1)).close();
+            verifyNoInteractions(f.grpc);
+            verify(f.runtime.deliveries(), never()).tryReserveDelivery();
+        }
+    }
+
+    @Test
+    void unavailableSuffixCommitsLargestOrderedPrefixWithoutTouchingLaterMembers() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var first = f.item(1, 10);
+            var second = f.item(2, 20);
+            var third = f.item(3, 30);
+            f.blockDecode(2);
+            f.process(List.of(first, second, third), OptionalLong.empty());
+            assertEquals(List.of(first), f.committedItems);
+            assertArrayEquals(new long[] {10}, f.committedRoutePredictions);
+            assertEquals(List.of(1L), f.claimIds());
+            verify(f.owner)
+                    .onDeliveryFact(
+                            argThat(
+                                    e ->
+                                            e instanceof RouteDelivered delivered
+                                                    && f.duration(
+                                                                    delivered.predictedAtMs(),
+                                                                    delivered.nowMs())
+                                                            == 10L));
+            verify(f.decode, never()).acquireDispatchPermit(eq(third.decodeReservation()), any());
+            verifyNoInteractions(f.grpc);
+        }
+    }
+
+    @Test
+    void unavailableHeadReturnsCapacityBoundaryWithoutPublishingAnyRoute() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var item = f.item(1, 10);
+            f.blockDecode(1);
+            var boundary = f.process(List.of(item), OptionalLong.empty());
+            assertEquals(CapacityBoundary.Status.UNAVAILABLE, boundary.status());
+            assertEquals(CapacityBoundary.Resource.DECODE_ENGINE, boundary.resource());
+            assertTrue(f.committedItems.isEmpty());
+            verify(f.owner, never()).claimDelivery(any(), any(), anyLong(), any());
+            verify(f.owner, never()).onDeliveryFact(isA(RouteDelivered.class));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    void lostClaimDoesNotContributeToLaterRoutePrediction(int lostIndex) {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var items = List.of(f.item(1, 10), f.item(2, 20), f.item(3, 30));
+            f.lostClaims.add(items.get(lostIndex).requestId());
+            var cumulative = new CopyOnWriteArrayList<Long>();
+            doAnswer(
+                            call -> {
+                                cumulative.add(
+                                        f.duration(
+                                        ((RouteDelivered) call.getArgument(0))
+                                                        .predictedAtMs(),
+                                        ((RouteDelivered) call.getArgument(0)).nowMs()));
+                                return null;
+                            })
+                    .when(f.owner)
+                    .onDeliveryFact(isA(RouteDelivered.class));
+            f.process(items, OptionalLong.empty());
+            long total = 0;
+            var expected = new java.util.ArrayList<Long>();
+            for (var item : items) {
+                if (f.lostClaims.contains(item.requestId())) {
+                    continue;
+                }
+                total += item.seqLen();
+                expected.add(total);
+            }
+            assertEquals(expected, cumulative);
+            assertEquals(2, f.claims.size());
+            verify(f.permits.get(items.get(lostIndex).requestId()), never()).dispatch();
+            verify(f.permits.get(items.get(lostIndex).requestId())).release();
+        }
+    }
+
+    @Test
+    void routePublicationFailureDoesNotSuppressLaterMembersOrKillWorker() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var published = new CopyOnWriteArrayList<Long>();
+            f.expectedShutdownFailure = new IllegalStateException("first owner failed");
+            doAnswer(
+                            call -> {
+                                RouteDelivered delivered = call.getArgument(0);
+                                DeliveryClaim claim = delivered.delivery();
+                                published.add(claim.item().requestId());
+                                if (claim.item().requestId() == 1) {
+                                    throw f.expectedShutdownFailure;
+                                }
+                                return null;
+                            })
+                    .when(f.owner)
+                    .onDeliveryFact(isA(RouteDelivered.class));
+            assertDoesNotThrow(
+                    () -> f.process(List.of(f.item(1, 10), f.item(2, 20)), OptionalLong.empty()));
+            assertEquals(List.of(1L, 2L), published);
+            verify(f.handoff).close();
+            verify(f.permits.get(1L)).release();
+            verify(f.permits.get(2L)).release();
+        }
+    }
+
+    @Test
+    void cleanupFailureStillClosesSiblingPermitAndGenerationHandoff() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var first = f.item(1, 10);
+            var second = f.item(2, 20);
+            f.expectedShutdownFailure = new IllegalStateException("first permit cleanup failed");
+            doThrow(f.expectedShutdownFailure).when(f.permits.get(1L)).release();
+            assertDoesNotThrow(() -> f.process(List.of(first, second), OptionalLong.empty()));
+            verify(f.permits.get(1L)).release();
+            verify(f.permits.get(2L)).release();
+            verify(f.handoff).close();
+            verify(f.owner, times(2)).onDeliveryFact(isA(RouteDelivered.class));
+        }
+    }
+
+    @Test
+    void zeroPredictionStillClaimsAndPublishesEveryRoute() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            f.process(List.of(f.item(1, 0), f.item(2, 0)), OptionalLong.empty());
+            assertEquals(2, f.claims.size());
+            verify(f.owner, times(2))
+                    .onDeliveryFact(
+                            argThat(
+                                    e ->
+                                            e instanceof RouteDelivered delivered
+                                                    && f.duration(
+                                                                    delivered.predictedAtMs(),
+                                                                    delivered.nowMs())
+                                                            == 0L));
+        }
+    }
+
+    @Test
+    void transferredRealPermitsAreResolvedWithoutReleasingRequestResources() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var endpoint = f.realDecode();
+            var first = f.realItem(endpoint, 1, 10);
+            var second = f.realItem(endpoint, 2, 20);
+            f.process(List.of(first, second), OptionalLong.empty());
+            var snapshot = endpoint.resourceSnapshot();
+            assertEquals(0, snapshot.activeDispatchPermits());
+            assertEquals(0, snapshot.queuedCount());
+            assertEquals(
+                    2,
+                    snapshot.requests().size(),
+                    "temporary permit close cannot release transferred requests");
+            assertEquals(2, endpoint.routingView().engineCapacityUsed());
+            assertEquals(200, endpoint.routingView().inflightHardKv());
+            assertEquals(
+                    DecodeResources.ReservationReleaseResult.RELEASED,
+                    endpoint.release(
+                                    first.decodeReservation(),
+                                    DecodeResources.ReleaseReason.NOT_SENT)
+                            .status());
+            assertEquals(1, endpoint.resourceSnapshot().requests().size());
+            assertTrue(endpoint.resourceSnapshot().requests().containsKey(2L));
+        }
+    }
+
+    @Test
+    void lostRealClaimAbandonsOnlyItsPermitAndPreservesTransferredSibling() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var endpoint = f.realDecode();
+            var first = f.realItem(endpoint, 1, 10);
+            var second = f.realItem(endpoint, 2, 20);
+            f.lostClaims.add(1L);
+            var capacitySignals = new AtomicInteger();
+            endpoint.watchEngineDispatchCapacity(capacitySignals::incrementAndGet);
+            f.process(List.of(first, second), OptionalLong.empty());
+            var snapshot = endpoint.resourceSnapshot();
+            assertEquals(0, snapshot.activeDispatchPermits());
+            assertEquals(1, snapshot.queuedCount());
+            assertEquals(2, snapshot.requests().size());
+            assertEquals(1, endpoint.routingView().engineCapacityUsed());
+            assertTrue(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, 1));
+            assertFalse(org.flexlb.balance.endpoint.EndpointTestSupport.isQueued(snapshot, 2));
+            assertEquals(List.of(2L), f.claimIds());
+            assertEquals(
+                    1,
+                    capacitySignals.get(),
+                    "only the abandoned temporary permit releases dispatch capacity");
+        }
+    }
+
+    @Test
+    void failedQueueCommitReleasesRealPreparedPermitsWithoutPublishing() {
+        try (var f = new LinearDeliveryFixture(false)) {
+            var endpoint = f.realDecode();
+            var first = f.realItem(endpoint, 1, 10);
+            var second = f.realItem(endpoint, 2, 20);
+            when(f.prefill.commitLocked(
+                            any(org.flexlb.balance.endpoint.PrefillState.CommitPlan.class)))
+                    .thenReturn(null);
+            f.process(List.of(first, second), OptionalLong.empty());
+            var snapshot = endpoint.resourceSnapshot();
+            assertEquals(0, snapshot.activeDispatchPermits());
+            assertEquals(2, snapshot.queuedCount());
+            assertEquals(0, endpoint.routingView().engineCapacityUsed());
+            assertEquals(2, snapshot.requests().size());
+            verify(f.owner, never()).claimDelivery(any(), any(), anyLong(), any());
+            verify(f.owner, never()).onDeliveryFact(isA(RouteDelivered.class));
+            verify(f.handoff, never()).close();
+        }
+    }
+}

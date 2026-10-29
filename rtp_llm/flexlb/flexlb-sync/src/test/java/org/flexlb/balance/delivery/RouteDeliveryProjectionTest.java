@@ -1,227 +1,246 @@
 package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRegistry;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
+import org.flexlb.balance.prediction.PrefillBatchFeatures;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation;
+import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
+import org.flexlb.config.DispatcherConfig;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.OptionalDouble;
-import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
 
-/**
- * Exact-value behavior contracts for the frozen
- * {@link RouteProjection.DeliveryProjection} SPI as implemented by
- * {@link RouteDeliveryStrategy} and {@link BatchDeliveryStrategy}.
- *
- * <p>Route service is a lazy cumulative prefix sum (asking for member i
- * evaluates only items 0..i). Batch service independently predicts each
- * prefix length via {@code batchDurationMs(items[0..i+1])}.
- */
-@DisplayName("Delivery projection contracts")
+/** Delivery timing contracts exercised through the complete projection entry point. */
 class RouteDeliveryProjectionTest {
 
-    private static GroupPlanner.Item item(long id, long seqLen) {
-        return new GroupPlanner.Item(id, 0, id, 1000L, 1_000_000L, seqLen, 0L);
-    }
-
-    private static GroupPlanner.Plan<GroupPlanner.Item> plan(
-            List<GroupPlanner.Item> items, OptionalDouble selectedPredictionMs) {
-        GroupPlanner.Shape shape = GroupPlanner.Shape.empty();
-        for (GroupPlanner.Item it : items) shape = shape.add(it.seqLen());
-        return new GroupPlanner.Plan<>(
-                items, shape, 1000L, 1300L, false, selectedPredictionMs, GroupPlanner.BATCH_FULL);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    @Nested
-    @DisplayName("Route projection: lazy cumulative cursor")
-    class RouteService {
-
-        private final RouteProjection.DeliveryProjection projection =
-                new RouteDeliveryStrategy(mock(RequestRegistry.class), mock(DeliveryMetrics.class))
-                        .projectionPolicy();
-
-        @Test
-        void completionOffsetIsTheCumulativePrefixSum() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            // offset(0)=100, offset(1)=100+200=300, offset(2)=300+50=350
-            assertEquals(100L, svc.completionOffsetMs(0));
-            assertEquals(300L, svc.completionOffsetMs(1));
-            assertEquals(350L, svc.completionOffsetMs(2));
-            assertEquals(350L, svc.totalDurationMs());
-        }
-
-        @Test
-        void probePrefixDoesNotEvaluateTheSuffix() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            svc.completionOffsetMs(1);
-            assertEquals(1, pred.itemCalls(1L));
-            assertEquals(1, pred.itemCalls(2L));
-            assertEquals(0, pred.itemCalls(3L), "suffix must not be predicted for a prefix query");
-        }
-
-        @Test
-        void prefixTtftSurvivesASuffixPredictionFailure() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            pred.failOn(3L);
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void eachCompletionEvaluatesOnlyItsRequiredPrefix(boolean batch) {
+        for (int index = 0; index < 3; index++) {
+            var model = new CountingEvaluator();
+            var result = project(model, batch, 0, index, 100, 200, 50);
             assertEquals(
-                    300L,
-                    svc.completionOffsetMs(1),
-                    "probe TTFT preserved even when suffix will fail");
-            assertThrows(
-                    RuntimeException.class,
-                    svc::totalDurationMs,
-                    "drain requires the failing suffix → unknown");
-        }
-
-        @Test
-        void offsetsAreMemoizedAndEvaluatedAtMostOnce() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            svc.completionOffsetMs(1);
-            svc.completionOffsetMs(0);
-            svc.totalDurationMs();
-            assertEquals(1, pred.itemCalls(1L));
-            assertEquals(1, pred.itemCalls(2L));
-        }
-
-        @Test
-        void planningDurationIsThePrefixSumThroughRequiredIndex() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupPlanning planning = projection.planning(pred);
-            // Through index 1: items[0]+items[1] = 100+200 = 300
-            assertEquals(300.0, planning.durationMs(items, 1));
-            assertEquals(0, pred.itemCalls(3L), "suffix beyond index not evaluated");
-        }
-
-        @Test
-        void memberIndexIsBoundsChecked() {
-            RouteProjection.GroupService svc =
-                    projection.service(
-                            plan(List.of(item(1L, 100L)), OptionalDouble.empty()),
-                            new CountingPredictions());
-            assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(1));
-            assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(-1));
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    @Nested
-    @DisplayName("Batch projection: per-prefix independent prediction")
-    class BatchService {
-
-        private final RouteProjection.DeliveryProjection projection =
-                new BatchDeliveryStrategy(
-                                () ->
-                                        CapacityBoundary.Attempt.rejected(
-                                                CapacityBoundary.OWNERSHIP_LOST),
-                                () -> 1L,
-                                mock(RequestRegistry.class),
-                                mock(DeliveryMetrics.class))
-                        .projectionPolicy();
-
-        @Test
-        void eachMemberGetsBatchDurationOfItsExactPrefix() {
-            // batchDurationMs returns 100*items.size() for discrimination.
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            // offset(0) = batchDurationMs([item1]) = 100*1 = 100
-            assertEquals(100L, svc.completionOffsetMs(0));
-            // offset(1) = batchDurationMs([item1,item2]) = 100*2 = 200
-            assertEquals(200L, svc.completionOffsetMs(1));
-            // offset(2) = batchDurationMs([item1,item2,item3]) = 100*3 = 300
-            assertEquals(300L, svc.completionOffsetMs(2));
-            assertEquals(300L, svc.totalDurationMs());
-        }
-
-        @Test
-        void eachPrefixIsComputedIndependentlyAndMemoized() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            svc.completionOffsetMs(0);
-            svc.completionOffsetMs(0); // repeated
-            svc.completionOffsetMs(1);
-            svc.completionOffsetMs(1); // repeated
-            // Each prefix evaluated exactly once.
-            assertEquals(2, pred.batchDurationCalls());
-        }
-
-        @Test
-        void planningDurationDelegates() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupPlanning planning = projection.planning(pred);
-            // Batch planning returns batchPlanningDurationMs = 777 always.
-            assertEquals(777.0, planning.durationMs(items, items.size() - 1));
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    private static final class CountingPredictions implements RouteProjection.Predictions {
-
-        private final Map<Long, Integer> itemCalls = new HashMap<>();
-        private Set<Long> failingIds = Set.of();
-        private int batchDurationCalls;
-
-        void failOn(long... ids) {
-            var set = new java.util.HashSet<Long>();
-            for (long id : ids) set.add(id);
-            this.failingIds = set;
-        }
-
-        int itemCalls(long id) {
-            return itemCalls.getOrDefault(id, 0);
-        }
-
-        int batchDurationCalls() {
-            return batchDurationCalls;
-        }
-
-        @Override
-        public long itemDurationMs(GroupPlanner.Item item) {
-            itemCalls.merge(item.requestId(), 1, Integer::sum);
-            if (failingIds.contains(item.requestId())) {
-                throw new RuntimeException("fail " + item.requestId());
+                    batch ? (index + 1) * 100L : new long[] {100, 300, 350}[index],
+                    result.projectedTtftMsValue());
+            if (batch) {
+                assertEquals(1, model.fullCalls);
+                assertEquals(index + 1, model.lastBatchSize);
+            } else {
+                assertEquals(index == 0 ? 1 : 2, model.calls(new long[] {100, 200, 50}[index]));
+                for (int member = index + 1; member < 3; member++) {
+                    assertEquals(0, model.calls(new long[] {100, 200, 50}[member]));
+                }
             }
-            return item.seqLen(); // deterministic: seqLen as duration
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void growingPlanningPrefixReusesOnlyEvaluatedWorkAndResetsForNextQueue(boolean batch) {
+        var model = new CountingEvaluator();
+        var first = project(model, batch, 1000, 1, 100, 200, 50);
+        assertEquals(batch ? 200 : 300, first.projectedTtftMsValue());
+        assertEquals(0, model.calls(50));
+        assertEquals(batch ? 2 : 0, model.appends);
+        assertEquals(0, model.fullCalls);
+        assertEquals(batch ? 1 : 0, model.sessions);
+
+        var next = project(model, batch, 1000, 1, 400, 500, 60);
+        assertEquals(batch ? 200 : 900, next.projectedTtftMsValue());
+        assertEquals(0, model.calls(60));
+        assertEquals(batch ? 4 : 0, model.appends);
+        assertEquals(batch ? 2 : 0, model.sessions);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void probePrefixSurvivesASuffixPredictionFailure(boolean batch) {
+        var model = new CountingEvaluator();
+        model.failingTokens = 50;
+        for (long budget : new long[] {0, 1000}) {
+            assertEquals(
+                    batch ? 200 : 300,
+                    project(model, batch, budget, 1, 100, 200, 50).projectedTtftMsValue());
+            assertEquals(0, model.calls(50));
+            assertEquals(
+                    RequestTimeEstimation.Candidate.State.UNAVAILABLE,
+                    project(model, batch, budget, 1, 50, 200, 100).state());
+            model.calls.clear();
+        }
+    }
+
+    @Test
+    void routeCompletionReusesTheAcceptedPrefixAfterAnOverBudgetAppend() {
+        var model = new CountingEvaluator();
+        var result = project(model, false, 250, 1, 100, 200, 50);
+        assertEquals(300L, result.projectedTtftMsValue());
+        assertEquals(1, model.calls(100));
+        assertEquals(2, model.calls(200), "one incoming estimate and one tentative append");
+        assertEquals(0, model.calls(50));
+    }
+
+    @Test
+    void batchCompletionUsesTheAcceptedFractionalPrefixAfterAnOverBudgetAppend() {
+        var model = new CountingEvaluator();
+        model.batchPerItem = 100.25;
+        var result = project(model, true, 250, 2, 100, 200, 50, 60);
+        assertEquals(302L, result.projectedTtftMsValue(), "ceil(200.5) + ceil(100.25)");
+        assertEquals(4, model.appends, "three tentative members then the next group head");
+        assertEquals(2, model.sessions);
+        assertEquals(0, model.fullCalls, "accepted group predictions are reused");
+    }
+
+    @Test
+    void routePlanningCacheKeepsExactLongValuesAndSaturates() {
+        var model = new CountingEvaluator();
+        long large = (1L << 53) + 3;
+        model.durations.put(100L, large);
+        model.durations.put(200L, 5L);
+        model.durations.put(50L, Long.MAX_VALUE);
+        for (long budget : new long[] {0, Long.MAX_VALUE}) {
+            assertEquals(
+                    large, project(model, false, budget, 0, 100, 200, 50).projectedTtftMsValue());
+            assertEquals(
+                    large + 5,
+                    project(model, false, budget, 1, 100, 200, 50).projectedTtftMsValue());
+            assertEquals(
+                    Long.MAX_VALUE,
+                    project(model, false, budget, 2, 100, 200, 50).projectedTtftMsValue());
+        }
+        var overshoot = new CountingEvaluator();
+        overshoot.durations.put(100L, large);
+        overshoot.durations.put(200L, 100L);
+        overshoot.durations.put(50L, 5L);
+        assertEquals(
+                large + 105,
+                project(overshoot, false, large + 4, 2, 100, 200, 50).projectedTtftMsValue(),
+                "overshoot must not round the accepted predecessor through double");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedProjectionCannotPoisonTheNextGroup(boolean batch) {
+        var model = new CountingEvaluator();
+        model.failingTokens = 100;
+        assertEquals(
+                RequestTimeEstimation.Candidate.State.UNAVAILABLE,
+                project(model, batch, 1000, 1, 100, 200).state());
+        model.failingTokens = -1;
+        assertEquals(
+                batch ? 200 : 300, project(model, batch, 1000, 1, 100, 200).projectedTtftMsValue());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nestedProjectionDuringGroupPredictionKeepsTheOuterPrefix(boolean batch) {
+        var model =
+                new CountingEvaluator() {
+                    @Override
+                    public long estimateMs(long tokens, long hit) {
+                        if (!batch && tokens == 100) {
+                            assertEquals(
+                                    800,
+                                    project(new CountingEvaluator(), false, 1000, 0, 800, 900)
+                                            .projectedTtftMsValue());
+                        }
+                        return super.estimateMs(tokens, hit);
+                    }
+
+                    @Override
+                    public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+                        var delegate = super.newBatchPrediction();
+                        return (tokens, hit) -> {
+                            if (tokens == 100) {
+                                assertEquals(
+                                        800,
+                                        project(new CountingEvaluator(), false, 1000, 0, 800, 900)
+                                                .projectedTtftMsValue());
+                            }
+                            return delegate.append(tokens, hit);
+                        };
+                    }
+                };
+        assertEquals(
+                batch ? 200 : 300,
+                project(model, batch, 1000, 1, 100, 200, 50).projectedTtftMsValue());
+        assertEquals(0, model.calls(50));
+    }
+
+    private static RequestTimeEstimation.Candidate project(
+            CountingEvaluator model, boolean batch, long budget, int probeIndex, long... tokens) {
+        var active = new ArrayList<GroupPlanner.Item>();
+        for (int i = 0; i < tokens.length; i++) {
+            if (i != probeIndex) {
+                active.add(
+                        new GroupPlanner.Item(i + 1, 0, i + 1, 1000, Long.MAX_VALUE, tokens[i], 0));
+            }
+        }
+        var queue =
+                new QueueSnapshot(
+                        1000,
+                        true,
+                        GroupPlanner.FIXED_WINDOW,
+                        Comparator.comparingLong(GroupPlanner.Item::requestId),
+                        new GroupPlanner.Constraints(64, Long.MAX_VALUE, Long.MAX_VALUE, budget, 0),
+                        active,
+                        null);
+        return RequestTimeEstimationTestSupport.project(
+                new RequestTimeEstimation.Inputs(
+                        queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0),
+                new RequestTimeEstimationTestSupport.Probe(
+                        probeIndex + 1, 0, 1000, Long.MAX_VALUE, tokens[probeIndex], 0, 0),
+                model,
+                batch ? DispatcherConfig.Type.BATCH : DispatcherConfig.Type.NON_BATCH);
+    }
+
+    private static class CountingEvaluator implements PrefillTimePredictor.Evaluator {
+        private final Map<Long, Integer> calls = new HashMap<>();
+        private final Map<Long, Long> durations = new HashMap<>();
+        private long failingTokens = -1;
+        private int fullCalls, lastBatchSize, sessions, appends;
+        private double batchPerItem = 100;
+
+        int calls(long tokens) {
+            return calls.getOrDefault(tokens, 0);
         }
 
-        @Override
-        public double batchPlanningDurationMs(List<GroupPlanner.Item> items) {
-            return 777.0;
+        public long estimateMs(long tokens, long hit) {
+            calls.merge(tokens, 1, Integer::sum);
+            validate(tokens);
+            return durations.getOrDefault(tokens, tokens);
         }
 
-        @Override
-        public long batchDurationMs(List<GroupPlanner.Item> items) {
-            batchDurationCalls++;
-            return 100L * items.size(); // discriminating: prefix-size dependent
+        public double predictBatchMs(PrefillBatchFeatures features) {
+            fullCalls++;
+            lastBatchSize = features.batchSize();
+            features.items().forEach(i -> validate(i.seqLen()));
+            return batchPerItem * features.batchSize();
+        }
+
+        public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+            sessions++;
+            int[] count = {0};
+            return (tokens, hit) -> {
+                validate(tokens);
+                appends++;
+                return ++count[0] * batchPerItem;
+            };
+        }
+
+        private void validate(long tokens) {
+            if (tokens == failingTokens) {
+                throw new IllegalStateException("prediction failed");
+            }
         }
     }
 }

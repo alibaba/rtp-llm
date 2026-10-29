@@ -85,7 +85,14 @@ class JavaLoadClientLegacyFallbackTest {
                         "",
                         enableFallback,
                         "",
-                        false);
+                        false,
+                        0,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
         return new JavaLoadClient(config);
     }
 
@@ -133,7 +140,7 @@ class JavaLoadClientLegacyFallbackTest {
             tokens.add(i);
         }
         return new JavaLoadClient.TraceRecord(
-                idx, "rid-" + idx, "trace-" + idx, 0L, 64, 8, List.of(), tokens);
+                idx, "rid-" + idx, "trace-" + idx, 0L, 64, 8, List.of(), tokens, 0);
     }
 
     @Test

@@ -98,7 +98,10 @@ class EngineCrashRecoveryTest {
         enqueueBatch(prefillServices.get(0), 8000, 1, 5, decodeServices);
 
         int stoppedDecodePort = decodeServices.get(0).getGrpcPort();
-        httpPost(controlServer.getPort(), "/stop_engine", "{\"port\":" + stoppedDecodePort + "}");
+        httpPost(
+                MockEngineTestSupport.controlPort(controlServer),
+                "/stop_engine",
+                "{\"port\":" + stoppedDecodePort + "}");
         assertTrue(
                 decodeServices.get(0).isStopped(),
                 "decode engine should be stopped after /stop_engine");
@@ -113,18 +116,21 @@ class EngineCrashRecoveryTest {
         // Verify no leak detected on any engine (including the stopped one)
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on port " + service.getGrpcPort());
         }
 
         // ── Phase 3: Restart the stopped engine ──
-        httpPost(controlServer.getPort(), "/start_engine", "{\"port\":" + stoppedDecodePort + "}");
+        httpPost(
+                MockEngineTestSupport.controlPort(controlServer),
+                "/start_engine",
+                "{\"port\":" + stoppedDecodePort + "}");
         assertFalse(
                 decodeServices.get(0).isStopped(),
                 "decode engine should be running after /start_engine");
 
         // Verify health endpoint reports all engines healthy
-        String healthBody = httpGet(controlServer.getPort(), "/health");
+        String healthBody = httpGet(MockEngineTestSupport.controlPort(controlServer), "/health");
         JsonNode healthJson = MAPPER.readTree(healthBody);
         assertTrue(
                 healthJson.get("healthy").asBoolean(),
@@ -141,12 +147,12 @@ class EngineCrashRecoveryTest {
         // Final leak check on all engines
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected after recovery on port " + service.getGrpcPort());
         }
 
         // Verify HTTP snapshot consistency
-        String body = httpGet(controlServer.getPort(), "/snapshot");
+        String body = httpGet(MockEngineTestSupport.controlPort(controlServer), "/snapshot");
         JsonNode snapshot = MAPPER.readTree(body).path("engines");
         assertEquals(services.size(), snapshot.size());
         for (JsonNode engine : snapshot) {

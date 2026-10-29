@@ -16,6 +16,8 @@ public enum StrategyErrorType {
     NO_FRONTEND_WORKER(8407, true),
     INVALID_REQUEST(8406, false),
     VIT_ROUTE_STALE(8408, false),
+    // Rejected before admission: a client may supply the omitted input and retry once.
+    GENERATE_INPUT_REQUIRED(8409, false),
 
     // queue error
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),

@@ -1,6 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
@@ -8,6 +9,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static com.google.common.base.Preconditions.checkArgument;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -33,6 +36,10 @@ public class Response {
 
     @JsonProperty("enqueued_by_master")
     private boolean enqueuedByMaster = false;
+
+    @JsonProperty("requires_generate_input")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean requiresGenerateInput;
 
     @JsonProperty("worker_summary")
     private Map<String, WorkerRoleSummary> workerSummary;
@@ -61,6 +68,7 @@ public class Response {
         copy.realMasterHost = source.realMasterHost;
         copy.queueLength = source.queueLength;
         copy.enqueuedByMaster = source.enqueuedByMaster;
+        copy.requiresGenerateInput = source.requiresGenerateInput;
         if (source.workerSummary != null) {
             copy.workerSummary = new LinkedHashMap<>();
             source.workerSummary.forEach(
@@ -110,13 +118,11 @@ public class Response {
         if (admissionRejectReason == null) {
             admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
         }
-        if (!strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason)) {
-            throw new IllegalArgumentException(
-                    "invalid schedule error code/reason: "
-                            + strategyErrorType
-                            + "/"
-                            + admissionRejectReason);
-        }
+        checkArgument(
+                strategyErrorType.acceptsAdmissionRejectReason(admissionRejectReason),
+                "invalid schedule error code/reason: %s/%s",
+                strategyErrorType,
+                admissionRejectReason);
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());

@@ -5,12 +5,11 @@ import io.grpc.Server;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
-import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Timeout;
@@ -33,11 +32,10 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
     @ValueSource(strings = {"NOT_MASTER", "SHUTDOWN", "DEAD_BEFORE_CONNECT", "UNRESOLVABLE_HOST"})
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
     void followerRecoveryDispatchesExactlyOnceToMockEngine(String failure) throws Exception {
-        RouteService remoteRoutes = mock(RouteService.class);
-        RouteService localRoutes =
-                new RouteService(scheduler, mock(RecentCacheKeyTraceReporter.class));
+        RequestScheduler remoteRoutes = mock(RequestScheduler.class);
         try (Node oldMaster = new Node("10.0.0.1", remoteRoutes);
-                Node follower = new Node("10.0.0.2", localRoutes)) {
+                Node follower = new Node("10.0.0.2", scheduler);
+                var deadAddress = java.nio.channels.SocketChannel.open()) {
             when(follower.leadership.getMasterHostIpPort()).thenReturn(oldMaster.httpAddress());
             if (failure.equals("SHUTDOWN")) {
                 oldMaster.server.shutdown().awaitTermination(3, TimeUnit.SECONDS);
@@ -48,8 +46,28 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                 when(follower.leadership.getMasterHostIpPort())
                         .thenReturn("flexlb-unresolvable.invalid.:7001");
             }
+            if (failure.equals("SHUTDOWN") || failure.equals("DEAD_BEFORE_CONNECT")) {
+                // Reserve a fresh non-listening address exclusively. A closed listener's
+                // port can still be occupied by connections from an earlier parameter case.
+                deadAddress.bind(new java.net.InetSocketAddress("127.0.0.1", 0));
+                int deadPort =
+                        ((java.net.InetSocketAddress) deadAddress.getLocalAddress()).getPort();
+                when(follower.leadership.getMasterHostIpPort())
+                        .thenReturn(
+                                "127.0.0.1:"
+                                        + (deadPort - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
+                follower.useBoundedConnectFailure(deadPort);
+            }
             long requestId = 91_001L;
-            var original = createBalanceContext(requestId);
+            var originalInput =
+                    org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                            .setRequestId(requestId)
+                            .setGenerateConfig(
+                                    org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB
+                                            .newBuilder()
+                                            .setMaxNewTokens(8))
+                            .build()
+                            .toByteString();
             var request =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                             .setRequestId(requestId)
@@ -57,13 +75,14 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                             .setMaxNewTokens(8)
                             .setNumBeams(1)
                             .setModel("mock-model")
-                            .setGenerateInput(original.getGenerateInputPb())
+                            .setGenerateInput(originalInput)
                             .build();
             ManagedChannel frontend =
                     NettyChannelBuilder.forAddress("127.0.0.1", follower.server.getPort())
                             .usePlaintext()
                             .build();
             try {
+                GrpcReceivingGuardRepro.awaitReady(frontend);
                 var response =
                         FlexlbServiceGrpc.newBlockingStub(frontend)
                                 .withDeadlineAfter(8, TimeUnit.SECONDS)
@@ -77,7 +96,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                         mockPrefillWorker.getEnqueueCount(),
                         "recovery must dispatch exactly once");
                 assertEquals(0, mockDecodeWorker.getEnqueueCount());
-                verify(remoteRoutes, never()).route(any());
+                verify(remoteRoutes, never()).submit(any());
             } finally {
                 frontend.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             }
@@ -85,13 +104,13 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
     }
 
     private final class Node implements AutoCloseable {
-        final LBStatusConsistencyService leadership = mock(LBStatusConsistencyService.class);
+        final MasterStatusService leadership = mock(MasterStatusService.class);
         final NioEventLoopGroup channelLoop = new NioEventLoopGroup(1);
         final FlexlbGrpcForwarder forwarder;
         final FlexlbServiceImpl service;
         final Server server;
 
-        Node(String identity, RouteService routes) throws Exception {
+        Node(String identity, RequestScheduler routes) throws Exception {
             when(leadership.isNeedConsistency()).thenReturn(true);
             when(leadership.isMaster()).thenReturn(false);
             when(leadership.getLocalHostIp()).thenReturn(identity);
@@ -100,8 +119,11 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                     new FlexlbGrpcForwarder(
                             leadership, configService, health, channelLoop, Runnable::run);
             service =
-                    new FlexlbServiceImpl(
+                    FlexlbServiceTestSupport.create(
                             routes,
+                            routes == scheduler
+                                    ? requestRegistry()
+                                    : mock(org.flexlb.balance.scheduler.RequestRepository.class),
                             leadership,
                             health,
                             forwarder,
@@ -109,7 +131,33 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                             reporter,
                             mock(ServerScheduleLatencyRecorder.class),
                             mock(RequestSchedulerReporter.class));
-            server = NettyServerBuilder.forPort(0).addService(service).build().start();
+            server =
+                    NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", 0))
+                            .channelType(io.netty.channel.socket.nio.NioServerSocketChannel.class)
+                            .bossEventLoopGroup(channelLoop)
+                            .workerEventLoopGroup(channelLoop)
+                            .addService(service)
+                            .build()
+                            .start();
+        }
+
+        @SuppressWarnings("unchecked")
+        void useBoundedConnectFailure(int port) {
+            // A bound but non-listening socket can drop SYNs on macOS instead of
+            // refusing them. Keep that real connect failure inside the RPC deadline.
+            ManagedChannel channel =
+                    NettyChannelBuilder.forAddress("127.0.0.1", port)
+                            .channelType(io.netty.channel.socket.nio.NioSocketChannel.class)
+                            .eventLoopGroup(channelLoop)
+                            .withOption(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, 500)
+                            .usePlaintext()
+                            .disableRetry()
+                            .build();
+            var channels =
+                    (java.util.Map<String, ManagedChannel>)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    forwarder, "channels");
+            channels.put("127.0.0.1:" + port, channel);
         }
 
         String httpAddress() {
