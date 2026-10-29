@@ -1,8 +1,14 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8PerChannelCompressedQuantConfig,
+)
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.ops import TaskType
 
@@ -87,6 +93,63 @@ class FastSafeTensorsFanoutTest(unittest.TestCase):
         self.assertEqual(result["complete"].item(), 3.0)
         self.assertEqual(result["incomplete"].item(), 12.0)
         self.assertCountEqual(database.fallback_reads, ["shared", "missing"])
+
+
+class FastSafeTensorsMemoryTest(unittest.TestCase):
+    def choose_load_method(self, quant_config, free_gib, moe_params=0):
+        gib = 1024**3
+        loader = ModelLoader.__new__(ModelLoader)
+        loader._load_method = LoadMethod.AUTO
+        loader._weights_info = SimpleNamespace(
+            _quant_config=quant_config,
+            model_config=SimpleNamespace(
+                eval_model_weight_size=lambda: 8 * gib,
+                quant_algo=SimpleNamespace(getWeightBits=lambda: 8),
+                moe_weight_param_count=lambda: moe_params,
+                layer_weight_param_count=lambda: 100,
+            ),
+        )
+        loader._load_config = SimpleNamespace(
+            ep_size=1,
+            tp_size=1,
+            exported_device=SimpleNamespace(
+                get_mem_info=lambda: SimpleNamespace(free=free_gib * gib)
+            ),
+            database=SimpleNamespace(
+                is_safetensor=True,
+                get_max_file_size=lambda: gib,
+                get_pretrain_tensor_names=lambda: ["weight"],
+            ),
+        )
+        loader._choose_weight_convert_device = lambda _: "cuda"
+        loader._load_from_fastsafetensor = lambda _: LoadMethod.FASTSAFETENSORS
+        loader._load_from_scratch = lambda _: LoadMethod.SCRATCH
+        with patch("rtp_llm.model_loader.loader.has_module", return_value=True):
+            return loader._load_weight("cuda")
+
+    def test_online_block_quantization_reserves_bf16_inputs(self):
+        online = Fp8BlockWiseQuantConfig(is_quanted=False)
+        self.assertEqual(self.choose_load_method(online, 16), LoadMethod.SCRATCH)
+        self.assertEqual(
+            self.choose_load_method(online, 24), LoadMethod.FASTSAFETENSORS
+        )
+
+    def test_prequantized_checkpoint_does_not_reserve_bf16_inputs(self):
+        offline = Fp8BlockWiseQuantConfig(is_quanted=True)
+        self.assertEqual(
+            self.choose_load_method(offline, 16), LoadMethod.FASTSAFETENSORS
+        )
+
+    def test_inline_ptpc_reserves_only_non_inline_weight_fraction(self):
+        online = Fp8PerChannelCompressedQuantConfig(is_quanted=False)
+        self.assertEqual(self.choose_load_method(online, 16), LoadMethod.SCRATCH)
+        self.assertEqual(
+            self.choose_load_method(online, 16, moe_params=50), LoadMethod.SCRATCH
+        )
+        self.assertEqual(
+            self.choose_load_method(online, 16, moe_params=75),
+            LoadMethod.FASTSAFETENSORS,
+        )
 
 
 if __name__ == "__main__":
