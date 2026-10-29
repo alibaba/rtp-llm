@@ -1,5 +1,10 @@
 from importlib import import_module
 
+from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+# FlashInfer selects its norm backend on first import, including via rope.
+setup_cutlass_import_path()
+
 __all__ = [
     # Base modules
     "Embedding",

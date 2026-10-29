@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -40,13 +41,13 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
             return out, lse
 
         fake_flash_mla.flash_mla_with_kvcache = fake_flash_mla_with_kvcache
-        old_flash_mla = sys.modules.get("flash_mla")
-        old_flash_mla_legacy = sys.modules.get("flash_mla_legacy")
-        # The production shim prefers the isolated legacy wheel; alias the
-        # fake under both names so the mock still intercepts it.
-        sys.modules["flash_mla"] = fake_flash_mla
-        sys.modules["flash_mla_legacy"] = fake_flash_mla
-        try:
+        with patch.dict(
+            sys.modules,
+            {
+                name: fake_flash_mla
+                for name in ("flash_mla", "flash_mla_legacy", "flash_mla.legacy")
+            },
+        ):
             op = SparseAttnV4DecodeFp8Op(
                 n_heads=4,
                 head_dim=512,
@@ -76,15 +77,6 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
             self.assertIsNone(calls[0]["block_table"])
             self.assertIsNone(calls[0]["cache_seqlens"])
             self.assertTrue(torch.equal(calls[0]["indices"], topk))
-        finally:
-            if old_flash_mla is None:
-                sys.modules.pop("flash_mla", None)
-            else:
-                sys.modules["flash_mla"] = old_flash_mla
-        if old_flash_mla_legacy is None:
-            sys.modules.pop("flash_mla_legacy", None)
-        else:
-            sys.modules["flash_mla_legacy"] = old_flash_mla_legacy
 
 
 if __name__ == "__main__":

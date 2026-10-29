@@ -201,6 +201,7 @@ apache-tvm-ffi==0.1.12 \
     #   -r deps/requirements_cuda13_arm.txt
     #   flashinfer-python
     #   tilelang
+    #   tokenspeed-mla
     #   xgrammar
 async-timeout==5.0.1 \
     --hash=sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c \
@@ -647,8 +648,8 @@ decorator==5.3.1 \
 deep-ep @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-cp310-cp310-linux_aarch64.whl \
     --hash=sha256:4e7509a2ad6fd84d6f195fcac0aedc33f2a7c7b3965e777da821cb9d1cfc4787
     # via -r deps/requirements_cuda13_arm.txt
-deep-gemm @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/deep_gemm-2.8.1%2B057ca59-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:e6474ca387758f11da7aff2851215cfe5230ed6b54cce0fabf5a880b5b56827c
+deep-gemm @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+98a672e.cu132-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:fa4ab6ceee84dd7adcfdd64f739419e04a5d41094ddab3d8b5e7250aea709fc4
     # via -r deps/requirements_cuda13_arm.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
@@ -682,11 +683,8 @@ filelock==3.32.0 \
     #   blobfile
     #   huggingface-hub
     #   torch
-flash-mla @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:4e729f23823e02ef95e5c94a1d41b9031e8e4b00682f0c44392f480fed15899e
-    # via -r deps/requirements_cuda13_arm.txt
-flash-mla-legacy @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla_legacy-1.0.0%2B92fd68b.rtp1-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:9a0d330ee0875d7bbca8772f7467a561c31627583373c1d5c06c7e183810ec7a
+flash-mla @ http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B3ca6856.cu132-cp310-cp310-linux_aarch64.whl#sha256=d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d \
+    --hash=sha256:d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d
     # via -r deps/requirements_cuda13_arm.txt
 flashinfer-cubin @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl \
     --hash=sha256:6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f
@@ -2229,7 +2227,10 @@ nvidia-cusparselt-cu13==0.8.0 \
     # via torch
 nvidia-cutlass-dsl==4.5.3 \
     --hash=sha256:c14ca121c2a4ce53ca4d5ee5d939e4181b97054b55ea7bb84aa9f99b98960060
-    # via flashinfer-python
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   flashinfer-python
+    #   tokenspeed-mla
 nvidia-cutlass-dsl-libs-base==4.5.3 \
     --hash=sha256:1bea2f2e5312a97a850be4bfe73ab0689861fa6f81888ad2abe47172f96afd1d \
     --hash=sha256:224ceed6db71b632b318c19bea52f1d0efdafc321dbe4159a7508f93abe8c694 \
@@ -3977,6 +3978,9 @@ tokenizers==0.22.2 \
     --hash=sha256:e10bf9113d209be7cd046d40fbabbaf3278ff6d18eb4da4c500443185dc1896c \
     --hash=sha256:f01a9c019878532f98927d2bacb79bbb404b43d3437455522a00a30718cdedb5
     # via transformers
+tokenspeed-mla @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3 \
+    --hash=sha256:d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3
+    # via -r deps/requirements_cuda13_arm.txt
 torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl \
     --hash=sha256:4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21
     # via
@@ -3989,6 +3993,7 @@ torch @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2
     #   tile-kernels
     #   tilelang
     #   timm
+    #   tokenspeed-mla
     #   torch-c-dlpack-ext
     #   torchvision
     #   xgrammar
