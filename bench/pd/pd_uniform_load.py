@@ -12,6 +12,9 @@ dispatcher coroutine sleeps until each slot and then starts that request, so
 sends cannot reorder or bunch; request bodies are JSON-encoded before the run
 starts so encoding a 32K prompt never delays a later slot.
 
+--endpoint takes a comma list to spread request i over P instance i % n (an ideal round-robin
+balancer in front of several prefill instances); --warmup then warms every instance.
+
 Each request takes the next prompt from the file (cycling) with a per-request
 nonce: at the start by default, so no two requests share a cache prefix, or at
 the end with --nonce-pos suffix, so a shared-prefix prompt set keeps its
@@ -189,7 +192,12 @@ def summarize(args, rows, t0):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--endpoint", default="127.0.0.1:14000")
+    ap.add_argument(
+        "--endpoint",
+        default="127.0.0.1:14000",
+        help="prefill frontend host:port; a comma list spreads request i over entry i %% n "
+        "(several P instances behind an ideal round-robin balancer)",
+    )
     ap.add_argument("--model", default="deepseek_v4")
     ap.add_argument(
         "--prompts-file",
@@ -233,7 +241,7 @@ async def main():
     prompts = json.load(open(args.prompts_file))
     if isinstance(prompts, dict):
         prompts = prompts["prompts"]
-    url = "http://%s/v1/chat/completions" % args.endpoint
+    urls = ["http://%s/v1/chat/completions" % e for e in args.endpoint.split(",") if e]
     n = int(round(args.qps * args.duration))
     if args.nonce_pos == "suffix" and n + args.warmup > len(prompts):
         print(
@@ -261,7 +269,7 @@ async def main():
     timeout = aiohttp.ClientTimeout(total=None, sock_read=1800)
     conn = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(timeout=timeout, connector=conn) as session:
-        for w in range(args.warmup):
+        for w in range(args.warmup * len(urls)):
             body = build_body(
                 args,
                 tagged(
@@ -270,7 +278,7 @@ async def main():
                 ),
                 w,
             )
-            r = await one(session, url, body, -1 - w, time.time())
+            r = await one(session, urls[w % len(urls)], body, -1 - w, time.time())
             print(
                 "warmup %d: ttft=%s err=%s"
                 % (
@@ -287,7 +295,11 @@ async def main():
             delay = t_target - time.time()
             if delay > 0:
                 await asyncio.sleep(delay)
-            tasks.append(asyncio.create_task(one(session, url, bodies[i], i, t_target)))
+            tasks.append(
+                asyncio.create_task(
+                    one(session, urls[i % len(urls)], bodies[i], i, t_target)
+                )
+            )
         rows = await asyncio.gather(*tasks)
     with open(args.out, "w") as f:
         for r in rows:
