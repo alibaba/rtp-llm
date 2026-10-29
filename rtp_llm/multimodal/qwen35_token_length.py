@@ -5,15 +5,12 @@ invokes a vision model, allocates image patches, or exposes video internals to F
 A video is one complete tensor: visual, timestamp, and internal delimiter rows.
 """
 
-import io
 import math
 
 import torch
 from PIL import Image
 
 from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.qwen2_5_vl_mixin import (
-    VideoReader,
-    cpu,
     smart_resize,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
@@ -63,6 +60,7 @@ def token_length(mm_input, vit_config, processor, factor, video_backend="nvdec")
     )
     if is_video:
         from rtp_llm.multimodal.qwen3_vl_video import (
+            read_video_metadata,
             resolve_video_size,
             sample_frame_indices,
             video_resize_shape,
@@ -88,20 +86,8 @@ def token_length(mm_input, vit_config, processor, factor, video_backend="nvdec")
             )
         if video_backend != "cpu":
             raise ValueError("unknown Qwen3.5 video backend")
-        import av
-
-        with av.open(io.BytesIO(data.getvalue())) as container:
-            if not container.streams.video:
-                raise ValueError("video input has no video stream")
-            stream = container.streams.video[0]
-            height, width = stream.height, stream.width
-        data.seek(0)
-        if VideoReader is None:
-            raise ImportError("decord is required for video metadata")
-        reader = VideoReader(data, ctx=cpu(0), num_threads=1)
-        fps = reader.get_avg_fps()
-        indices = sample_frame_indices(len(reader), fps, config, vit_config=vit_config)
-        del reader
+        total, fps, height, width = read_video_metadata(data)
+        indices = sample_frame_indices(total, fps, config, vit_config=vit_config)
         height, width = video_resize_shape(
             config, len(indices), height, width, vp, size
         )

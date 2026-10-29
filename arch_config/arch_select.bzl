@@ -46,21 +46,29 @@ def requirement(names):
             )
             continue
         if name in ("flash-attn-4", "pynvvideocodec"):
+            layout = ["@cuda13_wheel_layout//:layout"] if name == "flash-attn-4" else []
+            arm_layout = ["@cuda13_arm_wheel_layout//:layout"] if name == "flash-attn-4" else []
             native.py_library(
                 name = name,
                 deps = select({
-                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
+                    "@rtp_llm//:using_cuda13_x86": layout + [requirement_gpu_cuda13(name)],
+                    "@rtp_llm//:using_cuda13_arm": arm_layout + [requirement_cuda13_arm(name)],
                     "//conditions:default": [],
                 }),
                 visibility = ["//visibility:public"],
             )
             continue
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        cuda13_arm_deps = [] if name in _CUDA13_DEFERRED else [requirement_cuda13_arm(name)]
+        if name == "flashinfer-python":
+            cuda13_x86_deps = ["@cuda13_wheel_layout//:layout"] + cuda13_x86_deps
+            cuda13_arm_deps = ["@cuda13_arm_wheel_layout//:layout"] + cuda13_arm_deps
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
                 deps = select({
                     "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+                    "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                     "//conditions:default": [],
                 }),
@@ -72,6 +80,7 @@ def requirement(names):
             deps = select({
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+                "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
@@ -185,6 +194,16 @@ def whl_deps():
         "@rtp_llm//:using_cuda13_arm": [
             "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
             "torchvision@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            # deep_gemm + flash_mla self-built from GitHub main against torch 2.11+cu130
+            "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+ae715cd.cu132-cp310-cp310-linux_aarch64.whl",
+            "flash-mla@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl",
+            "flash-attn-4@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn-4/flash_attn_4-0.0.1.dev1%2Bg466a1da7d-py3-none-any.whl",
+            "rtp-kernel@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2Bc308bb84.cu132-cp310-cp310-linux_aarch64.whl",
+            "fast-safetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+            "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
+            "tilelang@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
+            # flash_attn / flash_attn_3 / fast_hadamard /
+            # deep_ep: deferred — cu129 wheels link libcudart.so.12.
             "flashinfer-python[cu13]@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.7.2%2B36684fe4.cu132-py3-none-any.whl",
             "nvshmem4py-cu13==0.3.1",
             "flashinfer-cubin@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/flashinfer-ci/flashinfer_cubin-0.7.2%2B36684fe4.cu132-py3-none-any.whl",
@@ -204,12 +223,14 @@ def whl_deps():
             "cuda-core==1.0.1",
             "cuda-pathfinder==1.6.0",
             "apache-tvm-ffi==0.1.11",
+            "pynvvideocodec@https://mirrors.aliyun.com/pypi/packages/fb/3f/15eedb920e5852161ea51939a72e5717d946e44226f9456a7bf95f68f46f/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_aarch64.whl",
         ],
         "//conditions:default": ["torch==2.1.2"],
     })
 
 def platform_deps():
     return select({
+        "@rtp_llm//:using_cuda13_arm": ["av==16.1.0"],
         "@rtp_llm//:using_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0", "av==16.1.0"],
@@ -238,6 +259,11 @@ def torch_deps():
             "@torch_2.11_py310_cuda//:torch",
             "@torch_2.11_py310_cuda//:torch_libs",
         ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "@torch_2.11_py310_cuda-aarch64//:torch_api",
+            "@torch_2.11_py310_cuda-aarch64//:torch",
+            "@torch_2.11_py310_cuda-aarch64//:torch_libs",
+        ],
         "@rtp_llm//:using_cuda12_9_x86": [
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
@@ -256,6 +282,7 @@ def flashinfer_deps():
         name = "flashinfer",
         actual = select({
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
+            "@rtp_llm//:using_cuda13_arm": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
         })
     )

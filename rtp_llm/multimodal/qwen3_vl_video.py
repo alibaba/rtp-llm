@@ -122,12 +122,87 @@ def video_resize_shape(
     )
 
 
+def _rewind_video(video_data):
+    if hasattr(video_data, "seek"):
+        video_data.seek(0)
+
+
+def _pyav_video_info(video_data):
+    """Read indexed metadata, counting frames only for unindexed containers."""
+    import av
+
+    _rewind_video(video_data)
+    with av.open(video_data) as container:
+        if not container.streams.video:
+            raise ValueError("video input has no video stream")
+        stream = container.streams.video[0]
+        stream.thread_type = "NONE"
+        stream.codec_context.thread_count = 1
+        fps = float(stream.average_rate or stream.guessed_rate or 0)
+        total = stream.frames
+        height, width = stream.height, stream.width
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError("video requires a finite positive FPS")
+        if total <= 0:
+            total = 0
+            for frame in container.decode(stream):
+                total += 1
+                height, width = frame.height, frame.width
+        if total <= 0 or min(height, width) <= 0:
+            raise ValueError("video input has no decodable frames")
+    _rewind_video(video_data)
+    return total, fps, height, width
+
+
+def read_video_metadata(video_data):
+    """Use the same decoder metadata as the CPU pixel path, including ARM."""
+    try:
+        from decord import VideoReader, cpu
+    except ImportError:
+        return _pyav_video_info(video_data)
+    import av
+
+    _rewind_video(video_data)
+    with av.open(video_data) as container:
+        if not container.streams.video:
+            raise ValueError("video input has no video stream")
+        stream = container.streams.video[0]
+        height, width = stream.height, stream.width
+    _rewind_video(video_data)
+    reader = VideoReader(video_data, ctx=cpu(0), num_threads=1)
+    return len(reader), reader.get_avg_fps(), height, width
+
+
+def _decode_video_pyav(video_data, configs, vit_config):
+    import av
+
+    total, fps, _, _ = _pyav_video_info(video_data)
+    indices = sample_frame_indices(total, fps, configs, vit_config=vit_config)
+    wanted = set(indices)
+    frames = []
+    with av.open(video_data) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "NONE"
+        stream.codec_context.thread_count = 1
+        for index, frame in enumerate(container.decode(stream)):
+            if index in wanted:
+                frames.append(frame.to_ndarray(format="rgb24"))
+            if index >= indices[-1]:
+                break
+    if len(frames) != len(indices):
+        raise ValueError("decoded video frame count does not match metadata")
+    video = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2)
+    return video, VideoMetadata(
+        total_num_frames=total, fps=fps, duration=total / fps, frames_indices=indices
+    )
+
+
 def decode_video(video_data: Any, configs: Any, *, vit_config: Any = None):
     """Decode sampled native RGB frames; resize only after the video policy resolves."""
     try:
         from decord import VideoReader, cpu
-    except ImportError as exc:
-        raise ImportError("decord is required for Qwen3-VL video processing") from exc
+    except ImportError:
+        return _decode_video_pyav(video_data, configs, vit_config)
     reader = VideoReader(video_data, ctx=cpu(0), num_threads=1)
     total, fps = len(reader), reader.get_avg_fps()
     indices = sample_frame_indices(total, fps, configs, vit_config=vit_config)

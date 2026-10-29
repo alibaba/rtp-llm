@@ -3217,6 +3217,9 @@ pygments==2.20.0 \
     --hash=sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f \
     --hash=sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176
     # via rich
+pynvvideocodec @ https://mirrors.aliyun.com/pypi/packages/fb/3f/15eedb920e5852161ea51939a72e5717d946e44226f9456a7bf95f68f46f/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_aarch64.whl \
+    --hash=sha256:6c653a236bb61e98fd787601bfa8095150888a8e6cabf604306fa8ebbeb696dc
+    # via -r deps/requirements_cuda13_arm.txt
 pynvml==13.0.1 \
     --hash=sha256:1245991d9db786b4d2f277ce66869bd58f38ac654e38c9397d18f243c8f6e48f \
     --hash=sha256:e2b20e0a501eeec951e2455b7ab444759cf048e0e13a57b08049fa2775266aa8
@@ -3630,8 +3633,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/rtp_kernel-0.1.0-49c379b-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:f58054a222003721f6793d66dc84e5ca26186ed36cd7977ede384810b168fbb4
+rtp-kernel @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2Bc308bb84.cu132-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:609ccd84b04da5da4a0d80cec0fd791554306df3bbe4ecfe43185b86d1b8bf8f
     # via -r internal_source/deps/requirements_cuda13_arm.txt
 safetensors==0.7.0 \
     --hash=sha256:0071bffba4150c2f46cae1432d31995d77acfd9f8db598b5d1a2ce67e8440ad2 \

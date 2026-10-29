@@ -11,6 +11,7 @@ from transformers import Qwen3VLVideoProcessor
 
 from rtp_llm.multimodal.qwen3_vl_video import (
     decode_video,
+    read_video_metadata,
     resize_video,
     resolve_video_size,
     sample_frame_indices,
@@ -277,7 +278,11 @@ class Qwen3VideoPreprocessTest(unittest.TestCase):
         reader.get_batch.side_effect = lambda indices: SimpleNamespace(
             asnumpy=lambda: raw[indices]
         )
-        with mock.patch("decord.VideoReader", return_value=reader):
+        # Test the Decord contract even on ARM, where Decord is not installed.
+        fake_decord = SimpleNamespace(
+            VideoReader=mock.Mock(return_value=reader), cpu=lambda device: device
+        )
+        with mock.patch.dict("sys.modules", {"decord": fake_decord}):
             video, metadata = decode_video(io.BytesIO(b"video"), SimpleNamespace(fps=5))
         self.assertEqual(tuple(video.shape), (5, 3, 8, 12))
         self.assertEqual(video[:, 0, 0, 0].tolist(), [0, 7, 14, 22, 29])
@@ -285,6 +290,85 @@ class Qwen3VideoPreprocessTest(unittest.TestCase):
         self.assertEqual(metadata.total_num_frames, 30)
         self.assertEqual(metadata.fps, 30.0)
         self.assertEqual(metadata.duration, 1.0)
+
+    @staticmethod
+    def encoded_fixture(container_format):
+        import av
+
+        encoded = io.BytesIO()
+        with av.open(encoded, "w", format=container_format) as container:
+            stream = container.add_stream("libx264", rate=10)
+            stream.width, stream.height = 32, 24
+            stream.pix_fmt = "yuv420p"
+            for index in range(17):
+                pixels = np.zeros((24, 32, 3), dtype=np.uint8)
+                pixels[:, :, 0] = index * 13
+                pixels[:, :, 1] = np.arange(32, dtype=np.uint8)[None, :] * 7
+                pixels[:, :, 2] = np.arange(24, dtype=np.uint8)[:, None] * 10
+                frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        return encoded.getvalue()
+
+    def test_pyav_fallback_preserves_rgb_frame_order_and_metadata(self):
+        import av
+
+        for container_format in ("mp4", "matroska"):
+            with self.subTest(container_format=container_format):
+                payload = self.encoded_fixture(container_format)
+                # Independent full decode is the pixel/order reference.
+                with av.open(io.BytesIO(payload)) as container:
+                    if container_format == "matroska":
+                        self.assertEqual(container.streams.video[0].frames, 0)
+                    reference = np.stack(
+                        [
+                            frame.to_ndarray(format="rgb24")
+                            for frame in container.decode(video=0)
+                        ]
+                    )
+                service = SimpleNamespace(mm_video_fps=6, mm_video_max_frames=8)
+                request = SimpleNamespace()
+                expected_indices = sample_frame_indices(
+                    17, 10, request, vit_config=service
+                )
+                with mock.patch.dict("sys.modules", {"decord": None}):
+                    # Metadata reading must leave a reusable, rewound input.
+                    video_data = io.BytesIO(payload)
+                    self.assertEqual(read_video_metadata(video_data), (17, 10, 24, 32))
+                    self.assertEqual(video_data.tell(), 0)
+                    video, metadata = decode_video(
+                        video_data, request, vit_config=service
+                    )
+                expected = torch.from_numpy(reference[expected_indices]).permute(
+                    0, 3, 1, 2
+                )
+                torch.testing.assert_close(video, expected, atol=0, rtol=0)
+                self.assertEqual(video.dtype, torch.uint8)
+                self.assertEqual(metadata.frames_indices, expected_indices)
+                self.assertEqual(metadata.total_num_frames, 17)
+                self.assertEqual(metadata.fps, 10)
+                self.assertEqual(metadata.duration, 1.7)
+
+    def test_pyav_truncated_decode_is_not_silently_accepted(self):
+        payload = self.encoded_fixture("mp4")
+        with mock.patch.dict("sys.modules", {"decord": None}), mock.patch(
+            "rtp_llm.multimodal.qwen3_vl_video._pyav_video_info",
+            return_value=(30, 10, 24, 32),
+        ), self.assertRaisesRegex(ValueError, "frame count does not match"):
+            decode_video(io.BytesIO(payload), SimpleNamespace(fps=6, max_frames=8))
+
+    def test_pyav_invalid_input_propagates_decoder_error(self):
+        import av
+
+        with mock.patch.dict("sys.modules", {"decord": None}):
+            for call in (
+                lambda: read_video_metadata(io.BytesIO(b"not a video")),
+                lambda: decode_video(io.BytesIO(b"not a video"), SimpleNamespace()),
+            ):
+                with self.assertRaises(av.error.InvalidDataError):
+                    call()
 
 
 if __name__ == "__main__":

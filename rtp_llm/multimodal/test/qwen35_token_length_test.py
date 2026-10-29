@@ -92,6 +92,10 @@ class Qwen35TokenLengthTest(unittest.TestCase):
                     (frames + vp.temporal_patch_size - 1) // vp.temporal_patch_size,
                 )
 
+    def test_service_sampling_without_decord(self):
+        with patch.dict("sys.modules", {"decord": None}):
+            self.test_service_sampling_matches_cpu_pixels_and_nvdec_metadata()
+
     def test_service_sampling_matches_cpu_pixels_and_nvdec_metadata(self):
         import av
         import numpy as np
