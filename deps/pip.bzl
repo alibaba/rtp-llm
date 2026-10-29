@@ -32,6 +32,13 @@ CUDA13_ANNOTATIONS["deep-gemm"] = package_annotation(
             ],
             "patch_strip": 1,
         }),
+        "@rtp_llm//patches/deep_gemm:0003-dsv41-swa-kv-numerical-boundaries.patch": json.encode({
+            "whls": [
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_x86_64.whl",
+                "deep_gemm-2.8.2+341b656.cu132-cp310-cp310-linux_aarch64.whl",
+            ],
+            "patch_strip": 1,
+        }),
     },
 )
 CUDA13_ANNOTATIONS["nvidia-cutlass-dsl-libs-core"] = package_annotation(

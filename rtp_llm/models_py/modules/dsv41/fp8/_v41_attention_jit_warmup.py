@@ -1410,10 +1410,8 @@ def _warm_flash_mla(attn, device):
 def _warm_q_norm_rope(attn, device):
     import torch
 
-    from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-        fused_rmsnorm_rope,
-    )
     from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
     from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import rope_only
 
     rows = 2
@@ -1427,7 +1425,7 @@ def _warm_q_norm_rope(attn, device):
         (1, rows, rank + attn.head_dim), dtype=torch.bfloat16, device=device
     )
     strided_q_rmsnorm(combined[..., :rank], attn.q_norm, attn.eps)
-    fused_rmsnorm_rope(
+    swa_kv_norm_rope(
         combined[..., rank:],
         attn.kv_norm,
         frequencies,
@@ -1435,7 +1433,7 @@ def _warm_q_norm_rope(attn, device):
         eps=attn.eps,
     )
     # The unfused projection's contiguous KV is also reachable via the flag.
-    fused_rmsnorm_rope(
+    swa_kv_norm_rope(
         combined[..., rank:].contiguous(),
         attn.kv_norm,
         frequencies,

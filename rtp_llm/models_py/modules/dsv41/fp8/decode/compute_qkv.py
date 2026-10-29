@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
     fused_rmsnorm_rope,
 )
 from rtp_llm.models_py.modules.dsv41._rope_only_triton import rope_only_inplace
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
 from rtp_llm.models_py.modules.dsv41.rope import apply_rotary_emb
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -314,7 +315,7 @@ def decode_compute_qkv(
             q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
 
     # KV path (single MQA head) — per-token RoPE using the same table lookup.
-    kv = fused_rmsnorm_rope(
+    kv = swa_kv_norm_rope(
         raw_kv,
         attn.kv_norm,
         freqs_cis,

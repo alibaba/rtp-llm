@@ -39,21 +39,32 @@ class MergeContractsCPU(unittest.TestCase):
         )
         keys = indexer.DecodeIndexerKeys(
             torch.zeros(2, 128, 68, dtype=torch.uint8),
-            torch.ones(1, 1, dtype=torch.int32), 128, 128,
+            torch.ones(1, 1, dtype=torch.int32),
+            128,
+            128,
         )
         attn = SimpleNamespace(
-            is_index_source=True, kv_source_layer_id=20,
-            index_n_heads=32, index_head_dim=128, rope_head_dim=64,
+            is_index_source=True,
+            kv_source_layer_id=20,
+            index_n_heads=32,
+            index_head_dim=128,
+            rope_head_dim=64,
             index_weights=torch.ones(32, 8, dtype=torch.bfloat16),
             _shared_attention={"global": {20: keys}},
             _lin=Mock(side_effect=AssertionError("query reprojected")),
         )
         with patch.object(indexer, "is_supported", return_value=True), patch.object(
             _v41_query_quant, "try_project_indexer_q", side_effect=AssertionError
-        ), patch.object(indexer, "prepare_indexer_q_and_weights", side_effect=AssertionError):
+        ), patch.object(
+            indexer, "prepare_indexer_q_and_weights", side_effect=AssertionError
+        ):
             q, actual_weights, actual = AttentionV41FP8._prepare_indexer_query_decode(
-                attn, x, qr, torch.zeros(2, dtype=torch.int64),
-                head_weights=weights, index_prepared=prepared,
+                attn,
+                x,
+                qr,
+                torch.zeros(2, dtype=torch.int64),
+                head_weights=weights,
+                index_prepared=prepared,
             )
         self.assertIsNone(q)
         self.assertIs(actual_weights, weights)
@@ -66,8 +77,12 @@ class MergeContractsCPU(unittest.TestCase):
         bf16_q = torch.zeros(2, 4096, dtype=torch.bfloat16)
         attn._lin = Mock(return_value=bf16_q)
         q, actual_weights, actual = AttentionV41FP8._prepare_indexer_query_decode(
-            attn, x, qr, torch.zeros(2, dtype=torch.int64),
-            head_weights=weights, index_prepared=prepared,
+            attn,
+            x,
+            qr,
+            torch.zeros(2, dtype=torch.int64),
+            head_weights=weights,
+            index_prepared=prepared,
         )
         self.assertEqual(q.shape, (2, 32, 128))
         self.assertIs(actual_weights, weights)
@@ -96,14 +111,25 @@ class MergeContractsCPU(unittest.TestCase):
             "qb_kv",
         ):
             with self.subTest(route=route), contextlib.ExitStack() as stack:
-                stack.enter_context(patch.dict(os.environ, {
-                    "DSV41_FUSED_QB_KV": str(int(route == "qb_kv")),
-                }))
+                stack.enter_context(
+                    patch.dict(
+                        os.environ,
+                        {
+                            "DSV41_FUSED_QB_KV": str(int(route == "qb_kv")),
+                        },
+                    )
+                )
                 attn = SimpleNamespace(
-                    is_index_source=True, is_kv_source=route != "reindex",
-                    rope_head_dim=64, n_heads=64, head_dim=512,
-                    skip_post_q_norm=True, freqs_cis=freqs,
-                    wq_b=object(), kv_norm=torch.ones(512), eps=1e-6,
+                    is_index_source=True,
+                    is_kv_source=route != "reindex",
+                    rope_head_dim=64,
+                    n_heads=64,
+                    head_dim=512,
+                    skip_post_q_norm=True,
+                    freqs_cis=freqs,
+                    wq_b=object(),
+                    kv_norm=torch.ones(512),
+                    eps=1e-6,
                     _lin=Mock(side_effect=AssertionError("unexpected projection")),
                 )
                 merged = SimpleNamespace(
@@ -111,39 +137,71 @@ class MergeContractsCPU(unittest.TestCase):
                     forward_quantized=Mock(return_value=(main_q, index_q)),
                 )
                 mega = SimpleNamespace(merged_qb=merged, padded_heads=64)
-                native = stack.enter_context(patch.object(
-                    _v41_query_quant, "try_project_qkv_to_cache",
-                    return_value=None if route == "native_fallback" else (qr, cached_kv, quantized),
-                ))
-                original = stack.enter_context(patch.object(
-                    _v41_query_quant, "try_project_quantized_qkv",
-                    return_value=(qr, raw_kv, quantized),
-                ))
-                fused_front = stack.enter_context(patch.object(
-                    front, "project", return_value=(qr, raw_kv, quantized, weights),
-                ))
+                native = stack.enter_context(
+                    patch.object(
+                        _v41_query_quant,
+                        "try_project_qkv_to_cache",
+                        return_value=(
+                            None
+                            if route == "native_fallback"
+                            else (qr, cached_kv, quantized)
+                        ),
+                    )
+                )
+                original = stack.enter_context(
+                    patch.object(
+                        _v41_query_quant,
+                        "try_project_quantized_qkv",
+                        return_value=(qr, raw_kv, quantized),
+                    )
+                )
+                fused_front = stack.enter_context(
+                    patch.object(
+                        front,
+                        "project",
+                        return_value=(qr, raw_kv, quantized, weights),
+                    )
+                )
                 ready = stack.enter_context(
                     patch.object(
                         qb_kv,
                         "try_project_kv_index",
                         return_value=(
-                            (main_q, cached_kv, slots) if route == "ready_fused" else None
+                            (main_q, cached_kv, slots)
+                            if route == "ready_fused"
+                            else None
                         ),
                     )
                 )
-                fused_qb = stack.enter_context(patch.object(qb_kv, "try_project_kv", return_value=None))
-                rope = stack.enter_context(patch.object(
-                    cache, "try_fused_qkv_rope_cache",
-                    return_value=cache.FusedQKVRopeCache(
-                        main_q.unflatten(-1, (64, 512)), cached_kv, freqs,
-                    ),
-                ))
-                stack.enter_context(patch.object(compute_qkv, "fused_rmsnorm_rope", side_effect=AssertionError))
+                fused_qb = stack.enter_context(
+                    patch.object(qb_kv, "try_project_kv", return_value=None)
+                )
+                rope = stack.enter_context(
+                    patch.object(
+                        cache,
+                        "try_fused_qkv_rope_cache",
+                        return_value=cache.FusedQKVRopeCache(
+                            main_q.unflatten(-1, (64, 512)),
+                            cached_kv,
+                            freqs,
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        compute_qkv, "swa_kv_norm_rope", side_effect=AssertionError
+                    )
+                )
                 result = compute_qkv.decode_compute_qkv(
-                    attn, x, positions, freqs_cis=freqs,
-                    mega_attention=mega, qb_pdl=route == "pdl",
+                    attn,
+                    x,
+                    positions,
+                    freqs_cis=freqs,
+                    mega_attention=mega,
+                    qb_pdl=route == "pdl",
                     ready_plan=object() if route in ("ready", "ready_fused") else None,
-                    swa_pool=object(), swa_slots=object(),
+                    swa_pool=object(),
+                    swa_slots=object(),
                 )
                 self.assertTrue(result.swa_written)
                 self.assertIs(result.kv, cached_kv)
@@ -181,7 +239,9 @@ class MergeContractsCPU(unittest.TestCase):
                     self.assertIs(fused_qb.call_args.args[3], raw_kv)
                 if route == "pdl":
                     self.assertTrue(original.call_args.kwargs["pdl"])
-                    self.assertTrue(merged.forward_quantized.call_args.kwargs["wait_pdl"])
+                    self.assertTrue(
+                        merged.forward_quantized.call_args.kwargs["wait_pdl"]
+                    )
 
     def test_ready_plan_requires_only_the_qkv_index_producer(self):
         rows = 128
@@ -285,10 +345,14 @@ class MergeContractsCPU(unittest.TestCase):
         local = threading.local()
         current = SimpleNamespace(cuda_stream=51)
         with patch(
-            "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index", return_value=0
+            "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
+            return_value=0,
         ), patch(
-            "rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant._context", return_value=17
-        ) as context, patch("torch.cuda.Stream", side_effect=lambda **_: object()) as allocate:
+            "rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant._context",
+            return_value=17,
+        ) as context, patch(
+            "torch.cuda.Stream", side_effect=lambda **_: object()
+        ) as allocate:
             get = lambda capturing: global_overlap._get_compute_stream(
                 local, torch.device("cuda", 0), current, capturing=capturing
             )
@@ -303,8 +367,10 @@ class MergeContractsCPU(unittest.TestCase):
             self.assertIsNone(get(True))
             context.return_value = 17
             values = []
+
             def worker():
                 values.extend((get(True), get(False)))
+
             thread = threading.Thread(target=worker)
             thread.start()
             thread.join()
