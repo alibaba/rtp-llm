@@ -20,7 +20,8 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                 for batch, width in ((63, 3), (64, 4), (100, 3)):
                     with self.subTest(tp=tp, role=role, batch=batch, width=width):
                         config = SimpleNamespace(
-                            num_layers=1, vocab_size=16,
+                            num_layers=1,
+                            vocab_size=16,
                             capture_aux_hidden_layer_ids=[],
                             moe_prefill_max_tokens_per_rank=262144,
                             max_seq_len=1048576,
@@ -29,22 +30,37 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                             layernorm_eps=1e-5,
                         )
                         parallel = SimpleNamespace(
-                            role_type=role, tp_size=tp, tp_rank=0,
-                            dp_size=8 // tp, ep_size=8, pp_size=1,
-                            get_attn_tp_size=lambda: tp, enable_sp=True,
+                            role_type=role,
+                            tp_size=tp,
+                            tp_rank=0,
+                            dp_size=8 // tp,
+                            ep_size=8,
+                            pp_size=1,
+                            get_attn_tp_size=lambda: tp,
+                            enable_sp=True,
                         )
                         weights = SimpleNamespace(
-                            weights=[{}], get_global_weight=lambda _: torch.ones(1),
+                            weights=[{}],
+                            get_global_weight=lambda _: torch.ones(1),
                         )
                         layer = nn.Identity()
                         layer.layer_type = object()
                         with (
-                            patch.dict(os.environ, {
-                                "RTP_LLM_FP8_COLLECTIVE_MAX_TOKENS": "65536",
-                            }),
-                            patch.object(kimi_k3, "Embedding", return_value=nn.Identity()),
-                            patch.object(kimi_k3, "RMSNorm", return_value=nn.Identity()),
-                            patch.object(kimi_k3, "KimiK3DecoderLayer", return_value=layer) as ctor,
+                            patch.dict(
+                                os.environ,
+                                {
+                                    "RTP_LLM_FP8_COLLECTIVE_MAX_TOKENS": "65536",
+                                },
+                            ),
+                            patch.object(
+                                kimi_k3, "Embedding", return_value=nn.Identity()
+                            ),
+                            patch.object(
+                                kimi_k3, "RMSNorm", return_value=nn.Identity()
+                            ),
+                            patch.object(
+                                kimi_k3, "KimiK3DecoderLayer", return_value=layer
+                            ) as ctor,
                         ):
                             kimi_k3.KimiK3Model(config, parallel, weights, batch)
                         # Enumerate whole-request SP padding independently.
@@ -56,7 +72,8 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                                     padded += 1
                                 verify = max(verify, padded * q // tp)
                         expected = (
-                            verify if role == RoleType.DECODE
+                            verify
+                            if role == RoleType.DECODE
                             else max(verify, 262144 // tp)
                         )
                         self.assertEqual(ctor.call_args.args[-1], expected)
@@ -67,6 +84,7 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         model.tp_size = 8
         model.parallelism_config = SimpleNamespace(role_type=RoleType.PREFILL)
         model._fp8_collective = None
+        init_resource = SimpleNamespace(kv_cache=None, is_decode_role=False)
         with (
             patch.dict(
                 "os.environ",
@@ -76,8 +94,12 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                 "rtp_llm.models_py.model_desc.module_base.GptModelBase.initialize",
                 return_value=True,
             ),
+            patch(
+                "rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup.warmup_kimi_k3_kernel_jit",
+            ) as warmup,
         ):
-            self.assertTrue(model.initialize(SimpleNamespace(kv_cache=None, is_decode_role=False)))
+            self.assertTrue(model.initialize(init_resource))
+        warmup.assert_called_once_with(model, init_resource)
         self.assertIsNone(model._fp8_collective)
 
     def test_local_projection_matches_full_projection_slice(self):
@@ -88,9 +110,11 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         model.tp_rank = 2
         full_embedding = nn.Embedding(128, 16)
         local_width = full_embedding.weight.shape[1] // model.tp_size
-        local_weight = full_embedding.weight.detach().narrow(
-            1, model.tp_rank * local_width, local_width
-        ).contiguous()
+        local_weight = (
+            full_embedding.weight.detach()
+            .narrow(1, model.tp_rank * local_width, local_width)
+            .contiguous()
+        )
         model.embed_tokens = Embedding(
             SimpleNamespace(),
             SimpleNamespace(get_attn_tp_size=lambda: model.tp_size),
@@ -105,22 +129,30 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
             input_hiddens=torch.randn(32, 16),
         )
         embedding = full_embedding(inputs.input_ids)
-        full = model.eh_proj(torch.cat((
-            model.enorm(embedding * (inputs.combo_position_ids[:, None] != 0)),
-            model.hnorm(inputs.input_hiddens),
-        ), dim=-1))
+        full = model.eh_proj(
+            torch.cat(
+                (
+                    model.enorm(embedding),
+                    model.hnorm(inputs.input_hiddens),
+                ),
+                dim=-1,
+            )
+        )
         expected = full.narrow(0, 16, 8)
         projected_rows = []
         hook = model.eh_proj.register_forward_pre_hook(
             lambda _module, args: projected_rows.append(args[0].shape[0])
         )
+
         def embedding_kernel(output, ids, weight, *_):
             output.copy_(torch.nn.functional.embedding(ids, weight))
 
         def gather_hidden_shards(local):
             torch.testing.assert_close(
-                local, embedding.narrow(1, model.tp_rank * local_width, local_width),
-                rtol=0, atol=0,
+                local,
+                embedding.narrow(1, model.tp_rank * local_width, local_width),
+                rtol=0,
+                atol=0,
             )
             return torch.cat(embedding.split(local_width, dim=1), dim=0)
 
@@ -130,7 +162,9 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                     "rtp_llm.models_py.modules.base.common.embedding.rtp_llm_ops.embedding",
                     side_effect=embedding_kernel,
                 ),
-                patch.object(model, "_gather_modeling_boundary", side_effect=gather_hidden_shards) as gather,
+                patch.object(
+                    model, "_gather_modeling_boundary", side_effect=gather_hidden_shards
+                ) as gather,
             ):
                 actual = model._project_local_mtp_input(inputs)
                 gather.assert_called_once()
@@ -140,5 +174,5 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         self.assertEqual(projected_rows, [8])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

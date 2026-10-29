@@ -176,6 +176,14 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_jit_warmup_test",
+    srcs = ["kimi_k3_jit_warmup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
+    tags = ["SM100_ARM_CU13"],
+)
+
+py_test(
     name = "kimi_k3_rope_cpu_test",
     srcs = ["kimi_k3_rope_test.py"],
     main = "kimi_k3_rope_test.py",
@@ -191,6 +199,17 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
     tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "kimi_k3_rope_jit_cache_test",
+    size = "large",
+    srcs = ["kimi_k3_rope_test.py"],
+    main = "kimi_k3_rope_test.py",
+    args = ["KimiK3RopeJitCacheTest"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "SM103_CU13"},
+    tags = ["SM103_CU13", "no-cache"],
 )
 
 py_test(
@@ -593,12 +612,14 @@ py_test(
     name = "kimi_k3_cache_config_test",
     srcs = ["kimi_k3_cache_config_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {'gpu':'A10'},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
 
 py_test(
     name = "kimi_k3_fp8_weight_test",
     srcs = ["kimi_k3_fp8_weight_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {'gpu':'A10'},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
