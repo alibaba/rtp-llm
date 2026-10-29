@@ -1,0 +1,880 @@
+{
+  "protocol": "wait5-20261029",
+  "product_commit": "ff13c95c5e6ce44cddad6789c4eb6acf2758a2e8",
+  "product_tree": "9eb345bbc0d737804d4d0bd5c47e68ca4f943cc1",
+  "driver_SHA256": "31f5f0664d42ce0d940bd8a3699fd0f7e881967f797749b7b3e00e78c8408a6e",
+  "SDK_DSO_SHA256": "eccbafbcdc651c65df5c029f8f3326e954f1dbe601ed651b27c7fc69562d25ed",
+  "default_SDK_dependency_changed": false,
+  "SDK_or_Manager_source_changes_in_delivery": false,
+  "artifact_identity": {
+    "DRAM": {
+      "wheel_bytes": 1945299136,
+      "wheel_SHA256": "4353096babe61b91323dd5beaa6e318c84e8e7a7c04b7999e7360e9a8c5033a4",
+      "main_SHA256": "8468c3b63dd55d5e2b5b6d74ba4ae6211ce738349fb87494bae3bc4ee2ae101e",
+      "compute_SHA256": "f4922f23a9aa6bc7915ba63bbfd3c53a7d1dc422ecd7844442ca21a97876eea8",
+      "native_target_cases": 493,
+      "native_failures": 0
+    },
+    "SSD": {
+      "wheel_bytes": 1943499127,
+      "wheel_SHA256": "a16c2c9808209861636e519d7bb1d722d61d9965cad8f8f926dd665d47313d39",
+      "main_SHA256": "88a3f2aa4a24edd71dca09d6f67b04bac6da9dd8de44c5f792b1feeea247f91a",
+      "compute_SHA256": "7862174941a69fc1175472e065281cb0f28f1b686e1ba8583bde96b212831fc7",
+      "native_Dtop_cases": 297,
+      "native_wrapper_cases": 31,
+      "native_failures": 0
+    }
+  },
+  "measurement": {
+    "sessions_per_arm": 4,
+    "turns_per_session": 2,
+    "R1_actual_output_tokens_each": 32768,
+    "R2_max_output_tokens": 32,
+    "requested_gap_seconds": 5,
+    "gap_clock": "same client monotonic clock, latest of4 normal R1EOF +5",
+    "publication_readiness_wait": false,
+    "P_reader_flag": "enabled in both arms",
+    "D_publication_flag": {
+      "A": false,
+      "B": true
+    },
+    "natural_P_local_cache_preserved": true,
+    "formal_is_fresh_P": false,
+    "profiler_CUPTI_copy_observers": false,
+    "statistical_significance_claim": false,
+    "P95_claim": false
+  },
+  "results": {
+    "DRAM": {
+      "protocol": "wait5-20261029",
+      "product_commit": "ff13c95c5e6ce44cddad6789c4eb6acf2758a2e8",
+      "driver_SHA256": "31f5f0664d42ce0d940bd8a3699fd0f7e881967f797749b7b3e00e78c8408a6e",
+      "medium": "DRAM",
+      "arm_A": {
+        "arm": "A",
+        "normal_EOF_requests": 8,
+        "per_session_R1_input_SHA256": [
+          "e59979ba1a53d0afb1845b08f0ea97d066e31db2eba3b2a594f787e5a97ac76f",
+          "4b29ed5ab8a7b7369611a58c37da4d0016d5489986bc8db2ed3d9060db57b0b9",
+          "dd325fa633ad594cf3fa584cb6fc01e9689cc35b8dd3b774cf9348f697ac1300",
+          "7b9b23798a9a483f0522cb7c1f75afa8b6619a3f59a1b7d91247bab04b36ba44"
+        ],
+        "per_session_R1_output_SHA256": [
+          "3d520628e5a7a6badae49177d4c871d65cd63ad4236215cf67fcb4a2f15db7c3",
+          "ba127463283aaed23b5c37a90b2cec42122ff4d6cd89255230437a53e27f5e3f",
+          "a7de14daad32d2d78384db78c93cdfb9264eeafb0623d33e1acbbb20616e46d2",
+          "9d687937b92548c3cbc5b77a041cec692230e2329ecbbdfe5b057ed09d585efb"
+        ],
+        "per_session_R2_input_SHA256": [
+          "50e22fe276898ba3449949cc7d0e1802315279f10deb66e2549a23473c5688c4",
+          "9eb8003e20180b537f7ee092ae103478826bb86876f55ddf9c53342d4e759f50",
+          "579811675fb4f87dc79a03c6d7c6b7c6c47880cab3b9d3068920f996eb36692f",
+          "a26b2ef0f47712a676a09ef077e0e48f27ef1fdda5ee8952171eeea1988a1497"
+        ],
+        "per_session_R2_output_SHA256": [
+          "dbf4213ed225160856034caf4feb0f6045a9982d99c47920c8e5b1a7ea376755",
+          "c88ee964926cf2bbb6358d9ce70d602ca5cc135f5eb84db8fe85fa11a4f90b66",
+          "7706c76385135fceb8c8b0e00f516ebb9b5dd8c0f4fe45d2a77b040aa306d5c1",
+          "1d88a86d5d9903b582826210e68a9489baf05b7ce6d02446251bef81894fe6bd"
+        ],
+        "R1_output_tokens": [
+          32768,
+          32768,
+          32768,
+          32768
+        ],
+        "R2_input_tokens": [
+          40576,
+          40576,
+          40576,
+          40576
+        ],
+        "R2_output_tokens": [
+          32,
+          32,
+          32,
+          32
+        ],
+        "R2_actual_gap_monotonic_s": [
+          5.00987949105911,
+          5.010214178008027,
+          5.0105486089596525,
+          5.009422659990378
+        ],
+        "R1_TTFT_ms": [
+          2551.9784099888057,
+          2551.5244259731844,
+          2551.6756589058787,
+          2552.223594044335
+        ],
+        "R2_TTFT_ms": [
+          591.67490596883,
+          289.3246660241857,
+          742.617323063314,
+          441.70397496782243
+        ],
+        "R2_TTFT_median_ms": 516.6894404683262,
+        "R2_TTFT_range_ms": [
+          289.3246660241857,
+          742.617323063314
+        ],
+        "R2_local_tokens": [
+          7680,
+          7680,
+          7680,
+          7680
+        ],
+        "R2_remote_tokens": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "R2_input_tail_tokens": [
+          32896,
+          32896,
+          32896,
+          32896
+        ],
+        "R1_wall_to_last_EOF_s": 270.2696525310166,
+        "business_wall_to_last_R2_EOF_s": 276.53089984098915,
+        "background_publication_and_drain": "separate native/Manager ledgers; not included in business EOF wall"
+      },
+      "arm_B": {
+        "arm": "B",
+        "normal_EOF_requests": 8,
+        "per_session_R1_input_SHA256": [
+          "e59979ba1a53d0afb1845b08f0ea97d066e31db2eba3b2a594f787e5a97ac76f",
+          "4b29ed5ab8a7b7369611a58c37da4d0016d5489986bc8db2ed3d9060db57b0b9",
+          "dd325fa633ad594cf3fa584cb6fc01e9689cc35b8dd3b774cf9348f697ac1300",
+          "7b9b23798a9a483f0522cb7c1f75afa8b6619a3f59a1b7d91247bab04b36ba44"
+        ],
+        "per_session_R1_output_SHA256": [
+          "3d520628e5a7a6badae49177d4c871d65cd63ad4236215cf67fcb4a2f15db7c3",
+          "ba127463283aaed23b5c37a90b2cec42122ff4d6cd89255230437a53e27f5e3f",
+          "a7de14daad32d2d78384db78c93cdfb9264eeafb0623d33e1acbbb20616e46d2",
+          "9d687937b92548c3cbc5b77a041cec692230e2329ecbbdfe5b057ed09d585efb"
+        ],
+        "per_session_R2_input_SHA256": [
+          "50e22fe276898ba3449949cc7d0e1802315279f10deb66e2549a23473c5688c4",
+          "9eb8003e20180b537f7ee092ae103478826bb86876f55ddf9c53342d4e759f50",
+          "579811675fb4f87dc79a03c6d7c6b7c6c47880cab3b9d3068920f996eb36692f",
+          "a26b2ef0f47712a676a09ef077e0e48f27ef1fdda5ee8952171eeea1988a1497"
+        ],
+        "per_session_R2_output_SHA256": [
+          "3d83adeb45e8fc29891b837b991455e5559c8a7cad9ce18aa3072fa95a332f82",
+          "d8b2ed7a196c1944d88946b456910434f607f7f6735aedbdec742325427e2c53",
+          "1b48e44fcd3fb574735285ed0f6aa7e87f9046acfbb5cd8caf03aeb3753e4bac",
+          "b3d9659913936f32c2e02e5986354a52244e689553c176a9732198ee5d9495f8"
+        ],
+        "R1_output_tokens": [
+          32768,
+          32768,
+          32768,
+          32768
+        ],
+        "R2_input_tokens": [
+          40576,
+          40576,
+          40576,
+          40576
+        ],
+        "R2_output_tokens": [
+          32,
+          32,
+          32,
+          32
+        ],
+        "R2_actual_gap_monotonic_s": [
+          5.009691907092929,
+          5.010010723024607,
+          5.010345122078434,
+          5.0092463720357046
+        ],
+        "R1_TTFT_ms": [
+          1753.3980089938268,
+          1753.6380399251357,
+          1753.4456889843568,
+          1754.0011759847403
+        ],
+        "R2_TTFT_ms": [
+          434.95144601911306,
+          298.7296070205048,
+          716.0146560054272,
+          573.3574710320681
+        ],
+        "R2_TTFT_median_ms": 504.1544585255906,
+        "R2_TTFT_range_ms": [
+          298.7296070205048,
+          716.0146560054272
+        ],
+        "R2_local_tokens": [
+          7680,
+          7680,
+          7680,
+          7680
+        ],
+        "R2_remote_tokens": [
+          32256,
+          32256,
+          32256,
+          32256
+        ],
+        "R2_input_tail_tokens": [
+          640,
+          640,
+          640,
+          640
+        ],
+        "R1_wall_to_last_EOF_s": 270.4134921329096,
+        "business_wall_to_last_R2_EOF_s": 276.6129628949566,
+        "background_publication_and_drain": "separate native/Manager ledgers; not included in business EOF wall"
+      },
+      "comparison": {
+        "per_session_R1_input_SHA256": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "per_session_R1_output_SHA256": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "per_session_R2_input_SHA256": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "per_session_R2_output_SHA256": [
+          false,
+          false,
+          false,
+          false
+        ]
+      },
+      "median_TTFT_observed_decrease_percent": 2.4260186024653296,
+      "qualification": "one A/B; no P95/statistical significance/stable benefit; numerical gate FAILED, R2 outputs differ in all4 sessions; formal P has natural local7680, not fresh-P",
+      "native_exit_acceptance": {
+        "A": {
+          "P_zero": 4,
+          "D_zero": 3,
+          "D_SIGABRT": 1
+        },
+        "B": {
+          "P_zero": 4,
+          "D_zero": 4,
+          "D_SIGABRT": 0
+        },
+        "roots_Consumers_zero": true
+      }
+    },
+    "SSD": {
+      "protocol": "wait5-20261029",
+      "product_commit": "ff13c95c5e6ce44cddad6789c4eb6acf2758a2e8",
+      "medium": "SSD",
+      "arm_A": {
+        "arm": "A",
+        "normal_EOF_requests": 8,
+        "per_session_R1_input_SHA256": [
+          "e59979ba1a53d0afb1845b08f0ea97d066e31db2eba3b2a594f787e5a97ac76f",
+          "4b29ed5ab8a7b7369611a58c37da4d0016d5489986bc8db2ed3d9060db57b0b9",
+          "dd325fa633ad594cf3fa584cb6fc01e9689cc35b8dd3b774cf9348f697ac1300",
+          "7b9b23798a9a483f0522cb7c1f75afa8b6619a3f59a1b7d91247bab04b36ba44"
+        ],
+        "per_session_R1_output_SHA256": [
+          "3d520628e5a7a6badae49177d4c871d65cd63ad4236215cf67fcb4a2f15db7c3",
+          "ba127463283aaed23b5c37a90b2cec42122ff4d6cd89255230437a53e27f5e3f",
+          "a7de14daad32d2d78384db78c93cdfb9264eeafb0623d33e1acbbb20616e46d2",
+          "9d687937b92548c3cbc5b77a041cec692230e2329ecbbdfe5b057ed09d585efb"
+        ],
+        "per_session_R2_input_SHA256": [
+          "50e22fe276898ba3449949cc7d0e1802315279f10deb66e2549a23473c5688c4",
+          "9eb8003e20180b537f7ee092ae103478826bb86876f55ddf9c53342d4e759f50",
+          "579811675fb4f87dc79a03c6d7c6b7c6c47880cab3b9d3068920f996eb36692f",
+          "a26b2ef0f47712a676a09ef077e0e48f27ef1fdda5ee8952171eeea1988a1497"
+        ],
+        "per_session_R2_output_SHA256": [
+          "dbf4213ed225160856034caf4feb0f6045a9982d99c47920c8e5b1a7ea376755",
+          "c88ee964926cf2bbb6358d9ce70d602ca5cc135f5eb84db8fe85fa11a4f90b66",
+          "7706c76385135fceb8c8b0e00f516ebb9b5dd8c0f4fe45d2a77b040aa306d5c1",
+          "1d88a86d5d9903b582826210e68a9489baf05b7ce6d02446251bef81894fe6bd"
+        ],
+        "R1_output_tokens": [
+          32768,
+          32768,
+          32768,
+          32768
+        ],
+        "R2_input_tokens": [
+          40576,
+          40576,
+          40576,
+          40576
+        ],
+        "R2_output_tokens": [
+          32,
+          32,
+          32,
+          32
+        ],
+        "R2_actual_gap_monotonic_s": [
+          5.008630730211735,
+          5.0089958216995,
+          5.009344559162855,
+          5.008182918652892
+        ],
+        "R1_TTFT_ms": [
+          171.98318056762218,
+          171.4592706412077,
+          171.52929306030273,
+          172.05422185361385
+        ],
+        "R2_TTFT_ms": [
+          200.53875632584095,
+          348.55268336832523,
+          495.67851424217224,
+          646.7612348496914
+        ],
+        "R2_TTFT_median_ms": 422.11559880524874,
+        "R2_TTFT_range_ms": [
+          200.53875632584095,
+          646.7612348496914
+        ],
+        "R2_local_tokens": [
+          7680,
+          7680,
+          7680,
+          7680
+        ],
+        "R2_remote_tokens": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "R2_input_tail_tokens": [
+          32896,
+          32896,
+          32896,
+          32896
+        ],
+        "R1_wall_to_last_EOF_s": 282.4445178247988,
+        "business_wall_to_last_R2_EOF_s": 288.5025507695973,
+        "background_publication_and_drain": "separate native/Manager ledgers; not included in business EOF wall"
+      },
+      "arm_B": {
+        "arm": "B",
+        "normal_EOF_requests": 8,
+        "per_session_R1_input_SHA256": [
+          "e59979ba1a53d0afb1845b08f0ea97d066e31db2eba3b2a594f787e5a97ac76f",
+          "4b29ed5ab8a7b7369611a58c37da4d0016d5489986bc8db2ed3d9060db57b0b9",
+          "dd325fa633ad594cf3fa584cb6fc01e9689cc35b8dd3b774cf9348f697ac1300",
+          "7b9b23798a9a483f0522cb7c1f75afa8b6619a3f59a1b7d91247bab04b36ba44"
+        ],
+        "per_session_R1_output_SHA256": [
+          "3d520628e5a7a6badae49177d4c871d65cd63ad4236215cf67fcb4a2f15db7c3",
+          "ba127463283aaed23b5c37a90b2cec42122ff4d6cd89255230437a53e27f5e3f",
+          "a7de14daad32d2d78384db78c93cdfb9264eeafb0623d33e1acbbb20616e46d2",
+          "9d687937b92548c3cbc5b77a041cec692230e2329ecbbdfe5b057ed09d585efb"
+        ],
+        "per_session_R2_input_SHA256": [
+          "50e22fe276898ba3449949cc7d0e1802315279f10deb66e2549a23473c5688c4",
+          "9eb8003e20180b537f7ee092ae103478826bb86876f55ddf9c53342d4e759f50",
+          "579811675fb4f87dc79a03c6d7c6b7c6c47880cab3b9d3068920f996eb36692f",
+          "a26b2ef0f47712a676a09ef077e0e48f27ef1fdda5ee8952171eeea1988a1497"
+        ],
+        "per_session_R2_output_SHA256": [
+          "3d83adeb45e8fc29891b837b991455e5559c8a7cad9ce18aa3072fa95a332f82",
+          "d8b2ed7a196c1944d88946b456910434f607f7f6735aedbdec742325427e2c53",
+          "1b48e44fcd3fb574735285ed0f6aa7e87f9046acfbb5cd8caf03aeb3753e4bac",
+          "b3d9659913936f32c2e02e5986354a52244e689553c176a9732198ee5d9495f8"
+        ],
+        "R1_output_tokens": [
+          32768,
+          32768,
+          32768,
+          32768
+        ],
+        "R2_input_tokens": [
+          40576,
+          40576,
+          40576,
+          40576
+        ],
+        "R2_output_tokens": [
+          32,
+          32,
+          32,
+          32
+        ],
+        "R2_actual_gap_monotonic_s": [
+          5.009749919176102,
+          5.010080544278026,
+          5.010418821126223,
+          5.00929775647819
+        ],
+        "R1_TTFT_ms": [
+          177.76821367442608,
+          177.16504074633121,
+          177.32760310173035,
+          177.83045582473278
+        ],
+        "R2_TTFT_ms": [
+          821.4001934975386,
+          1507.88695178926,
+          1166.5182709693909,
+          461.96472831070423
+        ],
+        "R2_TTFT_median_ms": 993.9592322334647,
+        "R2_TTFT_range_ms": [
+          461.96472831070423,
+          1507.88695178926
+        ],
+        "R2_local_tokens": [
+          7680,
+          7680,
+          7680,
+          7680
+        ],
+        "R2_remote_tokens": [
+          32256,
+          32256,
+          32256,
+          32256
+        ],
+        "R2_input_tail_tokens": [
+          640,
+          640,
+          640,
+          640
+        ],
+        "R1_wall_to_last_EOF_s": 283.7075932994485,
+        "business_wall_to_last_R2_EOF_s": 290.6591554917395,
+        "background_publication_and_drain": "separate native/Manager ledgers; not included in business EOF wall"
+      },
+      "comparison": {
+        "per_session_R1_input_SHA256": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "per_session_R1_output_SHA256": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "per_session_R2_input_SHA256": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "per_session_R2_output_SHA256": [
+          false,
+          false,
+          false,
+          false
+        ]
+      },
+      "median_TTFT_observed_increase_percent": 135.4708603630749,
+      "qualification": "one A/B; SSD R2 latency regresses, no session gain or numerical acceptance; all4 R2 output hashes differ; P natural local7680, not fresh-P",
+      "native_exit_acceptance": {
+        "A": {
+          "P_zero": 4,
+          "D_zero": 1,
+          "D_SIGABRT": 1
+        },
+        "B": {
+          "P_zero": 4,
+          "D_zero": 1,
+          "D_SIGABRT": 1
+        },
+        "roots_Consumers_zero": true,
+        "D_controller_terminal": "FAILED_NATIVE_LIFECYCLE_AFTER_PROTOCOL"
+      }
+    }
+  },
+  "strict_R2_output_equality": "FAILED_all4sessions_on_each_medium",
+  "D_origin_dedicated_metrics": "NOT_END_TO_END_ACCEPTED",
+  "native_model_exit_acceptance": "FAILED_not_all_D_ranks_exit_zero; all native wait states retained separately from successful RPC/root/Consumer",
+  "code_review": {
+    "tool": "dsh",
+    "model": "bailian/kimi-k3",
+    "ff13_verdict": "APPROVE_CODE_ONLY",
+    "session": "session-dc125ce9-8f2d-48e6-b9c8-2dfd9d9c0d61",
+    "independent_report_numbers_recalculated": true
+  },
+  "delivery_scope": "opt-in feature-development source and truthful evidence; not unconditional numerical, shutdown or production acceptance",
+  "native_model_exits": {
+    "DRAM": {
+      "A": {
+        "P_zero": 4,
+        "D_zero": 3,
+        "D_SIGABRT": 1
+      },
+      "B": {
+        "P_zero": 4,
+        "D_zero": 4,
+        "D_SIGABRT": 0
+      },
+      "roots_Consumers_zero": true
+    },
+    "SSD": {
+      "A": {
+        "P_zero": 4,
+        "D_zero": 1,
+        "D_SIGABRT": 1
+      },
+      "B": {
+        "P_zero": 4,
+        "D_zero": 1,
+        "D_SIGABRT": 1
+      },
+      "roots_Consumers_zero": true,
+      "D_controller_terminal": "FAILED_NATIVE_LIFECYCLE_AFTER_PROTOCOL"
+    },
+    "SIG_diagnostic_policy": "collect real exits only; no extra diagnosis or counterfactual runs",
+    "all_native_exit_acceptance": "FAILED_not_all_D_ranks_exit_zero"
+  },
+  "publication_accounting": {
+    "DRAM": {
+      "R1_transactions": [
+        {
+          "session": 0,
+          "EOS_queued_to_first_SDK_ms": 2131.648063659668,
+          "SDK_wall_envelope_ms": 49.649953842163086,
+          "last_SDK_to_commit_ms": 386.7959976196289,
+          "EOS_queued_to_commit_ms": 2568.09401512146,
+          "SDK_write_bytes": 33466368,
+          "local_reuse": 7680,
+          "remote_reuse": 32256,
+          "new_D_interval": [
+            7680,
+            39936
+          ],
+          "tail_recomputed": 640
+        },
+        {
+          "session": 1,
+          "EOS_queued_to_first_SDK_ms": 2120.9402084350586,
+          "SDK_wall_envelope_ms": 52.12593078613281,
+          "last_SDK_to_commit_ms": 356.3399314880371,
+          "EOS_queued_to_commit_ms": 2529.4060707092285,
+          "SDK_write_bytes": 33466368,
+          "local_reuse": 7680,
+          "remote_reuse": 32256,
+          "new_D_interval": [
+            7680,
+            39936
+          ],
+          "tail_recomputed": 640
+        },
+        {
+          "session": 2,
+          "EOS_queued_to_first_SDK_ms": 2221.989870071411,
+          "SDK_wall_envelope_ms": 29.101133346557617,
+          "last_SDK_to_commit_ms": 336.08388900756836,
+          "EOS_queued_to_commit_ms": 2587.174892425537,
+          "SDK_write_bytes": 33466368,
+          "local_reuse": 7680,
+          "remote_reuse": 32256,
+          "new_D_interval": [
+            7680,
+            39936
+          ],
+          "tail_recomputed": 640
+        },
+        {
+          "session": 3,
+          "EOS_queued_to_first_SDK_ms": 2099.0259647369385,
+          "SDK_wall_envelope_ms": 44.63791847229004,
+          "last_SDK_to_commit_ms": 349.2860794067383,
+          "EOS_queued_to_commit_ms": 2492.949962615967,
+          "SDK_write_bytes": 33466368,
+          "local_reuse": 7680,
+          "remote_reuse": 32256,
+          "new_D_interval": [
+            7680,
+            39936
+          ],
+          "tail_recomputed": 640
+        }
+      ],
+      "Manager_successful_Start_Finish_rows": 56,
+      "R1_computed": 40447,
+      "R1_published": 39936,
+      "computed_tail": 511,
+      "new_D_commits": 4,
+      "new_locations_each": 63,
+      "R2_new_checkpoint_required": false
+    },
+    "SSD": {
+      "write_duration_us": [
+        1013007,
+        1035419,
+        1132556,
+        1182121
+      ],
+      "SDK_chunks": [
+        {
+          "bytes": 8366592,
+          "duration_us": 151238,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 160334,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 213722,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 246033,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 217231,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 244634,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 287813,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 281600,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 284059,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 268291,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 323041,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 346179,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 342943,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 345008,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 294683,
+          "ec": 0
+        },
+        {
+          "bytes": 8366592,
+          "duration_us": 290828,
+          "ec": 0
+        }
+      ],
+      "all_SDK_ec_zero": true,
+      "CPU_snapshot_bytes": 0,
+      "computed_end": 40447,
+      "published_end": 39936,
+      "tail_tokens": 511,
+      "scope": "Native write_duration_us timer; not automatically EOS-to-commit. SDK bytes count passed call spans, not physical network counters.",
+      "write_duration_boundary": "inside writeTransaction entry/setup through successful FinishWrite; excludes EOS-to-worker queue wait",
+      "R1_total_observed_outer_SDK_payload_bytes": 133865472,
+      "Manager_transactions_including_prewarm": 32,
+      "all_Manager_FinishWrite_OK": true,
+      "Manager_business_ledger": {
+        "A": {
+          "transactions": 16,
+          "all_finished_OK": true,
+          "last_finish_server_epoch": 1793234352.23087,
+          "all_write_server_completion_wall_s": 289.1484422683716,
+          "tail_after_R2_EOF_s": 0.6458914279937744,
+          "roles": {
+            "P": {
+              "transactions": 8,
+              "nonempty": 8,
+              "URI_count": 6320,
+              "URI_bytes": 624517120,
+              "last_finish_server_epoch": 1793234352.23087
+            },
+            "D": {
+              "transactions": 8,
+              "nonempty": 8,
+              "URI_count": 3840,
+              "URI_bytes": 179134464,
+              "last_finish_server_epoch": 1793234351.602571
+            }
+          },
+          "warmup_transactions_excluded": 2
+        },
+        "B": {
+          "transactions": 12,
+          "all_finished_OK": true,
+          "last_finish_server_epoch": 1793234989.058747,
+          "all_write_server_completion_wall_s": 290.65915536880493,
+          "tail_after_R2_EOF_s": 0.0,
+          "roles": {
+            "P": {
+              "transactions": 8,
+              "nonempty": 8,
+              "URI_count": 1280,
+              "URI_bytes": 126484480,
+              "last_finish_server_epoch": 1793234989.058747
+            },
+            "D": {
+              "transactions": 4,
+              "nonempty": 4,
+              "URI_count": 3056,
+              "URI_bytes": 133865472,
+              "last_finish_server_epoch": 1793234983.6469572
+            }
+          },
+          "warmup_transactions_excluded": 2
+        },
+        "scope": "Manager server response completion; cross-host clocks not calibrated, no P client ACK timestamp; not exact full client completion",
+        "Provider_sampler_scope": "Sampler began after both R1 and R2 EOF: no per-R2 physical IO attribution. Absolute Provider IO and target-system O_DIRECT FD separately recorded.",
+        "sample_start_after_B_R2_EOF_s": 3.3196473121643066,
+        "B_minus_A_all_write_server_completion_wall_s": 1.5107131004333496,
+        "URI_bytes_scope": "Allocated URI sizes returned by Manager; not measured network or SSD transfer bytes.",
+        "D_native_write_timer_scope": "Native DTOP_GPU write_duration_us, from writeTransaction timer; not automatically EOS-to-commit. Raw lines retained."
+      },
+      "URI_byte_counts_are_allocated_sizes_not_actual_payload": true,
+      "Provider_PID": 356758,
+      "Provider_start_ticks": 33464534,
+      "SSD_FD": 9,
+      "SSD_FD_octal_flags": "0600002",
+      "target_O_DIRECT_constant": 65536,
+      "SSD_inode": 103829132,
+      "Provider_IO_first_sample_after_B_R2_EOF_seconds": 3.3196473121643066,
+      "R2_physical_SSD_IO_attribution": "NOT_MEASURED_sampler_started_after_R2; no cold-read or media-bandwidth claim"
+    }
+  },
+  "raw_evidence_SHA256": [
+    {
+      "file": "deployment/reports/dram-reproduction-20261028/wait5-formal-A-stage-prefill.json",
+      "bytes": 97693,
+      "SHA256": "318e47cfc5be93a017e60f6b90401e55bc012b24a43cb347b0ee0a751d8ca211"
+    },
+    {
+      "file": "deployment/reports/dram-reproduction-20261028/wait5-formal-A-stage-decode.json",
+      "bytes": 28760,
+      "SHA256": "05e44845d8f2d0e0bd1f3ec70f1a01939692b29a60584cfbfe156955630ca413"
+    },
+    {
+      "file": "deployment/reports/dram-reproduction-20261028/wait5-formal-B-stage-prefill.json",
+      "bytes": 107561,
+      "SHA256": "a344c0b9f6b8e5e15ddcf675d60bbf967df634e3f5879a37ce91fd8c39429da2"
+    },
+    {
+      "file": "deployment/reports/dram-reproduction-20261028/wait5-formal-B-stage-decode.json",
+      "bytes": 57902,
+      "SHA256": "4d419a4f0beedc8b9fbe5e33f002c6a2246d96d14f8fcd7e50cb0744b80299e2"
+    },
+    {
+      "file": "deployment/reports/dram-reproduction-20261028/wait5-R1-publication-phases.json",
+      "bytes": 23705,
+      "SHA256": "b4d024851fec84e47f58ddc0cabdf2f80acbaa1ff9be573bf093f5dc71803ead"
+    },
+    {
+      "file": "deployment/reports/dram-reproduction-20261028/wait5-formal-AB-Manager-ACKs.json",
+      "bytes": 40619,
+      "SHA256": "c3e03321ac886b851cf21ffc34cdc801536136d9ddbc1cfb4341556cfb877ac5"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-terminal-final-10.44.3.252.json",
+      "bytes": 39156,
+      "SHA256": "39c851999435106dcd07ac0820015038bd43431111e903df9285c2dcb1a5637d"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-terminal-final-10.44.45.9.json",
+      "bytes": 30183,
+      "SHA256": "964c534b5200043b41f49431d8dbdd38564e30abe472817957c4e38ccf08d144"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-D-write-summary.json",
+      "bytes": 1657,
+      "SHA256": "7f18b3b48cb28230baefbeda3de939c733829233785c57496c328b639812f0a2"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-storage-accounting.json",
+      "bytes": 30981,
+      "SHA256": "b4b46a21a4ca18b68e94715cc8c2adc9b6fc5c181391880c847337ac7dd0e36f"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-full-write-ledger.json",
+      "bytes": 2005,
+      "SHA256": "8a21e58c915fce77ac55aa509d743082434f5bdcfab485f06231b7fe0ee9f029"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-final-resource-10.44.3.252.json",
+      "bytes": 1028,
+      "SHA256": "a3b9cb621ad9ae39fb10e40119852a4743078dfc329e1efcda93db31313856b4"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-final-resource-10.44.45.9.json",
+      "bytes": 1028,
+      "SHA256": "66ae57f094a503fd3d8d3222f77683e42ba7b83304575c3c0e06b1a0fc5e0f75"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-final-resource-10.44.44.214.json",
+      "bytes": 10530,
+      "SHA256": "ed50d9718d42ff7687ac9c88db1b2a2bffbf4aee67915a6b2ea953800fd73d14"
+    },
+    {
+      "file": "deployment/reports/pace-rdma-20261023/ssd-e2e-20261028-B/wait5-final-resource-10.44.36.125.json",
+      "bytes": 141,
+      "SHA256": "c5ccd9283efadf1ba98c415e5010e49a00d3481cd4f5d096ba930ef17e377968"
+    }
+  ],
+  "resource_closeout": {
+    "state": "COMPLETE_OWN_RESOURCES_RELEASED",
+    "DRAM": "own Provider/Meta and own keepers exited; existing shared Manager healthy and untouched",
+    "SSD": {
+      "all4_nodes_owned_processes_empty": true,
+      "all4_nodes_test_listeners_empty": true,
+      "all4_nodes_GPU_compute_apps_empty": true,
+      "CPU_cycles_exited": true,
+      "Manager_exit_code": 0,
+      "Meta_exit_code": 0,
+      "Provider_requested_stop_exit_code": 143,
+      "idle_gate_started_sessions": 32,
+      "idle_gate_Finished_OK_sessions": 32,
+      "unfinished_write_sessions": 0,
+      "SSD_data_file_deleted": false,
+      "inmemory_URI_index_preserved": false,
+      "storage_archive_SHA256": "0e10fbab78ff7ed13b1e4dd53ba3417f8c3ce541cd3c131b3885403550e180fa"
+    },
+    "other_users_processes_stopped": false
+  }
+}

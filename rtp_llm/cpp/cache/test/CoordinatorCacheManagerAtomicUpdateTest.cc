@@ -5,6 +5,7 @@
 #include <memory>
 #include <set>
 #include <vector>
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
@@ -40,6 +41,77 @@ class CoordinatorCacheManagerAtomicUpdateTest: public ::testing::Test {
 protected:
     std::shared_ptr<TestAllocator> allocator_;
 };
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWritablePhysicalSuffixWhenEnabled) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto            config = createSingleTypeTestConfig(1, 6, 4);
+        allocator_             = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator_->init());
+        const auto pool     = allocator_->groupBlockPools().front();
+        auto       resource = createBatchKVCacheResource(1, config);
+        const auto blocks   = allocateRequestBlocks(pool, 3);
+        ASSERT_EQ(blocks.size(), 3u);
+        resource->mutableBlockIds(0, "default").assign(blocks);
+        ASSERT_TRUE(pool->enableDecodeOriginTracking());
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{
+                std::string(32, 'a'), 0, static_cast<int64_t>(i * 4), static_cast<int64_t>((i + 1) * 4), 12, 13});
+            ASSERT_TRUE(pool->bindDecodeOrigin(blocks[i], pool->decodeOriginIncarnation(blocks[i]), "default", origin));
+        }
+        ASSERT_TRUE(allocator_->detachSharedBlocksForRecompute(resource, 4));
+        EXPECT_EQ(resource->blocks(0, "default"), blocks);  // exclusive allocations are retained
+        for (size_t i = 0; i < blocks.size(); ++i)
+            EXPECT_EQ(static_cast<bool>(pool->decodeOrigin(blocks[i], "default")), !enabled || i == 0);
+        allocator_->free({resource, nullptr});
+    }
+}
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, CopySubmissionDoesNotPreserveTheDestinationsOldOrigin) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto            config = createSingleTypeTestConfig(1, 5, 4);
+        allocator_             = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator_->init());
+        const auto pool   = allocator_->groupBlockPools().front();
+        const auto blocks = allocateRequestBlocks(pool, 2);
+        ASSERT_EQ(blocks.size(), 2u);
+        ASSERT_TRUE(pool->enableDecodeOriginTracking());
+        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 0, 0, 4, 4, 5});
+        for (const auto block : blocks)
+            ASSERT_TRUE(pool->bindDecodeOrigin(block, pool->decodeOriginIncarnation(block), "default", origin));
+        allocator_->blockBatchCopyByGroup({{"default", blocks[0], blocks[1]}});
+        EXPECT_EQ(static_cast<bool>(pool->decodeOrigin(blocks[1], "default")), !enabled);
+        EXPECT_EQ(pool->decodeOrigin(blocks[0], "default"), origin);
+        allocator_->blockBatchCopyByGroup({{"default", blocks[0], blocks[0]}});
+        EXPECT_EQ(pool->decodeOrigin(blocks[0], "default"), origin);
+        pool->decRef(blocks);
+    }
+}
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, AtomicRemapPreservesRequestEosAndPublicationIdempotency) {
+    auto config = createSingleTypeTestConfig(1, 5, 4);
+    allocator_  = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+    auto       pool   = allocator_->groupBlockPools().front();
+    const auto blocks = allocateRequestBlocks(pool, 2);
+    ASSERT_EQ(blocks.size(), 2u);
+    auto resource = createBatchKVCacheResource(1, config);
+    resource->setBatchBlocks(0, "default", blocks);
+    const auto eos = DecodePublicationLifecycle::Clock::now();
+    resource->decodeCompletionLifecycle().recordEos(eos);
+    ASSERT_TRUE(resource->decodeCompletionLifecycle().recordPrefillComputedEnd(3));
+    EXPECT_TRUE(resource->decodeCompletionLifecycle().recordFirstBudgetSkip());
+    resource->decodeCompletionSubmitted() = true;
+    std::vector<TaggedBlockIdPair> mapping;
+    ASSERT_TRUE(allocator_->updateKVBlock(resource, {0}, /*copy_last_block=*/false, mapping));
+    EXPECT_EQ(resource->blocks(0, "default"), blocks);
+    EXPECT_EQ(resource->decodeCompletionLifecycle().eosAt(), eos);
+    EXPECT_EQ(resource->decodeCompletionLifecycle().prefillComputedEnd(), 3);
+    EXPECT_FALSE(resource->decodeCompletionLifecycle().recordFirstBudgetSkip());
+    EXPECT_TRUE(resource->decodeCompletionSubmitted());
+    allocator_->free(FreeInfo{resource, nullptr});
+}
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, BatchFreePreservesOtherRequestAndTransferHolds) {
     auto config = createSingleTypeTestConfig(2, 5, 4);

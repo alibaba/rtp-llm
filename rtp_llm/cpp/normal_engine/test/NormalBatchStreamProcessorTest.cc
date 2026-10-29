@@ -164,6 +164,48 @@ protected:
 
 class OutputDispatchTest: public NormalBatchStreamProcessorTest, public ::testing::WithParamInterface<int> {};
 
+TEST_P(OutputDispatchTest, RestoreGpuReadinessNeedsProducerRankDependencyAndExistingConsumerFence) {
+    class RecordingStream final: public NormalGenerateStream {
+    public:
+        using NormalGenerateStream::NormalGenerateStream;
+        void updateOutput(const StreamUpdateInfo& update_info) override {
+            readiness.push_back(update_info.context_kv_all_rank_gpu_ready_at);
+            observations.push_back(RemoteRestoreTiming::Clock::now());
+            NormalGenerateStream::updateOutput(update_info);
+        }
+        std::vector<std::optional<RemoteRestoreTiming::Clock::time_point>> readiness;
+        std::vector<RemoteRestoreTiming::Clock::time_point>                observations;
+    };
+    for (const bool rank_dependency : {false, true}) {
+        for (const bool gpu_output : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "rank_dependency=" << rank_dependency << " gpu_output=" << gpu_output);
+            auto query                             = std::make_shared<GenerateInput>();
+            query->input_ids                       = hostIntBuffer({0});
+            query->generate_config                 = std::make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens = 8;
+            query->generate_config->ignore_eos     = true;
+            ModelConfig config;
+            config.max_seq_len = 16;
+            config.vocab_size  = 2;
+            auto stream = std::make_shared<RecordingStream>(query, config, RuntimeConfig{}, ResourceContext{}, nullptr);
+            stream->generate_status_->status = StreamState::RUNNING;
+            StreamGroups streams({stream});
+            MergedOutput outputs;
+            outputs.model_output.context_kv_has_rank_completion_dependency = rank_dependency;
+            auto token_ids                   = torch::tensor({1}, torch::kInt32).reshape({1, 1});
+            outputs.sampler_output.token_ids = gpu_output ? token_ids.to(torch::kCUDA) : token_ids;
+            NormalOutputDispatcher dispatcher({}, GetParam());
+            ASSERT_TRUE(dispatcher.dispatch(streams, outputs).ok());
+            ASSERT_EQ(stream->readiness.size(), 1u);
+            EXPECT_EQ(stream->readiness.front().has_value(), rank_dependency && gpu_output);
+            if (stream->readiness.front()) {
+                EXPECT_LE(*stream->readiness.front(), stream->observations.front());
+            }
+            EXPECT_EQ(stream->outputTokenLen(), 1);
+        }
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, OutputDispatchTest, ::testing::Values(0, 2));
 
 TEST_P(OutputDispatchTest, testDispatchPreservesCpuProfilingAndAsyncDisableGuard) {
@@ -702,6 +744,7 @@ TEST_P(NormalBatchStreamProcessorPrefillOnlyTest, prefillOnlySkipsLmHeadAndDispa
         EXPECT_EQ(update_info.new_tokens.sizes(), (torch::IntArrayRef{1, 0}));
         EXPECT_FALSE(update_info.update_remote_generate);
         EXPECT_FALSE(update_info.force_update_info);
+        EXPECT_FALSE(update_info.context_kv_all_rank_gpu_ready_at);
         EXPECT_FALSE(update_info.prompt_logits.has_value());
         EXPECT_FALSE(update_info.error_info.has_value());
 

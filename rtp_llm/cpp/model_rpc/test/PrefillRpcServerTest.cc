@@ -287,8 +287,6 @@ TEST_F(PrefillRpcServerTest, GenerateHandoffExplicitlyExcludesSampledTokenOnlyWh
         TestPrefillRpcServer server;
         server.setEngineForTest(false);
         server.setProcessIdForTest("prefill");
-        // A later environment change must not alter the startup-owned flag.
-        setenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "1" : "0", 1);
         server.remoteGenerateForTest(*context);
         ASSERT_EQ(client->writes.size(), 1u);
         const auto& handoff = client->writes.front();

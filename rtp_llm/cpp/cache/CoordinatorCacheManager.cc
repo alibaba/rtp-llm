@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <unordered_map>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <iomanip>
 #include <numeric>
 #include <sstream>
@@ -342,6 +343,26 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
             }
         }
     }
+    if (remoteCacheDecodePublicationEnabled()) {
+        // The allocator may keep an exclusively owned numeric block ID for
+        // recomputation. Its payload will change without a new allocation:
+        // invalidate that suffix, while preserving the proven ready prefix
+        // and the old cache/other-request pages detached above.
+        for (const auto& group : groups) {
+            const auto& tag  = group->tag();
+            const auto& pool = group->blockPool();
+            const int   local_reuse_length =
+                cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
+            const size_t begin = local_reuse_length / group->seqSizePerBlock();
+            for (int batch = 0; batch < resource->batchSize(); ++batch) {
+                const auto& blocks = resource->blocks(batch, tag);
+                for (size_t pos = begin; pos < blocks.size(); ++pos) {
+                    if (!isNullBlockIdx(blocks[pos]))
+                        pool->bindDecodeOrigin(blocks[pos], pool->decodeOriginIncarnation(blocks[pos]), tag, nullptr);
+                }
+            }
+        }
+    }
     rollback.dismiss();
     return true;
 }
@@ -484,6 +505,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     BlockTreeMatchResult match_result =
         block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
+    prepared.decode_sources                        = std::move(match_result.matched_device_decode_sources);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -609,6 +631,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.decode_sources    = deferred_prepared->decode_sources;
         return result;
     }
 
@@ -619,6 +642,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.decode_sources    = std::move(prepared.decode_sources);
     return result;
 }
 
@@ -906,10 +930,13 @@ void CoordinatorCacheManager::free(const FreeInfo& free_info) {
 }
 
 bool CoordinatorCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,
-                                                     size_t computed_end,
-                                                     bool finished) const {
-    const auto backend = block_tree_cache_ ? block_tree_cache_->storageBackend() : nullptr;
-    return backend && backend->captureCompletedDecode(resource, computed_end, finished);
+                                                     size_t                      computed_end,
+                                                     bool                        decode_finished) const {
+    if (!block_tree_cache_) {
+        return false;
+    }
+    const auto backend = block_tree_cache_->storageBackend();
+    return backend && backend->captureCompletedDecode(resource, computed_end, decode_finished);
 }
 
 void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
@@ -1803,6 +1830,16 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
                                 tag.c_str());
     }
     if (gpu_block_copy_ && group_tags.size() == 1 && group_tags.front() == config_.groupTags().front()) {
+        if (remoteCacheDecodePublicationEnabled()) {
+            const auto& pool = group_block_pools_.front();
+            const auto* rows = copy_mapping.data_ptr<int32_t>();
+            for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
+                if (rows[3 * i + 1] != rows[3 * i + 2]) {
+                    const auto target = rows[3 * i + 2];
+                    pool->bindDecodeOrigin(target, pool->decodeOriginIncarnation(target), group_tags.front(), nullptr);
+                }
+            }
+        }
         gpu_block_copy_->copy(copy_mapping);
         return;
     }
@@ -1832,6 +1869,10 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
         const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
+        if (mapping.src != mapping.dst && remoteCacheDecodePublicationEnabled()) {
+            const auto& pool = group_block_pools_[static_cast<size_t>(group_id)];
+            pool->bindDecodeOrigin(mapping.dst, pool->decodeOriginIncarnation(mapping.dst), mapping.tag, nullptr);
+        }
         for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
             const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;

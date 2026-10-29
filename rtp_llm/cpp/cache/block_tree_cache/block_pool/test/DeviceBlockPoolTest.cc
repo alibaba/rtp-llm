@@ -478,6 +478,31 @@ TEST(DeviceBlockPoolTest, RequestReleaseCannotConsumeConnectorReference) {
     EXPECT_FALSE(pool.isAllocated(block));
 }
 
+TEST(DeviceBlockPoolTest, DonorReuseChangesOriginIncarnationButAnUnchangedReferenceDoesNot) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    ASSERT_TRUE(pool.enableDecodeOriginTracking());
+    const auto donor = pool.malloc().value();
+    pool.incRef(donor);
+    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
+    ASSERT_TRUE(parsed);
+    const auto source = std::make_shared<const DecodeCacheOrigin>(*parsed);
+    const auto first  = pool.decodeOriginIncarnation(donor);
+    ASSERT_TRUE(pool.bindDecodeOrigin(donor, first, "full", source));
+    BlockIndicesType replacements;
+    int              required_free = 0;
+    ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 1}}, 0, replacements, required_free));
+    EXPECT_EQ(pool.decodeOriginIncarnation(donor), first);
+    EXPECT_EQ(pool.decodeOrigin(donor, "full"), source);
+    ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
+    ASSERT_EQ(replacements, (BlockIndicesType{donor}));
+    EXPECT_NE(pool.decodeOriginIncarnation(donor), first);
+    EXPECT_FALSE(pool.decodeOrigin(donor, "full"));
+    EXPECT_FALSE(pool.bindDecodeOrigin(donor, first, "full", source));
+    pool.decRef(donor);
+    EXPECT_EQ(pool.freeBlocksNum(), pool.totalBlocksNum());
+}
+
 TEST(DeviceBlockPoolTest, RequestReplacementCannotRecycleConnectorHeldDonor) {
     for (const auto owner : {DeviceBlockRefType::REMOTE_CONNECTOR, DeviceBlockRefType::PD_CONNECTOR}) {
         DeviceBlockPool pool(makeConfig());

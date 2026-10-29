@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Exception.h"
+#include "autil/EnvUtil.h"
 
 #include <atomic>
 #include <chrono>
@@ -226,6 +227,109 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
+}
+
+TEST_F(GenerateStreamTest, DecodeCacheActualUseIncludesHotTiersWithoutRemoteRestore) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::REMOTE}) {
+        SCOPED_TRACE(tierName(tier));
+        // The same published interval can be used once by each independent
+        // request, including a context update that immediately reaches EOS.
+        for (int request = 0; request < 2; ++request) {
+            auto stream                              = GenerateStreamBuilder().createContextStream({1, 2, 3});
+            stream->generateConfig()->max_new_tokens = 1;
+            auto& resource                           = stream->streamCacheResource();
+            resource.resource_context_.role_type     = RoleType::PREFILL;
+            kmonitor::MetricsTags tags;
+            stream->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+            auto origin =
+                std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 1, 0, 2, 2, 3});
+            const auto sources =
+                std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), tier}});
+            resource.adoptDecodeReuse(sources, 2);
+            ASSERT_TRUE(resource.hasPendingDecodeReuse());
+            ASSERT_FALSE(resource.hasPendingRemoteRestore());
+
+            StreamUpdateInfo update{torch::tensor({{42}}, torch::kInt32), 1};
+            update.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
+            stream->update(update);
+
+            EXPECT_TRUE(resource.decode_reuse_use_state_.consumed_);
+            EXPECT_FALSE(resource.hasPendingDecodeReuse());
+            // Allocator retries cannot re-arm the count for this request.
+            resource.clearCacheReuseState();
+            resource.adoptDecodeReuse(sources, 2);
+            EXPECT_FALSE(resource.hasPendingDecodeReuse());
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, DecodeCacheActualUseRejectsUnprovenForcedAndFailedContextUpdates) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    enum class Case {
+        CPU_OBSERVATION,
+        FORCED,
+        WORKER_ERROR,
+        CANCELLED,
+        DECODE_UPDATE,
+        INVALID_TOKEN
+    };
+    for (const auto scenario : {Case::CPU_OBSERVATION,
+                                Case::FORCED,
+                                Case::WORKER_ERROR,
+                                Case::CANCELLED,
+                                Case::DECODE_UPDATE,
+                                Case::INVALID_TOKEN}) {
+        SCOPED_TRACE(static_cast<int>(scenario));
+        auto stream                              = GenerateStreamBuilder().createContextStream({1, 2, 3});
+        stream->generateConfig()->max_new_tokens = 4;
+        auto& resource                           = stream->streamCacheResource();
+        resource.resource_context_.role_type     = RoleType::PREFILL;
+        kmonitor::MetricsTags tags;
+        stream->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 1, 0, 2, 2, 3});
+        resource.adoptDecodeReuse(
+            std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), Tier::DEVICE}}), 2);
+        ASSERT_TRUE(resource.hasPendingDecodeReuse());
+
+        StreamUpdateInfo update{torch::tensor({{scenario == Case::INVALID_TOKEN ? 2048 : 42}}, torch::kInt32), 1};
+        if (scenario != Case::CPU_OBSERVATION)
+            update.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
+        update.force_update_info = scenario == Case::FORCED;
+        if (scenario == Case::WORKER_ERROR)
+            update.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "worker failed");
+        if (scenario == Case::CANCELLED)
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "request cancelled");
+        if (scenario == Case::DECODE_UPDATE)
+            stream->setIsContextStream(false);
+        stream->update(update);
+        EXPECT_FALSE(resource.decode_reuse_use_state_.consumed_);
+
+        // A later decode update carrying a GPU timestamp must not turn a CPU
+        // observation or forced P-to-D token into a successful context use.
+        if (scenario == Case::CPU_OBSERVATION || scenario == Case::FORCED) {
+            StreamUpdateInfo later{torch::tensor({{43}}, torch::kInt32), 1};
+            later.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
+            stream->update(later);
+            EXPECT_FALSE(resource.decode_reuse_use_state_.consumed_);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, DecodeCacheActualUseIsNotAdoptedWhenFeatureOffOrRoleIsDecode) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto            stream               = GenerateStreamBuilder().createContextStream({1, 2, 3});
+        auto&           resource             = stream->streamCacheResource();
+        resource.resource_context_.role_type = enabled ? RoleType::DECODE : RoleType::PREFILL;
+        kmonitor::MetricsTags tags;
+        stream->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 1, 0, 2, 2, 3});
+        resource.adoptDecodeReuse(
+            std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), Tier::DEVICE}}), 2);
+        EXPECT_FALSE(resource.hasPendingDecodeReuse());
+        EXPECT_FALSE(resource.decode_reuse_use_state_.sources_);
+    }
 }
 
 TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAuxInfo) {

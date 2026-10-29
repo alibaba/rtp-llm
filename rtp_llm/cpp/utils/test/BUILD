@@ -11,22 +11,29 @@ google_test_deps = [
 ]
 
 cc_test(
-    name = "decode_publication_budget_test",
-    srcs = ["DecodePublicationBudgetTest.cc"],
+    name = "decode_cache_origin_test",
+    srcs = ["DecodeCacheOriginTest.cc"],
     copts = copts(),
-    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:decode_cache_origin"],
 )
 
 cc_test(
-    name = "decode_publication_lifecycle_test",
-    srcs = ["DecodePublicationLifecycleTest.cc"],
+    name = "physical_decode_origins_test",
+    srcs = ["PhysicalDecodeOriginsTest.cc"],
     copts = copts(),
-    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:physical_decode_origins"],
 )
 
 cc_test(
     name = "remote_cache_config_test",
     srcs = ["RemoteCacheConfigTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_test(
+    name = "remote_restore_lifecycle_test",
+    srcs = ["RemoteRestoreLifecycleTest.cc"],
     copts = copts(),
     deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
 )

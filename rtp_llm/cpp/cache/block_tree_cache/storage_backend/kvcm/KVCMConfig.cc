@@ -5,6 +5,20 @@ using namespace autil::legacy;
 namespace rtp_llm {
 namespace kvcm {
 namespace {
+// SSD uses the same PACE SDK family, with a distinct wire backend name. Keep
+// this implementation detail private; never serialize it as the DRAM "pace".
+class PaceSsdSdkConfig final: public SdkBackendConfig {
+public:
+    PaceSsdSdkConfig(): SdkBackendConfig(DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL) {}
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+        std::string type = "pace_ssd";
+        json.Jsonize("type", type);
+        if (type != "pace_ssd")
+            AUTIL_LEGACY_THROW(NotJsonizableException, "invalid PACE SSD backend name");
+        json.Jsonize("sdk_log_file_path", sdk_log_file_path_, "");
+        json.Jsonize("sdk_log_level", sdk_log_level_, "ERROR");
+    }
+};
 DataStorageType DataStorageTypeFromString(const std::string& type) {
     if (type == "local") {
         return DataStorageType::DATA_STORAGE_TYPE_LOCAL;
@@ -129,7 +143,8 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
             if (type_str == nullptr) {
                 AUTIL_LEGACY_THROW(NotJsonizableException, "sdk_backend config field 'type' must be a string");
             }
-            DataStorageType                   type = DataStorageTypeFromString(*type_str);
+            DataStorageType type = *type_str == "pace_ssd" ? DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL :
+                                                             DataStorageTypeFromString(*type_str);
             std::shared_ptr<SdkBackendConfig> sdk_backend_config;
             switch (type) {
                 case DataStorageType::DATA_STORAGE_TYPE_LOCAL:
@@ -142,7 +157,10 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
                     sdk_backend_config = std::make_shared<MooncakeSdkConfig>();
                     break;
                 case DataStorageType::DATA_STORAGE_TYPE_TAIR_MEMPOOL:
-                    sdk_backend_config = std::make_shared<TairMempoolSdkConfig>();
+                    if (*type_str == "pace_ssd")
+                        sdk_backend_config = std::make_shared<PaceSsdSdkConfig>();
+                    else
+                        sdk_backend_config = std::make_shared<TairMempoolSdkConfig>();
                     break;
                 case DataStorageType::DATA_STORAGE_TYPE_NFS:
                     sdk_backend_config = std::make_shared<NfsSdkConfig>();

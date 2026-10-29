@@ -1,75 +1,130 @@
-// Included inside KVCMStorageBackend::Impl. EOS-only GPU source projection;
-// the ordinary Prefill transaction and its PACE batching remain unchanged.
+// EOS-only native GPU publication. No early payload copy or CPU snapshot.
+// Metadata and payload transfer reuse the Prefill StorageBackend pipeline.
 
-bool configureDecodePublication(const CacheTopology& topology,
-                                const StorageBackend::BufferResolver& resolver,
+bool configureDecodePublication(const CacheTopology&                                                topology,
+                                const StorageBackend::BufferResolver&                               resolver,
                                 const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
-    if (!decode_publication_enabled_) {
-        return true;
-    }
-#if !USING_CUDA
-    RTP_LLM_LOG_ERROR("Decode publication requires the CUDA backend");
-    return false;
-#endif
-    try {
-        kvcm::SdkWrapperConfig sdk;
-        sdk.parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
-        if (sdk.sdk_backend_configs().size() != 1
-            || !std::dynamic_pointer_cast<kvcm::TairMempoolSdkConfig>(sdk.sdk_backend_configs().front())) {
-            RTP_LLM_LOG_ERROR("Decode publication requires one DRAM PACE backend");
-            return false;
-        }
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("invalid Decode PACE configuration: %s", error.what());
+    const char* feature = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
+    if (feature && std::string_view(feature) != "0" && std::string_view(feature) != "1") {
+        RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
         return false;
     }
-    const auto& cp = parallelism_config_.prefill_cp_config;
-    target_prefill_cp_ = cp.prefill_cp_size;
+    decode_publication_enabled_ = remoteCacheDecodePublicationEnabled();
+    // Off must preserve the upstream Prefill backend contract. In particular,
+    // do not validate Decode-only backend/layout/budget settings, retain its
+    // resolver, or allocate publication accounting for an ordinary P cache.
+    if (!decode_publication_enabled_)
+        return true;
+    std::string backend_config = kv_cache_config_.kvcm_model_sdk_config;
+    backend_config.erase(
+        std::remove_if(backend_config.begin(), backend_config.end(), [](unsigned char c) { return std::isspace(c); }),
+        backend_config.end());
+    // The enabled path selects its backend from existing PACE configuration.
+    pace_backend_  = backend_config == "[{\"type\":\"pace\"}]" || backend_config == "[{\"type\":\"pace_ssd\"}]";
+    const bool ssd = backend_config == "[{\"type\":\"pace_ssd\"}]";
+    if (pace_backend_
+        && ((ssd && (kv_cache_config_.kvcm_read_backend_type != 9 || !gdr_enabled_))
+            || (!ssd && kv_cache_config_.kvcm_read_backend_type == 9))) {
+        RTP_LLM_LOG_ERROR("PACE SSD requires backend9/pace_ssd and GDR; DRAM cannot use backend9");
+        return false;
+    }
+    is_decode_role_         = parallelism_config_.role_type == RoleType::DECODE;
+    const bool  prefill     = parallelism_config_.role_type == RoleType::PREFILL;
+    const auto& cp          = parallelism_config_.prefill_cp_config;
+    target_prefill_cp_      = cp.prefill_cp_size;
+    target_prefill_tp_      = target_prefill_cp_;
     target_physical_shards_ = cp.kv_cache_sharded ? target_prefill_cp_ : 1;
-    const bool prefill = parallelism_config_.role_type == RoleType::PREFILL;
-    if ((!is_decode_role_ && !prefill) || target_prefill_cp_ < 1 || cache_config_.seq_size_per_block < 1
+    // CP is the target layout, DP is execution parallelism. They are independent.
+    // Geometry checks remain in CPSlotMapper / group projection, never a CP2/4 whitelist.
+    if (!pace_backend_ || (!is_decode_role_ && !prefill) || target_prefill_cp_ < 1
+        || cache_config_.seq_size_per_block < 1
         || static_cast<size_t>(target_prefill_cp_)
                > static_cast<size_t>(std::numeric_limits<int>::max()) / cache_config_.seq_size_per_block
         || !cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE
-        || autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
-        || !kv_cache_config_.kvcm_client_config.empty() || kv_cache_config_.kvcm_instance_id_salt.empty()
-        || (kv_cache_config_.kvcm_read_backend_type != 0 && kv_cache_config_.kvcm_read_backend_type != 3)
+        || autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false) || !kv_cache_config_.kvcm_client_config.empty()
+        || kv_cache_config_.kvcm_instance_id_salt.empty()
+        || (pace_backend_ && backend_config != (ssd ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]"))
         || (is_decode_role_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
         || (prefill && (parallelism_config_.tp_size != target_prefill_cp_ || parallelism_config_.dp_size != 1))) {
-        RTP_LLM_LOG_ERROR("Decode publication requires P CP / D TP1-DP, DRAM, and synchronous non-speculative decoding");
+        RTP_LLM_LOG_ERROR(
+            "Decode publication requires matching target P CP layout, positive D DP, synchronous single-token decoding, and native PACE");
         return false;
     }
+    if (!gdr_enabled_) {
+        RTP_LLM_LOG_ERROR("Decode publication requires GDR; CPU payload staging is not an alternative");
+        return false;
+    }
+    RTP_LLM_LOG_INFO("DTOP_GPU layout target_cp=%d target_tp=%d shards=%d visible_tokens=%zu dp=%ld role=%d",
+                     target_prefill_cp_,
+                     target_prefill_tp_,
+                     target_physical_shards_,
+                     cache_config_.seq_size_per_block * target_physical_shards_,
+                     parallelism_config_.dp_size,
+                     static_cast<int>(parallelism_config_.role_type));
+    RTP_LLM_LOG_INFO("DTOP_TRANSPORT backend=%s end_only=1 target_cp=%d target_tp=%d",
+                     pace_backend_ ? "pace" : "file",
+                     target_prefill_cp_,
+                     target_prefill_tp_);
     if (is_decode_role_) {
-        size_t bytes = 0;
-        std::unordered_set<const DeviceBlockPool*> seen;
+        size_t                                     native_pool_bytes = 0;
+        std::unordered_set<const DeviceBlockPool*> unique_pools;
         for (const auto& group : topology.groups()) {
-            if (!group.policy.enable_prefix_reuse) {
+            if (!group.policy.enable_prefix_reuse)
                 continue;
-            }
             const auto& pool = pool_resolver(group.tag);
-            if (!pool || pool->where() != MemoryType::MEMORY_GPU || !pool->getTotalSizeBytes()) {
-                RTP_LLM_LOG_ERROR("Decode publication requires a native GPU pool for tag=%s", group.tag.c_str());
+            if (!pool || pool->where() != MemoryType::MEMORY_GPU || pool->getTotalSizeBytes() == 0) {
+                RTP_LLM_LOG_ERROR("Decode publication has no native pool for tag=%s", group.tag.c_str());
                 return false;
             }
-            if (seen.insert(pool.get()).second) {
-                if (pool->getTotalSizeBytes() > std::numeric_limits<size_t>::max() - bytes) {
+            if (unique_pools.insert(pool.get()).second) {
+                if (pool->getTotalSizeBytes() > std::numeric_limits<size_t>::max() - native_pool_bytes) {
+                    RTP_LLM_LOG_ERROR("Decode publication native pool capacity overflow");
                     return false;
                 }
-                bytes += pool->getTotalSizeBytes();
+                native_pool_bytes += pool->getTotalSizeBytes();
             }
         }
-        const auto limits = remoteCacheDecodePublicationLimits(bytes);
+        const auto limits = remoteCacheDecodePublicationLimits(native_pool_bytes);
         if (!limits) {
-            RTP_LLM_LOG_ERROR("invalid Decode publication byte/job budget");
+            RTP_LLM_LOG_ERROR("invalid Decode publication pending byte/job budget");
             return false;
         }
-        completion_budget_ = std::make_shared<DecodePublicationBudget>(limits->bytes, limits->jobs);
-        publication_resolver_ = resolver;
-        RTP_LLM_LOG_INFO("DTOP budget pool=%zu bytes=%zu jobs=%zu cp=%d shards=%d",
-                         bytes, limits->bytes, limits->jobs, target_prefill_cp_, target_physical_shards_);
+        completion_limits_ = *limits;
+        RTP_LLM_LOG_INFO("DTOP_GPU budget native_pool_bytes=%zu pending_bytes_limit=%zu pending_jobs_limit=%zu",
+                         native_pool_bytes,
+                         completion_limits_.bytes,
+                         completion_limits_.jobs);
+        kvcm::DecodePublicationAccounting::SnapshotObserver snapshots;
+        kvcm::DecodePublicationAccounting::EventObserver    events;
+        if (metrics_reporter_) {
+            // Retain only the reporter, not Impl or its block pools: quarantined
+            // admission can outlive the executor until backend shutdown.
+            const auto reporter = metrics_reporter_;
+            snapshots           = [reporter](const auto& value) {
+                RtpLLMDecodePublicationStateMetricsCollector collector;
+                collector.pending_bytes    = value.bytes;
+                collector.pending_jobs     = value.jobs;
+                collector.queued_jobs      = value.queued;
+                collector.running_jobs     = value.running;
+                collector.quarantined_jobs = value.quarantined;
+                collector.byte_limit       = value.byte_limit;
+                collector.job_limit        = value.job_limit;
+                collector.oldest_age_us    = value.oldest_age_us;
+                reporter->report<RtpLLMDecodePublicationMetrics, RtpLLMDecodePublicationStateMetricsCollector>(
+                    nullptr, &collector);
+            };
+            events = [reporter](const char* outcome, std::optional<int64_t> latency) {
+                RtpLLMDecodePublicationEventMetricsCollector collector;
+                collector.outcome          = outcome;
+                collector.eos_to_commit_us = latency;
+                reporter->report<RtpLLMDecodePublicationMetrics, RtpLLMDecodePublicationEventMetricsCollector>(
+                    nullptr, &collector);
+            };
+        }
+        completion_accounting_ = std::make_shared<kvcm::DecodePublicationAccounting>(
+            completion_limits_.bytes, completion_limits_.jobs, std::move(snapshots), std::move(events));
+        file_resolver_ = resolver;
     }
-    // Allocate error payloads once at enabled startup, never in the interval
-    // between task preparation and a submit proof or after uncertain I/O.
     buffer_safe_failure_ = std::make_exception_ptr(StorageOperationBufferSafeFailure(
         "KVCM operation failed before submission or after completed payload"));
     completion_unknown_failure_ = std::make_exception_ptr(StorageOperationCompletionUnknown(
@@ -86,83 +141,85 @@ size_t publicationWireBytes(const std::string& tag) const {
     const auto& group = cache_config_.topology().group(tag);
     if (group.policy.group_type == CacheGroupType::FULL) {
         RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN,
-                                "Decode FULL projection requires page round-robin, tag=%s", tag.c_str());
+                                "DTOP_GPU requires FULL page RR, tag=%s",
+                                tag.c_str());
         return cache_config_.blockSizeBytesForGroup(tag);
     }
     RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
-                                && group.seqSizePerBlock() == cache_config_.seq_size_per_block * target_physical_shards_,
-                            "Decode state/SWA checkpoint span mismatch, tag=%s", tag.c_str());
+                                && group.seqSizePerBlock()
+                                       == cache_config_.seq_size_per_block * target_physical_shards_,
+                            "DTOP_GPU requires matching canonical state/SWA span, tag=%s",
+                            tag.c_str());
     size_t bytes = 0;
-    for (int layer : cache_config_.layerIdsForGroup(tag)) {
+    for (const int layer : cache_config_.layerIdsForGroup(tag)) {
         const auto& physical = cache_config_.physicalGroupForLayer(layer, tag);
-        RTP_LLM_CHECK_WITH_INFO(physical.kvScaleStrideBytes() == 0,
-                                "Decode state/SWA requires packed payload, tag=%s", tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            physical.kvScaleStrideBytes() == 0, "DTOP_GPU requires packed state/SWA, tag=%s", tag.c_str());
         size_t payload = physical.kvBlockStrideBytes();
         if (group.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES) {
             payload = group.spec->k_block_payload_bytes();
         } else {
             RTP_LLM_CHECK_WITH_INFO(group.policy.cp_slice == CpBlockSliceMode::EQUAL_BYTES,
-                                    "Decode unsupported state/SWA slice, tag=%s", tag.c_str());
+                                    "DTOP_GPU unsupported state slice, tag=%s",
+                                    tag.c_str());
         }
-        RTP_LLM_CHECK_WITH_INFO(payload && payload % target_physical_shards_ == 0,
-                                "Decode indivisible state/SWA payload, tag=%s", tag.c_str());
-        RTP_LLM_CHECK(payload / target_physical_shards_ <= std::numeric_limits<size_t>::max() - bytes);
+        RTP_LLM_CHECK_WITH_INFO(payload > 0 && payload % target_physical_shards_ == 0,
+                                "DTOP_GPU invalid state payload, tag=%s",
+                                tag.c_str());
         bytes += payload / target_physical_shards_;
     }
     return bytes;
 }
 
-std::string publicationPeerTag(const std::string& tag, size_t peer) const {
+std::string publicationPeerTag(const std::string& tag, int peer) const {
     return is_decode_role_ ? tag + "#cp" + std::to_string(peer) : tag;
 }
 
+// Select completed native checkpoints, not the final mutable slot. In
+// particular, floor(E/unit) is only a candidate: all FULL pages and every
+// required terminal STATE/SWA page must still be present at that exact key.
 StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end) {
     StorageRequest request;
     if (!decode_publication_enabled_ || !is_decode_role_ || parallelism_config_.tp_rank != 0
-        || completion_stopped_.load() || resource.decodeCompletionSubmitted() || resource.batchSize() != 1 || !computed_end) {
+        || completion_stopped_.load() || resource.decodeCompletionSubmitted())
+        return request;
+    if (resource.batchSize() != 1 || computed_end == 0)
+        return request;
+    const auto&  lifecycle      = resource.decodeCompletionLifecycle();
+    const size_t base           = cache_config_.seq_size_per_block;
+    const size_t canonical_unit = base * target_physical_shards_;
+    const size_t completed_full = computed_end / base;
+    const auto&  source_keys    = resource.cacheKeys(0);
+    if (source_keys.size() < completed_full) {
+        RTP_LLM_LOG_WARNING("DTOP_GPU incomplete key vector computed=%zu keys=%zu", computed_end, source_keys.size());
         return request;
     }
-    const auto& handoff = resource.decodeCompletionLifecycle().prefillComputedEnd();
-    if (!handoff || *handoff < 0 || static_cast<uint64_t>(*handoff) > computed_end) {
-        // Legacy P has no assertion. Preserve serving, but do not guess which
-        // positions were computed on P or publish an unvalidated D checkpoint.
-        return request;
-    }
-    const size_t base = cache_config_.seq_size_per_block;
-    const size_t canonical = base * target_physical_shards_;
-    const auto& keys = resource.cacheKeys(0);
-    if (keys.size() < computed_end / base) {
-        return request;
-    }
-    size_t unit = canonical;
+    // State/SWA slots must denote the same token boundary as the P key.
+    size_t unit = canonical_unit;
     for (const auto& entry : group_policy_->groups()) {
-        if (entry.second.is_full) {
-            continue;
-        }
-        const size_t span = topology_->group(entry.second.tag).seqSizePerBlock();
-        const size_t quotient = unit / std::gcd(unit, span);
-        RTP_LLM_CHECK(span && quotient <= std::numeric_limits<size_t>::max() / span);
-        unit = quotient * span;
+        const auto& group = topology_->group(entry.second.tag);
+        if (!entry.second.is_full)
+            unit = std::lcm(unit, group.seqSizePerBlock());
     }
-    size_t end = computed_end / unit * unit;
-    for (; end; end -= unit) {
-        bool ready = true;
-        const size_t count = end / canonical;
+    CPSlotMapper mapper(0, target_physical_shards_, static_cast<int>(base));
+    size_t       end = computed_end / unit * unit;
+    for (; end > 0; end -= unit) {
+        const size_t count = end / canonical_unit;
+        bool         ready = true;
         for (const auto& entry : group_policy_->groups()) {
-            const auto& spec = entry.second;
-            const auto& group = topology_->group(spec.tag);
+            const auto& spec   = entry.second;
+            const auto& group  = topology_->group(spec.tag);
             const auto& blocks = resource.blocks(0, spec.tag);
             if (spec.is_full) {
-                for (size_t i = 0; i < end / base; ++i) {
+                for (size_t i = 0; i < end / base; ++i)
                     if (i >= blocks.size() || isNullBlockIdx(blocks[i])) {
                         ready = false;
                         break;
                     }
-                }
             } else {
-                const size_t required = std::min(count, group.reuseBlockCount(count));
-                for (size_t key = count - required; key < count; ++key) {
-                    const size_t tokens = (key + 1) * canonical;
+                const size_t required = group.reuseBlockCount(count);
+                for (size_t key = count - std::min(count, required); key < count; ++key) {
+                    const size_t tokens = (key + 1) * canonical_unit;
                     if (tokens % group.seqSizePerBlock()) {
                         ready = false;
                         break;
@@ -174,78 +231,101 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
                     }
                 }
             }
-            if (!ready) {
+            if (!ready)
                 break;
-            }
         }
-        if (ready) {
+        if (ready)
             break;
-        }
     }
-    if (!end || end <= static_cast<uint64_t>(*handoff)) {
+    if (end == 0) {
+        RTP_LLM_LOG_INFO("DTOP_GPU no_complete_checkpoint computed=%zu", computed_end);
         return request;
     }
-    CPSlotMapper mapper(0, target_physical_shards_, static_cast<int>(base));
-    CacheKeysType full_keys(keys.begin(), keys.begin() + end / base);
-    request.keys = std::make_shared<const CacheKeysType>(mapper.canonicalCacheKeys(full_keys));
+    if (const auto& handoff = lifecycle.prefillComputedEnd(); handoff && *handoff >= 0
+                                                              && static_cast<uint64_t>(*handoff) <= computed_end
+                                                              && end <= static_cast<uint64_t>(*handoff)) {
+        // A partial D tail (or checkpoint backoff) did not add a complete
+        // checkpoint beyond P's explicit computed span. Skip optional work
+        // before copying keys, charging/holding pages or fencing the device.
+        // Legacy/unknown source metadata must retain the compatible path.
+        RTP_LLM_LOG_DEBUG(
+            "DTOP_GPU no_new_checkpoint computed=%zu published=%zu prefill=%ld", computed_end, end, *handoff);
+        return request;
+    }
+    CacheKeysType complete_keys(source_keys.begin(), source_keys.begin() + end / base);
+    request.keys = std::make_shared<const CacheKeysType>(mapper.canonicalCacheKeys(complete_keys));
     request.handles.resize(request.keys->size());
     request.decode_completion = true;
-    request.computed_tokens = computed_end;
-    request.published_tokens = end;
-    request.prefill_computed_tokens = *handoff;
-    size_t bytes = 0;
-    std::unordered_map<const DeviceBlockPool*, std::unordered_set<BlockIdxType>> seen;
+    request.computed_tokens   = computed_end;
+    request.published_tokens  = end;
+    if (const auto& handoff = lifecycle.prefillComputedEnd();
+        handoff && *handoff >= 0 && static_cast<uint64_t>(*handoff) <= computed_end) {
+        request.prefill_computed_tokens = *handoff;
+    }
+    size_t                                                                       bytes = 0;
+    std::unordered_map<const DeviceBlockPool*, std::unordered_set<BlockIdxType>> charged_blocks;
+    size_t                                                                       unique_pages = 0;
     for (size_t key = 0; key < request.keys->size(); ++key) {
         for (const auto& entry : group_policy_->groups()) {
-            const auto& spec = entry.second;
+            const auto& spec  = entry.second;
             const auto& group = topology_->group(spec.tag);
-            if (!spec.is_full && request.keys->size() - key > group.reuseBlockCount(request.keys->size())) {
+            if (!spec.is_full && request.keys->size() - key > group.reuseBlockCount(request.keys->size()))
                 continue;
-            }
-            const auto& blocks = resource.blocks(0, spec.tag);
+            const auto&        blocks = resource.blocks(0, spec.tag);
             StorageBlockHandle handle;
             handle.tag = spec.tag;
             if (spec.is_full) {
-                for (int peer = 0; peer < target_prefill_cp_; ++peer) {
-                    handle.peer_blocks.push_back(blocks.at(target_physical_shards_ * key
-                                                          + (target_physical_shards_ > 1 ? peer : 0)));
-                }
+                for (int peer = 0; peer < target_prefill_tp_; ++peer)
+                    handle.peer_blocks.push_back(
+                        blocks.at(target_physical_shards_ * key + (target_physical_shards_ > 1 ? peer : 0)));
                 handle.block = handle.peer_blocks.front();
             } else {
-                handle.block = blocks.at((key + 1) * canonical / group.seqSizePerBlock() - 1);
+                handle.block = blocks.at((key + 1) * canonical_unit / group.seqSizePerBlock() - 1);
             }
-            const auto& pool = pools_by_tag_.at(spec.tag);
             auto charge = [&](BlockIdxType block) {
-                if (seen[pool.get()].insert(block).second) {
-                    RTP_LLM_CHECK(pool->blockSizeBytes() <= std::numeric_limits<size_t>::max() - bytes);
-                    bytes += pool->blockSizeBytes();
+                const auto& pool = pools_by_tag_.at(spec.tag);
+                if (charged_blocks[pool.get()].insert(block).second) {
+                    const auto page_bytes = pool->blockSizeBytes();
+                    RTP_LLM_CHECK_WITH_INFO(page_bytes <= std::numeric_limits<size_t>::max() - bytes,
+                                            "EOS source-page budget charge overflow");
+                    bytes += page_bytes;
+                    ++unique_pages;
                 }
             };
             charge(handle.block);
-            for (auto peer : handle.peer_blocks) {
+            for (auto peer : handle.peer_blocks)
                 charge(peer);
-            }
             request.handles[key].push_back(std::move(handle));
         }
     }
-    request.completion_budget_lease = completion_budget_->tryAcquire(bytes);
-    if (!request.completion_budget_lease) {
-        RTP_LLM_LOG_WARNING("DTOP budget rejected bytes=%zu computed=%zu", bytes, computed_end);
+    request.completion_admission = completion_accounting_->tryAcquire(bytes, lifecycle.eosAt());
+    if (!request.completion_admission) {
+        if (lifecycle.recordFirstBudgetSkip())
+            completion_accounting_->recordBudgetSkip();
+        const auto pending = completion_accounting_->snapshot();
+        RTP_LLM_LOG_WARNING("DTOP_GPU admission=rejected retained_bytes=%zu pending_bytes=%zu pending_jobs=%zu",
+                            bytes,
+                            pending.bytes,
+                            pending.jobs);
         return {};
     }
-    // One EOS fence while the request still owns every source page. The
-    // generic prepareWrite then pins the same pages before request release.
+    // One fence at successful EOS. No decode-step fence or CPU capture. The
+    // task cannot outlive source ownership until prepareWrite has pinned it.
     setCudaDevice();
-#if USING_CUDA
     check_cuda_value(cudaDeviceSynchronize());
-#else
-    return {};
-#endif
-    RTP_LLM_LOG_INFO("DTOP retained computed=%zu published=%zu tail=%zu bytes=%zu CPU_snapshot_bytes=0",
-                     computed_end, end, computed_end - end, bytes);
+    RTP_LLM_LOG_INFO(
+        "DTOP_GPU retained_plan computed=%zu published=%zu tail=%zu pages=%zu bytes=%zu CPU_snapshot_bytes=0",
+        computed_end,
+        end,
+        computed_end - end,
+        unique_pages,
+        bytes);
     return request;
 }
 
+// The P transaction builds identical spec/tag batches and commits actual URIs
+// with the same masks and FinishWrite rules. Only the source projection differs:
+// D owns all P peers' FULL pages and the unsliced native STATE/SWA page locally.
 std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<FunctionRequestPB>& requests,
                                                        bool& transfer_attempted,
                                                        bool& source_may_be_touched) {
@@ -280,7 +360,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
             size_t bytes = 0;
             for (int layer : cache_config_.layerIdsForGroup(tag)) {
                 const auto parts = mapper.sliceBlockForPeer(
-                    cache_config_, tag, publication_resolver_(layer, tag, block), peer);
+                    cache_config_, tag, file_resolver_(layer, tag, block), peer);
                 for (const auto& part : parts) {
                     RTP_LLM_CHECK(part.is_cuda && part.addr && part.size_bytes);
                     batch.buffers.back().iovs.push_back(
@@ -306,7 +386,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
                 completion_resources_->completeOperation(operation, source_may_be_touched);
                 if (source_may_be_touched) {
                     completion_stopped_.store(true);
-                    completion_budget_->stopAdmission();
+                    if (completion_accounting_) completion_accounting_->stopAdmission();
                 }
             });
             const auto result = executeTagTransfers(

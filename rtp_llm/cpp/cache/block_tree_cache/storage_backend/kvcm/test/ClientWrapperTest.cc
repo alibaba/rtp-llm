@@ -1,20 +1,22 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "autil/EnvUtil.h"
 
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
-#include <new>
-#include <stdexcept>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
+#include "kvcm_client/HostCacheStateCompat.h"
 
 namespace rtp_llm::kvcm {
 namespace {
@@ -25,6 +27,18 @@ using ::testing::Invoke;
 using ::testing::Return;
 using ::testing::ReturnRef;
 using ::testing::SetArgReferee;
+
+TEST(ClientFactoryGdrTest, SsdAutomaticallyRequiresGpuRegistrations) {
+    autil::EnvGuard              enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ClientFactory                factory;
+    kv_cache_manager::InitParams params{};
+    const std::string            ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
+    EXPECT_THROW(factory.createTransferClient(ssd, params), std::invalid_argument);
+    const std::string mixed = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace"},{"type":"pace_ssd"}]}})";
+    kv_cache_manager::ClientMemoryRegistrations registrations;
+    EXPECT_THROW(factory.createTransferClientWithMemory(mixed, params, registrations), std::invalid_argument);
+    EXPECT_THROW(factory.createTransferClientWithMemory(ssd, params, registrations), std::invalid_argument);
+}
 
 struct InitObservation {
     const kv_cache_manager::RegistSpan* registration_descriptor = nullptr;
@@ -54,14 +68,16 @@ KVCMConfigPtr makeConfig(bool enable_vipserver, const std::string& endpoint, uin
                                         ModelDeployment());
 }
 
-std::shared_ptr<ClientWrapper> initializeClient(bool                                   enable_vipserver,
-                                                const std::string&                     endpoint,
-                                                kv_cache_manager::RegistSpan&          registration_span,
-                                                InitObservation&                       observation,
-                                                std::shared_ptr<int>                   transfer_destruction_count,
-                                                kv_cache_manager::MockMetaClient**     initial_meta_client = nullptr,
-                                                std::shared_ptr<std::atomic<int>>      reinit_attempts     = nullptr,
-                                                kv_cache_manager::MockTransferClient** transfer_client     = nullptr) {
+std::shared_ptr<ClientWrapper>
+initializeClient(bool                                                  enable_vipserver,
+                 const std::string&                                    endpoint,
+                 kv_cache_manager::RegistSpan&                         registration_span,
+                 InitObservation&                                      observation,
+                 std::shared_ptr<int>                                  transfer_destruction_count,
+                 kv_cache_manager::MockMetaClient**                    initial_meta_client      = nullptr,
+                 std::shared_ptr<std::atomic<int>>                     reinit_attempts          = nullptr,
+                 kv_cache_manager::MockTransferClient**                transfer_client          = nullptr,
+                 std::unique_ptr<kv_cache_manager::MockTransferClient> supplied_transfer_client = nullptr) {
     auto  factory        = std::make_unique<MockClientFactory>();
     auto* factory_ptr    = factory.get();
     auto  subscriber     = std::make_unique<MockSubscriber>();
@@ -116,7 +132,9 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
                 observation.registration_base       = params.regist_span->base;
                 observation.registration_size       = params.regist_span->size;
             }
-            auto client = std::make_unique<kv_cache_manager::MockTransferClient>(transfer_destruction_count);
+            auto client = supplied_transfer_client ?
+                              std::move(supplied_transfer_client) :
+                              std::make_unique<kv_cache_manager::MockTransferClient>(transfer_destruction_count);
             if (transfer_client != nullptr) {
                 *transfer_client = client.get();
             }
@@ -130,6 +148,227 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
         return nullptr;
     }
     return wrapper;
+}
+
+template<typename Match>
+Match hostStateFixture(const std::string& host, int64_t local, int64_t remote) {
+    Match result{};
+    result.host_ip_port = host;
+    result.local        = local;
+    if constexpr (HasGlobalHostCacheMatch<Match>::value) {
+        result.global = remote;
+    } else {
+        result.p2p_1_fetch       = 1;
+        result.p2p_1_total_match = remote;
+    }
+    return result;
+}
+
+template<typename Match>
+void expectHostState(const Match& value, const Match& expected) {
+    EXPECT_EQ(value.host_ip_port, expected.host_ip_port);
+    EXPECT_EQ(value.local, expected.local);
+    if constexpr (HasGlobalHostCacheMatch<Match>::value) {
+        EXPECT_EQ(value.global, expected.global);
+    } else {
+        EXPECT_EQ(value.p2p_1_fetch, expected.p2p_1_fetch);
+        EXPECT_EQ(value.p2p_1_total_match, expected.p2p_1_total_match);
+    }
+}
+
+// Exercise the actual ClientWrapper -> compile-time SDK adapter boundary.
+// The backend-aware SDK must request P2P's L2 backend explicitly: {} would
+// silently disable the estimate even though the metadata call succeeds.
+TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicationOnAndOff) {
+    using namespace kv_cache_manager;
+    const std::vector<int64_t>     keys{101, 202};
+    const std::vector<std::string> medium{"hbm"};
+    const HostCacheState           expected{hostStateFixture<HostCacheMatch>("host-a:1", 2, 3),
+                                  hostStateFixture<HostCacheMatch>("host-b:2", 5, 7)};
+    for (const std::string enabled : {"0", "1"}) {
+        SCOPED_TRACE(enabled);
+        autil::EnvGuard      feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+        std::array<char, 32> data{};
+        RegistSpan           span{data.data(), data.size()};
+        InitObservation      observation;
+        MockMetaClient*      meta      = nullptr;
+        auto                 destroyed = std::make_shared<int>(0);
+        auto                 wrapper   = initializeClient(false, "direct", span, observation, destroyed, &meta);
+        ASSERT_NE(wrapper, nullptr);
+        if constexpr (std::is_invocable_v<decltype(&MetaClient::GetHostCacheState),
+                                          MetaClient&,
+                                          const std::string&,
+                                          QueryType,
+                                          const std::vector<int64_t>&,
+                                          const std::vector<std::string>&,
+                                          int32_t,
+                                          const std::vector<StorageType>&>) {
+            EXPECT_CALL(*meta, GetHostCacheState(_, _, _, _, _)).Times(0);
+            EXPECT_CALL(*meta,
+                        GetHostCacheState("host-state",
+                                          QueryType::QT_PREFIX_MATCH,
+                                          keys,
+                                          medium,
+                                          2,
+                                          std::vector<StorageType>{StorageType::ST_EVENT_REPORT_L2}))
+                .WillOnce(Return(std::make_pair(ER_OK, expected)))
+                .WillOnce(Return(std::make_pair(ER_INVALID_PARAMS, expected)));
+        } else {
+            EXPECT_CALL(*meta, GetHostCacheState(_, _, _, _, _, _)).Times(0);
+            EXPECT_CALL(*meta, GetHostCacheState("host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2))
+                .WillOnce(Return(std::make_pair(ER_OK, expected)))
+                .WillOnce(Return(std::make_pair(ER_INVALID_PARAMS, expected)));
+        }
+        auto [ok, hosts] = wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2);
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(hosts.size(), expected.size());
+        for (size_t i = 0; i < hosts.size(); ++i) {
+            expectHostState(hosts[i], expected[i]);
+        }
+        auto [failed, ignored] =
+            wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2);
+        EXPECT_FALSE(failed);
+        EXPECT_TRUE(ignored.empty());
+        wrapper->shutdown();
+        EXPECT_EQ(*destroyed, 1);
+    }
+}
+
+// Reproduce the legacy Manager response observed on the real PACE fixture.
+// Every result remains indexed by the original key, including masks and misses.
+TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    const auto             type = StorageType::ST_TAIRMEMPOOL;
+    const BackendLocations all{
+        {{type, 16, {{"full", "uri101"}}}}, {{type, 16, {{"full", "uri102"}}}}, {{type, 16, {{"full", "uri103"}}}}};
+    struct Case {
+        BlockMask         mask;
+        BackendLocations  response;
+        std::vector<bool> expected_hits;
+    };
+    BackendLocations miss = all;
+    miss[1].clear();
+    BackendLocations already_masked = all;
+    already_masked[0].clear();
+    const std::vector<Case> cases{
+        {BlockMaskOffset{1}, all, {false, true, true}},
+        {BlockMaskVector{true, false, true}, all, {false, true, false}},
+        {BlockMaskOffset{1}, miss, {false, false, true}},
+        {BlockMaskOffset{1}, already_masked, {false, true, true}},
+        {BlockMaskVector{}, all, {true, true, true}},
+        {BlockMaskOffset{3}, all, {false, false, false}},
+    };
+    for (size_t c = 0; c < cases.size(); ++c) {
+        SCOPED_TRACE(c);
+        std::array<char, 32> data{};
+        RegistSpan           span{data.data(), data.size()};
+        InitObservation      observation;
+        MockMetaClient*      meta      = nullptr;
+        auto                 destroyed = std::make_shared<int>(0);
+        auto                 wrapper   = initializeClient(false, "direct", span, observation, destroyed, &meta);
+        ASSERT_NE(wrapper, nullptr);
+        const auto& test = cases[c];
+        EXPECT_CALL(*meta,
+                    GetCacheLocationsByBackend("backend",
+                                               std::vector<int64_t>({101, 102, 103}),
+                                               std::vector<int64_t>{},
+                                               test.mask,
+                                               std::vector<std::string>{"full"},
+                                               type,
+                                               BackendSelectStrategy::LSS_WEIGHTED_RANDOM))
+            .WillOnce(Return(std::make_pair(ClientErrorCode::ER_OK, test.response)));
+        auto [ok, result] =
+            wrapper->getCacheLocationsByBackend("", "backend", {101, 102, 103}, {}, test.mask, {"full"}, type);
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(result.size(), 3u);
+        for (size_t i = 0; i < result.size(); ++i) {
+            EXPECT_EQ(!result[i].empty(), test.expected_hits[i]);
+            if (!result[i].empty()) {
+                ASSERT_EQ(result[i].size(), 1u);
+                ASSERT_EQ(result[i][0].location_specs.size(), 1u);
+                EXPECT_EQ(result[i][0].location_specs[0].spec_name, "full");
+                EXPECT_EQ(result[i][0].location_specs[0].uri, all[i][0].location_specs[0].uri);
+            }
+        }
+        wrapper->shutdown();
+        EXPECT_EQ(*destroyed, 1);
+    }
+}
+
+TEST(ClientWrapperTest, BackendRejectsMalformedShapeAndPropagatesSdkFailure) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    const auto                                                type = StorageType::ST_TAIRMEMPOOL;
+    const BackendLocations                                    all(3, {{type, 16, {{"full", "uri"}}}});
+    const std::vector<std::pair<BlockMask, BackendLocations>> malformed{
+        {BlockMaskOffset{0}, BackendLocations(2)},
+        {BlockMaskOffset{4}, all},
+        {BlockMaskVector{false, true}, all},
+    };
+    std::array<char, 32> data{};
+    RegistSpan           span{data.data(), data.size()};
+    InitObservation      observation;
+    MockMetaClient*      meta      = nullptr;
+    auto                 destroyed = std::make_shared<int>(0);
+    auto                 wrapper   = initializeClient(false, "direct", span, observation, destroyed, &meta);
+    ASSERT_NE(wrapper, nullptr);
+    for (const auto& [mask, response] : malformed) {
+        EXPECT_CALL(*meta, GetCacheLocationsByBackend("bad_shape", _, _, mask, _, type, _))
+            .WillOnce(Return(std::make_pair(ClientErrorCode::ER_OK, response)));
+        auto [ok, result] = wrapper->getCacheLocationsByBackend("", "bad_shape", {101, 102, 103}, {}, mask, {}, type);
+        EXPECT_FALSE(ok);
+        EXPECT_TRUE(result.empty());
+    }
+    EXPECT_CALL(*meta, GetCacheLocationsByBackend("sdk_error", _, _, _, _, type, _))
+        .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, all)));
+    auto [ok, result] =
+        wrapper->getCacheLocationsByBackend("", "sdk_error", {101, 102, 103}, {}, BlockMaskOffset{0}, {}, type);
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(result.empty());
+    wrapper->shutdown();
+}
+
+TEST(ClientWrapperTest, FeatureOffPreservesBackendResponseAndSdkError) {
+    autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    using namespace kv_cache_manager;
+    const auto type = StorageType::ST_TAIRMEMPOOL;
+    const BackendLocations all{
+        {{type, 16, {{"full", "uri101"}}}}, {{type, 16, {{"full", "uri102"}}}}, {{type, 16, {{"full", "uri103"}}}}};
+    const std::vector<std::pair<BlockMask, BackendLocations>> cases{
+        {BlockMaskOffset{1}, all},
+        {BlockMaskVector{true, false, true}, all},
+        {BlockMaskOffset{4}, all},
+        {BlockMaskOffset{0}, BackendLocations{all[0], all[1]}},
+    };
+    std::array<char, 32> data{};
+    RegistSpan span{data.data(), data.size()};
+    InitObservation observation;
+    MockMetaClient* meta = nullptr;
+    auto destroyed = std::make_shared<int>(0);
+    auto wrapper = initializeClient(false, "direct", span, observation, destroyed, &meta);
+    ASSERT_NE(wrapper, nullptr);
+    for (const auto& [mask, response] : cases) {
+        EXPECT_CALL(*meta, GetCacheLocationsByBackend("legacy", _, _, mask, _, type, _))
+            .WillOnce(Return(std::make_pair(ClientErrorCode::ER_OK, response)));
+        auto [ok, result] = wrapper->getCacheLocationsByBackend("", "legacy", {101, 102, 103}, {}, mask, {}, type);
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(result.size(), response.size());
+        for (size_t i = 0; i < result.size(); ++i) {
+            ASSERT_EQ(result[i].size(), 1u);
+            ASSERT_EQ(result[i][0].location_specs.size(), 1u);
+            EXPECT_EQ(result[i][0].location_specs[0].spec_name, response[i][0].location_specs[0].spec_name);
+            EXPECT_EQ(result[i][0].location_specs[0].uri, response[i][0].location_specs[0].uri);
+        }
+    }
+    EXPECT_CALL(*meta, GetCacheLocationsByBackend("legacy_error", _, _, _, _, type, _))
+        .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, all)));
+    auto [ok, result] = wrapper->getCacheLocationsByBackend(
+        "", "legacy_error", {101, 102, 103}, {}, BlockMaskOffset{0}, {}, type);
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(result.empty());
+    wrapper->shutdown();
+    EXPECT_EQ(*destroyed, 1);
 }
 
 TEST(ClientWrapperTest, RejectsInvalidTagsBeforeCreatingClients) {
@@ -204,7 +443,12 @@ TEST(ClientWrapperTest, TagRoutingUsesRegistrationOrderAndFailedInitPublishesNoR
             EXPECT_CALL(*clients[0], SaveKvCaches(kv_cache_manager::UriStrVec{"zeta_uri"}, _, _))
                 .WillOnce(Return(
                     std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::UriStrVec{"actual"})));
+            // Exercise routing with a valid one-object transfer now that
+            // bounded batching always checks URI/buffer geometry first.
+            buffers.emplace_back();
+            buffers.back().iovs.push_back({kv_cache_manager::MemoryType::CPU, data.data() + 16, 16, false});
             EXPECT_TRUE(wrapper.loadKvCachesForTag("alpha", {"alpha_uri"}, buffers));
+            buffers.back().iovs.front().base = data.data();
             EXPECT_EQ(wrapper.saveKvCachesForTag("zeta", {"zeta_uri"}, buffers).second,
                       (kv_cache_manager::UriStrVec{"actual"}));
             EXPECT_FALSE(wrapper.loadKvCachesForTag("missing", {}, buffers));
@@ -394,8 +638,9 @@ TEST(ClientWrapperTest, ShutdownInterruptsFailedReRegistrationBeforeCreatingNewS
 
     EXPECT_CALL(*initial_transfer_client, LoadKvCaches(_, _, _))
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
-    kv_cache_manager::UriStrVec    uris;
-    kv_cache_manager::BlockBuffers buffers;
+    kv_cache_manager::UriStrVec    uris{"old_uri"};
+    kv_cache_manager::BlockBuffers buffers(1);
+    buffers.front().iovs.push_back({kv_cache_manager::MemoryType::CPU, old_pool.data(), old_pool.size(), false});
     std::promise<bool>             transfer_result_promise;
     auto                           transfer_result = transfer_result_promise.get_future();
     std::thread                    transfer_thread(
@@ -818,119 +1063,376 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_EQ(*destruction_count, 1);
 }
 
-class ClientWrapperCompletionTest: public ::testing::Test {
-protected:
-    void SetUp() override {
-        wrapper = initializeClient(false, "direct", span, observation, destroyed, &meta, nullptr, &transfer);
-        ASSERT_NE(wrapper, nullptr);
-        ASSERT_NE(transfer, nullptr);
-    }
-    void TearDown() override {
-        if (wrapper) {
-            wrapper->shutdown();
+TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
+    autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    using namespace kv_cache_manager;
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
+    MockTransferClient* mock   = nullptr;
+    auto                client = initializeClient(
+        false, "upstream_passthrough", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    // Above both the new block/IOV chunk limits: ordinary SDK clients retain
+    // their original call granularity and receive the caller's descriptors.
+    UriStrVec    uris(300, "allocated_uri"), actual(300, "actual_uri");
+    BlockBuffers buffers(300);
+    for (auto& block : buffers)
+        for (size_t j = 0; j < 4; ++j)
+            block.iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    auto trace          = std::make_shared<TransferTraceInfo>();
+    trace->block_ids    = uris;
+    size_t observations = 0;
+    client->setTransferObserver([&](bool, size_t, bool) { ++observations; });
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, const auto& b, const auto& t) {
+        EXPECT_EQ(&u, &uris);
+        EXPECT_EQ(&b, &buffers);
+        EXPECT_EQ(t, trace);
+        return std::make_pair(ClientErrorCode::ER_OK, actual);
+    }));
+    const auto saved = client->saveKvCachesForTagWithStatus("default", uris, buffers, trace);
+    EXPECT_EQ(saved.first, ClientErrorCode::ER_OK);
+    EXPECT_EQ(saved.second, actual);
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, const auto& b, const auto& t) {
+        EXPECT_EQ(&u, &actual);
+        EXPECT_EQ(&b, &buffers);
+        EXPECT_EQ(t, trace);
+        *static_cast<unsigned char*>(b[0].iovs[0].base) = 9;
+        return ClientErrorCode::ER_SDK_TIMEOUT;
+    }));
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", actual, buffers, trace), ClientErrorCode::ER_SDK_TIMEOUT);
+    EXPECT_EQ(byte, 9u);
+    EXPECT_EQ(buffers[0].iovs[0].size, 1u);
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
+        .WillOnce(Return(std::make_pair(ClientErrorCode::ER_SDK_TIMEOUT, UriStrVec{"partial_uri"})));
+    const auto failed = client->saveKvCachesForTag("default", uris, buffers, trace);
+    EXPECT_FALSE(failed.first);
+    EXPECT_TRUE(failed.second.empty());
+    EXPECT_EQ(observations, 0u);
+    client->shutdown();
+}
+
+TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    std::vector<unsigned char> data(250 * 19), destination(data.size(), 0);
+    for (size_t i = 0; i < data.size(); ++i)
+        data[i] = static_cast<unsigned char>(i * 31 + 7);
+    RegistSpan          span{data.data(), data.size()};
+    InitObservation     observation;
+    MockTransferClient* mock = nullptr;
+    auto                client =
+        initializeClient(false, "bounded", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    ASSERT_NE(mock, nullptr);
+    size_t read_bytes = 0, written_bytes = 0, unknown_calls = 0;
+    client->setTransferObserver([&](bool read, size_t bytes, bool unknown) {
+        (read ? read_bytes : written_bytes) += bytes;
+        unknown_calls += unknown;
+    });
+    UriStrVec    uris;
+    BlockBuffers source, target;
+    for (size_t i = 0; i < 250; ++i) {
+        uris.push_back("uri" + std::to_string(i));
+        source.emplace_back();
+        target.emplace_back();
+        for (size_t j = 0; j < 19; ++j) {
+            source.back().iovs.push_back({MemoryType::CPU, data.data() + i * 19 + j, 1, false});
+            target.back().iovs.push_back({MemoryType::CPU, destination.data() + i * 19 + j, 1, false});
         }
     }
+    auto trace        = std::make_shared<TransferTraceInfo>();
+    trace->need_print = true;
+    trace->block_ids  = uris;
+    size_t saved = 0, loaded = 0;
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
+        .Times(5)
+        .WillRepeatedly(Invoke([&](const auto& u, const auto& b, const auto& part_trace) {
+            EXPECT_NE(part_trace, nullptr);
+            EXPECT_EQ(part_trace->block_ids, u);
+            EXPECT_LE(u.size() * 19, 1024u);
+            UriStrVec actual;
+            for (size_t i = 0; i < u.size(); ++i) {
+                EXPECT_EQ(u[i], uris[saved + i]);
+                EXPECT_EQ(b[i].iovs.size(), 19u);
+                for (size_t j = 0; j < 19; ++j)
+                    EXPECT_EQ(b[i].iovs[j].base, source[saved + i].iovs[j].base);
+                actual.push_back("actual_" + u[i]);
+            }
+            saved += u.size();
+            return std::make_pair(ClientErrorCode::ER_OK, actual);
+        }));
+    auto written = client->saveKvCachesForTagWithStatus("default", uris, source, trace);
+    ASSERT_EQ(written.first, ClientErrorCode::ER_OK);
+    ASSERT_EQ(saved, 250u);
+    ASSERT_EQ(written.second.size(), 250u);
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _))
+        .Times(5)
+        .WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto& part_trace) {
+            EXPECT_NE(part_trace, nullptr);
+            EXPECT_EQ(part_trace->block_ids.size(), u.size());
+            for (size_t i = 0; i < u.size(); ++i)
+                EXPECT_EQ(part_trace->block_ids[i], uris[loaded + i]);
+            EXPECT_LE(u.size() * 19, 1024u);
+            for (size_t i = 0; i < u.size(); ++i) {
+                EXPECT_EQ(u[i], "actual_" + uris[loaded + i]);
+                for (size_t j = 0; j < 19; ++j)
+                    *static_cast<unsigned char*>(b[i].iovs[j].base) = data[(loaded + i) * 19 + j];
+            }
+            loaded += u.size();
+            return ClientErrorCode::ER_OK;
+        }));
+    ASSERT_EQ(client->loadKvCachesForTagWithStatus("default", written.second, target, trace), ClientErrorCode::ER_OK);
+    EXPECT_EQ(loaded, 250u);
+    EXPECT_EQ(data, destination);
+    EXPECT_EQ(read_bytes, data.size());
+    EXPECT_EQ(written_bytes, data.size());
+    EXPECT_EQ(unknown_calls, 0u);
+    client->shutdown();
+}
+TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
+    MockTransferClient* mock   = nullptr;
+    auto                client = initializeClient(
+        false, "bounded_failure", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    size_t confirmed = 0, expected_confirmed = 0, unknown_calls = 0;
+    client->setTransferObserver([&](bool read, size_t bytes, bool unknown) {
+        EXPECT_FALSE(read);
+        confirmed += bytes;
+        unknown_calls += unknown;
+    });
+    UriStrVec    uris(120, "uri");
+    BlockBuffers buffers(120);
+    for (auto& b : buffers)
+        for (int j = 0; j < 19; ++j)
+            b.iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    {
+        ::testing::InSequence ordered;
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Invoke([&](const auto&, const auto& batch, const auto&) {
+            for (const auto& block : batch)
+                for (const auto& iov : block.iovs)
+                    expected_confirmed += iov.size;
+            return std::make_pair(ClientErrorCode::ER_OK, UriStrVec{});
+        }));
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
+            .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, UriStrVec{})));
+    }
+    auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
+    auto result     = client->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion);
+    EXPECT_EQ(result.first, ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_TRUE(result.second.empty());
+    EXPECT_GT(confirmed, 0u);
+    EXPECT_EQ(confirmed, expected_confirmed);
+    EXPECT_EQ(unknown_calls, 1u);
+    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::UNKNOWN);
+    ::testing::Mock::VerifyAndClearExpectations(mock);
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", UriStrVec{"one"}, buffers, nullptr, &completion).first,
+              ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
+    BlockBuffers unsafe(1);
+    for (int j = 0; j < 1025; ++j)
+        unsafe[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", UriStrVec{"one"}, unsafe, nullptr, &completion),
+              ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
+    EXPECT_EQ(unknown_calls, 1u);  // Rejected geometry never attempted SDK I/O.
+    client->shutdown();
+}
 
-    using Completion = ClientWrapper::TransferCompletion;
-    using Code = kv_cache_manager::ClientErrorCode;
-    std::array<char, 32> registration{};
-    kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    InitObservation observation;
-    std::shared_ptr<int> destroyed = std::make_shared<int>(0);
-    kv_cache_manager::MockMetaClient* meta = nullptr;
-    kv_cache_manager::MockTransferClient* transfer = nullptr;
-    std::shared_ptr<ClientWrapper> wrapper;
-    kv_cache_manager::UriStrVec uris{"pace://payload"};
-    kv_cache_manager::BlockBuffers buffers;
+class ObservedTransferClient: public kv_cache_manager::MockTransferClient, public SdkTransferObservable {
+public:
+    using MockTransferClient::MockTransferClient;
+    void setSdkTransferObserver(SdkTransferObserver next) override {
+        ++setter_calls;
+        observer = std::move(next);
+    }
+    SdkTransferObserver observer;
+    size_t              setter_calls{0};
 };
 
-TEST_F(ClientWrapperCompletionTest, MissingTagAndClosedClientHaveNoSubmittedWork) {
-    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).Times(0);
-    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).Times(0);
-    auto completion = Completion::PAYLOAD_COMPLETE;
-    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion),
-              Code::ER_CLIENT_NOT_EXISTS);
-    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
-    EXPECT_EQ(wrapper->saveKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion).first,
-              Code::ER_CLIENT_NOT_EXISTS);
-    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
-    wrapper->shutdown();
-    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion),
-              Code::ER_CLIENT_NOT_EXISTS);
-    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
-}
-
-TEST_F(ClientWrapperCompletionTest, SDKReturningMissingClientCodeDoesNotProveNoSubmission) {
-    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Return(Code::ER_CLIENT_NOT_EXISTS));
-    auto completion = Completion::NOT_SUBMITTED;
-    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion),
-              Code::ER_CLIENT_NOT_EXISTS);
-    EXPECT_EQ(completion, Completion::UNKNOWN);
-}
-
-TEST_F(ClientWrapperCompletionTest, MarkUnknownBeforeEnteringSDKAndCompleteOnlyOnSuccess) {
-    auto completion = Completion::PAYLOAD_COMPLETE;
-    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto&, const auto&, const auto&) {
-        EXPECT_EQ(completion, Completion::UNKNOWN);
-        return Code::ER_OK;
+TEST(ClientWrapperTest, InnerSdkObserverOwnsPartialBytesAndSuppressesOuterFailureOrException) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    unsigned char   byte = 7;
+    RegistSpan      span{&byte, 1};
+    InitObservation observation;
+    auto            destruction_count = std::make_shared<int>(0);
+    auto            inner             = std::make_unique<ObservedTransferClient>(destruction_count);
+    auto*           observed          = inner.get();
+    auto            client            = initializeClient(
+        false, "inner_sdk", span, observation, destruction_count, nullptr, nullptr, nullptr, std::move(inner));
+    ASSERT_NE(client, nullptr);
+    size_t completed = 0, unknown = 0, events = 0;
+    client->setTransferObserver([&](bool read, size_t bytes, bool uncertain) {
+        EXPECT_TRUE(read);
+        completed += bytes;
+        unknown += uncertain;
+        ++events;
+    });
+    ASSERT_TRUE(static_cast<bool>(observed->observer));
+    BlockBuffers buffers(1);
+    buffers[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    EXPECT_CALL(*observed, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto&, const auto&, const auto&) {
+        observed->observer(true, 6, false);
+        observed->observer(true, 0, true);
+        return ClientErrorCode::ER_SDKREAD_ERROR;
     }));
-    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion), Code::ER_OK);
-    EXPECT_EQ(completion, Completion::PAYLOAD_COMPLETE);
-}
-
-TEST_F(ClientWrapperCompletionTest, TimeoutErrorsAndUnnamedVendorCodesRemainUnknown) {
-    for (const auto code : {Code::ER_SDK_TIMEOUT, Code::ER_SDKREAD_ERROR,
-                            static_cast<Code>(119), static_cast<Code>(120)}) {
-        SCOPED_TRACE(static_cast<int>(code));
-        EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Return(code));
-        auto completion = Completion::PAYLOAD_COMPLETE;
-        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion), code);
-        EXPECT_EQ(completion, Completion::UNKNOWN);
-    }
-}
-
-TEST_F(ClientWrapperCompletionTest, LoadExceptionPreservesUnknownForTheOwner) {
-    auto completion = Completion::NOT_SUBMITTED;
-    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _))
-        .WillOnce(Invoke([&](const auto&, const auto&, const auto&) -> Code {
-            EXPECT_EQ(completion, Completion::UNKNOWN);
-            throw std::runtime_error("accepted operation failed");
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers), ClientErrorCode::ER_SDKREAD_ERROR);
+    EXPECT_EQ(completed, 6u);
+    EXPECT_EQ(unknown, 1u);
+    EXPECT_EQ(events, 2u);
+    EXPECT_CALL(*observed, LoadKvCaches(_, _, _))
+        .WillOnce(Invoke([&](const auto&, const auto&, const auto&) -> ClientErrorCode {
+            observed->observer(true, 0, true);
+            throw std::runtime_error("inner SDK unknown");
         }));
-    EXPECT_THROW(static_cast<void>(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion)),
+    EXPECT_THROW(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers), std::runtime_error);
+    EXPECT_EQ(unknown, 2u);
+    EXPECT_EQ(events, 3u);  // No outer exception duplicates the inner event.
+    client->shutdown();
+    EXPECT_EQ(*destruction_count, 1);
+}
+
+TEST(ClientWrapperTest, InnerSdkPreIoFailureProducesNoEventAndClearingOrShutdownReleasesCallback) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    unsigned char   byte = 7;
+    RegistSpan      span{&byte, 1};
+    InitObservation observation;
+    auto            destruction_count = std::make_shared<int>(0);
+    auto            inner             = std::make_unique<ObservedTransferClient>(destruction_count);
+    auto*           observed          = inner.get();
+    auto            client            = initializeClient(
+        false, "inner_pre_io", span, observation, destruction_count, nullptr, nullptr, nullptr, std::move(inner));
+    ASSERT_NE(client, nullptr);
+    auto               owner    = std::make_shared<int>(0);
+    std::weak_ptr<int> lifetime = owner;
+    size_t             events   = 0;
+    client->setTransferObserver([owner, &events](bool, size_t, bool) { ++events; });
+    owner.reset();
+    BlockBuffers buffers(1);
+    buffers[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    EXPECT_CALL(*observed, SaveKvCaches(_, _, _))
+        .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, UriStrVec{})));
+    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", {"uri"}, buffers).first,
+              ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_EQ(events, 0u);  // Packer rejected before any inner SDK call.
+    EXPECT_FALSE(lifetime.expired());
+    client->setTransferObserver({});
+    EXPECT_FALSE(static_cast<bool>(observed->observer));
+    EXPECT_TRUE(lifetime.expired());
+    client->shutdown();
+}
+
+TEST(ClientWrapperTest, FeatureOffDoesNotInstallAnInnerSdkObserver) {
+    autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    using namespace kv_cache_manager;
+    unsigned char   byte = 7;
+    RegistSpan      span{&byte, 1};
+    InitObservation observation;
+    auto            destruction_count = std::make_shared<int>(0);
+    auto            inner             = std::make_unique<ObservedTransferClient>(destruction_count);
+    auto*           observed          = inner.get();
+    auto            client            = initializeClient(
+        false, "off_inner_sdk", span, observation, destruction_count, nullptr, nullptr, nullptr, std::move(inner));
+    ASSERT_NE(client, nullptr);
+    client->setTransferObserver([](bool, size_t, bool) {});
+    EXPECT_EQ(observed->setter_calls, 0u);
+    EXPECT_FALSE(static_cast<bool>(observed->observer));
+    client->shutdown();
+}
+
+template<typename Code>
+std::vector<std::pair<Code, bool>> completionProofCases() {
+    std::vector<std::pair<Code, bool>> cases{{Code::ER_OK, true},
+                                             {Code::ER_INVALID_PARAMS, false},
+                                             {Code::ER_SDKREAD_ERROR, false},
+                                             {Code::ER_SDK_TIMEOUT, false}};
+    if constexpr (detail::HasExplicitBufferSafeCodes<Code>::value) {
+        cases.emplace_back(Code::ER_SDK_TIMEOUT_BUFFER_SAFE, true);
+        cases.emplace_back(Code::ER_SDK_ERROR_BUFFER_SAFE, true);
+    }
+    return cases;
+}
+
+TEST(ClientWrapperTest, CompletionProofDistinguishesLocalRejectionFromActualSdkError) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    using Completion         = ClientWrapper::TransferCompletion;
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
+    MockTransferClient* mock   = nullptr;
+    auto                client = initializeClient(
+        false, "completion_proof", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    BlockBuffers buffers(1);
+    buffers[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    auto completion = Completion::UNKNOWN;
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("missing", {"uri"}, buffers, nullptr, &completion),
+              ClientErrorCode::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::NOT_STARTED);
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri", "extra"}, buffers, nullptr, &completion),
+              ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_EQ(completion, Completion::NOT_STARTED);
+    for (const auto& [ec, safe] : completionProofCases<ClientErrorCode>()) {
+        SCOPED_TRACE(static_cast<int>(ec));
+        EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Return(ec));
+        EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion), ec);
+        EXPECT_EQ(completion, safe ? Completion::BUFFER_SAFE : Completion::UNKNOWN);
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(ec, UriStrVec{})));
+        EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion).first, ec);
+        EXPECT_EQ(completion, safe ? Completion::BUFFER_SAFE : Completion::UNKNOWN);
+    }
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _))
+        .WillOnce(Invoke([](const auto&, const auto&, const auto&) -> ClientErrorCode {
+            throw std::runtime_error("SDK may retain caller buffers");
+        }));
+    EXPECT_THROW(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion),
                  std::runtime_error);
     EXPECT_EQ(completion, Completion::UNKNOWN);
+    client->shutdown();
 }
 
-TEST_F(ClientWrapperCompletionTest, SaveAllocationExceptionPreservesUnknownForTheOwner) {
-    auto completion = Completion::NOT_SUBMITTED;
-    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _))
-        .WillOnce(Invoke([&](const auto&, const auto&, const auto&)
-                             -> std::pair<Code, kv_cache_manager::UriStrVec> {
-            EXPECT_EQ(completion, Completion::UNKNOWN);
-            throw std::bad_alloc();
-        }));
-    EXPECT_THROW(wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion),
-                 std::bad_alloc);
-    EXPECT_EQ(completion, Completion::UNKNOWN);
-}
-
-TEST_F(ClientWrapperCompletionTest, ReturnedURIValidationIsSeparateFromPayloadCompletion) {
-    const kv_cache_manager::UriStrVec malformed{"pace://one", "pace://extra"};
-    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(Code::ER_OK, malformed)));
-    auto completion = Completion::NOT_SUBMITTED;
-    const auto result = wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion);
-    EXPECT_EQ(result.first, Code::ER_OK);
-    EXPECT_EQ(result.second, malformed);
-    EXPECT_EQ(completion, Completion::PAYLOAD_COMPLETE);
-}
-
-TEST_F(ClientWrapperCompletionTest, MetadataFailureDoesNotUndoCompletedPayload) {
-    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(Code::ER_OK, uris)));
-    EXPECT_CALL(*meta, FinishWrite("commit", "session", _, _)).WillOnce(Return(Code::ER_SERVICE_INTERNAL_ERROR));
-    auto completion = Completion::NOT_SUBMITTED;
-    ASSERT_EQ(wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion).first, Code::ER_OK);
-    EXPECT_FALSE(wrapper->finishWrite("", "commit", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
-    EXPECT_EQ(completion, Completion::PAYLOAD_COMPLETE);
+TEST(ClientWrapperTest, ThrowingSdkMarksUnknownAndShutdownReleasesObserver) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
+    MockTransferClient* mock = nullptr;
+    auto                client =
+        initializeClient(false, "throwing_sdk", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    auto               owner   = std::make_shared<int>(0);
+    std::weak_ptr<int> alive   = owner;
+    size_t             unknown = 0;
+    client->setTransferObserver([owner, &unknown](bool read, size_t bytes, bool uncertain) {
+        (void)owner;
+        EXPECT_TRUE(read);
+        EXPECT_EQ(bytes, 0u);
+        EXPECT_TRUE(uncertain);
+        ++unknown;
+        throw std::runtime_error("reporting failed");
+    });
+    owner.reset();
+    BlockBuffers buffers(1);
+    buffers[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Invoke([](const auto&, auto&, const auto&) -> ClientErrorCode {
+        throw std::runtime_error("SDK completion unknown");
+    }));
+    EXPECT_THROW(client->loadKvCachesForTagWithStatus("default", UriStrVec{"uri"}, buffers), std::runtime_error);
+    EXPECT_EQ(unknown, 1u);
+    EXPECT_FALSE(alive.expired());
+    client->shutdown();
+    EXPECT_TRUE(alive.expired());
 }
 
 }  // namespace

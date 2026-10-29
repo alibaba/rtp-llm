@@ -1298,6 +1298,90 @@ public:
     bool    report_load_join_wait         = false;
 };
 
+class RtpLLMDecodePublicationStateMetricsCollector final {
+public:
+    int64_t pending_bytes{0}, pending_jobs{0}, queued_jobs{0}, running_jobs{0}, quarantined_jobs{0};
+    int64_t byte_limit{0}, job_limit{0}, oldest_age_us{0};
+};
+
+class RtpLLMDecodePublicationEventMetricsCollector final {
+public:
+    const char*            outcome{"failed"};
+    std::optional<int64_t> eos_to_commit_us;
+};
+
+class RtpLLMDecodePublicationMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationStateMetricsCollector*);
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationEventMetricsCollector*);
+    kmonitor::MutableMetric* pending_bytes_metric{nullptr};
+    kmonitor::MutableMetric* pending_jobs_metric{nullptr};
+    kmonitor::MutableMetric* queued_jobs_metric{nullptr};
+    kmonitor::MutableMetric* running_jobs_metric{nullptr};
+    kmonitor::MutableMetric* quarantined_jobs_metric{nullptr};
+    kmonitor::MutableMetric* byte_limit_metric{nullptr};
+    kmonitor::MutableMetric* job_limit_metric{nullptr};
+    kmonitor::MutableMetric* oldest_age_us_metric{nullptr};
+    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+    kmonitor::MutableMetric* budget_skip_qps_metric{nullptr};
+    kmonitor::MutableMetric* eos_latency_bucket_qps_metric{nullptr};
+    kmonitor::MutableMetric* eos_latency_sum_us_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteRestoreLatencyMetricsCollector final {
+public:
+    const char* mode{"checkpoint_gpu_ready"};
+    int64_t     latency_us{0};
+};
+
+class RtpLLMRemoteRestoreLatencyMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteRestoreLatencyMetricsCollector*);
+    kmonitor::MutableMetric* latency_bucket_qps_metric{nullptr};
+    kmonitor::MutableMetric* latency_sum_us_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheOutcomeMetricsCollector final {
+public:
+    const char* stage{"lookup"};
+    const char* outcome{"failed"};
+};
+
+class RtpLLMDecodeCacheTokenMetricsCollector final {
+public:
+    const char* stage{"restored"};
+    const char* tier{"REMOTE"};
+    int64_t     logical_tokens{0};
+};
+
+class RtpLLMDecodeCacheTokenMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodeCacheTokenMetricsCollector*);
+    kmonitor::MutableMetric* logical_tokens_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCacheOutcomeMetricsCollector*);
+    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheMatchMetricsCollector final {
 public:
     bool    remote_match_qps             = true;
@@ -1324,6 +1408,23 @@ public:
     int64_t remote_get_write_location_time_us = 0;
     int64_t remote_write_broadcast_time_us    = 0;
     int64_t remote_finish_write_time_us       = 0;
+};
+
+class RtpLLMRemoteCachePayloadMetricsCollector final {
+public:
+    int64_t completed_payload_bytes{0};
+    bool    completion_unknown{false};
+};
+
+class RtpLLMRemoteCachePayloadMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCachePayloadMetricsCollector*);
+    kmonitor::MutableMetric* completed_payload_bytes_qps_metric{nullptr};
+    kmonitor::MutableMetric* completion_unknown_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
 };
 
 class RtpLLMRemoteCacheSDKMetricsCollector final {
@@ -1637,6 +1738,10 @@ private:
 };
 
 bool initKmonitorFactory();
+// A KVCM-local payload reporter for nonroot ranks, leaving general metrics root-only.
+// Disabled returns before touching the factory; an existing reporter is reused.
+kmonitor::MetricsReporterPtr
+     remoteCachePayloadReporter(bool enabled, int64_t tp_rank, const kmonitor::MetricsReporterPtr& existing_reporter);
 void stopKmonitorFactory();
 
 void setHippoTags(kmonitor::MetricsConfig& config);

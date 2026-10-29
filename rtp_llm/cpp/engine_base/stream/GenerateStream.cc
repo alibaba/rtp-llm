@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -1498,6 +1499,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
+    const bool is_context_update        = isContextStream();
+    const bool completes_remote_context = is_context_update && stream_cache_resource_->hasPendingRemoteRestore();
+    // A hot DEVICE/HOST/DISK hit can reuse Decode KV without a remote read in
+    // this request. Keep its actual-use boundary independent of restore timing.
+    const bool consumes_decode_reuse = is_context_update && stream_cache_resource_->hasPendingDecodeReuse();
     is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
@@ -1576,7 +1582,18 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                   update_info.top_logprob_token_ids,
                   update_info.top_logprobs,
                   old_seq_length,
-                  update_info.logprobs_offset});
+                  update_info.logprobs_offset,
+                  update_info.context_kv_all_rank_gpu_ready_at});
+
+    if ((completes_remote_context || consumes_decode_reuse) && !update_info.force_update_info && !hasErrorWithoutLock()
+        && !hasEventWithoutLock(StreamEvents::Error)) {
+        if (completes_remote_context) {
+            stream_cache_resource_->reportRemoteContextReady(update_info.context_kv_all_rank_gpu_ready_at);
+        }
+        if (consumes_decode_reuse) {
+            stream_cache_resource_->reportDecodeCacheUse(update_info.context_kv_all_rank_gpu_ready_at);
+        }
+    }
 
     // needFinish(), called by updateOutput(), can trim this packet at EOS/stop
     // words. Advance the cached phase only from tokens that were committed.
@@ -1585,6 +1602,16 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
+
+    // Protect the final native checkpoint only AFTER successful EOS and before
+    // any final block remapping. The backend prepares pinned GPU handles and
+    // queues the existing Prefill writer; no decode-progress CPU snapshots.
+    if (is_done && hasEventWithoutLock(StreamEvents::GenerateDone) && !hasEventWithoutLock(StreamEvents::Error)
+        && !hasErrorWithoutLock() && resourceContext().cache_manager && !useStreamAsyncReserveTokens()
+        && num_new_tokens == 1 && currentBatchSize() == 1 && remoteCacheDecodePublicationEnabled()
+        && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache() && seqLength() > 0) {
+        resourceContext().cache_manager->captureCompletedDecode(kvCache(), seqLength() - 1, true);
+    }
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done

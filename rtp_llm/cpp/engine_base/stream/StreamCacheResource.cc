@@ -1,3 +1,5 @@
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -12,7 +14,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
-#include <exception>
 #include <limits>
 #include <thread>
 
@@ -52,6 +53,7 @@ void StreamCacheResource::init(int batch_size) {
 }
 
 void StreamCacheResource::releaseResource() {
+    decode_reuse_use_state_.adopt({}, 0);
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
         return;
@@ -122,24 +124,13 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
-            if (resource_context_.enable_decode_publication && resource_context_.role_type == RoleType::DECODE
-                && !stream_->hasNumBeams() && stream_->numReturnSequences() == 1
-                && batch_kv_cache_resource_->batchSize() == 1
+            if (remoteCacheDecodePublicationEnabled() && resource_context_.role_type == RoleType::DECODE
+                && !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
                 && stream_->completeTokenIdsPtr()->seqLength() > 0) {
-                // The final sampled token has no computed target KV. Admission
-                // must pin the completed pages before the normal free below.
-                // Publication is optional: failed admission cannot break the
-                // original cache insertion and release path.
-                try {
-                    (void)resource_context_.cache_manager->captureCompletedDecode(
-                        *batch_kv_cache_resource_,
-                        static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength() - 1),
-                        true);
-                } catch (const std::exception& error) {
-                    RTP_LLM_LOG_WARNING("Decode publication admission failed: %s", error.what());
-                } catch (...) {
-                    RTP_LLM_LOG_WARNING("Decode publication admission failed with an unknown error");
-                }
+                (void)resource_context_.cache_manager->captureCompletedDecode(
+                    *batch_kv_cache_resource_,
+                    static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength() - 1),
+                    true);
             }
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
@@ -220,6 +211,14 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.enable_storage_backend       = !skip_remote_cache_;
 
+    // The allocator performs lookup and page preparation before backend.read.
+    // Keep an attempt-local steady timestamp; report only after a real remote
+    // read succeeds and the resulting GPU pages are adopted below.
+    remote_restore_attempt_started_at_.reset();
+    if (resource_context_.role_type == RoleType::PREFILL && remoteCacheDecodePublicationEnabled()
+        && malloc_info.enable_storage_backend && malloc_info.enable_cache_lookup) {
+        remote_restore_attempt_started_at_ = RemoteRestoreTiming::Clock::now();
+    }
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
     if (!result.success) {
@@ -244,11 +243,15 @@ absl::Status StreamCacheResource::initKVBlock() {
 
     // HOST/DISK reuse is published after the asynchronous load completes.
     publishReuseLengths(result.reuse_len, 0, 0, 0);
+    adoptDecodeReuse(std::move(result.decode_sources), result.reuse_len);
     allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
 }
 
 void StreamCacheResource::clearCacheReuseState() {
+    decode_reuse_use_state_.adopt({}, 0);  // Never reset a consumed logical request on retry.
+    remote_restore_lifecycle_.reset();
+    remote_restore_attempt_started_at_.reset();
     stream_->setReuseLength(0);
     stream_->setMtpTokenIndex(0);
     stream_->setInitialReuseLength(0);
@@ -258,7 +261,41 @@ void StreamCacheResource::clearCacheReuseState() {
     stream_->setRemoteReuseLength(0);
 }
 
+void StreamCacheResource::adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end) {
+    if (resource_context_.role_type == RoleType::PREFILL && stream_->metrics_reporter_
+        && remoteCacheDecodePublicationEnabled())
+        decode_reuse_use_state_.adopt(std::move(sources), adopted_end);
+}
+
+void StreamCacheResource::reportDecodeCacheUse(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
+    if (resource_context_.role_type != RoleType::PREFILL || !stream_->metrics_reporter_ || !gpu_ready_at)
+        return;
+    try {
+        const auto counts = decode_reuse_use_state_.consume(true);
+        if (!counts)
+            return;
+        for (size_t tier = 0; tier < counts->by_tier.size(); ++tier) {
+            if (counts->by_tier[tier] <= 0)
+                continue;
+            RtpLLMDecodeCacheTokenMetricsCollector collector;
+            collector.stage          = "used";
+            collector.tier           = tierName(static_cast<Tier>(tier));
+            collector.logical_tokens = counts->by_tier[tier];
+            stream_->metrics_reporter_->report<RtpLLMDecodeCacheTokenMetrics>(nullptr, &collector);
+        }
+        RtpLLMRemoteCacheOutcomeMetricsCollector outcome;
+        outcome.stage   = "use";
+        outcome.outcome = counts->total() > 0 ? "used" : "no_decode_interval";
+        stream_->metrics_reporter_->report<RtpLLMRemoteCacheOutcomeMetrics>(nullptr, &outcome);
+    } catch (const std::bad_alloc&) {
+        decode_reuse_use_state_.adopt({}, 0);
+        RTP_LLM_LOG_WARNING("optional Decode cache use attribution unavailable");
+    }
+}
+
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
+    decode_reuse_use_state_.adopt({}, 0);
+    remote_restore_lifecycle_.reset();
     cache_reuse_metrics_.device_input_length    = result.device_input_length;
     cache_reuse_metrics_.match_cost_time_us     = result.match_cost_time_us;
     cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
@@ -325,6 +362,21 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         publishAllocatorReuse(*load_context, false);
+        try {
+            adoptDecodeReuse(load_context->decodeSources(), stream_->reuseLength());
+        } catch (const std::bad_alloc&) {
+            decode_reuse_use_state_.adopt({}, 0);
+        }
+        if (resource_context_.role_type == RoleType::PREFILL && stream_->metrics_reporter_
+            && stream_->remoteReuseLength() > 0) {
+            const auto timing = load_context->remoteRestoreTiming();
+            if (timing && remote_restore_attempt_started_at_
+                && remote_restore_lifecycle_.adopt(*timing, remote_restore_attempt_started_at_)) {
+                reportRemoteRestoreLatency("checkpoint_gpu_ready", *remote_restore_lifecycle_.checkpointReadyUs());
+                reportRemoteRestoreLatency("read_to_checkpoint_gpu_ready",
+                                           *remote_restore_lifecycle_.readToCheckpointUs());
+            }
+        }
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         const bool backend_timeout = load_context && load_context->backendTimedOut();
         skip_remote_cache_         = skip_remote_cache_ || backend_timeout;
@@ -340,6 +392,11 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
             malloc_status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
         } else if (reuse_local) {
             publishAllocatorReuse(*load_context, true);
+            try {
+                adoptDecodeReuse(load_context->decodeSources(true), stream_->reuseLength());
+            } catch (const std::bad_alloc&) {
+                decode_reuse_use_state_.adopt({}, 0);
+            }
         } else {
             stream_->setHostReuseLength(0);
             stream_->setDiskReuseLength(0);
@@ -393,6 +450,35 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     kmonitor::MetricsTags tags;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
         &tags, &cache_reuse_metrics_);
+}
+
+void StreamCacheResource::reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
+    const auto latency =
+        remote_restore_lifecycle_.completeContextForward(gpu_ready_at.value_or(RemoteRestoreTiming::Clock::now()));
+    if (!latency || !stream_->metrics_reporter_) {
+        return;
+    }
+    // The existing context forward can fuse historical tail with new prompt or
+    // tool tokens. No source/tail identity is available here yet, so do not call
+    // this tail-only restore, actual D-token use or TTFT. The GPU-ready mode
+    // requires the explicit producer collective + existing output-stream fence;
+    // arbitrary CPU updates remain observations without that qualification.
+    reportRemoteRestoreLatency(gpu_ready_at ? "fused_context_gpu_ready" : "root_context_update_observed", *latency);
+}
+
+void StreamCacheResource::reportRemoteRestoreLatency(const char* mode, int64_t latency_us) {
+    if (!stream_->metrics_reporter_)
+        return;
+    try {
+        RtpLLMRemoteRestoreLatencyMetricsCollector collector;
+        collector.mode       = mode;
+        collector.latency_us = latency_us;
+        stream_->metrics_reporter_
+            ->report<RtpLLMRemoteRestoreLatencyMetrics, RtpLLMRemoteRestoreLatencyMetricsCollector>(nullptr,
+                                                                                                    &collector);
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("remote restore telemetry failed; inference result is retained");
+    }
 }
 
 std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {

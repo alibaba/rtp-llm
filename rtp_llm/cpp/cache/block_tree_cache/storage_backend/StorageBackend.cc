@@ -56,6 +56,7 @@ struct StorageTaskState {
             }
             pins.clear();
             request.completion_budget_lease.reset();
+            request.completion_admission.reset();
             completion_resources.reset();
         });
     }
@@ -289,6 +290,8 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
         return;
     }
     const size_t pinned_block_count = state->pins.size();
+    if (state->request.completion_admission)
+        state->request.completion_admission->onQuarantined();
     if (state->completion_protected) {
         // Anchor before any log, observer, allocation or cleanup. This link
         // only copies/moves already-existing shared ownership and is acyclic.
@@ -509,9 +512,13 @@ bool StorageBackend::write(StorageWriteTask task) {
     RTP_LLM_CHECK(initialized_);
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
+    if (state->request.completion_admission)
+        state->request.completion_admission->onQueued();
     return dispatch([this, state](Lifecycle outcome) {
         std::optional<StorageQuarantineReason> quarantine_reason;
         if (outcome == Lifecycle::ACCEPTING) {
+            if (state->request.completion_admission)
+                state->request.completion_admission->onRunning();
             try {
                 writeImpl(state->request);
             } catch (const StorageOperationTimeout& error) {

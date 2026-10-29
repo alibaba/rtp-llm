@@ -60,24 +60,28 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
 }
 
 absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
-    const StreamGroups& stream_groups, GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status) const {
+    const StreamGroups&                                   stream_groups,
+    GenerationPrefillCudaGraphStatus                      generation_prefill_cuda_graph_status,
+    std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at) const {
     for (const auto& stream : stream_groups.allStreams()) {
         auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
-        stream->update({empty_token_ids,
-                        /*num_new_tokens=*/0,
-                        /*hidden_states=*/torch::Tensor(),
-                        /*logits=*/torch::Tensor(),
-                        /*softmax_probs=*/torch::Tensor(),
-                        /*cum_log_probs=*/torch::Tensor(),
-                        /*all_probs=*/torch::Tensor(),
-                        /*loss=*/torch::Tensor(),
-                        /*src_batch_indices=*/torch::Tensor(),
-                        /*all_hidden_states=*/torch::Tensor(),
-                        /*update_remote_generate=*/false,
-                        /*force_update_info=*/false,
-                        /*prompt_logits=*/std::nullopt,
-                        /*error_info=*/std::nullopt,
-                        generation_prefill_cuda_graph_status});
+        StreamUpdateInfo update_info{empty_token_ids,
+                                     /*num_new_tokens=*/0,
+                                     /*hidden_states=*/torch::Tensor(),
+                                     /*logits=*/torch::Tensor(),
+                                     /*softmax_probs=*/torch::Tensor(),
+                                     /*cum_log_probs=*/torch::Tensor(),
+                                     /*all_probs=*/torch::Tensor(),
+                                     /*loss=*/torch::Tensor(),
+                                     /*src_batch_indices=*/torch::Tensor(),
+                                     /*all_hidden_states=*/torch::Tensor(),
+                                     /*update_remote_generate=*/false,
+                                     /*force_update_info=*/false,
+                                     /*prompt_logits=*/std::nullopt,
+                                     /*error_info=*/std::nullopt,
+                                     generation_prefill_cuda_graph_status};
+        update_info.context_kv_all_rank_gpu_ready_at = context_kv_all_rank_gpu_ready_at;
+        stream->update(update_info);
     }
     return absl::OkStatus();
 }

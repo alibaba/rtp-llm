@@ -23,7 +23,7 @@ class ClientWrapper;
 // KVCM adapter for the BlockTree remote tier. Metadata operations are owned by
 // rank 0; payload copies are broadcast to the per-rank adapters so every
 // process transfers its own GPU blocks through its locally registered client.
-class KVCMStorageBackend final: public StorageBackend {
+class KVCMStorageBackend: public StorageBackend {
 public:
     KVCMStorageBackend(const CacheConfig&                            cache_config,
                        const KVCacheConfig&                          kv_cache_config,

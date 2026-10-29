@@ -47,3 +47,44 @@ index 03ff7ce5..bdaff505 100644
  def genshared(name, lib):
      return native.genrule(
          name = name,
+
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/KMonitorWorker.cpp aios/kmonitor/cpp_client/src/kmonitor/client/KMonitorWorker.cpp
+--- aios/kmonitor/cpp_client/src/kmonitor/client/KMonitorWorker.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/KMonitorWorker.cpp
+@@ -126,13 +126,21 @@
+     autil::ScopedLock lock(metric_mutex_);
+     if (!started_) {
+         AUTIL_LOG(WARN, "kmonitor worker has not started");
+-        return;
+-    }
+-    system_->Stop();
++    } else {
++        system_->Stop();
++    }
+     map<string, KMonitor *>::iterator it = kmonitor_map_->begin();
+     for (; it != kmonitor_map_->end(); it++) {
+         it->second->Stop();
+         AUTIL_LOG(INFO, "shutdown kmonitor [%s]", it->first.c_str());
++        system_->DelSource(it->first);
++        // Reset the cached builtin only when this worker retires its owner.
++        // Stop the metrics system before destroying monitors or cached tags.
++        if (sg_buildin_kmonitor == it->second) {
++            sg_buildin_kmonitor = NULL;
++            delete sg_buildin_tags;
++            sg_buildin_tags = NULL;
++        }
+         delete it->second;
+     }
+     kmonitor_map_->clear();
+@@ -167,6 +174,11 @@
+         KMonitor *monitor = it->second;
+         monitor->Stop();
+         kmonitor_map_->erase(it);
++        if (sg_buildin_kmonitor == monitor) {
++            sg_buildin_kmonitor = NULL;
++            delete sg_buildin_tags;
++            sg_buildin_tags = NULL;
++        }
+         delete monitor;
+     }
+ }
