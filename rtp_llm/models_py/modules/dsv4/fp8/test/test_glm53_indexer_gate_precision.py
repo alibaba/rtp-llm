@@ -50,9 +50,17 @@ def fixture(q_len=1, dtype=torch.float32):
     model.wq_b.weight.zero_()
     model.wq_b.weight[0, 0] = 1
     model.wq_b.weight[128 + 1, 0] = 1
-    # Both gates round to1 in BF16, despite their strict FP32 ordering.
+    # BF16 checkpoint coefficients produce strictly ordered FP32 dot products.
+    # Only rounding the projected gates to BF16 collapses both values to1.
     model.weights_proj = torch.zeros(32, 2, device="cuda", dtype=dtype)
-    model.weights_proj[0, 0], model.weights_proj[1, 0] = 1.001953125, 1.0029296875
+    model.weights_proj[:2, 0] = 1
+    model.weights_proj[0, 1], model.weights_proj[1, 1] = 0.001953125, 0.0029296875
+    torch.testing.assert_close(
+        model.weights_proj,
+        model.weights_proj.to(torch.bfloat16).to(dtype),
+        rtol=0,
+        atol=0,
+    )
     width, block = 1026, 64
     slots = 17 * block
     key = torch.zeros(slots, 128, device="cuda")
@@ -85,7 +93,7 @@ def fixture(q_len=1, dtype=torch.float32):
 
     model._gather_prefill_k_cache = gather
     x = torch.zeros(q_len, 2, device="cuda", dtype=torch.bfloat16)
-    x[:, 0] = 1
+    x[:] = 1
     meta = SimpleNamespace(
         M=q_len,
         T=width,
@@ -205,9 +213,9 @@ class Glm53IndexerGatePrecisionTest(unittest.TestCase):
                 with torch.cuda.graph(graph):
                     run()
                 for higher in (1, 0, 1):
-                    values = [1.001953125, 1.001953125]
-                    values[higher] = 1.0029296875
-                    model.weights_proj[:2, 0].copy_(torch.tensor(values, device="cuda"))
+                    values = [0.001953125, 0.001953125]
+                    values[higher] = 0.0029296875
+                    model.weights_proj[:2, 1].copy_(torch.tensor(values, device="cuda"))
                     graph.replay()
                     torch.testing.assert_close(
                         actual.reshape(1, -1).cpu(),

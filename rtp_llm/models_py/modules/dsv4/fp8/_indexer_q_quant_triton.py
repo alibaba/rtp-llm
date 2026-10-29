@@ -42,6 +42,7 @@ def _indexer_q_fp8_fold_kernel(
     BSH,  # B*S*H — rows
     D: tl.constexpr,  # head_dim = 128
     fp8_max: tl.constexpr,
+    ROUND_SCALE: tl.constexpr,
 ):
     """One program per (b, s, h) row. Each row is one 128-elem vector;
     fits in registers, no inner-D tiling needed."""
@@ -53,9 +54,15 @@ def _indexer_q_fp8_fold_kernel(
     q = tl.load(q_ptr + pid * D + d_off).to(tl.float32)
 
     absmax = tl.max(tl.abs(q), axis=0)
-    scale = tl.maximum(absmax / fp8_max, 1e-12)
+    if ROUND_SCALE:
+        # GLM53 uses the same UE8M0 scale contract for indexer Q and K.
+        scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(absmax, 1e-4) * (1.0 / fp8_max))))
+        scaled = tl.minimum(tl.maximum(q / scale, -fp8_max), fp8_max)
+    else:
+        scale = tl.maximum(absmax / fp8_max, 1e-12)
+        scaled = q / scale
 
-    q_fp8 = (q / scale).to(tl.float8e4nv)
+    q_fp8 = scaled.to(tl.float8e4nv)
     tl.store(
         (q_fp8_ptr + pid * D + d_off).to(tl.pointer_type(tl.uint8)),
         q_fp8.to(tl.uint8, bitcast=True),
@@ -68,8 +75,12 @@ def _indexer_q_fp8_fold_kernel(
 def indexer_q_fp8_quant_fold(
     q_bf16: torch.Tensor,  # [B, S, H, D] bf16, D=128
     weights: torch.Tensor,  # [B, S, H]    bf16 or fp32
+    round_scale: bool = False,
 ):
     """Per-(token, head) FP8 quant of indexer Q + scale-fold into weights.
+
+    ``round_scale=True`` selects GLM53 UE8M0 power-of-two scales, including
+    the 1e-4 absmax floor. The default retains the DSV4 scale contract.
 
     Returns ``(q_fp8, w_folded)`` where ``q_fp8`` is contiguous
     ``[B, S, H, D] float8_e4m3fn`` and ``w_folded`` is contiguous
@@ -98,6 +109,7 @@ def indexer_q_fp8_quant_fold(
         BSH=BSH,
         D=D,
         fp8_max=FP8_E4M3_MAX,
+        ROUND_SCALE=round_scale,
         num_warps=4,
     )
     return q_fp8, w_fold

@@ -247,3 +247,23 @@ py_test(
     tags = ["manual"],
     timeout = "long",
 )
+
+py_test(
+    name = "test_glm53_indexer_gate_precision",
+    srcs = ["test_glm53_indexer_gate_precision.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "test_glm53_indexer_q_scale",
+    srcs = ["test_glm53_indexer_q_scale.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)

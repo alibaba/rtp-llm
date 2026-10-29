@@ -582,13 +582,15 @@ class IndexerFP8(PoolBackedModule):
     def _quantize_q(self, q: torch.Tensor, weights: torch.Tensor):
         # GLM53 projects head gates in FP32 to distinguish near-tie scores.
         # Both quantizers accept FP32 gates; preserve them until scale folding.
+        # GLM53 Q follows the KPool UE8M0 scale contract in both paths.
+        round_scale = self.compressor.kpool_mode
         if self._fuse_glm_q_quant():
             from rtp_llm.models_py.modules.dsv4.fp8._indexer_hadamard_quant_triton import (
                 indexer_hadamard_quant_fold,
             )
 
-            return indexer_hadamard_quant_fold(q, weights)
-        return indexer_q_fp8_quant_fold(q, weights)
+            return indexer_hadamard_quant_fold(q, weights, round_scale=round_scale)
+        return indexer_q_fp8_quant_fold(q, weights, round_scale=round_scale)
 
     def _prefill_score_topk(self, q, weights, key, key_scale, meta):
         out = torch.empty((meta.M, self.index_topk), dtype=torch.int32, device=q.device)
