@@ -20,7 +20,7 @@ class GrpcReceivingWireBudgetTest {
     var release = new CountDownLatch(1);
     var control = Executors.newSingleThreadExecutor();
     var guard =
-        new GrpcReceivingGuard(8, 1, 5000, pool, control, 192L << 10, 128L << 10, 64L << 10);
+        new GrpcReceivingGuard(2, 1, 5000, pool, control, 64L << 10, 128L << 10);
     var alloc = new PooledByteBufAllocator(true);
     var cancelMethod =
         GrpcReceivingGuardRepro.METHOD.toBuilder()
@@ -72,7 +72,7 @@ class GrpcReceivingWireBudgetTest {
       assertTrue(blocked.await(2, TimeUnit.SECONDS));
       partial(a, 65536);
       GrpcReceivingGuardRepro.until(
-          () -> guard.receivingBytes() == (128L << 10) + 65531,
+          () -> guard.receivingBytes() == 65531,
           "all A partial body bytes charged before B competes for the shared budget");
       GrpcReceivingGuardRepro.until(
           () -> alloc.pinnedDirectMemory() >= 65531,
@@ -94,7 +94,7 @@ class GrpcReceivingWireBudgetTest {
         controlChannel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
       }
       long held = guard.receivingBytes();
-      assertTrue(held <= 192L << 10);
+      assertTrue(held <= 64L << 10);
       assertEquals(2, guard.receiving());
       assertTrue(
           alloc.pinnedDirectMemory() >= 65531,
@@ -106,7 +106,7 @@ class GrpcReceivingWireBudgetTest {
       }
       GrpcReceivingGuardRepro.until(
           () -> guard.rejected() >= 11,
-          "closed-but-not-cleaned reservation cannot be reused by new TCP");
+          "closed-but-not-cleaned receiving permit cannot be reused by new TCP");
       assertEquals(held, guard.receivingBytes());
       System.out.println(
           "WIRE_MULTI_TCP blockedReceiving="
@@ -160,8 +160,8 @@ class GrpcReceivingWireBudgetTest {
     var transport = new io.netty.channel.nio.NioEventLoopGroup(1);
     var pool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
     var release = new CountDownLatch(1);
-    var handlerReady = new CountDownLatch(1);
-    var guard = new GrpcReceivingGuard(8, 1, 5000, pool, pool, 128L << 10, 64L << 10, 64L << 10);
+    var handlerReady = new CountDownLatch(2);
+    var guard = new GrpcReceivingGuard(2, 1, 5000, pool, pool, 48L << 10, 64L << 10);
     var alloc = new PooledByteBufAllocator(true);
     var service =
         ServerServiceDefinition.builder("receiving.Test")
@@ -191,7 +191,8 @@ class GrpcReceivingWireBudgetTest {
             .withChildOption(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(4096))
             .build()
             .start();
-    try (var a = new GrpcReceivingGuardMatrix.Raw(server.getPort(), null)) {
+    try (var a = new GrpcReceivingGuardMatrix.Raw(server.getPort(), null);
+        var b = new GrpcReceivingGuardMatrix.Raw(server.getPort(), null)) {
       assertTrue(handlerReady.await(5, TimeUnit.SECONDS), "handler requested before blocking");
       var blocked = new CountDownLatch(1);
       pool.execute(
@@ -206,17 +207,18 @@ class GrpcReceivingWireBudgetTest {
       assertTrue(blocked.await(2, TimeUnit.SECONDS));
       a.message(new byte[32768], false);
       GrpcReceivingGuardRepro.until(
-          () -> alloc.pinnedDirectMemory() >= 32768 && guard.receivingBytes() == 98304,
+          () -> alloc.pinnedDirectMemory() >= 32768 && guard.receivingBytes() == 32768,
           "complete queued producer charged");
       a.reset();
       Thread.sleep(50);
-      assertEquals(98304, guard.receivingBytes());
+      assertEquals(32768, guard.receivingBytes());
       assertTrue(alloc.pinnedDirectMemory() >= 32768);
-      try (var b = new GrpcReceivingGuardMatrix.Raw(server.getPort(), null)) {
-        GrpcReceivingGuardRepro.until(
-            () -> guard.rejected() > 0, "held bytes deny fresh initial reservation");
-        assertEquals(98304, guard.receivingBytes());
-      }
+      b.message(new byte[32768], false);
+      GrpcReceivingGuardRepro.until(
+          () -> guard.rejected() > 0, "uncleaned producer bytes prevent another body from fitting");
+      assertTrue(guard.receivingBytes() >= 32768);
+      assertTrue(guard.receivingBytes() <= 48L << 10);
+      assertEquals(2, guard.receiving());
       release.countDown();
       GrpcReceivingGuardRepro.until(
           () -> guard.receivingBytes() == 0 && alloc.pinnedDirectMemory() == 0,
@@ -239,7 +241,7 @@ class GrpcReceivingWireBudgetTest {
   @Test
   void parallelSmallMessagesUseBytesInsteadOfMaximumMessageSlots() throws Exception {
     parallelSmallMessages(64L << 30);
-    parallelSmallMessages(8L << 30);
+    parallelSmallMessages(2L << 30);
   }
 
   void parallelSmallMessages(long directLimit) throws Exception {
@@ -263,8 +265,7 @@ class GrpcReceivingWireBudgetTest {
             pool,
             control,
             limits.scheduleBudgetBytes(),
-            limits.controlBudgetBytes(),
-            limits.initialReservationBytes());
+            limits.controlBudgetBytes());
     var alloc = new PooledByteBufAllocator(true);
     var service =
         ServerServiceDefinition.builder("receiving.Test")
@@ -299,7 +300,7 @@ class GrpcReceivingWireBudgetTest {
       }
       GrpcReceivingGuardRepro.until(
           () -> guard.receiving() == 32, "all32 headers receive concurrently");
-      assertEquals(256L << 20, guard.receivingBytes());
+      assertEquals(0, guard.receivingBytes(), "HEADERS must not reserve hypothetical body bytes");
       for (var c : calls) {
         c.sendMessage(new byte[8192]);
         c.halfClose();

@@ -111,18 +111,14 @@ public class FlexlbGrpcServer {
                 GrpcReceivingBudget.resolve(
                         executorConfig, io.netty.util.internal.PlatformDependent.maxDirectMemory());
         Logger.info(
-                "FlexLB logical receiving wire budget (not pinned Direct): schedule={}, control={},"
-                        + " timeoutMs={}, totalBudgetBytes={}, scheduleBudgetBytes={},"
-                        + " controlBudgetBytes={}, initialReservationBytes={}, DirectFraction={}",
+                "FlexLB receiving limits: schedule={}, control={}, timeoutMs={},"
+                    + " bodyBudgetBytes={}, scheduleBodyBudgetBytes={}, controlBodyBudgetBytes={}",
                 receiving.scheduleCalls(),
                 receiving.controlCalls(),
                 receiving.timeoutMs(),
                 receiving.budgetBytes(),
                 receiving.scheduleBudgetBytes(),
-                receiving.controlBudgetBytes(),
-                receiving.initialReservationBytes(),
-                (double) receiving.budgetBytes()
-                        / io.netty.util.internal.PlatformDependent.maxDirectMemory());
+                receiving.controlBudgetBytes());
 
         this.bossGroup =
                 new NioEventLoopGroup(1, new DefaultThreadFactory("flexlb-grpc-server-boss"));
@@ -156,8 +152,7 @@ public class FlexlbGrpcServer {
                         grpcExecutor,
                         grpcControlExecutor,
                         receiving.scheduleBudgetBytes(),
-                        receiving.controlBudgetBytes(),
-                        receiving.initialReservationBytes());
+                        receiving.controlBudgetBytes());
 
         // Register monitoring metrics for the gRPC server executor
         registerMetrics();
