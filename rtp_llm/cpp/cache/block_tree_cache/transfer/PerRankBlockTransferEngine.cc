@@ -55,9 +55,9 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                          metrics_reporter,
                                                                          std::move(crc_service),
                                                                          load_transfer_task_pool_.get(),
-                                                                         group_sets_);
+                                                                         group_sets_, world_rank);
     host_disk_executor_   = std::make_unique<HostDiskTransferExecutor>(
-        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, load_transfer_task_pool_.get());
+        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, load_transfer_task_pool_.get(), world_rank);
     if (enable_disk_cache && !group_sets_.empty()) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
                                                                              *host_disk_executor_,
@@ -66,7 +66,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                              *transfer_task_pool_,
                                                                              max_descriptors_per_batch,
                                                                              std::move(metrics_reporter),
-                                                                             load_transfer_task_pool_.get());
+                                                                             load_transfer_task_pool_.get(),
+                                                                             world_rank);
     }
 }
 
