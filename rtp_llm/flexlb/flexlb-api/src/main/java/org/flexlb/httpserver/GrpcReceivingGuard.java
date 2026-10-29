@@ -6,8 +6,8 @@ import java.util.concurrent.atomic.*;
 
 /**
  * Headers-phase receiving admission, independent of accepted business queue length. Requires a
- * direct bootstrap executor and gRPC 1.65.1 per-call SerializingExecutor ordering. Initial
- * allowances plus body wire increments form a logical budget, not a physical Netty Direct-memory
+ * direct bootstrap executor and gRPC 1.65.1 per-call SerializingExecutor ordering. Body wire
+ * increments form a logical budget, not a physical Netty Direct-memory
  * measurement. Normal receiving completion is decoded half-close; terminal cleanup waits for the
  * application listener, including message producers already queued when the transport closed.
  */
@@ -30,7 +30,6 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
   private final AtomicLong controlReceivingBytes = new AtomicLong();
   private final long scheduleByteLimit;
   private final long controlByteLimit;
-  private final long initialReservation;
 
   public long receivingBytes() {
     return receivingBytes.get();
@@ -55,8 +54,7 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         business,
         control,
         Long.MAX_VALUE,
-        Long.MAX_VALUE,
-        GrpcReceivingBudget.INITIAL_RESERVATION_BYTES);
+        Long.MAX_VALUE);
   }
 
   public GrpcReceivingGuard(
@@ -66,17 +64,14 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
       Executor business,
       Executor control,
       long scheduleByteLimit,
-      long controlByteLimit,
-      long initialReservation) {
+      long controlByteLimit) {
     if (limit <= 0
         || controlLimit <= 0
         || timeoutMillis <= 0
-        || initialReservation <= 0
-        || scheduleByteLimit < initialReservation
-        || controlByteLimit < initialReservation) throw new IllegalArgumentException();
+        || scheduleByteLimit <= 0
+        || controlByteLimit <= 0) throw new IllegalArgumentException();
     this.scheduleByteLimit = scheduleByteLimit;
     this.controlByteLimit = controlByteLimit;
-    this.initialReservation = initialReservation;
     this.limit = limit;
     this.controlLimit = controlLimit;
     this.control = control;
@@ -138,10 +133,6 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
     AtomicLong byteCounter = isControl ? controlReceivingBytes : receivingBytes;
     long byteLimit = isControl ? controlByteLimit : scheduleByteLimit;
     boolean admitted = acquire(counter, isControl ? controlLimit : limit);
-    if (admitted && !acquireBytes(byteCounter, byteLimit, initialReservation)) {
-      counter.decrementAndGet();
-      admitted = false;
-    }
     Lease lease = new Lease(admitted, counter, isControl, byteCounter, byteLimit);
     active.add(lease);
     return new ServerStreamTracer() {
@@ -175,7 +166,7 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
     }
     if (!lease.admitted) {
       rejected.incrementAndGet();
-      lease.close(Status.RESOURCE_EXHAUSTED.withDescription("receiving budget full"));
+      lease.close(Status.RESOURCE_EXHAUSTED.withDescription("receiving request limit reached"));
       return Runnable::run;
     }
     long delay = Math.max(0, timeoutNanos - (System.nanoTime() - lease.created));
@@ -301,7 +292,6 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
       this.control = control;
       this.byteCounter = byteCounter;
       this.byteLimit = byteLimit;
-      this.chargedBytes = admitted ? initialReservation : 0;
     }
 
     void charge(long bytes) {
@@ -312,8 +302,8 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
           chargedBytes += bytes;
           return;
         }
-        // Wire accounting follows one deframer read. Keep the initial window/slack reservation
-        // and all prior charges until the same cleanup fence as the receiving permit.
+        // Wire accounting follows one deframer read. Keep prior charges until the same
+        // cleanup fence as the receiving permit.
         closed = true;
         rejected.incrementAndGet();
       }
