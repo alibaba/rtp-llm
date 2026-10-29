@@ -62,7 +62,6 @@ public:
         max_seq_len_(graph_params.max_seq_len),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
-        hc_mult_(static_cast<int>(graph_params.hc_mult)),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         position_encoding_(graph_params.position_encoding),
@@ -97,6 +96,10 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        RTP_LLM_CHECK_WITH_INFO(num_tokens_per_bs_ > 0, "CUDA graph tokens per request must be positive");
+        draft_prefill_uses_request_lanes_ =
+            isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
+            && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_
@@ -203,11 +206,8 @@ private:
         return role_ == CudaGraphRole::GENERATION_PREFILL;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        // DSpARK propose/commit now run as construction-time-role decode graphs
-        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
-        // prefill keeps fixed lanes per captured request. Each key's input,
-        // metadata and output capacities must agree with [B * q_len, dim].
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        // Request lanes describe token layout, independently of hidden-state width.
+        return draft_prefill_uses_request_lanes_;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -242,6 +242,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    draft_prefill_uses_request_lanes_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
@@ -252,7 +253,6 @@ private:
     int                     max_seq_len_{0};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
-    int                     hc_mult_{1};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

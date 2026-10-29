@@ -1273,8 +1273,8 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs,
         }
         return false;
     }
-    // HC draft graphs retain four lanes per request even when acceptance
-    // leaves fewer packed tokens. Choose by both request count and token count.
+    // Request-lane draft graphs retain num_tokens_per_bs_ lanes per request
+    // even when acceptance leaves fewer packed tokens.
     int required_capacity = state.current_seq_len;
     if (usesFixedCapacityMtpDraftPrefillCudaGraph()) {
         const auto requests = inputs.attention_inputs.input_lengths.numel();
@@ -1916,7 +1916,7 @@ void CudaGraphRunner::initCapture() {
         // input_hidden_size_ is the configured width of one input_hiddens row.
         // It defaults to hidden_size * hc_mult, may be model-overridden for a
         // regular MTP graph, and is Python-overridden for a DSpARK draft graph.
-        // Never recompute it from hc_mult_ here.
+        // Never recompute it from the HC width here.
         if (isGenerationPrefillCudaGraph()) {
             // Generation prefill consumes token ids and builds its
             // embeddings inside the captured model. input_hiddens is an MTP /
@@ -2177,7 +2177,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.attention_inputs.is_cuda_graph    = true;
-    // HC-shaped MTP draft prefill has fixed lanes per captured request,
+    // Request-lane MTP draft prefill has fixed lanes per captured request,
     // while each graph key captures only its own request capacity.
     const int token_slice_len = seq_len_or_tokens;
     inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);

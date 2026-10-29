@@ -179,6 +179,10 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
     def supports_cuda_graph_draft_prefill(self) -> bool:
         return True
 
+    def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
+        # QSA reserves speculative token lanes independently of the HC width.
+        return True
+
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
         if not is_cuda_graph:
             normalize_mtp_prefill_positions(
