@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -8,6 +9,54 @@
 
 namespace rtp_llm {
 namespace {
+
+TEST(CudaGraphReplayContractsTest, MoeSelfCheckUsesIndependentEagerEnvelope) {
+    auto reference = torch::ones({8, 16});
+    auto check = [&](double eager_noise, double graph_noise) {
+        return checkPrefillMoeReplay({reference * (1 - eager_noise), reference * (1 + eager_noise)},
+                                    {reference * (1 - graph_noise), reference * (1 + graph_noise)}).passed;
+    };
+    EXPECT_TRUE(check(0, 0));
+    EXPECT_TRUE(check(0.01, 0.015));
+    EXPECT_FALSE(check(0, 0.015));
+    EXPECT_FALSE(check(0.01, 0.04));
+    EXPECT_TRUE(check(0.3, 0.35));
+    EXPECT_FALSE(check(0.3, 0.6));
+    // A single broken token must not hide in an acceptable batch-wide L2.
+    auto damaged = reference.clone();
+    damaged[0].mul_(1.06);
+    EXPECT_FALSE(checkPrefillMoeReplay({reference * 0.98, reference * 1.02}, {damaged, damaged}).passed);
+    auto noisy_low = reference.clone();
+    auto noisy_high = reference.clone();
+    noisy_low[7].mul_(0.2);
+    noisy_high[7].mul_(1.8);
+    EXPECT_FALSE(checkPrefillMoeReplay({noisy_low, noisy_high}, {damaged, damaged}).passed);
+    // Even a noisy baseline must reject erased or rescaled output rows.
+    EXPECT_FALSE(checkPrefillMoeReplay({reference * 0.2, reference * 1.8},
+                                      {torch::zeros_like(reference), torch::zeros_like(reference)}).passed);
+    EXPECT_FALSE(checkPrefillMoeReplay({reference * 0.7, reference * 1.3},
+                                      {reference * 3, reference * 3}).passed);
+}
+
+TEST(CudaGraphReplayContractsTest, MoeSelfCheckRejectsInvalidOutputs) {
+    auto reference = torch::ones({8, 16});
+    auto invalid_graph = [&](const torch::Tensor& value) {
+        return checkPrefillMoeReplay({reference, reference}, {reference, value}).passed;
+    };
+    EXPECT_FALSE(checkPrefillMoeReplay({}, {reference, reference}).passed);
+    EXPECT_FALSE(checkPrefillMoeReplay({reference}, {reference, reference}).passed);
+    EXPECT_FALSE(checkPrefillMoeReplay({reference, reference}, {reference}).passed);
+    EXPECT_FALSE(invalid_graph(torch::Tensor()));
+    EXPECT_FALSE(invalid_graph(torch::ones({8, 8})));
+    EXPECT_FALSE(invalid_graph(reference.to(torch::kBFloat16)));
+    auto invalid = reference.clone();
+    invalid[0][0] = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(invalid_graph(invalid));
+    EXPECT_FALSE(checkPrefillMoeReplay({reference, invalid}, {reference, reference}).passed);
+    EXPECT_FALSE(checkPrefillMoeReplay({invalid, reference}, {reference, reference}).passed);
+    invalid[0][0] = std::numeric_limits<float>::infinity();
+    EXPECT_FALSE(invalid_graph(invalid));
+}
 
 TEST(CudaGraphReplayContractsTest, BuildsDynamicFullPrefillSentinelLayout) {
     std::vector<int32_t> input_lengths{24, 32, -1, -1, -1};

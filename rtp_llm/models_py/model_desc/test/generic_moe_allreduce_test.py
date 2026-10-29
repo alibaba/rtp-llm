@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoeModel
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.utils.model_weight import W
@@ -229,6 +229,63 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         torch.testing.assert_close(result, routed_output + shared_output)
         self.assertFalse(fused_moe.call_args.kwargs["skip_tp_allreduce"])
         self.assertFalse(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+
+
+class GenericMoeFullPrefillCapabilityTest(TestCase):
+    def test_cuda_does_not_import_rocm_implementation(self):
+        # CUDA's per-block eligibility remains in its existing C++ path.
+        with patch.object(torch.version, "hip", None):
+            self.assertFalse(GenericMoeModel.supports_full_prefill_rocm_moe(None))
+
+    def test_unvalidated_architecture_is_rejected(self):
+        with (
+            patch.object(torch.version, "hip", "test"),
+            patch("torch.cuda.current_device", return_value=0),
+            patch(
+                "torch.cuda.get_device_properties",
+                return_value=SimpleNamespace(gcnArchName="gfx950"),
+            ),
+        ):
+            self.assertFalse(GenericMoeModel.supports_full_prefill_rocm_moe(None))
+
+    def test_selected_router_and_executor_must_both_match(self):
+        if not torch.version.hip:
+            self.skipTest("ROCm implementation is only available in ROCm builds")
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
+            RocmExpertsFp8PerChannel,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router import (
+            PureTpRouterFusedQuant,
+        )
+
+        layer = GenericMoeLayer.__new__(GenericMoeLayer)
+        torch.nn.Module.__init__(layer)
+        selected = SimpleNamespace(
+            router=PureTpRouterFusedQuant.__new__(PureTpRouterFusedQuant),
+            fused_experts=RocmExpertsFp8PerChannel.__new__(RocmExpertsFp8PerChannel),
+        )
+        layer.fused_moe = selected
+        model = SimpleNamespace(
+            layers=[SimpleNamespace(mlp=layer)],
+            config=SimpleNamespace(moe_layer_index=[0]),
+        )
+        with (
+            patch("torch.cuda.current_device", return_value=0),
+            patch(
+                "torch.cuda.get_device_properties",
+                return_value=SimpleNamespace(gcnArchName="gfx942:sramecc+"),
+            ),
+        ):
+            self.assertTrue(GenericMoeModel.supports_full_prefill_rocm_moe(model))
+            with patch.object(selected, "router", object()):
+                self.assertFalse(GenericMoeModel.supports_full_prefill_rocm_moe(model))
+            with patch.object(selected, "fused_experts", object()):
+                self.assertFalse(GenericMoeModel.supports_full_prefill_rocm_moe(model))
+            model.config.moe_layer_index = [0, 1]
+            self.assertFalse(GenericMoeModel.supports_full_prefill_rocm_moe(model))
+            model.layers = []
+            model.config.moe_layer_index = []
+            self.assertFalse(GenericMoeModel.supports_full_prefill_rocm_moe(model))
 
 
 if __name__ == "__main__":

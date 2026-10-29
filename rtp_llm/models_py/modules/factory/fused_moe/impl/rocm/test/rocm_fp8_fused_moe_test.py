@@ -357,6 +357,84 @@ class RocmExpertsFp8PerChannelReferenceTest(_Fp8MoeBaseTest):
         self._case(17, 1, input_weight=True)
 
 
+class RocmPerChannelPrefillGraphTest(_Fp8MoeBaseTest):
+    """Replay a fixed bucket with different routing and sentinel token counts."""
+
+    def test_replay_updates_routing_and_padding(self):
+        experts, width, inter, topk = 16, 256, 256, 8
+        q1, s1 = _per_channel_quant_fp8(
+            torch.randn(experts, 2 * inter, width, dtype=torch.bfloat16) * 0.15,
+            self.fp8_dtype,
+        )
+        q2, s2 = _per_channel_quant_fp8(
+            torch.randn(experts, width, inter, dtype=torch.bfloat16) * 0.15,
+            self.fp8_dtype,
+        )
+        executor = RocmExpertsFp8PerChannel(
+            _make_config_adapter(experts, topk, 2 * inter),
+            FusedMoEQuantConfig(),
+            {
+                W.moe_w1: shuffle_weight(q1, (16, 16)),
+                W.moe_w2: shuffle_weight(q2, (16, 16)),
+                W.moe_s1: s1,
+                W.moe_s2: s2,
+            },
+        )
+        for bucket in (80, 960):
+            payload = self._build_payload(bucket, width, experts, topk)
+
+            def run():
+                return executor.execute(
+                    payload, "silu", None, None, False, None
+                ).fused_expert_output
+
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    run()
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = run()
+            for index, valid_tokens in enumerate((bucket, 1, 33, bucket - 1, 0)):
+                with self.subTest(bucket=bucket, valid_tokens=valid_tokens):
+                    payload.expert_x.copy_(torch.randn_like(payload.expert_x) * 0.2)
+                    # Concentrate routing, leaving half the experts empty; then
+                    # change the destination experts on the next replay.
+                    ids = (torch.arange(topk, device=self.device) + index * 3) % experts
+                    payload.expert_topk_ids.copy_(ids.expand(bucket, -1))
+                    payload.expert_topk_weights.copy_(
+                        torch.softmax(torch.randn_like(payload.expert_topk_weights), dim=-1)
+                    )
+                    # Sentinel tokens intentionally route like real tokens.
+                    # They must not change the real tokens' numerical result.
+                    graph.replay()
+                    actual = output.clone()
+                    self.assertTrue(torch.isfinite(actual).all().item())
+                    if not valid_tokens:
+                        continue
+                    hidden = payload.expert_x[:valid_tokens].float()
+                    reference = torch.zeros(valid_tokens, width, dtype=torch.float32)
+                    for expert in range(experts):
+                        gate, up = torch.nn.functional.linear(
+                            hidden, q1[expert].float() * s1[expert, :, None]
+                        ).chunk(2, dim=-1)
+                        value = torch.nn.functional.linear(
+                            torch.nn.functional.silu(gate) * up,
+                            q2[expert].float() * s2[expert, :, None],
+                        )
+                        weight = (
+                            payload.expert_topk_weights[:valid_tokens]
+                            * (payload.expert_topk_ids[:valid_tokens] == expert)
+                        ).sum(1)
+                        reference.add_(value * weight[:, None])
+                    relative_l2 = (
+                        (actual[:valid_tokens].float() - reference).norm() / reference.norm()
+                    )
+                    self.assertLess(relative_l2.item(), 0.05)
+
+
 class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
     """Smoke / sanity for the brand-new PerBlock executor (review item #4)."""
 

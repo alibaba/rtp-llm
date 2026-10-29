@@ -146,12 +146,51 @@ void CudaGraphRunner::capturePrefill() {
         replayAndSyncCheck(seq_len, "seq len");
         if (isGenerativePrefillCudaGraph()) {
             const auto& graph_output = graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_;
-            RTP_LLM_CHECK_WITH_INFO(torch::allclose(graph_output, eager_selfcheck_output, 1e-3, 1e-3),
+            bool selfcheck_passed = torch::allclose(graph_output, eager_selfcheck_output, 1e-3, 1e-3);
+#if USING_ROCM
+            if (!selfcheck_passed && py::hasattr(py_instance_, "supports_full_prefill_rocm_moe")
+                && py_instance_.attr("supports_full_prefill_rocm_moe")().cast<bool>()) {
+                // Preserve each sample: attention/MoE may reuse output storage.
+                std::vector<torch::Tensor> eager_samples{eager_selfcheck_output};
+                std::vector<torch::Tensor> graph_samples{graph_output.clone()};
+                for (int sample = 1; sample < 64; ++sample) {
+                    eager_samples.push_back(
+                        py_forward_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_,
+                                           graph_instances_[seq_len].mem_hold_.attn_pyobj_)
+                            .cast<PyModelOutputs>().hidden_states.clone());
+                }
+                for (int sample = 1; sample < 8; ++sample) {
+                    cuda_graph::graphDeviceSynchronize();
+                    replayGraph(seq_len);
+                    cuda_graph::graphDeviceSynchronize();
+                    graph_samples.push_back(graph_output.clone());
+                }
+                const auto check = checkPrefillMoeReplay(eager_samples, graph_samples);
+                RTP_LLM_LOG_INFO("full prefill ROCm MoE noise-aware self-check bucket=%d "
+                                 "eager_samples=64 graph_samples=8 eager_relative=%.6f "
+                                 "graph_relative=%.6f graph_row_max=%.6f passed=%d",
+                                 seq_len, check.eager_relative, check.graph_relative, check.graph_row_max,
+                                 static_cast<int>(check.passed));
+                selfcheck_passed = check.passed;
+                if (!selfcheck_passed) {
+                    // Keep verified profiles available. Runtime selection uses
+                    // capture_range_, so this bucket can never be replayed;
+                    // requests use another eligible profile or eager instead.
+                    RTP_LLM_LOG_WARNING("full prefill ROCm MoE bucket disabled: bucket=%d "
+                                        "reason=startup_numeric_drift", seq_len);
+                    graph_instances_.erase(seq_len);
+                    capture_range_.erase(capture_range_.begin() + i);
+                    continue;
+                }
+            }
+#endif
+            RTP_LLM_CHECK_WITH_INFO(selfcheck_passed,
                                     "full prefill CUDA graph startup self-check failed for bucket=%d",
                                     seq_len);
         }
         RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);
     }
+    RTP_LLM_CHECK_WITH_INFO(!capture_range_.empty(), "no prefill CUDA graph profile passed startup self-check");
     RTP_LLM_LOG_INFO("Capture Prefill End");
 }
 

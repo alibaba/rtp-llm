@@ -2,10 +2,76 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <tuple>
+#include <vector>
 
 #include <torch/torch.h>
 
 namespace rtp_llm {
+
+struct PrefillMoeSelfCheck {
+    bool   passed          = false;
+    double eager_relative  = 0;
+    double graph_relative  = 0;
+    double graph_row_max   = 0;
+};
+
+// Only for the attested ROCm atomic-accumulation MoE implementation. Routing
+// amplifies BF16 accumulation noise across layers, so whole-model allclose is
+// not an appropriate capture check. Compare independent repeats to an eager
+// envelope instead. This is a startup compatibility check, not a golden
+// accuracy test or a determinism guarantee. Stable eager outputs still have
+// a tight tolerance, and a bad token cannot hide in a batch-wide norm.
+inline PrefillMoeSelfCheck checkPrefillMoeReplay(const std::vector<torch::Tensor>& eager_outputs,
+                                               const std::vector<torch::Tensor>& graph_outputs) {
+    PrefillMoeSelfCheck result;
+    if (eager_outputs.size() < 2 || graph_outputs.size() < 2) {
+        return result;
+    }
+    const auto& reference = eager_outputs.front();
+    if (!reference.defined() || reference.dim() != 2 || reference.numel() == 0) {
+        return result;
+    }
+    auto valid = [&](const torch::Tensor& value) {
+        return value.defined() && value.sizes() == reference.sizes()
+               && value.scalar_type() == reference.scalar_type() && value.device() == reference.device()
+               && torch::isfinite(value).all().item<bool>();
+    };
+    for (const auto& value : eager_outputs) {
+        if (!valid(value)) {
+            return result;
+        }
+    }
+    for (const auto& value : graph_outputs) {
+        if (!valid(value)) {
+            return result;
+        }
+    }
+    auto eager      = torch::stack(eager_outputs).to(torch::kFloat32);
+    auto graph      = torch::stack(graph_outputs).to(torch::kFloat32);
+    auto center     = eager.mean(0);
+    auto eager_diff = eager - center;
+    auto graph_diff = graph - center;
+    auto norm       = center.norm().clamp_min(1e-6);
+    result.eager_relative = (eager_diff.flatten(1).norm(2, 1).max() / norm).item<double>();
+    result.graph_relative = (graph_diff.flatten(1).norm(2, 1).max() / norm).item<double>();
+    auto center_row_norm = center.norm(2, 1);
+    auto eager_radius = std::get<0>(eager_diff.norm(2, 2).max(0));
+    auto graph_radius = std::get<0>(graph_diff.norm(2, 2).max(0));
+    result.graph_row_max = (graph_radius / center_row_norm.clamp_min(1e-6)).max().item<double>();
+    // The larger eager sample estimates normal routing variation; graph
+    // repeats may exceed it by 50% globally and 2x for individual tokens.
+    // The additive floor only covers roundoff when eager is stable.
+    auto row_limit = 2 * eager_radius + 1e-3 * (center_row_norm + 1);
+    auto min_eager_norm = std::get<0>(eager.norm(2, 2).min(0));
+    auto max_eager_norm = std::get<0>(eager.norm(2, 2).max(0));
+    auto graph_norm = graph.norm(2, 2);
+    const bool valid_norms = (graph_norm >= 0.5 * min_eager_norm - 1e-3).all().item<bool>()
+                             && (graph_norm <= 2 * max_eager_norm + 1e-3).all().item<bool>();
+    result.passed = result.graph_relative <= 1.5 * result.eager_relative + 1e-3
+                    && (graph_radius <= row_limit).all().item<bool>() && valid_norms;
+    return result;
+}
 
 // Normalize a dynamic packed prefill batch to the fixed graph contract:
 // Bmax real slots followed by one sentinel slot, with exactly token_capacity

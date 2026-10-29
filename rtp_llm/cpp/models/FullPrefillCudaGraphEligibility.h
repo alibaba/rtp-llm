@@ -5,19 +5,22 @@
 namespace rtp_llm {
 
 // Full-prefill graph support for MoE is intentionally narrower than decode
-// graph support. The masked DeepGEMM V2 path keeps routing counts on device and
-// uses bucket-derived fixed-capacity tensors, while the other MoE strategies
-// may use host synchronization, dynamic layouts, or graph-unsafe collectives.
+// graph support. CUDA uses masked DeepGEMM V2. ROCm additionally requires the
+// Python model to attest its actual router/executor before graph capture.
 inline bool supportsFullPrefillCudaGraphMoe(const GptModelDescription& description,
                                             const ParallelismConfig&   parallelism_config,
-                                            const MoeConfig&           moe_config) {
+                                            const MoeConfig&           moe_config,
+                                            bool                       rocm_backend = false) {
     if (!description.ffn_conf.moe_configs.has_value()) {
         return true;
     }
 
     const auto& model_moe_config = description.ffn_conf.moe_configs.value();
-    return description.act_qscheme == QScheme::Qfp8PerTokenBlock
-           && moe_config.moe_strategy == "fp8_per_block_no_dp_masked" && moe_config.use_all_gather
+    const bool supported_quant_strategy = rocm_backend ?
+        description.act_qscheme == QScheme::Qfp8PerToken && moe_config.moe_strategy == "auto" :
+        description.act_qscheme == QScheme::Qfp8PerTokenBlock
+            && moe_config.moe_strategy == "fp8_per_block_no_dp_masked";
+    return supported_quant_strategy && moe_config.use_all_gather
            && !moe_config.use_deepep_moe && !moe_config.use_deepep_internode && !moe_config.use_deepep_low_latency
            && !moe_config.use_deepep_p2p_low_latency && !moe_config.use_mori_ep && !moe_config.fake_balance_expert
            && !moe_config.hack_moe_expert && parallelism_config.tp_size == 1 && parallelism_config.ep_size == 1

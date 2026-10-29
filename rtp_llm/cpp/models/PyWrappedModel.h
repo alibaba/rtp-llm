@@ -300,7 +300,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         if (enable_full_prefill_cuda_graph_ && !is_prefill_cuda_graph_mode_) {
             const bool supported_moe_config =
+#if USING_ROCM
+                supportsFullPrefillCudaGraphMoe(description_, params.parallelism_config, params.moe_config, true)
+                && (!description_.ffn_conf.moe_configs.has_value()
+                    || (py::hasattr(py_instance, "supports_full_prefill_rocm_moe")
+                        && py_instance.attr("supports_full_prefill_rocm_moe")().cast<bool>()));
+#else
                 supportsFullPrefillCudaGraphMoe(description_, params.parallelism_config, params.moe_config);
+#endif
             const bool valid_static_config =
                 params.sp_config.type == SP_TYPE_NONE && description_.data_type == DataType::TYPE_BF16
                 && !description_.attention_conf.use_mla && supported_moe_config
