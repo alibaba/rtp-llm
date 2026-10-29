@@ -13,7 +13,10 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
-from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_quant_gluon import norm_quant
+from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_quant_gluon import (
+    _gdn_norm_quant,
+    norm_quant,
+)
 from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
     Qwen4PrefillGatedNorm,
 )
@@ -48,6 +51,31 @@ class GdnNormQuantTest(unittest.TestCase):
             role=role,
         )
         return norm, projection
+
+    def test_runtime_rows_and_strides_reuse_compilation(self):
+        for width in (1536, 3072):
+            norm, projection = self.build(width)
+            x = torch.randn(2048, width, device="cuda", dtype=torch.bfloat16)
+            norm_quant(x, x, norm.weight, norm.eps)
+            with patch.object(
+                _gdn_norm_quant,
+                "compile",
+                side_effect=AssertionError("runtime sizes triggered recompilation"),
+            ):
+                for rows, padding in ((2053, 16), (4096, 32), (8191, 64)):
+                    with self.subTest(width=width, rows=rows, padding=padding):
+                        x = torch.randn(
+                            rows, width, device="cuda", dtype=torch.bfloat16
+                        )
+                        gate = torch.randn(
+                            rows, width + padding, device="cuda", dtype=torch.bfloat16
+                        )[:, :width]
+                        q, s = norm_quant(x, gate, norm.weight, norm.eps)
+                        refq, refs = projection.quantize_input(norm.native(x, gate))
+                        self.assertTrue(
+                            torch.equal(q.view(torch.uint8), refq.view(torch.uint8))
+                        )
+                        self.assertTrue(torch.equal(s, refs))
 
     def test_complete_projection_and_packed_scales_exact_across_domain(self):
         for width in (1536, 3072):

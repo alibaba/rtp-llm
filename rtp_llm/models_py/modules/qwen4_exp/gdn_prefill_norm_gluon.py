@@ -10,15 +10,15 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
 
-@gluon.jit
+@gluon.jit(do_not_specialize=["M", "ZX"])
 def _gdn_flat_head_norm(
     X,
     Z,
     W,
     Y,
-    M: gl.constexpr,
+    M,
     N: gl.constexpr,
-    ZX: gl.constexpr,
+    ZX,
     EPS: gl.constexpr,
     GROUPS: gl.constexpr,
 ):
