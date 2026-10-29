@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <pthread.h>
 #include <thread>
 #include <utility>
 
@@ -154,6 +155,7 @@ public:
         if (!snapshots_ || sampler_.joinable())
             return;
         sampler_ = std::thread([this] {
+            pthread_setname_np(pthread_self(), "kvcm_dpub_stats");
             std::unique_lock<std::mutex> lock(sampler_mutex_);
             while (!stopping_) {
                 lock.unlock();

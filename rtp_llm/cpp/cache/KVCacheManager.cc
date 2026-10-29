@@ -7,6 +7,7 @@
 #include <chrono>
 #include <limits>
 #include <numeric>
+#include <pthread.h>
 #include <sstream>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -960,6 +961,7 @@ void KVCacheManager::stopCacheEventPublisher() {
 }
 
 void KVCacheManager::reportMetricsLoop() {
+    pthread_setname_np(pthread_self(), "kv_cache_stats");
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
     constexpr auto        kLogInterval  = std::chrono::minutes(1);

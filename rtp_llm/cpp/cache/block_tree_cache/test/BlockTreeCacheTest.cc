@@ -1229,7 +1229,7 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
             reporter.maybeReportCopyError(descriptor.source_tier, descriptor.target_tier, {failure, error});
         }
     }
-    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
     EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
     EXPECT_EQ(metricSeriesCount(metric), 24u);
     for (const char* direction : {"TO_GPU", "FROM_GPU", "TO_DISK", "FROM_DISK"}) {
@@ -1248,7 +1248,7 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
 
 TEST(BlockTreeCacheMetricsTest, CopyErrorsAreReportedOnlyForFailedLogicalCopiesWithReporter) {
     auto  metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
     BlockTreeCacheMetricsReporter worker(nullptr);
     BlockTreeCacheMetricsReporter leader(metrics_reporter);
     const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "copy failed");
@@ -1275,7 +1275,7 @@ TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnc
         result.merge({failure, mismatch ? CacheCopyError::CRC_MISMATCH : CacheCopyError::CRC_COMPUTE_FAILED});
         reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
         auto* metric =
-            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
         EXPECT_EQ(metricSeriesCount(metric), 1u);
         kmonitor::MetricsTags tags("copy_direction", "TO_GPU");
         tags.AddTag("error_type", mismatch ? "CRC_MISMATCH" : "CRC_COMPUTE_FAILED");

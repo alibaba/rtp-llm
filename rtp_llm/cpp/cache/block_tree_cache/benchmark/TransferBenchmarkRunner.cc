@@ -584,7 +584,7 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     coordinate_cursor += working_set_blocks;
     writer_.addPhaseNs("warmup", warmup_ns);
     writer_.addResolvedConfig("cache_precondition",
-                              options_.disk_io_mode == "buffered" ? "full_working_set_sweep" : "direct_or_memory");
+                              options_.disk_io_mode == "buffered" ? "full_working_set_sweep" : "direct_or_host");
 
     const size_t min_seconds = options_.min_measured_seconds;
     size_t       pilot_operations =

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <exception>
 #include <numeric>
+#include <pthread.h>
 #include <thread>
 #include <random>
 #include <chrono>
@@ -587,6 +588,7 @@ void ClientWrapper::requestReinit() {
 }
 
 void ClientWrapper::reinitWorkerLoop() noexcept {
+    pthread_setname_np(pthread_self(), "kvcm_reinit");
     while (true) {
         {
             std::unique_lock<std::mutex> lock(reinit_worker_mutex_);

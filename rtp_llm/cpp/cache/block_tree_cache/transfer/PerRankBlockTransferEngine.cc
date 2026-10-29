@@ -133,9 +133,9 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
             group_sets_, max_descriptors_per_batch, 2 * transfer_worker_count, world_rank);
     }
     load_transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferLoad");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_load");
     transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferBackground");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_evict_store");
     RTP_LLM_CHECK(load_transfer_task_pool_->start());
     RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(*transfer_task_pool_,

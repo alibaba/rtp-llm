@@ -34,7 +34,7 @@ public:
 // Layout of one packed HOST/DISK record for one GroupSet block on this rank.
 // The payload combines one block from each member pool, including all of that
 // member's layer buffers (KV and any scales). Factory computes this plan once
-// and shares it with GroupSet, pool creation and memory/disk capacity budgeting.
+// and shares it with GroupSet, pool creation and host/disk capacity budgeting.
 // All sizes below are bytes per record, not the size of the whole pool.
 //
 // payload_bytes: Packed bytes before CRC; 0 derives logical sizes from topology, otherwise uses exact physical sizes.

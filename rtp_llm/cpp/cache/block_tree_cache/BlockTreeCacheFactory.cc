@@ -469,7 +469,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.memory_eviction_policy);
     const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
     if (!device_eviction_policy.has_value() || !host_eviction_policy.has_value() || !disk_eviction_policy.has_value()) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: unsupported eviction policy, device=%s memory=%s disk=%s",
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: unsupported eviction policy, device=%s host=%s disk=%s",
                           kv_cache_config.device_eviction_policy.c_str(),
                           kv_cache_config.memory_eviction_policy.c_str(),
                           kv_cache_config.disk_eviction_policy.c_str());
@@ -528,7 +528,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         return mb > 0 && static_cast<uint64_t>(mb) <= std::numeric_limits<size_t>::max() / bytes_per_mb;
     };
     if (host_enabled && !valid_budget(kv_cache_config.memory_cache_size_mb)) {
-        RTP_LLM_LOG_ERROR("memory cache size must be positive and fit in bytes");
+        RTP_LLM_LOG_ERROR("host cache size must be positive and fit in bytes");
         return nullptr;
     }
     if (disk_enabled && !valid_budget(kv_cache_config.disk_cache_size_mb)) {
@@ -814,7 +814,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                            0 :
                                            config.business_queue_max_size + BlockTreeTaskPool::kLoadReservedSlots;
     auto         task_pool           = std::make_unique<BlockTreeTaskPool>(
-        static_cast<size_t>(config.task_pool_size), business_queue_size, "BlockTreeCacheTaskPool");
+        static_cast<size_t>(config.task_pool_size), business_queue_size, "btc_task");
 
     auto tree = std::make_unique<BlockTree>(std::move(group_sets));
 
