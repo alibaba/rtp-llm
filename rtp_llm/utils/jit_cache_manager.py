@@ -202,6 +202,12 @@ def resolve_scope(
             if parts and all(parts):
                 selected.append(item)
                 keys.append("-".join((item.name, *parts)))
+                # A snapshot produced by older filters can contain metadata but
+                # omit its binary (e.g. PPU hgbin). Never reuse that namespace.
+                rules = tuple(
+                    (suffixes, tuple(sorted(events))) for suffixes, events in item.rules
+                )
+                keys.append(repr((item.name, rules, item.empty_files)))
     if not selected:
         logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
         return None
