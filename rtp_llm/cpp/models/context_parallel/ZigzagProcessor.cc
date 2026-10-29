@@ -137,7 +137,7 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
         torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
     execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
 
-    const auto& output_indices = cp_params.prefill_cp_output_indices;
+    const auto& output_indices   = cp_params.prefill_cp_output_indices;
     int64_t     num_valid_tokens = output_indices.size(0);
     hidden_states                = all_hidden_t.index_select(0, output_indices);
     return num_valid_tokens;
@@ -155,22 +155,26 @@ torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&      
 
     // Map each requested output row (in restored valid-seq order) to its
     // chunk-concat flat index, without ever materializing the full sequence.
-    torch::Tensor sel = cp_params.prefill_cp_output_indices.index_select(0, inputs.lm_output_indexes.to(torch::kLong))
-                            .to(torch::kLong);
+    torch::Tensor sel =
+        cp_params.prefill_cp_output_indices.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
 
     const int64_t num_lm = sel.size(0);
 
-    // sel is non-negative kLong; floor-division and the residual recover (rank, offset).
-    torch::Tensor owner     = sel.div(chunk_len, c10::string_view("floor"));
-    torch::Tensor local_off = sel - owner.mul(chunk_len);
-    torch::Tensor mine      = (owner == static_cast<int64_t>(parallelism_config_.tp_rank));
-    torch::Tensor mine_rows = torch::nonzero(mine).squeeze(-1);  // positions in [0, num_lm) this rank owns
-
-    torch::Tensor local_buf = torch::zeros({num_lm, hidden}, hidden_states.options());
-    if (mine_rows.size(0) > 0) {
-        torch::Tensor my_local_off = local_off.index_select(0, mine_rows);
-        local_buf.index_copy_(0, mine_rows, hidden_states.index_select(0, my_local_off));
+    if (num_lm == 0) {
+        return torch::empty({0, hidden}, hidden_states.options());
     }
+    TORCH_CHECK(chunk_len > 0, "CP last-hidden selection requires nonempty local chunks");
+
+    // Keep every intermediate's size CPU-known. nonzero(mine) would synchronize
+    // CUDA to discover how many rows this rank owns before scheduling the tail.
+    const auto owner     = sel.div(chunk_len, c10::string_view("floor"));
+    const auto local_off = sel - owner.mul(chunk_len);
+    const auto mine      = owner == static_cast<int64_t>(parallelism_config_.tp_rank);
+    // Non-owned rows read a valid sentinel offset and are overwritten, not
+    // multiplied by zero (which would propagate NaN/Inf from the sentinel).
+    const auto safe_offsets = torch::where(mine, local_off, torch::zeros_like(local_off));
+    auto       local_buf    = hidden_states.index_select(0, safe_offsets);
+    local_buf.masked_fill_(mine.logical_not().unsqueeze(-1), 0);
     return local_buf;
 }
 
