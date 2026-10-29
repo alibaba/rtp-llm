@@ -1405,44 +1405,53 @@ sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_
     return kv_cache_block_id;
 }
 
-torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input, bool fp32_logits) {
+torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
+    RTP_LLM_PROFILE_SCOPE("py_model.computeLogits");
+    const auto& kernel = weights_.lm_head->kernel;
+    {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(py_model_, "compute_logits")) {
+            // A model-owned head returns full, padded-vocabulary FP32 logits.
+            // None delegates to the native head, including its TP collective.
+            auto result = py_model_.attr("compute_logits")(hidden);
+            if (!result.is_none()) {
+                auto logits = result.cast<torch::Tensor>();
+                TORCH_CHECK(logits.device() == hidden.device() && logits.scalar_type() == torch::kFloat32
+                                && logits.dim() == 2 && logits.size(0) == hidden.size(0)
+                                && logits.size(1) == kernel.size(0) * device_props_.tp_size && logits.is_contiguous(),
+                            "compute_logits must return contiguous FP32 [rows, padded_vocab] on the hidden device");
+                return logits;
+            }
+        }
+    }
+    TORCH_CHECK(kernel.scalar_type() == torch::kBFloat16 || kernel.scalar_type() == torch::kHalf
+                    || kernel.scalar_type() == torch::kFloat32 || kernel.scalar_type() == torch::kFloat64,
+                "native LM head requires floating-point weights; provide compute_logits for a scaled head");
+    torch::Tensor logits;
+    {
+        RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");
+#if USING_CUDA
+        if (kernel.scalar_type() == torch::kBFloat16) {
+            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), kernel);
+        } else
+#endif
+        {
+            logits = torch::mm(hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
+        }
+    }
+    if (device_props_.tp_size > 1) {
+        RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(tp_sync_logits)");
+        logits = tpSyncEmbeddingOrLogits(logits);
+    }
+    return logits;
+}
+
+torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
     RTP_LLM_PROFILE_SCOPE("py_model.tpSyncEmbeddingOrLogits");
     const auto tp_size = device_props_.tp_size;
     const auto tp_rank = device_props_.tp_rank;
     const auto rows    = input.size(0);
     const auto cols    = input.size(1);
-    if (fp32_logits) {
-        TORCH_CHECK(input.scalar_type() == torch::kBFloat16, "FP8 TP head gather requires BF16 local logits");
-        // A model-owned, preinitialized IPC workspace may serve the measured
-        // local Head domain. Unsupported inputs retain the explicit NCCL path.
-        {
-            py::gil_scoped_acquire gil;
-            if (py::hasattr(py_model_, "try_gather_fp8_lm_head_for_tp")) {
-                auto result = py_model_.attr("try_gather_fp8_lm_head_for_tp")(input);
-                if (!result.is_none()) {
-                    auto logits = result.cast<torch::Tensor>();
-                    TORCH_CHECK(logits.is_cuda() && logits.device() == input.device()
-                                    && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
-                                    && logits.size(0) == rows && logits.size(1) == cols * (int64_t)tp_size
-                                    && logits.is_contiguous(),
-                                "Head IPC returned an invalid gathered tensor");
-                    return logits;
-                }
-            }
-        }
-        // Match the explicit-send gather used by vLLM: NCCL reads the local
-        // head output directly, with no rank-slice packing copy. The existing
-        // callback expects concatenation on dimension zero for a 2D send.
-        auto send     = input.contiguous();
-        auto gathered = torch::empty({rows * (int64_t)tp_size, cols}, input.options());
-        execAllGather({{gathered}, ParallelMode::TP, {send}, false});
-        // One strided copy performs rank reordering and the lossless BF16 to
-        // FP32 conversion. No intermediate contiguous BF16 logits are needed.
-        auto logits = torch::empty({rows, (int64_t)tp_size, cols}, input.options().dtype(torch::kFloat32));
-        logits.copy_(gathered.reshape({(int64_t)tp_size, rows, cols}).permute({1, 0, 2}));
-        cudaCheckLastError();
-        return logits.reshape({rows, cols * (int64_t)tp_size});
-    }
     const auto local_numel = input.numel();
     auto       all_data    = torch::empty({rows, cols * (int64_t)tp_size}, input.options());
     // Copy local data into the correct rank position
@@ -1563,27 +1572,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
-        torch::Tensor logits;
-        bool          use_bf16_tp_head = false;
-        {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
-#if USING_CUDA
-            if (lm_head->kernel.dtype() == torch::kFloat8_e4m3fn) {
-                py::gil_scoped_acquire gil;
-                TORCH_CHECK(py::hasattr(py_model_, "compute_fp8_lm_head"), "FP8 LM head requires a scaled consumer");
-                use_bf16_tp_head = device_props_.tp_size > 1 && py::hasattr(py_model_, "compute_fp8_lm_head_for_tp");
-                const char* head_method = use_bf16_tp_head ? "compute_fp8_lm_head_for_tp" : "compute_fp8_lm_head";
-                logits                  = py_model_.attr(head_method)(last_hidden).cast<torch::Tensor>();
-                TORCH_CHECK(!use_bf16_tp_head || logits.scalar_type() == torch::kBFloat16,
-                            "TP FP8 LM head must return its original BF16 output");
-            } else if (lm_head->kernel.dtype() == torch::kBFloat16) {
-                logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-            } else
-#endif
-            {
-                logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-            }
-        }
+        auto logits = computeLogits(last_hidden);
 
         GptModelOutputs outputs;
         // Internal warmup/system-prefix requests have no selected token and do not score.
@@ -1600,10 +1589,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
         printTorchTensorData(logits, "logits");
-        if (device_props_.tp_size > 1) {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
-            logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
-        }
         if (description_.output_vocab_size > 0) {
             RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
                                         && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
@@ -1650,32 +1635,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     printTorchTensorData(hidden, "last_hidden");
 
     torch::Tensor last_hidden = hidden;
-    torch::Tensor logits;
-    bool          use_bf16_tp_head = false;
-    {
-        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
-#if USING_CUDA
-        if (lm_head->kernel.dtype() == torch::kFloat8_e4m3fn) {
-            py::gil_scoped_acquire gil;
-            TORCH_CHECK(py::hasattr(py_model_, "compute_fp8_lm_head"), "FP8 LM head requires a scaled consumer");
-            use_bf16_tp_head        = device_props_.tp_size > 1 && py::hasattr(py_model_, "compute_fp8_lm_head_for_tp");
-            const char* head_method = use_bf16_tp_head ? "compute_fp8_lm_head_for_tp" : "compute_fp8_lm_head";
-            logits                  = py_model_.attr(head_method)(last_hidden).cast<torch::Tensor>();
-            TORCH_CHECK(!use_bf16_tp_head || logits.scalar_type() == torch::kBFloat16,
-                        "TP FP8 LM head must return its original BF16 output");
-        } else if (lm_head->kernel.dtype() == torch::kBFloat16) {
-            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-        } else
-#endif
-        {
-            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-        }
-    }
+    auto          logits      = computeLogits(last_hidden);
     printTorchTensorData(logits, "logits");
-    if (device_props_.tp_size > 1) {
-        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
-        logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
-    }
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");

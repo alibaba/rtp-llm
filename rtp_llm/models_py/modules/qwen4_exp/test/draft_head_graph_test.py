@@ -1,6 +1,7 @@
 import unittest
 
 import torch
+
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
     DraftHeadGraph,
 )
@@ -109,15 +110,11 @@ class DraftHeadGraphTest(unittest.TestCase):
         torch.nn.Module.__init__(model)
         model._draft_head_graph = cache
         model._fp8_lm_head = head
-        for method, dtype in (
-            (model.compute_fp8_lm_head_for_tp, torch.bfloat16),
-            (model.compute_fp8_lm_head, torch.float32),
-        ):
-            cache.activate(4)
-            actual = method(live)
-            self.assertEqual(actual.dtype, dtype)
-            torch.testing.assert_close(actual, expected.to(dtype), rtol=0, atol=0)
-            self.assertIsNone(cache.take(hidden))
+        cache.activate(4)
+        actual = model._compute_local_logits(live)
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertIsNone(cache.take(hidden))
 
     def test_invalid_head_output_is_rejected(self):
         hidden = torch.zeros(4, 32, device="cuda", dtype=torch.bfloat16)

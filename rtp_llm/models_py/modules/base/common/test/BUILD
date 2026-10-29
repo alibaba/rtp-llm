@@ -4,6 +4,15 @@ py_test_deps = [
 
 test_envs = {}
 
+py_test(
+    name = "vocab_parallel_logits_test",
+    srcs = ["vocab_parallel_logits_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+)
+
 py_test (
     name = "embeding_test",
     srcs = ["embeding_test.py"],

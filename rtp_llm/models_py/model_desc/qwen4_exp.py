@@ -928,19 +928,21 @@ class Qwen4ExpModel(Qwen35Model):
             status.close()
         self._closed = True
 
-    def try_gather_fp8_lm_head_for_tp(self, local):
+    def compute_logits(self, hidden: torch.Tensor) -> Optional[torch.Tensor]:
+        if not hasattr(self, "_fp8_lm_head"):
+            return None
+        from rtp_llm.models_py.modules.base.common.vocab_parallel_logits import (
+            gather_vocab_parallel_logits,
+        )
+
         workspace = self.__dict__.get("_head_ipc_gather")
-        return workspace.try_gather(local) if workspace is not None else None
+        return gather_vocab_parallel_logits(
+            self._compute_local_logits(hidden),
+            int(self.parallelism_config.tp_size),
+            try_gather=workspace.try_gather if workspace is not None else None,
+        )
 
-    def compute_fp8_lm_head(self, hidden):
-        head_graph = self.__dict__.get("_target_head_graph")
-        logits = head_graph.take(hidden) if head_graph is not None else None
-        if logits is None:
-            logits = self._fp8_lm_head(hidden.to(torch.bfloat16))
-        return logits.float()
-
-    def compute_fp8_lm_head_for_tp(self, hidden):
-        """Keep the GEMM's BF16 output until TP gather; native restores FP32."""
+    def _compute_local_logits(self, hidden: torch.Tensor) -> torch.Tensor:
         head_graph = self.__dict__.get("_target_head_graph")
         logits = head_graph.take(hidden) if head_graph is not None else None
         return (

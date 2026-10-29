@@ -129,7 +129,8 @@ private:
     bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
-    torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input, bool fp32_logits = false);
+    torch::Tensor   computeLogits(const torch::Tensor& hidden);
+    torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
                                       const bool            has_context_request,
                                       const bool            need_all_logits,

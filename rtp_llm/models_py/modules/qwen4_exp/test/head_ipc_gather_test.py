@@ -72,18 +72,19 @@ class HeadIpcGatherTest(unittest.TestCase):
         self.assertTrue(torch.equal(output, x + 1))
         graph.reset()
 
-    def test_model_hook_preserves_optional_fallback(self):
-        local = torch.ones(4, 8)
+    def test_model_logits_own_transport_and_native_fallback(self):
+        local = torch.ones(4, 8, dtype=torch.bfloat16)
         model = SimpleNamespace()
-        self.assertIsNone(Qwen4ExpModel.try_gather_fp8_lm_head_for_tp(model, local))
+        self.assertIsNone(Qwen4ExpModel.compute_logits(model, local))
+        model._fp8_lm_head = object()
+        model._compute_local_logits = lambda _: local
+        model.parallelism_config = SimpleNamespace(tp_size=2)
         expected = torch.ones(4, 16)
         seen = []
         model._head_ipc_gather = SimpleNamespace(
             try_gather=lambda x: (seen.append(x), expected)[1]
         )
-        self.assertIs(
-            Qwen4ExpModel.try_gather_fp8_lm_head_for_tp(model, local), expected
-        )
+        self.assertIs(Qwen4ExpModel.compute_logits(model, local), expected)
         self.assertIs(seen[0], local)
 
 
