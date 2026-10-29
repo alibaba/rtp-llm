@@ -135,7 +135,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             )
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
                 video, metadata = decode_video(
-                    video_data, mm_input.mm_preprocess_config
+                    video_data, mm_input.mm_preprocess_config, vit_config=vit_config
                 )
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags):
                 video = resize_video(

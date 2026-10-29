@@ -81,7 +81,7 @@ def token_length(mm_input, vit_config, processor, factor, video_backend="nvdec")
 
             # Existing production metadata planner: no CUDA context or decoded frames.
             plan, grid = prepare_gpu_video(
-                data.getvalue(), config, vp, factor, size=size
+                data.getvalue(), config, vp, factor, size=size, vit_config=vit_config
             )
             return video_output_length(
                 grid, plan.frame_indices, plan.source_fps, processor
@@ -100,7 +100,7 @@ def token_length(mm_input, vit_config, processor, factor, video_backend="nvdec")
             raise ImportError("decord is required for video metadata")
         reader = VideoReader(data, ctx=cpu(0), num_threads=1)
         fps = reader.get_avg_fps()
-        indices = sample_frame_indices(len(reader), fps, config)
+        indices = sample_frame_indices(len(reader), fps, config, vit_config=vit_config)
         del reader
         height, width = video_resize_shape(
             config, len(indices), height, width, vp, size

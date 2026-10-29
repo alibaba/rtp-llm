@@ -132,6 +132,7 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
                     vit_config.mm_video_total_min_pixels,
                     vit_config.mm_video_total_max_pixels,
                 ),
+                vit_config=vit_config,
             )
             timestamps = video_timestamp_tokens(
                 grid, data.frame_indices, data.source_fps, processor

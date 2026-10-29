@@ -23,16 +23,20 @@ def _value(configs: Any, name: str, default: Any) -> Any:
 
 
 def sample_frame_indices(
-    total_frames: int, source_fps: float, configs: Any
+    total_frames: int, source_fps: float, configs: Any, *, vit_config: Any = None
 ) -> List[int]:
     """Use vLLM's integer frame count and float64 uniform frame indices.
 
     Odd counts are intentional: the video processor pads the final temporal
     patch, rather than dropping a frame before sampling as Qwen2-VL does.
+    Missing/None/-1 request fields inherit the service sampling defaults.
+    Never mutate the request or read process-global environment in a worker.
     """
-    fps = _value(configs, "fps", 2)
+    fps = _value(configs, "fps", getattr(vit_config, "mm_video_fps", 2))
     min_frames = _value(configs, "min_frames", 4)
-    max_frames = _value(configs, "max_frames", 768)
+    max_frames = _value(
+        configs, "max_frames", getattr(vit_config, "mm_video_max_frames", 768)
+    )
     if total_frames <= 0 or not math.isfinite(source_fps) or source_fps <= 0:
         raise ValueError(
             "video requires a positive frame count and finite positive FPS"
@@ -118,7 +122,7 @@ def video_resize_shape(
     )
 
 
-def decode_video(video_data: Any, configs: Any):
+def decode_video(video_data: Any, configs: Any, *, vit_config: Any = None):
     """Decode sampled native RGB frames; resize only after the video policy resolves."""
     try:
         from decord import VideoReader, cpu
@@ -126,7 +130,7 @@ def decode_video(video_data: Any, configs: Any):
         raise ImportError("decord is required for Qwen3-VL video processing") from exc
     reader = VideoReader(video_data, ctx=cpu(0), num_threads=1)
     total, fps = len(reader), reader.get_avg_fps()
-    indices = sample_frame_indices(total, fps, configs)
+    indices = sample_frame_indices(total, fps, configs, vit_config=vit_config)
     video = torch.from_numpy(reader.get_batch(indices).asnumpy()).permute(0, 3, 1, 2)
     metadata = VideoMetadata(
         total_num_frames=total, fps=fps, duration=total / fps, frames_indices=indices

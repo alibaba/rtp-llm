@@ -88,6 +88,36 @@ class Qwen3VideoPreprocessTest(unittest.TestCase):
             46,
         )
 
+    def test_sampling_inherits_service_defaults_without_mutating_requests(self):
+        service = SimpleNamespace(mm_video_fps=6.0, mm_video_max_frames=180)
+        for config in (
+            SimpleNamespace(),
+            SimpleNamespace(fps=-1, max_frames=-1),
+            SimpleNamespace(fps=None, max_frames=None),
+        ):
+            with self.subTest(config=config):
+                original = vars(config).copy()
+                self.assertEqual(
+                    len(sample_frame_indices(233, 30, config, vit_config=service)), 46
+                )
+                self.assertEqual(
+                    len(sample_frame_indices(10000, 30, config, vit_config=service)),
+                    180,
+                )
+                self.assertEqual(vars(config), original)
+        # Each explicit request field independently overrides its service default.
+        for config, total, expected in (
+            (SimpleNamespace(fps=2.5), 300, 25),
+            (SimpleNamespace(max_frames=90), 10000, 90),
+            (SimpleNamespace(max_frames=240), 10000, 240),
+            (SimpleNamespace(fps=3, max_frames=12), 300, 12),
+        ):
+            with self.subTest(config=config):
+                self.assertEqual(
+                    len(sample_frame_indices(total, 30, config, vit_config=service)),
+                    expected,
+                )
+
     def test_invalid_sampling_metadata_is_rejected(self):
         for total, fps in ((0, 30), (10, 0), (10, float("nan")), (10, float("inf"))):
             with self.subTest(total=total, fps=fps), self.assertRaises(ValueError):

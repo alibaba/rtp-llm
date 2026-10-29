@@ -344,6 +344,9 @@ class VitConfig:
         # Qwen3-VL/Qwen3.5 total-video pixel budgets; 0 inherits the model.
         self.mm_video_total_min_pixels: int = 0
         self.mm_video_total_max_pixels: int = 0
+        # Sampling defaults; explicit per-request values take precedence.
+        self.mm_video_fps: float = 2.0
+        self.mm_video_max_frames: int = 768
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True

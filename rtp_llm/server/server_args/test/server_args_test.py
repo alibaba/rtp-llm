@@ -106,6 +106,51 @@ class ServerArgsPyEnvConfigsTest(TestCase):
                 73728000,
             )
 
+    def test_video_sampling_service_defaults_and_cli_override(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            defaults = server_args.setup_args([]).vit_config
+            self.assertEqual(defaults.mm_video_fps, VitConfig().mm_video_fps)
+            self.assertEqual(defaults.mm_video_max_frames, 768)
+            self.assertEqual(defaults.mm_video_fps, 2.0)
+        with patch.dict(
+            os.environ, {"MM_VIDEO_FPS": "6", "MM_VIDEO_MAX_FRAMES": "180"}, clear=True
+        ):
+            for argv in ([], ["--tp_size=1"]):
+                with self.subTest(argv=argv):
+                    config = server_args.setup_args(argv).vit_config
+                    self.assertEqual(config.mm_video_fps, 6.0)
+                    self.assertEqual(config.mm_video_max_frames, 180)
+                    restored = pickle.loads(pickle.dumps(config))
+                    self.assertEqual(restored.mm_video_fps, 6.0)
+                    self.assertEqual(restored.mm_video_max_frames, 180)
+            config = server_args.setup_args(
+                ["--mm_video_fps=2.5", "--mm_video_max_frames", "90"]
+            ).vit_config
+            self.assertEqual(config.mm_video_fps, 2.5)
+            self.assertEqual(config.mm_video_max_frames, 90)
+
+    def test_video_sampling_rejects_invalid_service_defaults(self):
+        from rtp_llm.server.server_args import server_args
+
+        for option, env_name, values in (
+            ("--mm_video_fps", "MM_VIDEO_FPS", ("0", "-1", "nan", "inf", "bad")),
+            ("--mm_video_max_frames", "MM_VIDEO_MAX_FRAMES", ("0", "-1", "1.5", "bad")),
+        ):
+            for value in values:
+                with self.subTest(option=option, value=value), patch.dict(
+                    os.environ, {}, clear=True
+                ), patch("sys.stderr", new_callable=io.StringIO):
+                    with self.assertRaises(SystemExit):
+                        server_args.setup_args([f"{option}={value}"])
+                with self.subTest(env=env_name, value=value), patch.dict(
+                    os.environ, {env_name: value}, clear=True
+                ), patch("sys.stderr", new_callable=io.StringIO):
+                    with self.assertRaises(SystemExit):
+                        server_args.setup_args([])
+
     def test_dsv4_mega_moe_public_choices(self):
         from rtp_llm.server.server_args import server_args
 

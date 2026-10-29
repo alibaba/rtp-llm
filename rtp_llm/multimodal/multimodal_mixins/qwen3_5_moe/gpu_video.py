@@ -262,7 +262,9 @@ class PreparedGpuVideo:
         return self.pixels
 
 
-def prepare_gpu_video(encoded, configs, processor, factor, size=None):
+def prepare_gpu_video(
+    encoded, configs, processor, factor, size=None, *, vit_config=None
+):
     """Determine the same frame/grid policy without creating a CUDA context."""
     import av
 
@@ -288,7 +290,9 @@ def prepare_gpu_video(encoded, configs, processor, factor, size=None):
             "NVDEC video preprocessing requires an indexed video with a frame "
             "count and average frame rate; use the cpu video backend for this input"
         )
-    indices = tuple(sample_frame_indices(total_frames, fps, configs))
+    indices = tuple(
+        sample_frame_indices(total_frames, fps, configs, vit_config=vit_config)
+    )
     count = len(indices)
     out_h, out_w = video_resize_shape(
         configs,

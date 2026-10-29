@@ -1,5 +1,6 @@
 import io
 import os
+import pickle
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -90,6 +91,111 @@ class Qwen35TokenLengthTest(unittest.TestCase):
                     len(timestamps),
                     (frames + vp.temporal_patch_size - 1) // vp.temporal_patch_size,
                 )
+
+    def test_service_sampling_matches_cpu_pixels_and_nvdec_metadata(self):
+        import av
+        import numpy as np
+
+        # Decode a real, tiny indexed video on CPU; NVDEC is only metadata-planned.
+        encoded = io.BytesIO()
+        with av.open(encoded, "w", format="mp4") as container:
+            stream = container.add_stream("libx264", rate=10)
+            stream.width, stream.height = 96, 64
+            stream.pix_fmt = "yuv420p"
+            for index in range(24):
+                frame = av.VideoFrame.from_ndarray(
+                    np.full((64, 96, 3), index * 7, dtype=np.uint8), format="rgb24"
+                )
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        payload = encoded.getvalue()
+        self.vit.mm_video_fps = 6.0
+        self.vit.mm_video_max_frames = 8
+        # The same serialized VitConfig is passed to preprocessing workers.
+        service = pickle.loads(pickle.dumps(self.vit))
+        modules = (
+            "rtp_llm.multimodal.qwen35_token_length",
+            "rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin",
+            "rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin",
+        )
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for module in modules:
+                stack.enter_context(
+                    patch(
+                        module + ".get_bytes_io_from_url",
+                        side_effect=lambda *a, **k: io.BytesIO(payload),
+                    )
+                )
+            for fps, maximum, expected_frames in (
+                (-1, -1, 8),
+                (3, -1, 7),
+                (-1, 12, 12),
+                (5, 6, 6),
+            ):
+                with self.subTest(fps=fps, max_frames=maximum):
+                    config = MMPreprocessConfig(96, 64, -1, -1, fps, -1, maximum)
+                    item = MultimodalInput(
+                        "fixture.mp4", MMUrlType.VIDEO, torch.empty(0), config
+                    )
+                    length = token_length(
+                        item, service, self.processor, 32, video_backend="cpu"
+                    )
+                    nvdec_length = token_length(
+                        item, service, self.processor, 32, video_backend="nvdec"
+                    )
+                    pixels, grid, timestamps = (
+                        Qwen3_5MoeImageEmbedding.preprocess_input(
+                            [item], service, self.processor, 32, video_backend="cpu"
+                        )
+                    )
+                    plan, planned_grid, planned_timestamps = (
+                        Qwen3_5MoeImageEmbedding.preprocess_input(
+                            [item], service, self.processor, 32, video_backend="nvdec"
+                        )
+                    )
+                    self.assertEqual(len(plan.frame_indices), expected_frames)
+                    self.assertEqual(int(grid[0, 0]), (expected_frames + 1) // 2)
+                    self.assertTrue(torch.equal(grid, planned_grid))
+                    self.assertEqual(timestamps, planned_timestamps)
+                    self.assertEqual(length, nvdec_length)
+                    self.assertEqual(
+                        length,
+                        int(grid.prod()) // 4 + sum(len(t) + 2 for t in timestamps),
+                    )
+                    self.assertEqual(pixels.shape[0], int(grid.prod()))
+                    # Explicit old-style requests produce the exact same pixels.
+                    explicit = MultimodalInput(
+                        "fixture.mp4",
+                        MMUrlType.VIDEO,
+                        torch.empty(0),
+                        MMPreprocessConfig(
+                            96,
+                            64,
+                            -1,
+                            -1,
+                            int(service.mm_video_fps) if fps == -1 else fps,
+                            -1,
+                            service.mm_video_max_frames if maximum == -1 else maximum,
+                        ),
+                    )
+                    reference, reference_grid, reference_timestamps = (
+                        Qwen3_5MoeImageEmbedding.preprocess_input(
+                            [explicit],
+                            VitConfig(),
+                            self.processor,
+                            32,
+                            video_backend="cpu",
+                        )
+                    )
+                    self.assertTrue(torch.equal(pixels, reference))
+                    self.assertTrue(torch.equal(grid, reference_grid))
+                    self.assertEqual(timestamps, reference_timestamps)
+                    self.assertEqual(config.fps, fps)
+                    self.assertEqual(config.max_frames, maximum)
 
     def test_engine_length_query_does_not_submit_or_read_embedding(self):
         engine = object.__new__(MMProcessEngine)
