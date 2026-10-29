@@ -22,6 +22,18 @@ cuda13_sm100_py_test(
 )
 
 py_test(
+    name = "test_prefill_positions_upload",
+    srcs = ["test_prefill_positions_upload.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["dsv41_cuda13", "SM103_TEST"],
+    exec_properties = {"gpu": "SM103_TEST", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "test_v41_front_gemm",
     srcs = ["test_v41_front_gemm.py"],
     deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
