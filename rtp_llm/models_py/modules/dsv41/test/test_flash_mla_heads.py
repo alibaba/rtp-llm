@@ -61,7 +61,7 @@ class FlashMLAHeadTest(unittest.TestCase):
                 kwargs["extra_indices_in_kvcache"], extra[:, index : index + 1]
             )
             self.assertIs(kwargs["topk_length"], lengths)
-            self.assertIs(kwargs["tile_scheduler_metadata"], created[index])
+            self.assertIs(kwargs["tile_scheduler_metadata"], created[0])
             calls.append(index)
             return q, q.sum(-1).transpose(1, 2)
 
@@ -80,7 +80,7 @@ class FlashMLAHeadTest(unittest.TestCase):
                 torch.testing.assert_close(
                     lse, q.sum(-1).transpose(1, 2), rtol=0, atol=0
                 )
-        self.assertEqual(len(created), 4)
+        self.assertEqual(len(created), 1)
         self.assertEqual(len(calls), 8)
 
     def test_backend_selection_preserves_sm100_default_wheel(self):

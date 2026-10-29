@@ -86,12 +86,12 @@ class FlashMLAQueryCopyCudaTest(unittest.TestCase):
                 q, indices, extra = self._inputs(3, queries)
                 owner = SimpleNamespace()
                 self._run(q, indices, extra, owner)
-                plans = owner._dsv41_query_plans
+                plan = owner._dsv41_query_plan
                 torch.cuda.synchronize()
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     actual = self._run(q, indices, extra, owner)
-                self.assertIs(owner._dsv41_query_plans, plans)
+                self.assertIs(owner._dsv41_query_plan, plan)
                 for _ in range(2):
                     q.normal_()
                     indices.random_(0, 512)

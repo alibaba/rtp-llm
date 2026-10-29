@@ -86,12 +86,17 @@ def _single_query_decode(native, q, sink, kwargs, get_mla_metadata=None):
         from flash_mla import get_mla_metadata
 
     owner = kwargs["tile_scheduler_metadata"]
-    plans = getattr(owner, "_dsv41_query_plans", None)
-    if plans is None:
-        plans = tuple(get_mla_metadata()[0] for _ in range(q.shape[1]))
-        owner._dsv41_query_plans = plans
-    if len(plans) != q.shape[1]:
-        raise ValueError("FlashMLA query count changed on an existing planner")
+    # The SM90 FlashMLA scheduler depends on Q shape and the values of
+    # topk_length/extra_topk_length, not on the index payload.  This wrapper
+    # slices only Q and the index tensors; the length tensors stay identical
+    # for every single-query call.  Match the SM100 path's per-layer-type
+    # ownership and initialize one plan on the first query, then reuse it for
+    # the remaining queries and same-type layers.  Keeping one plan per query
+    # recorded Q redundant get_mla_metadata kernels in every graph replay.
+    plan = getattr(owner, "_dsv41_query_plan", None)
+    if plan is None:
+        plan = get_mla_metadata()[0]
+        owner._dsv41_query_plan = plan
     # Keep one query's operands live, rather than retaining a query-major
     # copy of the entire speculative batch in each CUDA graph pool.
     scratch = None
@@ -111,7 +116,7 @@ def _single_query_decode(native, q, sink, kwargs, get_mla_metadata=None):
             scratch = allocate_query_scratch(q, primary, extra)
 
     outputs, lses = [], []
-    for index, plan in enumerate(plans):
+    for index in range(q.shape[1]):
         args = dict(kwargs, tile_scheduler_metadata=plan)
         if scratch is not None:
             copy_query_into_scratch(q, primary, extra, index, scratch)
