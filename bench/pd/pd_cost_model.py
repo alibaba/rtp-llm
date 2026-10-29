@@ -2,7 +2,7 @@
 """Cost model: homogeneous 5kpro PD vs heterogeneous (5kpro P -> PPU D) vs homogeneous PPU PD.
 
 DeepSeek-V4-Flash, 32K input, 1024 output, MTP 2+1 at acceptance 2.3, decode at TPOT <= 15 ms.
-All capacities are measured (docs/project-progress.md §94-§97); see CAP below. Outputs, for each prefix-hit ratio:
+All capacities are measured (docs/project-progress.md §94-§97); see P_CAP / D_CAP below. Outputs, for each prefix-hit ratio:
 the ideal P:D ratio, the best small-integer instance mix (<= MAX_INST instances of each), its system QPS, waste,
 GPU count and QPS per GPU (and per cost unit when a card price ratio is given).
 
@@ -24,8 +24,9 @@ P_CAP = {
 }
 # Decode instance capacity: output tok/s at TPOT <= 15 ms, MTP 2+1 forced acceptance 2.3.
 D_CAP = {
-    # ppu4 DEP8 + DSV4_PPU_DECODE_FUSIONS=1 (§94, §97.3)
-    "ppu_dep8": {"gpus": 8, "tok_s": 4600.0},
+    # ppu4 DEP8 + DSV4_PPU_DECODE_FUSIONS=1 (§94, §97.4): cc64 13.9 ms / 4600, cc80 15.2 ms / 5264 (the 15 ms line),
+    # cc96 15.5 ms steady but 24 ms end to end (a 19 s stall after release)
+    "ppu_dep8": {"gpus": 8, "tok_s": 5264.0},
     # 5kpro-4 TP4 PDFUSION decode-only (§95.1): 15 ms line at cc8
     "5kpro_tp4": {"gpus": 4, "tok_s": 541.0},
 }
