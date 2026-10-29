@@ -175,6 +175,64 @@ class DSparkConfidenceArgumentsTest(TestCase):
                     self.parse_config(args, {name.upper(): value})
 
 
+class ThinkingProcessorArgumentsTest(TestCase):
+    def test_defaults_keep_both_thinking_controls_enabled(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args([]).generate_env_config
+
+        self.assertIs(config.enable_think_processor, True)
+        self.assertIs(config.enable_dash_sc_think_eos_phase2, True)
+
+    def test_environment_switches_are_independent_and_survive_fanout(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env_name, field, other_field in (
+            (
+                "ENABLE_THINK_PROCESSOR",
+                "enable_think_processor",
+                "enable_dash_sc_think_eos_phase2",
+            ),
+            (
+                "ENABLE_DASH_SC_THINK_EOS_PHASE2",
+                "enable_dash_sc_think_eos_phase2",
+                "enable_think_processor",
+            ),
+        ):
+            with self.subTest(env_name=env_name), patch.dict(
+                os.environ, {env_name: "0"}, clear=True
+            ):
+                configs = server_args.setup_args([])
+                config = pickle.loads(pickle.dumps(configs)).generate_env_config
+                self.assertIs(getattr(config, field), False)
+                self.assertIs(getattr(config, other_field), True)
+                self.assertIn(f"{field}: False", config.to_string())
+
+    def test_explicit_cli_can_override_disabled_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_THINK_PROCESSOR": "0",
+                "ENABLE_DASH_SC_THINK_EOS_PHASE2": "0",
+            },
+            clear=True,
+        ):
+            config = server_args.setup_args(
+                [
+                    "--enable_think_processor",
+                    "1",
+                    "--enable_dash_sc_think_eos_phase2",
+                    "1",
+                ]
+            ).generate_env_config
+
+        self.assertIs(config.enable_think_processor, True)
+        self.assertIs(config.enable_dash_sc_think_eos_phase2, True)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

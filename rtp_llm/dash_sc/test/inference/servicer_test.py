@@ -30,6 +30,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.dash_sc import grpc_metrics
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import (
@@ -65,6 +66,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _build_mm_inputs_from_request,
     _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
+    _dash_sc_reasoning_format,
     _derive_max_token_id,
     _finish_server_trace,
     _make_generate_input,
@@ -295,6 +297,8 @@ class _FakeTokenizer:
 class _GenerateEnvCfg:
     max_thinking_tokens = None
     think_mode = "adaptive"
+    enable_think_processor = True
+    enable_dash_sc_think_eos_phase2 = True
     think_end_token_id = -1
     think_start_tag = "<think>\n"
     think_end_tag = "</think>\n\n"
@@ -415,7 +419,55 @@ class DeriveMaxTokenIdTest(unittest.TestCase):
         self.assertIsNone(_derive_max_token_id(_Tokenizer()))
 
 
+class DashScReasoningFormatMetadataTest(unittest.TestCase):
+    def test_begin_reconstruction_preserves_reasoning_metadata(self):
+        base = ReasoningFormat(
+            tag_begin="",
+            tag_end={"type": "token", "token": 102},
+            suffix="\n",
+            no_think_excludes=("boundary",),
+        )
+        for prompt_has_begin in (False, True):
+            with self.subTest(prompt_has_begin=prompt_has_begin), patch.object(
+                ReasoningFormat, "from_generate_env_config", return_value=base
+            ):
+                resolved = _dash_sc_reasoning_format(
+                    _GenerateEnvCfg(), prompt_end_with_think=prompt_has_begin
+                )
+                self.assertEqual(
+                    resolved.tag_begin, "" if prompt_has_begin else "<think>\n"
+                )
+                self.assertEqual(resolved.tag_end, base.tag_end)
+                self.assertEqual(resolved.suffix, base.suffix)
+                self.assertEqual(resolved.no_think_excludes, base.no_think_excludes)
+        self.assertEqual(base.tag_begin, "")
+
+
 class BuildThinkRuntimeTest(unittest.TestCase):
+    def test_phase2_switch_preserves_boundaries_and_is_independent_of_processor(self):
+        for model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_dspark"):
+            for processor_enabled in (True, False):
+                for phase2_enabled in (True, False):
+                    with self.subTest(
+                        model_type=model_type,
+                        processor_enabled=processor_enabled,
+                        phase2_enabled=phase2_enabled,
+                    ):
+                        env_cfg = _GenerateEnvCfg()
+                        env_cfg.enable_think_processor = processor_enabled
+                        env_cfg.enable_dash_sc_think_eos_phase2 = phase2_enabled
+                        runtime = build_think_runtime(
+                            _dsv4_tokenizer(), env_cfg, model_type
+                        )
+                        self.assertEqual(runtime.phase2_enabled, phase2_enabled)
+                        self.assertEqual(runtime.bos_tokens, (128821, 198))
+                        self.assertEqual(runtime.eos_tokens, (128822, 271))
+                        self.assertEqual(
+                            runtime.empty_tokens, (128821, 271, 128822, 271)
+                        )
+                        self.assertEqual(runtime.close_token_id, 128822)
+                        self.assertEqual(runtime.terminate_token_id, 1)
+
     def test_derives_eos_token_id_from_tokenizer(self) -> None:
         runtime = build_think_runtime(_FakeTokenizer({}), None, None)
 
@@ -2449,8 +2501,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     async def test_terminate_token_id_disabled_keeps_token_in_stream(self) -> None:
         """``terminate_token_id=None`` disables the in-stream "stop thinking"
         branch: token id 1 is emitted as a regular content token, with no
-        truncation and no phase-2 enqueue. (No ``</think>`` in the stream so the
-        regular close-driven phase-2 path also stays dormant.)"""
+        truncation and no phase-2 enqueue."""
         req = self._minimal_request()
         out = GenerateOutput(
             output_ids=torch.tensor([10, 1, 11], dtype=torch.int32),
@@ -2488,6 +2539,99 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(_gen_ids(chunks[0]), [10, 1, 11])
+
+    async def test_phase2_switch_off_preserves_thinking_eos_and_backend_finish(self):
+        for mode in ("enabled", "adaptive"):
+            for chunked in (False, True):
+                with self.subTest(mode=mode, chunked=chunked):
+                    req = self._minimal_request()
+                    env_cfg = _GenerateEnvCfg()
+                    env_cfg.think_mode = mode
+                    env_cfg.enable_dash_sc_think_eos_phase2 = False
+                    token_chunks = [[10, 1, 11], [12, 1]] if chunked else [[10, 1]]
+                    input_ids = [7, 8, 128821, 198]
+                    if mode == "adaptive":
+                        input_ids = [7, 8]
+                        token_chunks[0] = [128821, 198] + token_chunks[0]
+                    outputs = [
+                        GenerateOutputs(
+                            generate_outputs=[
+                                GenerateOutput(
+                                    output_ids=torch.tensor(ids, dtype=torch.int32),
+                                    finished=index == len(token_chunks) - 1,
+                                    aux_info=AuxInfo(
+                                        input_len=len(input_ids), reuse_len=0
+                                    ),
+                                )
+                            ]
+                        )
+                        for index, ids in enumerate(token_chunks)
+                    ]
+                    stream = _FakeAsyncStream(outputs)
+                    visitor = _FakeVisitor(stream)
+                    phase2_ids = MagicMock(return_value=200)
+                    tokenizer = _dsv4_tokenizer()
+                    with patch(
+                        "rtp_llm.dash_sc.inference.servicer.kmonitor.report"
+                    ) as report:
+                        results = await _drain(
+                            iter_real_model_stream_infer(
+                                req,
+                                input_ids,
+                                SamplingParams(max_new_tokens=32),
+                                DashScRequestControls(),
+                                visitor,
+                                rtp_llm_request_id=100,
+                                tokenizer=tokenizer,
+                                generate_env_config=env_cfg,
+                                think_runtime=build_think_runtime(
+                                    tokenizer, env_cfg, "deepseek_v41"
+                                ),
+                                phase2_request_id_factory=phase2_ids,
+                                yield_access_stats=True,
+                            )
+                        )
+                    responses = [response for response, _ in results]
+                    self.assertEqual(visitor.enqueue_called, 1)
+                    phase2_ids.assert_not_called()
+                    self.assertEqual(
+                        [_gen_ids(response) for response in responses], token_chunks
+                    )
+                    self.assertEqual(
+                        [stats[1] for _, stats in results],
+                        [False] * (len(token_chunks) - 1) + [True],
+                    )
+                    self.assertEqual(
+                        _finish_reason(responses[-1]), LLMFinishReason.STOP
+                    )
+                    for response in responses:
+                        self.assertNotEqual(response.infer_response.id, "trace-real-2")
+                        self.assertNotIn(
+                            "generate_think_token_num",
+                            response.infer_response.parameters,
+                        )
+                    self.assertEqual(
+                        [
+                            out.generate_outputs[0].output_ids.tolist()
+                            for out in outputs
+                        ],
+                        token_chunks,
+                    )
+                    self.assertTrue(stream.aclose_called)
+                    self.assertFalse(
+                        any(
+                            call.args[0] == AccMetrics.DASH_SC_DSV4_PHASE2_QPS_METRIC
+                            for call in report.call_args_list
+                        )
+                    )
+                    self.assertEqual(
+                        visitor.generate_inputs[0].generate_config.thinking_mode,
+                        (
+                            ThinkingMode.ENABLED
+                            if mode == "enabled"
+                            else ThinkingMode.ADAPTIVE
+                        ),
+                    )
 
     async def test_terminate_token_id_configurable_value(self) -> None:
         """A non-default ``terminate_token_id`` (here 42) drives the same

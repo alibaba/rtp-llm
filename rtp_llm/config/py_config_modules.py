@@ -521,6 +521,8 @@ class GenerateEnvConfig:
         self.think_end_token_id: int = -1
         self.max_thinking_tokens: Optional[int] = None
         self.think_mode: str = "disabled"
+        self.enable_think_processor: bool = True
+        self.enable_dash_sc_think_eos_phase2: bool = True
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
@@ -534,6 +536,8 @@ class GenerateEnvConfig:
             f"think_end_token_id: {self.think_end_token_id}\n"
             f"max_thinking_tokens: {self.max_thinking_tokens}\n"
             f"think_mode: {self.think_mode}\n"
+            f"enable_think_processor: {self.enable_think_processor}\n"
+            f"enable_dash_sc_think_eos_phase2: {self.enable_dash_sc_think_eos_phase2}\n"
             f"force_stop_words: {self.force_stop_words}\n"
             f"stop_words_list: {self.stop_words_list}\n"
             f"stop_words_str: {self.stop_words_str}\n"
