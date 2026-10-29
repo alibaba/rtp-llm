@@ -1678,10 +1678,10 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
         const auto& tag              = config_.groupTags()[static_cast<size_t>(group_id)];
         const auto  group            = kv_cache_groups_[static_cast<size_t>(group_id)];
         const bool  reuse_enabled    = reuseEnabledForGroup(malloc_info, config_, tag);
-        const int   reuse_blocks_len = reuse_enabled ? (malloc_info.pd_decode_linear_tail_only ?
-                                                            malloc_info.batch_kv_cache_resource->blocksNum(0, tag) :
-                                                            malloc_info.batch_kv_cache_resource->curBlocksNum()) :
-                                                       0;
+        // Reuse length is always the group's own row: curBlocksNum() (the
+        // cross-group max row) would overstate reuse for short-row groups and
+        // under-count their fresh-block demand on mixed-length topologies.
+        const int   reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, tag) : 0;
         const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
         const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
         const auto  required_positions = chunkRequiredPositions(malloc_info, *group);
