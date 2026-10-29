@@ -262,15 +262,14 @@ class JitCacheManager(FileSystemEventHandler):
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
-                    if not item.should_sync(rel, event.event_type):
+                    if not item.should_sync(rel, event.event_type, path.stat().st_size):
                         return
                     if item.name == "deep_gemm":
                         if not rel.startswith("cache/"):
                             return
                         entry = item.local_dir / "cache" / rel.split("/")[1]
                         deepjit_entry_files(entry)
-                    if item.should_sync(rel, event.event_type, path.stat().st_size):
-                        self._dirty.set()
+                    self._dirty.set()
                 return
 
     def _lock_path(self, kind: str) -> Path:

@@ -10,7 +10,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         GTEST_SKIP() << "CP disk round-trip requires the HostDisk layout";
     }
 
-    ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/8));
+    ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/8, /*lower_cache_size_mb=*/8, /*cp_size=*/2));
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
 
@@ -174,6 +174,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     auto                  load_token_ids =
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo load_info{load_resource, load_token_ids};
+    load_info.enable_remove_skipped_blocks = false;
     load_info.reuse_cache         = true;
     load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
@@ -262,6 +263,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     auto         hit_token_ids =
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
+    hit_info.enable_remove_skipped_blocks = false;
     hit_info.reuse_cache         = true;
     hit_info.enable_cache_lookup = true;
     const auto hit_result        = manager_->malloc(hit_info);

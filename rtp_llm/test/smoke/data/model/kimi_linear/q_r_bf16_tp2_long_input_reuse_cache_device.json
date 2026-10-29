@@ -66,8 +66,8 @@
         "aux_info": {
           "input_len": 7759,
           "prefix_len": 0,
-          "reuse_len": 4096,
-          "local_reuse_len": 4096,
+          "reuse_len": 6144,
+          "local_reuse_len": 6144,
           "remote_reuse_len": 0,
           "memory_reuse_len": 0,
           "prefill_total_reuse_len": 0,
@@ -152,8 +152,8 @@
         "aux_info": {
           "input_len": 5740,
           "prefix_len": 0,
-          "reuse_len": 4096,
-          "local_reuse_len": 4096,
+          "reuse_len": 2048,
+          "local_reuse_len": 2048,
           "remote_reuse_len": 0,
           "memory_reuse_len": 0,
           "prefill_total_reuse_len": 0,

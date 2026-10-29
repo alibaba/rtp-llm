@@ -2743,10 +2743,9 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
     ASSERT_EQ(min_free_blocks, free_before_admission - static_cast<size_t>(estimated_peak));
 }
 
-TEST_F(FIFOSchedulerTest, testHybridAdmissionAllowsUnderestimateAtDifferentBlockPeak) {
-    // The logical-token peak is at t=0, where the block estimate is 13. The short stream's physical
-    // block peak is 16 at t=9 because Hybrid block boundaries do not necessarily follow token volume.
-    // Admission intentionally accepts this underestimate instead of scanning every endpoint.
+TEST_F(FIFOSchedulerTest, testHybridAdmissionUsesTailOnlyLinearPeak) {
+    // At t=0 the two requests need 13 blocks. Without periodic Linear checkpoints,
+    // the long-lived request's later peak is only 13 blocks.
     auto cache_config = test::makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/64, /*tokens_per_block=*/1, rtp_llm::DataType::TYPE_FP16);
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -2783,7 +2782,7 @@ TEST_F(FIFOSchedulerTest, testHybridAdmissionAllowsUnderestimateAtDifferentBlock
 
     ASSERT_EQ(long_context_short_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/0), 11);
     ASSERT_EQ(short_context_long_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/0), 2);
-    ASSERT_EQ(short_context_long_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/9), 16);
+    ASSERT_EQ(short_context_long_lifetime->estimatePeakNeedBlocks(/*remaining_tokens=*/9), 13);
 
     scheduler.buildAdmissionPeakState();
     ASSERT_TRUE(scheduler.tryAddToAdmissionPeakState(
@@ -6018,6 +6017,7 @@ static CacheConfig makeChunkCpGroupCacheConfig(size_t group_block_size,
 }
 
 TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
+    constexpr int all_tail_blocks = std::numeric_limits<int>::max();
     struct TestCase {
         const char* name;
         size_t      group_block_size;
@@ -6027,7 +6027,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
         bool        request_reuse;
         bool        ignore_request_switches;
         bool        reject;
-        int         step               = 1;
+        int         tail_blocks        = all_tail_blocks;
         size_t      block_size         = 256;
         bool        shared_chunk_state = false;
         int         cp_size            = 0;
@@ -6045,23 +6045,37 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
         {"equal_group_with_reuse", 256, 768, true, true, true, false, false},
         {"smaller_group_block", 128, 768, true, false, true, false, false},
         {"non_divisor_group_block", 192, 768, true, false, true, false, true},
+        {"swa_tail_covers_prompt", 256, 768, true, true, true, false, false, 5},
+        {"swa_tail_below_prompt", 256, 768, true, true, true, false, true, 4},
         {"sparse_swa_reuse", 256, 768, true, true, true, false, true, 2},
         {"chunk_disabled", 512, 0, true, false, true, false, false},
-        {"shared_small_blocks", 64, 128, false, false, true, false, true, 1, 64, true},
-        {"shared_small_base", 128, 128, false, false, true, false, true, 1, 64, true},
-        {"shared_small_group", 64, 256, false, false, true, false, true, 1, 256, true},
-        {"shared_unaligned_with_reuse", 64, 256, false, true, true, false, true, 1, 256, true},
-        {"shared_unaligned_group", 192, 256, false, false, true, false, true, 1, 256, true},
-        {"shared_aligned", 128, 256, false, false, true, false, false, 1, 128, true},
-        {"shared_cp_aligned", 512, 256, false, false, true, false, false, 1, 256, true},
-        {"shared_chunk_disabled", 64, 0, false, false, true, false, false, 1, 64, true},
-        {"cp_round_robin", 256, 768, false, false, true, false, true, 1, 256, false, 2, true},
-        {"cp_round_robin_reuse", 256, 768, true, true, true, false, true, 1, 256, false, 2, true},
-        {"shared_cp_round_robin", 128, 256, false, false, true, false, true, 1, 128, true, 2, true},
-        {"cp_compact", 256, 768, false, false, true, false, false, 1, 256, false, 2},
-        {"single_rank_round_robin", 256, 768, false, false, true, false, false, 1, 256, false, 1, true},
-        {"unsharded_round_robin", 256, 768, false, false, true, false, false, 1, 256, false, 0, true},
-        {"cp_round_robin_chunk_disabled", 256, 0, false, false, true, false, false, 1, 256, false, 2, true},
+        {"shared_small_blocks", 64, 128, false, false, true, false, true, all_tail_blocks, 64, true},
+        {"shared_small_base", 128, 128, false, false, true, false, true, all_tail_blocks, 64, true},
+        {"shared_small_group", 64, 256, false, false, true, false, true, all_tail_blocks, 256, true},
+        {"shared_unaligned_with_reuse", 64, 256, false, true, true, false, true, all_tail_blocks, 256, true},
+        {"shared_unaligned_group", 192, 256, false, false, true, false, true, all_tail_blocks, 256, true},
+        {"shared_aligned", 128, 256, false, false, true, false, false, all_tail_blocks, 128, true},
+        {"shared_cp_aligned", 512, 256, false, false, true, false, false, all_tail_blocks, 256, true},
+        {"shared_chunk_disabled", 64, 0, false, false, true, false, false, all_tail_blocks, 64, true},
+        {"cp_round_robin", 256, 768, false, false, true, false, true, all_tail_blocks, 256, false, 2, true},
+        {"cp_round_robin_reuse", 256, 768, true, true, true, false, true, all_tail_blocks, 256, false, 2, true},
+        {"shared_cp_round_robin", 128, 256, false, false, true, false, true, all_tail_blocks, 128, true, 2, true},
+        {"cp_compact", 256, 768, false, false, true, false, false, all_tail_blocks, 256, false, 2},
+        {"single_rank_round_robin", 256, 768, false, false, true, false, false, all_tail_blocks, 256, false, 1, true},
+        {"unsharded_round_robin", 256, 768, false, false, true, false, false, all_tail_blocks, 256, false, 0, true},
+        {"cp_round_robin_chunk_disabled",
+         256,
+         0,
+         false,
+         false,
+         true,
+         false,
+         false,
+         all_tail_blocks,
+         256,
+         false,
+         2,
+         true},
     };
     const auto verify = [](auto& env, const TestCase& test_case, bool group_enqueue) {
         env.model_config.max_seq_len                       = 4096;
@@ -6105,7 +6119,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
             groups.back().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
             cache_config.setTopology(std::move(groups), cache_config.topology().layers());
         }
-        cache_config.linear_step = test_case.step;
+        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
         ChunkSchedulerTestConfig config;
         config.seq_size_per_block = test_case.block_size;
         config.prefill_chunk_size = test_case.chunk_size;
@@ -6122,10 +6136,11 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
 }
 
 TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
+    constexpr int all_tail_blocks = std::numeric_limits<int>::max();
     struct TestCase {
         const char* name;
         bool        has_linear;
-        int         step;
+        int         tail_blocks;
         int         chunk_size;
         bool        global_reuse;
         bool        request_reuse;
@@ -6136,26 +6151,28 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
         bool        group_reuse      = true;
     };
     const TestCase cases[] = {
-        {"step_one", true, 1, 192, true, true, false, false},
-        {"global_reuse_off", true, 2, 192, false, true, false, true},
-        {"request_reuse_off", true, 2, 192, true, false, false, true},
+        {"all_tail_blocks", true, all_tail_blocks, 192, true, true, false, false},
+        {"global_reuse_off", true, 2, 192, false, true, false, false},
+        {"request_reuse_off", true, 2, 192, true, false, false, false},
+        {"linear_tail_covers_prompt", true, 11, 192, true, true, false, false},
+        {"linear_tail_below_prompt", true, 10, 192, true, true, false, true},
         {"sparse_linear_reuse", true, 2, 192, true, true, false, true},
         {"ignored_request_switch", true, 2, 192, true, false, true, true},
-        {"full_attention", false, 2, 192, true, true, false, true},
+        {"full_attention", false, 2, 192, true, true, false, false},
         {"chunk_disabled", true, 2, 0, true, true, false, false},
-        {"linear_block_32", true, 1, 96, true, true, false, true, 32},
-        {"linear_block_96", true, 1, 192, true, true, false, true, 96},
-        {"linear_block_128", true, 1, 384, true, true, false, false, 128},
-        {"linear_block_256", true, 1, 768, true, true, false, false, 256},
-        {"smaller_linear_group", true, 1, 192, true, true, false, true, 64, 32},
-        {"larger_linear_group", true, 1, 192, true, true, false, true, 64, 128},
-        {"compatible_linear_group", true, 1, 384, true, true, false, false, 128, 64},
-        {"small_block_global_reuse_off", true, 1, 96, false, true, false, false, 32},
-        {"small_block_request_reuse_off", true, 1, 96, true, false, false, false, 32},
-        {"small_block_ignored_request_switch", true, 1, 96, true, false, true, true, 32},
-        {"small_block_group_reuse_off", true, 1, 96, true, true, false, false, 32, 32, false},
-        {"small_block_full_attention", false, 1, 96, true, true, false, false, 32},
-        {"small_block_chunk_disabled", true, 1, 0, true, true, false, false, 32},
+        {"linear_block_32", true, all_tail_blocks, 96, true, true, false, true, 32},
+        {"linear_block_96", true, all_tail_blocks, 192, true, true, false, true, 96},
+        {"linear_block_128", true, all_tail_blocks, 384, true, true, false, false, 128},
+        {"linear_block_256", true, all_tail_blocks, 768, true, true, false, false, 256},
+        {"smaller_linear_group", true, all_tail_blocks, 192, true, true, false, true, 64, 32},
+        {"larger_linear_group", true, all_tail_blocks, 192, true, true, false, true, 64, 128},
+        {"compatible_linear_group", true, all_tail_blocks, 384, true, true, false, false, 128, 64},
+        {"small_block_global_reuse_off", true, all_tail_blocks, 96, false, true, false, false, 32},
+        {"small_block_request_reuse_off", true, all_tail_blocks, 96, true, false, false, false, 32},
+        {"small_block_ignored_request_switch", true, all_tail_blocks, 96, true, false, true, true, 32},
+        {"small_block_group_reuse_off", true, all_tail_blocks, 96, true, true, false, false, 32, 32, false},
+        {"small_block_full_attention", false, all_tail_blocks, 96, true, true, false, false, 32},
+        {"small_block_chunk_disabled", true, all_tail_blocks, 0, true, true, false, false, 32},
     };
     const auto verify = [](auto& env, const TestCase& test_case, bool group_enqueue) {
         env.model_config.max_seq_len                       = 4096;
@@ -6184,7 +6201,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
         auto cache_config = test_case.has_linear ?
                                 test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
                                 test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
-        cache_config.linear_step = test_case.step;
+        cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
         if (test_case.group_block_size > 0) {
             auto groups = cache_config.groups();
             for (auto& group : groups) {
