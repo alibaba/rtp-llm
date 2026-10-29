@@ -13,6 +13,10 @@
 #   CP_SINGLE=0 MAX_CTX_BS=4  batched prefill: up to 4 requests per pass (default 1 per pass)
 #   GEN         MTP draft depth (gen_num_per_cycle), default 3; must match the decode side. GEN=2 also sets
 #               DSV4_FP4_INDEXER_ALLOW_MTP2=1 (MTP depth 2 with the FP4 indexer is opt-in)
+#   PD_SERVING_CP_RANK=0  advertise / publish only CP rank 0 of each PP stage (default off). Only for a TP1-per-rank
+#               decode (PPU DEP8); a TP>1 decode of this branch then plans quarter-block reads of the single peer
+#               and writes them into whole opaque DSV4 blocks (StagePeerGroups.cc planStagePeerSlices), so it
+#               decodes garbage
 set -u
 unset RTP_LLM_LOG_TPSYNC TOKENIZER_PATH CHECKPOINT_PATH MODEL_CONFIG DEPLOYMENT_CONFIG kmonitorTags role GPU_MODEL_DETAIL HIPPO_SLAVE_HTTP_PORT MODEL_TYPE DP_SIZE TP_SIZE WORLD_SIZE LOCAL_WORLD_SIZE
 ulimit -c 0
@@ -119,7 +123,7 @@ export RTP_LLM_LOG_FASTGEN=0
 export RTP_LLM_PP_CHUNK_OVERLAP=2
 export RTP_LLM_MTP_CHUNKED_PREFILL=${MTP_CHUNKED:-1}
 export RTP_LLM_PP_OBJ_LOG=${PP_OBJ_LOG:-0}
-export RTP_LLM_PD_SERVING_CP_RANK=${PD_SERVING_CP_RANK-0}
+export RTP_LLM_PD_SERVING_CP_RANK=${PD_SERVING_CP_RANK-}
 export RTP_LLM_PD_PUBLISH_AT_END=${PD_PUBLISH_AT_END:-0}
 [ -n "${PD_PUBLISH_DEBUG:-}" ] && export RTP_LLM_PD_PUBLISH_DEBUG=1
 export RTP_LLM_PP_ROUND_DEVICE_SYNC=1

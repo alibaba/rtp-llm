@@ -80,11 +80,14 @@ The first round after a P restart runs with a cold prefix cache; drop it.
 ## Prefill launcher
 
 `run_prefill_cep4pp2_mtp_fastgen.sh` starts the CEP4PP2 (PP2 x CP4, EP4) prefill used for the MTP numbers:
-MTP gen3 with fastgen chunked prefill (`RTP_LLM_MTP_CHUNKED_PREFILL=1`, one request per pass), one serving
-CP rank per stage (`RTP_LLM_PD_SERVING_CP_RANK=0`), prefix reuse on, and the prefill optimization env set
-(the async/fusion group is worth ~30 ms of 32K TTFT in fastgen mode). Required: `WS` (built tree),
-`DECODE_ADDR` (every decode DP rank's `ip:http_port`). Optional: `DEEPGEMM`, `EXTRA_PY`, `RDMA_LIB`, `RUN`, `CKPT`.
-`MTP_CHUNKED=0 FASTGEN_ARGS=' '` gives the non-fastgen MTP prefill of the same binary.
+MTP gen3 with fastgen chunked prefill (`RTP_LLM_MTP_CHUNKED_PREFILL=1`, one request per pass), prefix reuse on,
+and the prefill optimization env set (the async/fusion group is worth ~30 ms of 32K TTFT in fastgen mode).
+`PD_SERVING_CP_RANK=0` advertises one serving CP rank per stage (`RTP_LLM_PD_SERVING_CP_RANK=0`); it is off by
+default because a TP>1 decode of this branch then reads quarter blocks into whole opaque DSV4 blocks and
+decodes garbage (PPU DEP8, TP1 per rank, is fine with it).
+Required: `WS` (built tree), `DECODE_ADDR` (every decode DP rank's `ip:http_port`). Optional: `DEEPGEMM`,
+`EXTRA_PY`, `RDMA_LIB`, `RUN`, `CKPT`. `MTP_CHUNKED=0 FASTGEN_ARGS=' '` gives the non-fastgen MTP prefill of the
+same binary.
 
 ```bash
 WS=/path/to/github-opensource RDMA_LIB=/path/to/rdma-core/build/lib \
