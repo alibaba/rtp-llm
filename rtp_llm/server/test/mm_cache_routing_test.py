@@ -156,6 +156,64 @@ class MMCacheRoutingTest(unittest.TestCase):
         self.assertEqual(length, 6)
         self.assertEqual(tokens, [10, 99, 20, 99, 30])
 
+    def test_expansion_at_or_above_limit_raises_long_prompt_and_clears_sidecars(self):
+        # Exercise the early expansion guard and the trailing-text guard,
+        # including a rejection after an earlier media span has been appended.
+        cases = (
+            ([1, 99, 2], [list(range(99))]),
+            ([1, 99, 2], [list(range(100))]),
+            ([1, 99, 2], [list(range(98))]),
+            ([1, 99, 2, 3], [list(range(98))]),
+            ([1, 99, 2, 99, 3], [[11], list(range(97))]),
+            ([1, 99, 2, 99, 3], [[11], list(range(96))]),
+        )
+        for compact in (False, True):
+            for semantic_id in (-1, 129264):
+                for tokens, hashes in cases:
+                    with self.subTest(
+                        compact=compact, semantic_id=semantic_id, hashes=hashes
+                    ):
+                        original = list(tokens)
+                        keys = [str(index) for index in range(len(hashes))]
+                        spans, cache_spans = [(7, 8)], [(7, [8])]
+                        with self.assertRaises(FtRuntimeException) as raised:
+                            multimodal_routing_tokens(
+                                tokens,
+                                [[99]],
+                                False,
+                                keys,
+                                metadata(keys, hashes),
+                                100,
+                                compact=compact,
+                                expanded_spans=spans,
+                                cache_spans=cache_spans,
+                                semantic_mm_token_id=semantic_id,
+                            )
+                        self.assertEqual(
+                            raised.exception.exception_type,
+                            ExceptionType.MM_LONG_PROMPT_ERROR,
+                        )
+                        self.assertIn("max_seq_len(100)", raised.exception.message)
+                        self.assertEqual(spans, [])
+                        self.assertEqual(cache_spans, [])
+                        self.assertEqual(tokens, original)
+
+    def test_expansion_just_below_limit_is_unchanged(self):
+        for compact in (False, True):
+            with self.subTest(compact=compact):
+                hashes = list(range(97))
+                tokens, length = multimodal_routing_tokens(
+                    [1, 99, 2],
+                    [[99]],
+                    False,
+                    ["a"],
+                    metadata(["a"], [hashes]),
+                    100,
+                    compact=compact,
+                )
+                self.assertEqual(list(tokens), [1] + hashes + [2])
+                self.assertEqual(length, 99)
+
     def test_partial_hit_stops_before_unknown_image(self):
         result, length = multimodal_routing_tokens(
             [10, 99, 20, 99, 30],
@@ -206,6 +264,43 @@ class MMCacheRoutingTest(unittest.TestCase):
                 multimodal_routing_tokens([1, 99, 2], [[99]], False, ["a"], data, 100),
                 ([1], None),
             )
+
+    def test_malformed_tags_raise_wrong_format_and_clear_sidecars(self):
+        cases = (
+            ([1, 98, 2], [[98, 99]]),
+            ([1, 99, 2], [[98, 99]]),
+            ([1, 98, 98, 99, 2], [[98, 99]]),
+            ([1, 96, 98, 2, 97, 99, 3], [[96, 97], [98, 99]]),
+        )
+        for tokens, separators in cases:
+            for include_separators in (False, True):
+                for compact in (False, True):
+                    with self.subTest(
+                        tokens=tokens,
+                        include_separators=include_separators,
+                        compact=compact,
+                    ):
+                        original = list(tokens)
+                        spans, cache_spans = [(7, 8)], [(7, [8])]
+                        with self.assertRaises(FtRuntimeException) as raised:
+                            multimodal_routing_tokens(
+                                tokens,
+                                separators,
+                                include_separators,
+                                ["a"],
+                                metadata(["a"], [[1, 2]]),
+                                100,
+                                compact=compact,
+                                expanded_spans=spans,
+                                cache_spans=cache_spans,
+                            )
+                        self.assertEqual(
+                            raised.exception.exception_type,
+                            ExceptionType.MM_WRONG_FORMAT_ERROR,
+                        )
+                        self.assertEqual(spans, [])
+                        self.assertEqual(cache_spans, [])
+                        self.assertEqual(tokens, original)
 
     def test_invalid_hashes_are_rejected(self):
         data = metadata(["a"], [[1 << 32]])
@@ -384,12 +479,78 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route["block_cache_keys"], expected)
         self.assertEqual(route["seq_len"], 4)
 
+    async def test_long_prompt_survives_preselection_and_reselection(self):
+        for reselect in (False, True):
+            for hash_count in (98, 99):
+                with self.subTest(reselect=reselect, hash_count=hash_count):
+                    await self.asyncSetUp()
+                    client = self.visitor.master_client
+                    keys = multimodal_cache_keys(self.request)
+                    overlong = metadata(keys, [list(range(hash_count))])
+                    if reselect:
+                        new_vit = self.vit.model_copy(update={"ip": "127.0.0.3"})
+                        new_status = {**self.status, "server_ip": new_vit.ip}
+                        client.get_backend_role_addrs.side_effect = [
+                            FlexlbResponse(
+                                role_addrs=[self.vit],
+                                result={"server_status": [self.status]},
+                            ),
+                            FlexlbResponse.error_response(VIT_ROUTE_STALE_CODE),
+                            FlexlbResponse(
+                                role_addrs=[new_vit],
+                                result={"server_status": [new_status]},
+                            ),
+                        ]
+                        client.get_vit_cache_metadata.side_effect = [
+                            metadata(keys, [[-10, 11]]),
+                            overlong,
+                        ]
+                    else:
+                        client.get_vit_cache_metadata.return_value = overlong
+                    with self.assertRaises(FtRuntimeException) as raised:
+                        await self.visitor.get_master_route_addrs(self.request)
+                    self.assertEqual(
+                        raised.exception.exception_type,
+                        ExceptionType.MM_LONG_PROMPT_ERROR,
+                    )
+                    self.assertEqual(
+                        client.get_backend_role_addrs.await_count,
+                        3 if reselect else 1,
+                    )
+                    self.assertFalse(self.request.generate_config.role_addrs)
+                    self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
+
+    async def test_malformed_tags_stop_before_prefill_with_wrong_format(self):
+        for tokens in ([1, 98, 2], [1, 99, 2], [1, 98, 98, 99, 2]):
+            with self.subTest(tokens=tokens):
+                await self.asyncSetUp()
+                self.visitor.mm_model_config.mm_sep_tokens = [[98, 99]]
+                self.request.token_ids = torch.tensor(tokens, dtype=torch.int32)
+                with self.assertRaises(FtRuntimeException) as raised:
+                    await self.visitor.get_master_route_addrs(self.request)
+                self.assertEqual(
+                    raised.exception.exception_type,
+                    ExceptionType.MM_WRONG_FORMAT_ERROR,
+                )
+                self.assertEqual(
+                    self.visitor.master_client.get_backend_role_addrs.await_count, 1
+                )
+                self.assertFalse(self.request.generate_config.role_addrs)
+                self.assertEqual(self.request.token_ids.tolist(), tokens)
+
     async def test_missing_or_invalid_required_hashes_stop_before_prefill_routing(self):
-        for data in ({"entries": [{}]},):
+        for data in (
+            {"entries": [{}]},
+            {"entries": []},
+            {"entries": [{"key": "missing", "hash_hit": False}]},
+        ):
             await self.asyncSetUp()
             self.visitor.master_client.get_vit_cache_metadata.return_value = data
-            with self.assertRaises(FtRuntimeException):
+            with self.assertRaises(FtRuntimeException) as raised:
                 await self.visitor.get_master_route_addrs(self.request)
+            self.assertEqual(
+                raised.exception.exception_type, ExceptionType.MM_PROCESS_ERROR
+            )
             calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
             self.assertEqual(len(calls), 1)
 

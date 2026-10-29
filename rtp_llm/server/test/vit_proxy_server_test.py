@@ -11,6 +11,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    ErrorDetailsPB,
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
@@ -152,6 +153,9 @@ class AbortCalled(Exception):
 
 
 class RpcBoundaryFakeContext:
+    def set_trailing_metadata(self, metadata):
+        self.trailing_metadata = metadata
+
     def time_remaining(self):
         return None
 
@@ -1200,12 +1204,12 @@ class RuntimeExceptionStatusTest(TestCase):
             (
                 MMSchedulerOverloadError,
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
-                "[MM_PROCESS_ERROR] embedding failed",
+                "[CONCURRENCY_LIMIT_ERROR] embedding failed",
             ),
             (
                 MMSchedulerTimeoutError,
                 grpc.StatusCode.DEADLINE_EXCEEDED,
-                "[MM_PROCESS_ERROR] embedding failed",
+                "[GENERATE_TIMEOUT] embedding failed",
             ),
             (
                 MMSchedulerRequestTooLargeError,
@@ -1256,6 +1260,26 @@ class RuntimeExceptionStatusTest(TestCase):
                                 proxy_stub.RemoteMultimodalEmbedding(request, timeout=5)
                             self.assertEqual(proxy_error.exception.code(), status)
                             self.assertEqual(proxy_error.exception.details(), details)
+                            typed_codes = {
+                                MMSchedulerOverloadError: ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                                MMSchedulerTimeoutError: ExceptionType.GENERATE_TIMEOUT,
+                                TimeoutError: ExceptionType.GENERATE_TIMEOUT,
+                            }
+                            if error_type in typed_codes:
+                                for received in (
+                                    direct_error.exception,
+                                    proxy_error.exception,
+                                ):
+                                    wire = dict(received.trailing_metadata())
+                                    parsed = ErrorDetailsPB.FromString(
+                                        wire["grpc-status-details-bin"]
+                                    )
+                                    self.assertEqual(
+                                        parsed.error_code, typed_codes[error_type]
+                                    )
+                                    self.assertEqual(
+                                        parsed.error_message, "embedding failed"
+                                    )
                             self.assertEqual(
                                 [
                                     call.args[1]
@@ -1308,12 +1332,12 @@ class RuntimeExceptionStatusTest(TestCase):
             (
                 MMSchedulerOverloadError("overloaded"),
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
-                ExceptionType.MM_PROCESS_ERROR,
+                ExceptionType.CONCURRENCY_LIMIT_ERROR,
             ),
             (
                 MMSchedulerTimeoutError("timed out"),
                 grpc.StatusCode.DEADLINE_EXCEEDED,
-                ExceptionType.MM_PROCESS_ERROR,
+                ExceptionType.GENERATE_TIMEOUT,
             ),
             (
                 MMSchedulerRequestTooLargeError("too large"),
@@ -1332,6 +1356,15 @@ class RuntimeExceptionStatusTest(TestCase):
 
                 self.assertEqual(context.code, expected_status)
                 self.assertTrue(context.details.startswith(f"[{expected_type.name}]"))
+                if expected_type in (
+                    ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                    ExceptionType.GENERATE_TIMEOUT,
+                ):
+                    wire = dict(context.trailing_metadata)
+                    parsed = ErrorDetailsPB.FromString(wire["grpc-status-details-bin"])
+                    self.assertEqual(parsed.error_code, expected_type)
+                    self.assertEqual(parsed.error_message, str(error))
+                    self.assertEqual(wire[VIT_ERROR_REPORTED_METADATA_KEY], "1")
 
 
 def _rdma_slot(lease_id: str) -> MMRdmaSlotPB:
