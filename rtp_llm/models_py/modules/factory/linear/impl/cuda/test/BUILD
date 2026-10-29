@@ -17,7 +17,11 @@ py_test(
 
 py_test(
     name = "fp8_linear_test",
-    srcs = ["fp8_linear_test.py"],
+    srcs = [
+        "fp8_linear_test.py",
+        "fp8_linear_test_launcher.py",
+    ],
+    main = "fp8_linear_test_launcher.py",
     deps = py_test_deps,
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13"},

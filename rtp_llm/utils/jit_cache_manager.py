@@ -1,4 +1,5 @@
 import importlib.metadata
+import importlib.util
 import logging
 import os
 import platform
@@ -139,6 +140,63 @@ def _distribution_version(name: str) -> str:
     return importlib.metadata.version(name)
 
 
+def _tokenspeed_mla_identity() -> str:
+    # Inspect the selected package without importing its GPU runtime. Both wheel
+    # rebuilds and edits to a source install can change the generated CuTe code.
+    spec = importlib.util.find_spec("tokenspeed_mla")
+    if spec is None or not spec.origin:
+        raise ValueError("TokenSpeed MLA is not importable")
+    package = Path(spec.origin).resolve(strict=True).parent
+    digest = sha256()
+    with suppress(importlib.metadata.PackageNotFoundError):
+        dist = importlib.metadata.distribution("tokenspeed-mla")
+        digest.update(dist.version.encode() + b"\0")
+        if record := dist.read_text("RECORD"):
+            digest.update(record.encode() + b"\0")
+    sources = sorted(
+        path
+        for path in package.rglob("*")
+        if path.is_file()
+        and path.suffix in {".py", ".so", ".cu", ".cuh", ".h", ".inc", ".cpp"}
+        and "__pycache__" not in path.relative_to(package).parts
+    )
+    if not sources:
+        raise ValueError("TokenSpeed MLA has no identifiable source files")
+    for path in sources:
+        digest.update(path.relative_to(package).as_posix().encode() + b"\0")
+        digest.update(sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str, ...]:
+    parts = tuple(
+        _distribution_version(part[1:]) if part.startswith("@") else scopes[part]
+        for part in item.scopes
+    )
+    if item.name in ("flashinfer", "tilelang"):
+        # Their native extensions link TVM FFI even when its own cache is an
+        # explicit opt-out. Older FlashInfer releases need no FFI package.
+        try:
+            ffi = _distribution_version("apache-tvm-ffi")
+        except importlib.metadata.PackageNotFoundError:
+            ffi = "absent"
+        parts += (f"ffi-{ffi}",)
+    if item.name == "flashinfer":
+        # FMHA ninja rules include headers supplied by flashinfer-cubin. Keep
+        # snapshots generated before that provider had a stable path isolated.
+        try:
+            cubin = _distribution_version("flashinfer-cubin")
+        except importlib.metadata.PackageNotFoundError:
+            cubin = "absent"
+        parts += (f"cubin-{cubin}",)
+    if item.name == "cute_dsl" and os.environ.get("MODEL_TYPE") in (
+        "kimi_k3",
+        "kimi_k3_mtp",
+    ):
+        parts += (_tokenspeed_mla_identity(),)
+    return parts
+
+
 def resolve_scope(
     local_root: Path, cache_env_config: CacheEnvConfig | None = None
 ) -> Scope | None:
@@ -171,11 +229,8 @@ def resolve_scope(
             or item.env_name in cache_env_config.explicit_envs
         ):
             continue
-        with suppress(importlib.metadata.PackageNotFoundError):
-            parts = tuple(
-                _distribution_version(p[1:]) if p.startswith("@") else scopes[p]
-                for p in item.scopes
-            )
+        try:
+            parts = _component_scope_parts(item, scopes)
             if item.name == "deep_gemm":
                 try:
                     identity = deep_gemm_build_scope(torch_scope)
@@ -190,6 +245,16 @@ def resolve_scope(
             if parts and all(parts):
                 selected.append(item)
                 keys.append("-".join((item.name, *parts)))
+        except importlib.metadata.PackageNotFoundError:
+            pass
+        except (OSError, ValueError) as error:
+            if os.environ.get("MODEL_TYPE") not in ("kimi_k3", "kimi_k3_mtp"):
+                raise
+            logging.warning(
+                "JIT_CACHE_FAIL_OPEN: %s K3 producer identity unavailable: %s",
+                item.name,
+                error,
+            )
     if not selected:
         logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
         return None
@@ -255,20 +320,22 @@ class JitCacheManager(FileSystemEventHandler):
         self._dirty, self._stop = Event(), Event()
 
     def on_any_event(self, event) -> None:
-        if event.is_directory or self._stop.is_set():
+        # Entry validation opens metadata and emits its own read-only events.
+        if event.is_directory or event.event_type not in CREATED or self._stop.is_set():
             return
         path = Path(event.dest_path if event.event_type == "moved" else event.src_path)
         for item in self.scope.components:
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
+                    if not item.should_sync(rel, event.event_type, path.stat().st_size):
+                        return
                     if item.name == "deep_gemm":
                         if not rel.startswith("cache/"):
                             return
                         entry = item.local_dir / "cache" / rel.split("/")[1]
                         deepjit_entry_files(entry)
-                    if item.should_sync(rel, event.event_type, path.stat().st_size):
-                        self._dirty.set()
+                    self._dirty.set()
                 return
 
     def _lock_path(self, kind: str) -> Path:

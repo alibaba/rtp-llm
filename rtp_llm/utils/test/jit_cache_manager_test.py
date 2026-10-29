@@ -15,6 +15,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from watchdog import events as watchdog_events
+
 from rtp_llm import start_backend_server as backend
 from rtp_llm.model_loader.tipc import ffi as tipc_ffi
 from rtp_llm.test.utils import jit_sys_path_setup as wrapper_cache
@@ -99,6 +101,7 @@ class JitCacheTestBase(unittest.TestCase):
         for name in (*(item.env_name for item in jit.COMPONENTS), *COMPILE_FLAG_ENVS):
             os.environ.pop(name, None)
         os.environ.pop("REMOTE_JIT_DIR", None)
+        os.environ.pop("MODEL_TYPE", None)
         os.environ.pop(cache_env._AUTOMATIC_CACHE_ENVS, None)
         jit.setup_jit_cache_env.cache_clear()  # memoized: every test starts cold
         self.addCleanup(jit.setup_jit_cache_env.cache_clear)
@@ -119,7 +122,204 @@ class JitCacheTestBase(unittest.TestCase):
         return snap_store.publish_snapshot(generation)
 
 
+class K3ProducerIdentityTest(JitCacheTestBase):
+    def test_other_models_keep_the_original_package_scope(self):
+        component = next(item for item in jit.COMPONENTS if item.name == "cute_dsl")
+        with (
+            mock.patch.dict(os.environ, {"MODEL_TYPE": "qwen3_next"}),
+            mock.patch.object(jit.importlib.metadata, "version", return_value="wheel"),
+            mock.patch.object(
+                jit,
+                "_tokenspeed_mla_identity",
+                side_effect=AssertionError("K3 identity used for another model"),
+            ),
+        ):
+            self.assertEqual(
+                jit._component_scope_parts(component, {"accelerator": "sm103"}),
+                ("sm103", "wheel"),
+            )
+
+    def test_tokenspeed_identity_tracks_source_and_wheel_record(self):
+        package = self.root / "selected" / "tokenspeed_mla"
+        package.mkdir(parents=True)
+        source = package / "__init__.py"
+        source.write_text("raise AssertionError('identity must not import runtime')\n")
+        dist = types.SimpleNamespace(
+            version="1.0", read_text=lambda _: "tokenspeed_mla/__init__.py,sha256=one,1\n"
+        )
+        spec = types.SimpleNamespace(origin=str(source))
+        with (
+            mock.patch.object(jit.importlib.util, "find_spec", return_value=spec),
+            mock.patch.object(
+                jit.importlib.metadata, "distribution", return_value=dist
+            ),
+        ):
+            first = jit._tokenspeed_mla_identity()
+            relocated = self.root / "relocated"
+            shutil.copytree(package, relocated)
+            spec.origin = str(relocated / "__init__.py")
+            self.assertEqual(first, jit._tokenspeed_mla_identity())
+            spec.origin = str(source)
+            source.write_text("KERNEL = 2\n")
+            second = jit._tokenspeed_mla_identity()
+            self.assertNotEqual(first, second)
+            dist.read_text = lambda _: "tokenspeed_mla/__init__.py,sha256=two,1\n"
+            self.assertNotEqual(second, jit._tokenspeed_mla_identity())
+
+    def test_tokenspeed_source_install_needs_no_wheel_metadata(self):
+        package = self.root / "tokenspeed_mla"
+        package.mkdir()
+        source = package / "jit.py"
+        source.write_text("KERNEL = 1\n")
+        (package / "__init__.py").write_text("")
+        spec = types.SimpleNamespace(origin=str(package / "__init__.py"))
+        with (
+            mock.patch.object(jit.importlib.util, "find_spec", return_value=spec),
+            mock.patch.object(
+                jit.importlib.metadata,
+                "distribution",
+                side_effect=jit.importlib.metadata.PackageNotFoundError,
+            ),
+        ):
+            first = jit._tokenspeed_mla_identity()
+            source.write_text("KERNEL = 2\n")
+            self.assertNotEqual(first, jit._tokenspeed_mla_identity())
+
+    def test_k3_cutlass_scope_uses_tokenspeed_mla_identity(self):
+        component = next(item for item in jit.COMPONENTS if item.name == "cute_dsl")
+        scopes = {"accelerator": "sm103"}
+        for model_type in ("kimi_k3", "kimi_k3_mtp"):
+            with (
+                self.subTest(model_type=model_type),
+                mock.patch.dict(os.environ, {"MODEL_TYPE": model_type}),
+                mock.patch.object(
+                    jit.importlib.metadata, "version", return_value="4.7.1"
+                ),
+                mock.patch.object(
+                    jit, "_tokenspeed_mla_identity", return_value="mla-source"
+                ),
+            ):
+                self.assertEqual(
+                    jit._component_scope_parts(component, scopes),
+                    ("sm103", "4.7.1", "mla-source"),
+                )
+
+    def test_unavailable_tokenspeed_identity_only_skips_k3_cute_dsl(self):
+        with (
+            mock.patch.dict(os.environ, {"MODEL_TYPE": "kimi_k3"}),
+            _fake_probes(),
+            mock.patch.object(
+                jit,
+                "_tokenspeed_mla_identity",
+                side_effect=ValueError("not installed"),
+            ),
+        ):
+            with self.assertLogs(level="WARNING"):
+                scope = jit.resolve_scope(self.root)
+        names = {item.name for item in scope.components}
+        self.assertNotIn("cute_dsl", names)
+        self.assertLessEqual({"flashinfer", "deep_gemm", "triton"}, names)
+
+
 class WrapperCacheSetupTest(JitCacheTestBase):
+
+    def test_default_cubin_headers_survive_runfiles_removal(self):
+        runfiles = self.root / "action.runfiles"
+        source = runfiles / "pip_cuda13_flashinfer_cubin/site-packages/flashinfer_cubin"
+        source.mkdir(parents=True)
+        (source / "__init__.py").write_text("# cubin provider\n")
+        payload = runfiles / "flashInferMetaInfo.h"
+        payload.write_text("#define META_INFO 1\n")
+        header = source / "cubins/fmha/include/flashInferMetaInfo.h"
+        header.parent.mkdir(parents=True)
+        header.symlink_to(payload)
+
+        def info(name):
+            return (
+                ("0.6.9", str(source)) if name == "flashinfer_cubin" else (None, None)
+            )
+
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", side_effect=info
+        ), mock.patch.object(wrapper_cache.Path, "home", return_value=self.root):
+            wrapper_cache.setup_jit_cache(cache_dir=self.root / "packages")
+        staged = Path(os.environ["_JIT_CACHE_PATHS"]) / "flashinfer_cubin"
+        shutil.rmtree(runfiles)
+        self.assertEqual(
+            (staged / "cubins/fmha/include/flashInferMetaInfo.h").read_text(),
+            "#define META_INFO 1\n",
+        )
+        self.assertNotIn(".runfiles", str(staged))
+
+    def test_same_version_flashinfer_patch_replaces_cached_python_payload(self):
+        source = self.root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+        source.mkdir(parents=True)
+        module = source / "kernel.py"
+        module.write_text("allocate = cute.make_fragment\n")
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", return_value=("0.6.9", str(source))
+        ):
+            first = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+            module.write_text("allocate = cute.make_rmem_tensor\n")
+            second = Path(wrapper_cache.copy_package_with_lock("flashinfer", self.root))
+        self.assertNotEqual(first, second)
+        self.assertIn(
+            "cute.make_fragment", (first / "flashinfer/kernel.py").read_text()
+        )
+        self.assertIn(
+            "cute.make_rmem_tensor", (second / "flashinfer/kernel.py").read_text()
+        )
+
+    def test_flashinfer_payload_key_is_independent_of_runfiles_location(self):
+        keys = []
+        for root in ("first", "second"):
+            source = self.root / root / "pip_cuda13_flashinfer/site-packages/flashinfer"
+            source.mkdir(parents=True)
+            (source / "kernel.py").write_text("same_payload = True\n")
+            keys.append(wrapper_cache._cache_key("flashinfer", "0.6.9", source))
+        self.assertEqual(keys[0], keys[1])
+
+    def test_flashinfer_workspace_separates_ffi_abis_and_retains_old_cache(self):
+        versions = {"torch": "2.11.0+cu130", "tvm_ffi": "0.1.13"}
+
+        def info(name):
+            return (
+                versions[name],
+                f"/runfiles/pip_gpu_cuda13_torch_{name}/site-packages/{name}",
+            )
+
+        with mock.patch.object(
+            wrapper_cache, "get_package_info", side_effect=info
+        ), mock.patch.object(wrapper_cache.Path, "home", return_value=self.root):
+            wrapper_cache.setup_jit_cache(packages=[])
+            old = Path(os.environ.pop("FLASHINFER_WORKSPACE_BASE"))
+            cached_op = old / ".cache/flashinfer/op.so"
+            cached_op.write_bytes(b"FFI 0.1.13 native op")
+            versions["tvm_ffi"] = "0.1.12"
+            wrapper_cache.setup_jit_cache(packages=[])
+            current = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
+        self.assertNotEqual(old, current)
+        self.assertEqual(cached_op.read_bytes(), b"FFI 0.1.13 native op")
+        self.assertFalse((current / ".cache/flashinfer/op.so").exists())
+
+    def test_flashinfer_workspace_reuses_relocated_runfiles_build(self):
+        with mock.patch.object(wrapper_cache, "get_package_info") as info:
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/first/pip_cuda13_{name}/site-packages/{name}",
+            )
+            original = wrapper_cache._flashinfer_cache_scope()
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_cuda13_{name}/site-packages/{name}",
+            )
+            self.assertEqual(original, wrapper_cache._flashinfer_cache_scope())
+            info.side_effect = lambda name: (
+                "1.0",
+                f"/second/pip_arm_{name}/site-packages/{name}",
+            )
+            self.assertNotEqual(original, wrapper_cache._flashinfer_cache_scope())
+
     def test_local_fallback_does_not_use_remote_snapshot_root(self):
         os.environ["REMOTE_JIT_DIR"] = str(self.root / "remote")
         self.assertEqual(
@@ -261,6 +461,119 @@ class WrapperCacheSetupTest(JitCacheTestBase):
                 )
         self.assertNotIn("TRITON_CACHE_DIR", os.environ)
         self.assertNotIn(cache_env._AUTOMATIC_CACHE_ENVS, os.environ)
+
+
+class DeepGemmWatcherEventTest(JitCacheTestBase):
+    def setUp(self):
+        super().setUp()
+        self.component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        self.manager = jit.JitCacheManager(
+            jit.Scope("test", self.root, (self.component,)), ""
+        )
+        self.entry = self.component.local_dir / "cache" / "hash"
+        self.entry.mkdir(parents=True)
+        self.payloads = {
+            "kernel.cu": b"source",
+            "kernel.cubin": b"binary",
+            "meta.json": b"{}",
+            ".committed": b"",
+        }
+        for name, payload in self.payloads.items():
+            (self.entry / name).write_bytes(payload)
+
+    def test_read_and_directory_events_do_not_read_or_validate_entries(self):
+        events = [
+            event(str(self.entry / name))
+            for name in self.payloads
+            for event in (
+                watchdog_events.FileOpenedEvent,
+                watchdog_events.FileClosedNoWriteEvent,
+                watchdog_events.FileModifiedEvent,
+                watchdog_events.FileDeletedEvent,
+            )
+        ]
+        events.extend(
+            [
+                watchdog_events.DirCreatedEvent(str(self.entry)),
+                watchdog_events.DirMovedEvent("old", str(self.entry)),
+            ]
+        )
+        with mock.patch.object(
+            jit, "deepjit_entry_files"
+        ) as validate, mock.patch.object(
+            Path,
+            "stat",
+            side_effect=AssertionError("ignored events must not read entries"),
+        ):
+            for event in events:
+                with self.subTest(event=event):
+                    self.manager.on_any_event(event)
+                    self.assertFalse(self.manager._dirty.is_set())
+            self.manager._stop.set()
+            self.manager.on_any_event(
+                watchdog_events.FileClosedEvent(str(self.entry / ".committed"))
+            )
+        validate.assert_not_called()
+
+    def test_write_events_validate_complete_entries_including_empty_marker(self):
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as validate:
+            for name in self.payloads:
+                path = str(self.entry / name)
+                for event in (
+                    watchdog_events.FileCreatedEvent(path),
+                    watchdog_events.FileClosedEvent(path),
+                    watchdog_events.FileMovedEvent("old", path),
+                ):
+                    with self.subTest(event=event):
+                        self.manager._dirty.clear()
+                        validate.reset_mock()
+                        self.manager.on_any_event(event)
+                        validate.assert_called_once_with(self.entry)
+                        self.assertTrue(self.manager._dirty.is_set())
+
+    def test_write_events_still_reject_incomplete_or_invalid_entries(self):
+        for name, invalid in (
+            ("kernel.cu", None),
+            ("kernel.cubin", b""),
+            ("meta.json", b"[]"),
+            (".committed", b"not-empty"),
+        ):
+            for filename, payload in self.payloads.items():
+                (self.entry / filename).write_bytes(payload)
+            path = self.entry / name
+            if invalid is None:
+                path.unlink()
+            else:
+                path.write_bytes(invalid)
+            marker = str(self.entry / ".committed")
+            for event in (
+                watchdog_events.FileCreatedEvent(marker),
+                watchdog_events.FileClosedEvent(marker),
+                watchdog_events.FileMovedEvent("old", marker),
+            ):
+                with self.subTest(invalid=name, event=event), mock.patch.object(
+                    jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+                ) as validate:
+                    self.manager.on_any_event(event)
+                    validate.assert_called_once_with(self.entry)
+                    self.assertFalse(self.manager._dirty.is_set())
+
+    def test_unrelated_files_do_not_validate_entries(self):
+        for relative in ("cache/hash/readme.txt", "cache/tmp.pid_42/kernel.cubin"):
+            path = self.component.local_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"not a cache product")
+            with self.subTest(path=relative), mock.patch.object(
+                jit, "deepjit_entry_files"
+            ) as validate:
+                self.manager.on_any_event(watchdog_events.FileClosedEvent(str(path)))
+                validate.assert_not_called()
+                self.assertFalse(self.manager._dirty.is_set())
 
 
 class StoreTest(JitCacheTestBase):
@@ -576,6 +889,32 @@ class StoreTest(JitCacheTestBase):
 
 @requires_shared_acl
 class ScopeTest(JitCacheTestBase):
+
+    def test_flashinfer_snapshots_track_the_cubin_provider(self):
+        versions = {"flashinfer-cubin": "0.6.9"}
+        with _fake_probes(pkg=lambda name: versions.get(name, "1.0")):
+            first = jit.resolve_scope(self.root)
+            versions["flashinfer-cubin"] = "0.6.10"
+            second = jit.resolve_scope(self.root)
+        self.assertNotEqual(first.scope_id, second.scope_id)
+
+    def test_native_consumers_track_ffi_with_ffi_cache_opted_out(self):
+        os.environ["TVM_FFI_CACHE_DIR"] = str(self.root / "explicit-ffi")
+        versions = {"apache-tvm-ffi": "0.1.13"}
+
+        def version(name):
+            return versions.get(name, "1.0")
+
+        with _fake_probes(pkg=version):
+            first = jit.resolve_scope(self.root)
+            versions["apache-tvm-ffi"] = "0.1.12"
+            second = jit.resolve_scope(self.root)
+        self.assertNotEqual(first.scope_id, second.scope_id)
+        self.assertNotIn("tvm_ffi", {item.name for item in first.components})
+        self.assertLessEqual(
+            {"flashinfer", "tilelang"}, {item.name for item in second.components}
+        )
+
     def resolve(self, root=None, **overrides):
         with _fake_probes(**overrides):
             scope = jit.resolve_scope(root or self.root)
