@@ -23,7 +23,7 @@ CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& de
         {"gpu_snapshot_role", store ? "gathered_candidate_output" : "checked_source"},
         {"tile_copy_stage", store ? "gather_completed" : "scatter_completed"},
         {"cpu_backing",
-         descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST ? "memory_pool" :
+         descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST ? "host_pool" :
                                                                                         "disk_staging_buffer"},
     };
     for (size_t member = 0; member < group.groupTags().size(); ++member) {
