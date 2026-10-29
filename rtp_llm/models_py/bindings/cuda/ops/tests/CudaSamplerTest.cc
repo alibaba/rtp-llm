@@ -799,6 +799,53 @@ TEST_F(CudaSamplerTest, testUnrestrictedTopPReturnsOriginalDistributionForReject
     assertTokenIn(toHostInt(output_token_ids_t), 1, {0, 1, 2});
 }
 
+TEST_F(CudaSamplerTest, testAirTopPRenormHandlesFlatRowsInMixedBatch) {
+    // Regression: the DSpARK packed target-verify path scatters
+    // [packed_rows, vocab] logits into a zero-filled dense buffer, so the
+    // unverified tail rows reach the sampler as all-zero logits. softmax(0) is
+    // exactly uniform, which puts every element of such a row into a single
+    // radix bucket. The histogram update must fold a converged warp that maps
+    // to one bucket into a single atomic; otherwise the per-element shared
+    // atomics serialize and the three radix sweeps cost milliseconds instead
+    // of microseconds. This also guards the warp-aggregation fast path against
+    // deadlocking on the divergent tail of the vectorized sweep.
+    //
+    // 8192 is above NUM_BUCKETS and is not the 4096 special case, so this
+    // takes the radix path.
+    constexpr int64_t  batch = 4, width = 8192;
+    const float        flat = 1.0f / static_cast<float>(width);
+    std::vector<float> values(batch * width, flat);
+    // Rows 0 and 2 are peaked; rows 1 and 3 stay exactly flat.
+    for (int64_t row : {int64_t{0}, int64_t{2}}) {
+        for (int64_t col = 0; col < width; ++col)
+            values[row * width + col] = 0.0f;
+        values[row * width]     = 0.5f;
+        values[row * width + 1] = 0.3f;
+        values[row * width + 2] = 0.2f;
+    }
+    auto probs  = cudaTensor(values, {batch, width});
+    auto output = torch::empty_like(probs);
+    auto top_p  = pinnedFloatTensor({0.95f, 0.95f, 0.95f, 0.95f}).to(torch::kCUDA);
+    top_p_renorm_probs(probs, output, top_p, 1.0);
+    check_cuda_error();
+
+    // A flat row is already normalized inside the nucleus: every element is
+    // >= the threshold, so renormalization is the identity.
+    for (int64_t row : {int64_t{1}, int64_t{3}}) {
+        auto out_row = toHostFloat(output.select(0, row));
+        for (int64_t col = 0; col < width; col += 64)
+            EXPECT_NEAR(out_row[col], flat, 1e-7f) << "row " << row << " col " << col;
+        EXPECT_NEAR(output.select(0, row).sum().item<float>(), 1.0f, 1e-4f);
+    }
+    // The peaked rows keep the ordinary top-p semantics. 0.95 keeps the whole
+    // {0.5, 0.3, 0.2} nucleus, so the renormalized row is unchanged.
+    auto expected = cudaTensor({0.5f, 0.3f, 0.2f}, {3});
+    for (int64_t row : {int64_t{0}, int64_t{2}}) {
+        EXPECT_TRUE(torch::allclose(output.select(0, row).slice(0, 0, 3), expected, 1e-5, 1e-6));
+        EXPECT_NEAR(output.select(0, row).sum().item<float>(), 1.0f, 1e-5f);
+    }
+}
+
 TEST_F(CudaSamplerTest, testAirTopPRenormSkipsUnrestrictedRowsInMixedBatch) {
     constexpr int64_t  vocab_size = 4096;
     std::vector<float> values(2 * vocab_size, 0.0f);
