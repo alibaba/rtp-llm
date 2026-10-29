@@ -144,6 +144,27 @@ class PrefillSloRoutingTest {
         assertEquals(700,target.ownership.tokenWorkload().plannedTokens());
     }
     @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
+    void longQueryCanUseIdleWorkerWhenCacheLeaderCannotMeetSlo(String mode) {
+        setup(mode, 30000);
+        var idleWorker = publish("10.0.0.2");
+        when(cache.findMatchingEngines(any(), any(), any()))
+                .thenReturn(Map.of(worker.ipPort(), 9));
+        // Keep the cache leader busy for the entire 27s execution budget.
+        assertNotNull(select(18_900_000, 0, null));
+        // CSV-sized long input: a cold execution needs 1.77s at 70K tokens/s.
+        // It has already waited 5s but still fits easily within the 30s target.
+        assertNull(select(124086, 0, null), "cache affinity still waits before escaping");
+        assertNull(select(124086, 26000, null), "cold execution must fit the remaining SLO budget");
+        assertNull(select(2_000_000, 5000, null), "an idle worker cannot make oversized work feasible");
+        var rescued = select(124086, 5000, null);
+        assertNotNull(rescued, "an idle worker must not reject feasible work at the legacy 1s rescue cap");
+        assertSame(idleWorker, rescued.prefillEp());
+        assertEquals(0, rescued.hitCache());
+        assertEquals(124086, idleWorker.ownership.tokenWorkload().plannedTokens());
+        assertNull(select(124086, 5000, null), "rescue must not build another queue on the target");
+    }
+
+    @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
     void coldWorkWaitsBeforeItCanFillTheQueueAheadOfHotWork(String mode) {
         setup(mode,30000);
         when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of(worker.ipPort(),9));

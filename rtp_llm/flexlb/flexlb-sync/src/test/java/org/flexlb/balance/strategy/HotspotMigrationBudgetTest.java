@@ -75,6 +75,37 @@ class HotspotMigrationBudgetTest {
         assertEquals(List.of(routes.get(1), routes.get(3)), strategy.hotspotMigrationCandidates(2));
     }
 
+    @Test
+    void sloMigrationUsesRemainingTargetForLongQueriesInsteadOfLegacyFeedWindow() {
+        var config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":30000}");
+        var registry = mock(EndpointRegistry.class);
+        var evaluator = mock(PrefillTimePredictor.Evaluator.class);
+        when(evaluator.estimateMs(anyLong(), anyLong())).thenAnswer(call -> (long) call.getArgument(0) / 70);
+        var source = endpoint(0, false, evaluator);
+        var idle = endpoint(1, true, evaluator);
+        ReflectionTestUtils.setField(source, "serviceWindowMs", 2000L);
+        ReflectionTestUtils.setField(idle, "serviceWindowMs", 2000L);
+        var feasible = route(124086, 1, 5000);
+        var late = route(124086, 2, 26000);
+        var oversized = route(2_000_000, 3, 5000);
+        var routes = List.of(feasible, late, oversized);
+        when(source.ownership.captureQueue(anyInt()))
+                .thenReturn(new PrefillState.QueueSnapshot(1, 1, routes, feasible));
+        var inputs = mock(org.flexlb.balance.projection.RouteProjection.Inputs.class);
+        var work = mock(org.flexlb.balance.projection.WorkSnapshot.class);
+        when(inputs.work()).thenReturn(work);
+        when(work.knownRemainingWorkMsAt(anyLong())).thenReturn(30_000L);
+        when(source.captureRouteProjectionInputs()).thenReturn(inputs);
+        var idleInputs = mock(org.flexlb.balance.projection.RouteProjection.Inputs.class);
+        when(idleInputs.work()).thenReturn(mock(org.flexlb.balance.projection.WorkSnapshot.class));
+        when(idle.captureRouteProjectionInputs()).thenReturn(idleInputs);
+        when(registry.prefillRoutingSnapshot(RoleType.PREFILL)).thenReturn(List.of(
+                new EndpointRegistry.PrefillRoutingEntry("a", source), new EndpointRegistry.PrefillRoutingEntry("b", idle)));
+        var strategy = new CostBasedPrefillStrategy(registry, mock(CacheAwareService.class),
+                mock(EngineHealthReporter.class), mock(CacheMetricsReporter.class), SchedulingTestConfig.configService(config));
+        assertEquals(List.of(feasible), strategy.hotspotMigrationCandidates(8));
+    }
+
     private PrefillEndpoint endpoint(int id, boolean idle, PrefillTimePredictor.Evaluator evaluator) {
         var endpoint = mock(PrefillEndpoint.class);
         var ownership = mock(PrefillState.class);
@@ -94,12 +125,16 @@ class HotspotMigrationBudgetTest {
     }
 
     private RequestRoute route(long tokens, long sequence) {
+        return route(tokens, sequence, 1000);
+    }
+
+    private RequestRoute route(long tokens, long sequence, long ageMs) {
         var route = mock(RequestRoute.class);
         when(route.seqLen()).thenReturn(tokens);
         when(route.enqueueSeq()).thenReturn(sequence);
         when(route.decodeEp()).thenReturn(mock(DecodeEndpoint.class));
         var context = new RequestContext(SchedulingTestConfig.newConfig());
-        context.register(sequence, System.currentTimeMillis() - 1000, Long.MAX_VALUE, 60_000);
+        context.register(sequence, System.currentTimeMillis() - ageMs, Long.MAX_VALUE, 60_000);
         when(route.ctx()).thenReturn(context);
         return route;
     }

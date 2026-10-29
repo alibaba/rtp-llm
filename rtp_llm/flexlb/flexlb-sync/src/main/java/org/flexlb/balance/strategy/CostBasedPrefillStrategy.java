@@ -235,7 +235,8 @@ public class CostBasedPrefillStrategy {
                 selectedIndex = -1;
                 if (rescue) {
                     selectedIndex = selectRescueCandidate(survivors, roleType, group, seqLen,
-                            sticky != null ? sticky : route.ctx().prefillMigrationSource());
+                            sticky != null ? sticky : route.ctx().prefillMigrationSource(),
+                            route.ctx().snapshot().createdAtMs());
                 } else if (sticky != null) {
                     for (int i = 0; i < survivors.size(); i++) {
                         if (survivors.endpoint(i) == sticky && hasTokenCapacity(sticky)) { selectedIndex = i; break; }
@@ -506,7 +507,7 @@ public class CostBasedPrefillStrategy {
             var endpoint = entry.endpoint();
             if (idleForRescue(endpoint, endpoint.ownership.tokenWorkload())) {
                 idleByGroup.computeIfAbsent(endpoint.getStatus().topologySnapshot().group(), ignored -> new ArrayList<>())
-                        .add(new IdleTarget(endpoint, endpoint.predictor.evaluator(), endpoint.serviceWindowMs / 2));
+                        .add(new IdleTarget(endpoint, endpoint.predictor.evaluator(), rescueExecutionBudgetMs(endpoint)));
             }
         }
         if (idleByGroup.isEmpty()) { return List.of(); }
@@ -534,7 +535,7 @@ public class CostBasedPrefillStrategy {
                     targetChecks++;
                     if (target.endpoint() != endpoint && (rescue.getMaxInputTokens() > 0
                             || PrefillPredictionBoundary.predictSingleRequestMs(target.evaluator(), route.seqLen(), 0)
-                            <= target.budgetMs())) { eligible = true; break; }
+                            <= remainingRescueBudgetMs(target.budgetMs(), route.ctx().snapshot().createdAtMs(), wallMs))) { eligible = true; break; }
                 }
                 if (eligible) {
                     if (candidates.size() < limit) { candidates.add(route); }
@@ -567,8 +568,21 @@ public class CostBasedPrefillStrategy {
                 && (limit > 0 || endpoint.ownership.progress().outstandingRequests() == 0);
     }
 
-    /** Escape only to truly idle capacity; total input length was bounded before this call. */
-    private int selectRescueCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen, PrefillEndpoint excluded) {
+    private long rescueExecutionBudgetMs(PrefillEndpoint endpoint) {
+        // SLO admission already accounts for elapsed wait and all outstanding work.
+        // The legacy half-feed window is only 1s at SLO=30s, stranding long
+        // requests on a busy cache leader even when an idle worker can meet SLO.
+        return ttftSloMs > 0 ? PrefillSloPolicy.executionBudgetMs(ttftSloMs) : endpoint.serviceWindowMs / 2;
+    }
+
+    private long remainingRescueBudgetMs(long budgetMs, long createdAtMs, long nowMs) {
+        return ttftSloMs > 0 ? Math.max(0L, budgetMs - Math.max(0L, nowMs - createdAtMs)) : budgetMs;
+    }
+
+    /** Escape only to idle capacity that can cold-execute the input within the remaining budget. */
+    private int selectRescueCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen,
+                                      PrefillEndpoint excluded, long createdAtMs) {
+        long nowMs = System.currentTimeMillis();
         double[] scores = new double[candidates.size()];
         java.util.Arrays.fill(scores, Double.POSITIVE_INFINITY);
         double minimum = Double.POSITIVE_INFINITY;
@@ -577,7 +591,7 @@ public class CostBasedPrefillStrategy {
             if (candidates.endpoint(i) == excluded || !idleForRescue(candidates.endpoint(i), work)
                     || tokenBalance.getHotspotRescue().getMaxInputTokens() == 0
                     && PrefillPredictionBoundary.predictSingleRequestMs(candidates.endpoint(i).predictor.evaluator(), seqLen, 0)
-                            > candidates.endpoint(i).serviceWindowMs / 2) { continue; }
+                            > remainingRescueBudgetMs(rescueExecutionBudgetMs(candidates.endpoint(i)), createdAtMs, nowMs)) { continue; }
             scores[i] = work.score() + Math.max(0L, seqLen - candidates.cacheHit(i));
             minimum = Math.min(minimum, scores[i]);
         }
