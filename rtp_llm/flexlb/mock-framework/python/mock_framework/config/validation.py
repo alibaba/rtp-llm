@@ -29,9 +29,10 @@ def validate(value, spec, where):
         for v in value:
             validate(v, spec['items'], where + '[]')
     elif kind == 'range':
-        if value != 'latest':
+        if value != 'latest' or not spec.get('allow_latest', True):
             if type(value) is not list or len(value) != 2:
-                raise ConfigError(f'{where}: expected latest or [start, end]')
+                expected = 'latest or [start, end]' if spec.get('allow_latest', True) else '[start, end]'
+                raise ConfigError(f'{where}: expected {expected}')
             start, end = (duration(v, negative=True) for v in value)
             if not start < end <= 0:
                 raise ConfigError(f'{where}: range must satisfy start < end <= 0')

@@ -8,7 +8,7 @@ import org.flexlb.mock.engine.rtp.transfer.*;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 import org.flexlb.mock.engine.*;
 
-/** Mock-only P cache-store boundary. A source is a live computed request, never an LRU lookup. */
+/** Mock-only token handoff. A source is a live computed request, never an LRU lookup. */
 final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase implements AutoCloseable {
     private record Key(String client, long request) {}
     private static final class Entry {
@@ -41,7 +41,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
     void validate(GenerateInputPB input) { requests.validate(input, true); }
 
     Source start(TransferRequest request, long deadline) {
-        var key = key(request); layout(request); requests.validate(request.getInput(), true); var entry = new Entry(request, metadata(request));
+        var key = key(request); requests.validate(request.getInput(), true); var entry = new Entry(request, metadata(request));
         synchronized (entry) {
             synchronized (active) {
                 if (closed) throw Status.UNAVAILABLE.withDescription("Transfer service closed").asRuntimeException();
@@ -68,7 +68,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
     @Override public void read(TransferRequest request, StreamObserver<TransferMetadata> observer) {
         var response = (ServerCallStreamObserver<TransferMetadata>) observer; Entry entry;
         try {
-            layout(request); entry = active.get(key(request));
+            entry = active.get(key(request));
             if (entry == null) throw Status.NOT_FOUND.withDescription("No live Prefill source").asRuntimeException();
             synchronized (entry) {
                 if (entry.session == null) throw Status.NOT_FOUND.withDescription("Prefill preparation failed").asRuntimeException();
@@ -121,18 +121,13 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         model.close();
     }
 
-    private void layout(TransferRequest request) {
-        if (request.getBlockSize() != config.blockSize())
-            throw Status.FAILED_PRECONDITION.withDescription("Prefill/Decode block size differs").asRuntimeException();
-    }
     private static Key key(TransferRequest request) {
         if (request.getClientId().isBlank() || !request.hasInput())
             throw Status.INVALID_ARGUMENT.withDescription("Transfer requires client identity and native input").asRuntimeException();
         return new Key(request.getClientId(), request.getInput().getRequestId());
     }
     private TransferMetadata metadata(TransferRequest request) {
-        return TransferMetadata.newBuilder().setBlockSize(config.blockSize()).setInputTokens(request.getInput().getTokenIdsCount())
-            .addAllCacheKeys(PrefixKeys.completeBlocks(request.getInput(), config.blockSize()))
+        return TransferMetadata.newBuilder().setInputTokens(request.getInput().getTokenIdsCount())
             .setStopAfter(config.stoppingModel().length(Long.toString(request.getInput().getRequestId()),
                 request.getInput().getGenerateConfig().getMinNewTokens(), request.getInput().getGenerateConfig().getMaxNewTokens(),
                 request.getInput().getGenerateConfig().getIgnoreEos())).build();

@@ -118,7 +118,7 @@ def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(mon
         # Even one successful terminal in the interval is sufficient.
         return [metrics.QuerySample({}, 1.0, at)]
     monkeypatch.setattr(metrics, 'instant', instant)
-    assert asyncio.run(metrics.client_success_rate(ctx, metrics.MetricArgs(range=['-20s', '0s']))) == 1
+    assert asyncio.run(metrics.client_success_rate(ctx, metrics.SuccessRateArgs(range=['-20s', '0s']))) == 1
     assert len(calls) == 5 and len({at for _, at in calls}) == 1
     assert all('outcome=' + json.dumps(outcome) in calls[i][0]
                for i, outcome in enumerate(('success', 'error', 'timeout', 'cancelled')))
@@ -139,7 +139,7 @@ def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, 
         return [metrics.QuerySample({}, value, at)]
     monkeypatch.setattr(metrics, 'instant', instant)
     with pytest.raises(ExecutionError, match='terminal observations'):
-        asyncio.run(metrics.client_success_rate(ctx, metrics.MetricArgs(range=['-20s', '0s'])))
+        asyncio.run(metrics.client_success_rate(ctx, metrics.SuccessRateArgs(range=['-20s', '0s'])))
 
 
 def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
@@ -151,4 +151,33 @@ def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
         return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 2, at) for port in ports]
     monkeypatch.setattr(metrics, 'instant', instant)
     with pytest.raises(ExecutionError, match='coverage'):
-        asyncio.run(metrics.client_success_rate(ctx, metrics.MetricArgs(range=['-20s', '0s'])))
+        asyncio.run(metrics.client_success_rate(ctx, metrics.SuccessRateArgs(range=['-20s', '0s'])))
+
+
+@pytest.mark.parametrize('args', [{}, {'range': 'latest'}, {'range': 'all'},
+    {'range': ['0s', '0s']}, {'range': ['-20s', '1s']}, {'range': ['-20s']}])
+def test_success_rate_requires_an_explicit_valid_window(args):
+    from mock_framework.config import Registry
+    from mock_framework.config.errors import ConfigError
+    with pytest.raises(ConfigError):
+        Registry.standard().get('client/success_rate').arguments(args)
+
+
+def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
+    from mock_framework.config import Registry
+    ctx = context()
+    for node in ctx.nodes:
+        node['role'] = 'client'
+    calls = []
+    async def instant(ctx, expression, at):
+        calls.append((expression, at))
+        if expression.startswith('count_over_time'):
+            return [metrics.QuerySample({'instance': '127.0.0.1:1002'}, 2, at)]
+        return [metrics.QuerySample({}, .75, at)]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    result = asyncio.run(Registry.standard().get('client/success_rate').invoke(ctx,
+        {'targets': ['127.0.0.1:1002'], 'range': ['-40s', '-20s']}))
+    assert result == .75
+    assert all(at == metrics.epoch(ctx.query_time) - 20 for _, at in calls)
+    assert all('1002' in expression and '1001' not in expression for expression, _ in calls)
+    assert '[20000ms]' in calls[-1][0] and 'irate' not in calls[-1][0]

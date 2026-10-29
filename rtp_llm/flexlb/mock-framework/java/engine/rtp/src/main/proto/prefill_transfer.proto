@@ -4,16 +4,17 @@ option java_package = "org.flexlb.mock.engine.rtp.transfer";
 option java_multiple_files = true;
 import "engine_rpc_service.proto";
 
-// Mock-internal metadata transport, not the real engine's tensor/cache-store wire protocol.
+// Mock-internal token coverage; local block layouts never cross this boundary.
 message TransferRequest {
   string client_id = 1;
   GenerateInputPB input = 2;
-  uint32 block_size = 3;
+  reserved 3;
+  reserved "block_size";
 }
 message TransferMetadata {
-  uint32 block_size = 1;
+  reserved 1, 3;
+  reserved "block_size", "cache_keys";
   uint32 input_tokens = 2;
-  repeated int64 cache_keys = 3;
   uint32 stop_after = 4; // Resolved once by P, independent of Decode round size.
 }
 service PrefillTransfer {

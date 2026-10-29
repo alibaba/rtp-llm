@@ -185,7 +185,7 @@ final class PrefillGeneration implements AutoCloseable {
                     throw Status.DATA_LOSS.withDescription("Invalid ALLOCATE acknowledgement").asRuntimeException();
                 synchronized (this) {
                     if (terminal) return;
-                    source = transfer.start(TransferRequest.newBuilder().setClientId(config.id()).setInput(input).setBlockSize(config.blockSize()).build(), deadline);
+                    source = transfer.start(TransferRequest.newBuilder().setClientId(config.id()).setInput(input).build(), deadline);
                     if (deferred) {
                         attachmentDeadline = Deadline.after(attachMillis, TimeUnit.MILLISECONDS);
                         attachment = deadlines.schedule(() -> {

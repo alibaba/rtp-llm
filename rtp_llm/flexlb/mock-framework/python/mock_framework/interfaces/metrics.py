@@ -21,6 +21,11 @@ class MetricArgs(Targets):
     range: Annotated[str | list[str], 'range'] = 'latest'
 
 
+@dataclass(frozen=True, kw_only=True)
+class SuccessRateArgs(Targets):
+    range: Annotated[list[str], 'range']
+
+
 @dataclass(frozen=True)
 class Promql:
     promql: str
@@ -170,16 +175,16 @@ async def client_qps(ctx, args: MetricArgs) -> float:
 
 
 @case_interface('client/success_rate', effect='read', unit='ratio')
-async def client_success_rate(ctx, args: MetricArgs) -> float:
-    """Success share of terminal observations in the selected interval; no request-count floor."""
-    at, millis, operation = window(ctx, args)
+async def client_success_rate(ctx, args: SuccessRateArgs) -> float:
+    """Success share of terminal observations in an explicit [start, end] window; no request-count floor."""
+    at, millis, _ = window(ctx, args)
     labels, targets = scope(ctx, args, 'client')
     name = 'mock_client_requests_finished_total'
     for outcome in ('success', 'error', 'timeout', 'cancelled'):
         await counter_history(ctx, name, labels + ',outcome=' + json.dumps(outcome), targets, at, millis)
     success = f'{name}{{{labels},outcome="success"}}'
     total = f'{name}{{{labels}}}'
-    expression = f'sum({operation}({success}[{millis}ms])) / sum({operation}({total}[{millis}ms]))'
+    expression = f'sum(increase({success}[{millis}ms])) / sum(increase({total}[{millis}ms]))'
     values = await instant(ctx, expression, at)
     if len(values) != 1 or not 0 <= values[0].value <= 1:
         raise ExecutionError('Client success rate requires terminal observations in the selected interval')

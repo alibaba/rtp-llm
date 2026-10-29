@@ -151,7 +151,7 @@ final class DecodeAdmission implements AutoCloseable {
             transport.execute(() -> {
                 try {
                     source.run(() -> PrefillTransferGrpc.newStub(channels.get(call.peers.getFirst())).withDeadlineAfter(budget, TimeUnit.NANOSECONDS)
-                        .read(TransferRequest.newBuilder().setClientId(call.client).setInput(call.input).setBlockSize(config.blockSize()).build(),
+                        .read(TransferRequest.newBuilder().setClientId(call.client).setInput(call.input).build(),
                             new StreamObserver<>() {
                                 private TransferMetadata metadata;
                                 @Override public void onNext(TransferMetadata value) { metadata = value; }
@@ -188,13 +188,12 @@ final class DecodeAdmission implements AutoCloseable {
     private void loadedResult(Call call, TransferMetadata metadata) {
         synchronized (this) {
             if (!live(call)) return;
-            var keys = PrefixKeys.completeBlocks(call.input, config.blockSize());
-            if (metadata == null || metadata.getBlockSize() != config.blockSize()
+            if (metadata == null
                     || metadata.getStopAfter() < Math.max(1, call.input.getGenerateConfig().getMinNewTokens())
                     || metadata.getStopAfter() > call.input.getGenerateConfig().getMaxNewTokens()
                     || call.input.getGenerateConfig().getIgnoreEos() && metadata.getStopAfter() != call.input.getGenerateConfig().getMaxNewTokens()
-                    || metadata.getInputTokens() != call.input.getTokenIdsCount() || !metadata.getCacheKeysList().equals(keys)) {
-                stop(call, Status.FAILED_PRECONDITION.withDescription("P-to-D KV layout differs"), 8212);
+                    || metadata.getInputTokens() != call.input.getTokenIdsCount()) {
+                stop(call, Status.FAILED_PRECONDITION.withDescription("P-to-D token coverage or generation length differs"), 8212);
                 return;
             }
             try { engine.transferCompleted(call.request, new RtpTransferResult(metadata.getStopAfter(), null)); }

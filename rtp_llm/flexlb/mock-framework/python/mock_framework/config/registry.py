@@ -20,6 +20,8 @@ def schema(kind):
         for rule in variants[1:]:
             if rule in ('duration', 'range'):
                 result = {'type': rule}
+                if rule == 'range' and get_origin(variants[0]) is list:
+                    result['allow_latest'] = False
             elif isinstance(rule, Bounds):
                 result.update({k: v for k, v in asdict(rule).items() if v is not None})
             else:

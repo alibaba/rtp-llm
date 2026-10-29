@@ -433,7 +433,7 @@ phases:
 
 ### 查询和断言
 
-普通指标优先使用语义接口，YAML 不写 PromQL。当前支持 `latest` 和相对该 step 固定查询时刻的区间 `[-60s, 0s]`；`all` 的跨轮次查询窗口尚未实现，目前拒绝。
+普通指标优先使用语义接口，YAML 不写 PromQL。当前支持 `latest` 和相对该 step 固定查询时刻的区间 `[-60s, 0s]`；`client/success_rate` 必须显式提供区间，不接受 latest 或 all，也不隐式切换为整轮累计成功率。其他指标的时间语义保持各自定义；`all` 的跨轮次查询窗口尚未实现，目前拒绝。
 
 `latest` 使用前 60 秒内最近两次样本的 irate；区间使用 increase。执行器固定 `query_time`，指标实现记录实际查询点、表达式和窗口，不重新取墙钟。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值直接返回 float，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
 
@@ -579,7 +579,7 @@ environment:
       compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
 ```
 
-原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`；P/D 批量上限取 1–1024，默认 1。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
+原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`；P/D 批量上限取 1–1024，默认 1。Mock 一个 Engine 表示完整计算体，不拆 CP/TP/DP rank 或模拟 rank 间通信；内部并行的影响由整 Engine 的性能公式、容量和调度配置表达。block size 是本 Engine 的逻辑分配粒度，PD 不根据 CP 数乘除。配置导入时应先统一容量口径。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
 
 RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：多模态、adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
 
@@ -591,7 +591,7 @@ RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token�
 
 P 的内部 `PrefillTransfer.start()` 注册活跃来源并复用 LocalPrefill 计算。Forward 完成后 KV 仍由请求持有；网络 `Read` 交付结束后仍保留来源，P 收到 D 的 LOAD ACK 后才完成计算阶段并释放。正式服务**只保留 Read RPC，没有外部 Prepare RPC**；测试从包内 start 建立来源或调用正式生成链路，不为探针注册额外协议。
 
-D 的 LOAD 从 peer_addrs 对应 P 发起真实网络 Read，校验 client/request 身份、完整 prompt、block size 和单 Reader 所有权；不能用缓存中存在的 key 冒充活跃来源。返回元数据为 block size、输入长度、完整块 cache keys 和 stop_after；不复制 KV 张量，不模拟 RDMA/TCP cache-store 或带宽。D 验证成功且预算有效后才能确认 LOAD，传入 KV 不算 D 历史命中，也不提前提交为缓存。
+D 的 LOAD 从 peer_addrs 对应 P 发起真实网络 Read，校验 client/request 身份、完整 prompt 和单 Reader 所有权；不能用缓存中存在的 key 冒充活跃来源。PD 按完整输入的 token 覆盖范围交接，返回元数据只有 input_tokens 和 stop_after，不传 block size、块编号或 cache keys。P/D 各自按本地 block size 分配和生成前缀 keys，两端块大小不要求相同或成倍数；最后不足一块的 token 也纳入交接。D 验证 token 数、生成长度及预算后才能确认 LOAD，传入 KV 不算 D 历史命中，也不提前提交为缓存。不复制 KV 张量，不模拟 RDMA/TCP cache-store 或带宽。
 
 Read 等待计算就绪；D 取消/超时会取消 P 来源，P 取消/关闭也使 LOAD 失败。`load_cache_timeout_ms` 默认 5s，非正值按原生回退 5s，同时受总 deadline 限制。没有 Reader 或 Read 入口校验失败时，来源仍由正式 P 请求所有者管理，受请求取消、timeout/deadline 和节点关闭约束。
 
@@ -692,14 +692,14 @@ EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册�
 | engine/prefill/tps | P 实际计算 token 增量／完成 Forward 耗时增量。 |
 | engine/prefill/tps_with_cache | P 输入 token 增量／完成 Forward 耗时增量，输入含命中。 |
 | engine/decode/tps | D 完成 Forward 输出 token 增量／墙钟时间。 |
-| client/success_rate | 区间内成功终态计数增量／全部终态计数增量，先对各 Client 算增量再聚合；可选 targets。 |
+| client/success_rate | 必填 range 区间内成功终态计数增量／全部终态计数增量，先对各 Client 算增量再聚合；可选 targets。 |
 | prometheus/query | 固定 query_time 的一次 scalar 或 float instant vector，保留标签、数值和 sample_time。 |
 
 普通接口在本次独占 Prometheus 内按 role 和 instance 地址过滤，先逐条 Counter 算增量再聚合以处理 reset；hit_rate 不能平均节点比率。显式空 targets 报错，选择器转义；每个选中实例的分子/分母至少需要两次采样，重复或缺失序列报错。range 在固定 end 执行单次 instant query，窗口=end−start，精度 ms，低于 1ms 拒绝；latest 用检查前 60s 内最近两次采样的 irate，不平均整分钟。缺少采样或没有可计算 Forward 时报错。
 
-`client/success_rate` 按完成时间统计，分母包含 success/error/timeout/cancelled。它没有最小请求数门槛；窗口无终态时分母为零，或任一 Client 的终态序列采集不完整时均报错。至少两次抓取是计数器增量的计算条件，不是请求数要求。近期完成请求可能在更早时发出；此口径不表示同一发送阶段的成功率。
+`client/success_rate` 的 range 是必填的 `[start, end]`（start < end <= 0），按固定查询时刻定位窗口，使用 Counter 的 increase，按完成时间统计，分母包含 success/error/timeout/cancelled。它没有最小请求数门槛；窗口无终态时分母为零，或任一 Client 的终态序列采集不完整时均报错。至少两次抓取是计数器增量的计算条件，不是请求数要求。近期完成请求可能在更早时发出；此口径不表示同一发送阶段的成功率。
 
-`cases/master_ha_failover/case.yaml` 用同一轮固定 QPS 播放贯穿杀 A、恢复 A、杀 B、恢复 B。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集并检查 Master owner 归零，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 验证当前固定 QPS 播放下的滚动恢复，不声称覆盖旧 trace 到达节奏或原负载均衡实验。
+`cases/master_ha_failover/case.yaml` 用同一轮固定 QPS 播放贯穿杀 A、恢复 A、杀 B、恢复 B。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集 Client 终态，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 验证当前固定 QPS 播放下的滚动恢复，不声称覆盖旧 trace 到达节奏或原负载均衡实验。
 
 原始 PromQL 不自动加过滤。matrix/string/native histogram、非有限值、查询 warning 或后端失败都不作为有效门禁；普通指标恰好一个有限值。原始查询返回结构化结果，不隐式聚合或对各样本套用数值门禁。查询不重试，HTTP 和求值均受步骤剩余预算限制。
 

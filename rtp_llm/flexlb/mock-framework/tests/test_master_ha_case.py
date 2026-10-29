@@ -110,7 +110,7 @@ def test_success_rate_through_native_clients_and_prometheus(tmp_path):
             if step['interface'] == 'client/start':
                 step['args']['requests_file'] = str(ROOT / 'cases/basic/requests.binpb.zst')
             if step['interface'] == 'client/qps':
-                step.update(interface='client/success_rate', expect={'eq': 1.0})
+                step.update(interface='client/success_rate', args={'range': ['-20s', '0s']}, expect={'eq': 1.0})
     source = tmp_path / 'case.yaml'; source.write_text(yaml.safe_dump(document))
     registry = Registry.standard(); case = compile_case(source, registry)
     launch = local_launch(case, Path(os.environ['JAVA_HOME']) / 'bin/java', os.environ['PROMETHEUS_BIN'], framework=ROOT)
