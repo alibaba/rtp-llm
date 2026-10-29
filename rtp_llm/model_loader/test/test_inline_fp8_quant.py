@@ -8,11 +8,14 @@ Covers:
   - LoadQuantPerChannelFp8Weight.get_tensor_names: excludes scale keys
 """
 
+import functools
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.model_loader.ffn_weight import (
     MoeAtomicWeight,
     MoeConfig,
@@ -23,8 +26,17 @@ from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
     per_channel_cast_to_fp8,
     per_channel_cast_to_fp8_expert,
 )
-from rtp_llm.model_loader.tensor_source import TensorCollector
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
+from rtp_llm.model_loader.weight_module import CompositeWeight
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    identity,
+    stack_,
+    stack_moe_w1,
+    stack_moe_w1_pad,
+    stack_pad,
+)
 
 
 class FakeDatabase:
@@ -33,6 +45,12 @@ class FakeDatabase:
 
     def has_tensor(self, name):
         return False
+
+
+class CompositeWeightGroup(CompositeWeight):
+    @classmethod
+    def support(cls, quant_config, src_weight_info):
+        return True
 
 
 class TestTensorCollectorFp8(unittest.TestCase):
@@ -254,6 +272,164 @@ class TestTransposeStackMoeW1Swap(unittest.TestCase):
         )
         ref_fp8, _ = per_channel_cast_to_fp8(ref_stacked.cuda())
         self.assertTrue(torch.equal(fp8_out, ref_fp8))
+
+
+class TestInlineFp8LayoutCompatibility(unittest.TestCase):
+    """Padded layouts must retain original weights until merge and quantization."""
+
+    def _case(self, is_w1, padded):
+        parts = 2 if is_w1 else 1
+        name, scale_name = (W.moe_w1, W.moe_s1) if is_w1 else (W.moe_w2, W.moe_s2)
+        process = stack_moe_w1 if is_w1 else stack_
+        if padded:
+            process = functools.partial(
+                stack_moe_w1_pad if is_w1 else stack_pad,
+                moe_align_size=4,
+                dim=1 if is_w1 else 2,
+            )
+        ckpts = [
+            CkptWeightInfo("layer.{i}.expert.{expert_id}.part" + str(p), identity)
+            for p in range(parts)
+        ]
+        kernel = MoeAtomicWeight(
+            name, ckpts, process, data_type=torch.bfloat16, config=MoeConfig(expert_num=2)
+        )
+        weight = object.__new__(LoadQuantPerChannelFp8Weight)
+        weight.kernel = kernel
+        weight.scale = SimpleNamespace(name=scale_name)
+        config = SimpleNamespace(
+            compute_dtype=torch.bfloat16,
+            moe_pure_tp_preshard=False,
+            get_selected_experts=lambda layer, n: list(range(n)),
+        )
+        raw = {
+            ckpt.name.format(i=0, expert_id=e): (
+                torch.arange(1, 36).reshape(5, 7).float() * (0.001 * (p + e + 1))
+            ).to(torch.bfloat16)
+            for p, ckpt in enumerate(ckpts)
+            for e in range(2)
+        }
+        return weight, config, raw
+
+    def test_fastsafetensors_matches_scratch_for_padded_and_supported_layouts(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        for is_w1 in (True, False):
+            for padded in (True, False):
+                with self.subTest(is_w1=is_w1, padded=padded):
+                    weight, config, raw = self._case(is_w1, padded)
+                    database = SimpleNamespace(
+                        load_tensor=lambda name, dtype: [raw[name].to(dtype)]
+                    )
+                    scratch = weight._load_raw_tensor(
+                        DatabaseTensorSource(database), 0, "cpu", config
+                    )
+                    collector = TensorCollector(set(raw), database)
+                    inline = ModelLoader._should_inline_fp8_quantize(
+                        None, SimpleNamespace(weight=weight)
+                    )
+                    self.assertEqual(inline, not padded)
+                    for key, tensor in raw.items():
+                        if inline:
+                            fp8, scale = per_channel_cast_to_fp8_expert(tensor)
+                            collector.store_fp8_quantized(key, fp8, scale)
+                        else:
+                            collector.store_tensor(key, tensor)
+                    fast = weight._load_raw_tensor(collector, 0, "cpu", config)
+                    for key in (weight.kernel.name, weight.scale.name):
+                        torch.testing.assert_close(
+                            fast[key].float(), scratch[key].float(), rtol=0, atol=0
+                        )
+                    self.assertLess(float(fast[weight.scale.name].max()), 0.01)
+
+    def test_unsupported_prequantized_layout_fails_instead_of_losing_scale(self):
+        for is_w1 in (True, False):
+            with self.subTest(is_w1=is_w1):
+                weight, config, raw = self._case(is_w1, padded=True)
+                collector = TensorCollector(set(raw), FakeDatabase())
+                for key, tensor in raw.items():
+                    fp8, scale = per_channel_cast_to_fp8_expert(tensor)
+                    collector.store_fp8_quantized(key, fp8, scale)
+                with self.assertRaisesRegex(ValueError, "require their original scales"):
+                    weight._load_raw_tensor(collector, 0, "cpu", config)
+
+    def _auto_loader(self, layers, free_gib):
+        from rtp_llm.model_loader.load_config import LoadMethod
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        gib = 1024**3
+        loader = object.__new__(ModelLoader)
+        loader._load_method = LoadMethod.AUTO
+        loader._weights_info = SimpleNamespace(
+            _quant_config=Fp8PerChannelCompressedQuantConfig(),
+            model_config=SimpleNamespace(
+                eval_model_weight_size=lambda: 80 * gib,
+                moe_weight_param_count=lambda: 90,
+                layer_weight_param_count=lambda: 100,
+            ),
+        )
+        loader._model_weights_info = SimpleNamespace(layer_weights=layers)
+        loader._load_config = SimpleNamespace(
+            tp_size=1,
+            ep_size=1,
+            exported_device=SimpleNamespace(
+                get_mem_info=lambda: SimpleNamespace(free=free_gib * gib)
+            ),
+            database=SimpleNamespace(
+                is_safetensor=True,
+                get_max_file_size=lambda: 4 * gib,
+                get_pretrain_tensor_names=lambda: ["expert.weight"],
+            ),
+        )
+        # Only isolate environment and loading side effects; exercise the actual
+        # AUTO selection, model traversal and inline eligibility implementations.
+        loader._choose_weight_convert_device = MagicMock(return_value="cuda:0")
+        loader._load_from_fastsafetensor = MagicMock(return_value="fast")
+        loader._load_from_scratch = MagicMock(return_value="scratch")
+        return loader
+
+    def _assert_auto_choice(self, layers, free_gib, expected):
+        loader = self._auto_loader(layers, free_gib)
+        with patch("rtp_llm.model_loader.loader.has_module", return_value=True):
+            self.assertEqual(loader._load_weight("cuda:0"), expected)
+        selected = (
+            loader._load_from_fastsafetensor
+            if expected == "fast"
+            else loader._load_from_scratch
+        )
+        selected.assert_called_once_with("cuda:0")
+
+    def test_auto_keeps_inline_memory_discount_for_supported_moe(self):
+        weights = [self._case(is_w1, padded=False)[0] for is_w1 in (True, False)]
+        # 80 GiB * (90% MoE + 2 * 10% dense) + 3 * 4 GiB shards = 100 GiB.
+        self._assert_auto_choice([weights], 101, "fast")
+        self._assert_auto_choice([weights], 99, "scratch")
+
+    def test_auto_uses_noninline_budget_for_padded_moe(self):
+        for is_w1 in (True, False):
+            with self.subTest(is_w1=is_w1):
+                weight = self._case(is_w1, padded=True)[0]
+                self._assert_auto_choice([[weight]], 120, "scratch")
+                # Conservative non-inline budget: 2 * 80 + 3 * 4 = 172 GiB.
+                self._assert_auto_choice([[weight]], 173, "fast")
+                self._assert_auto_choice([[weight]], 172, "scratch")
+
+    def test_auto_checks_all_layers_and_nested_components(self):
+        supported = self._case(True, padded=False)[0]
+        padded = self._case(False, padded=True)[0]
+        for last in (padded, supported.kernel):
+            with self.subTest(weight_type=type(last).__name__):
+                nested = CompositeWeightGroup(
+                    {"experts": CompositeWeightGroup({"w2": last}, name="experts")},
+                    name="layer",
+                )
+                self._assert_auto_choice([[supported], nested], 120, "scratch")
+        self._assert_auto_choice(
+            [CompositeWeightGroup({"w1": supported}, name="layer")], 120, "fast"
+        )
+
+    def test_auto_without_moe_weights_does_not_assume_inline(self):
+        self._assert_auto_choice([], 120, "scratch")
 
 
 class TestGetTensorNamesExcludesScale(unittest.TestCase):

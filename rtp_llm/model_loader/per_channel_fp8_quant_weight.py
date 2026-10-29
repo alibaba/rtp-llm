@@ -18,14 +18,17 @@ from rtp_llm.model_loader.linear_attn_weight import (
     W8A8Fp8PerChannelLinearAttnAtomicWeight,
 )
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import StackSplitTensorSource
+from rtp_llm.model_loader.tensor_source import (
+    StackSplitTensorSource,
+    TensorCollector,
+    TensorSource,
+)
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -723,9 +726,19 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
     ) -> set[str]:
         return self.kernel.get_tensor_names(layer_id, load_config)
 
+    def supports_inline_fp8_quantization(self) -> bool:
+        # The producer must only quantize layouts whose consumer preserves scales.
+        # Other layouts (e.g. padding) must transform the original weights first.
+        return (
+            isinstance(self.kernel, MoeAtomicWeight)
+            and self.scale is not None
+            and self.kernel._process_fun_name
+            in ("stack_moe_w1", "transpose_stack_moe_w1", "stack_")
+        )
+
     def _load_moe_inline_quant(
         self,
-        tensor_source,
+        tensor_source: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
@@ -739,6 +752,9 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         (from inline quantization during fastsafetensors loading), the already-
         quantized tensors and scales are used directly without re-quantization.
         """
+        if not self.supports_inline_fp8_quantization():
+            return None
+
         kernel = self.kernel
         convert_type = (
             kernel.data_type
@@ -762,13 +778,6 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         num_ckpt = len(ckpt_weights)
 
         is_w1 = kernel._process_fun_name == "stack_moe_w1"
-        if kernel._process_fun_name not in (
-            "stack_moe_w1",
-            "transpose_stack_moe_w1",
-            "stack_",
-        ):
-            return None
-
         first_name, first_tensor = kernel._load_expert_tensor(
             ckpt_weights[0], layer_id, selected_experts[0], tensor_source, convert_type
         )
@@ -780,7 +789,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             device if isinstance(device, torch.device) else torch.device(device)
         )
 
-        has_prequant = hasattr(tensor_source, "has_prequantized_scale")
+        has_prequant = isinstance(tensor_source, TensorCollector)
 
         if is_w1:
             fp8_out = torch.empty(
@@ -880,7 +889,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
 
     def _load_raw_tensor(
         self,
-        database: BaseDatabase,
+        database: TensorSource,
         layer_id: Optional[int],
         device: str,
         load_config: LoadConfig,
@@ -897,6 +906,16 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             )
             if result is not None:
                 return result
+
+        if isinstance(database, TensorCollector) and any(
+            database.has_prequantized_scale(name)
+            for name in self.get_tensor_names(layer_id, load_config)
+        ):
+            raise ValueError(
+                f"Cannot fall back to raw weight loading for {self.kernel.name} "
+                f"({self.kernel._process_fun_name}): pre-quantized FP8 tensors "
+                "require their original scales"
+            )
 
         # Load the original weight tensor
         kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)

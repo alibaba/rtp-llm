@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
-from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, iter_stacked_moe_weights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -328,7 +328,11 @@ class ModelLoader:
             total_layer_params = (
                 self._weights_info.model_config.layer_weight_param_count()
             )
-            if total_layer_params > 0 and moe_params > 0:
+            if (
+                total_layer_params > 0
+                and moe_params > 0
+                and self._all_moe_weights_support_inline_fp8()
+            ):
                 # dense_ratio: fraction of layer weights that are NOT inline-quantized MoE
                 dense_ratio = 1.0 - (moe_params / total_layer_params)
                 # Dense weights need 2x (BF16 loaded + FP8 quantized simultaneously),
@@ -342,11 +346,12 @@ class ModelLoader:
                     f"memory multiplier={mem_multiplier:.2f}x (dense needs BF16 peak)"
                 )
             else:
-                # No MoE weights detected, treat as full online quant
+                # Non-inline MoE layouts retain BF16 tensors until merge/padding
+                # and quantization complete. Do not give them the inline discount.
                 model_mem *= 2
                 logging.info(
-                    f"online PTPC but no MoE weights detected, "
-                    f"doubling model_mem estimate conservatively"
+                    "online PTPC without fully supported inline MoE layouts: "
+                    "doubling model_mem estimate conservatively"
                 )
         elif self._is_online_quant_without_inline():
             # Non-inline online quantization: BF16 checkpoint loaded then
@@ -402,8 +407,31 @@ class ModelLoader:
             and not self._is_online_ptpc()
         )
 
+    def _all_moe_weights_support_inline_fp8(self) -> bool:
+        from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+            LoadQuantPerChannelFp8Weight,
+        )
+
+        found_moe = False
+        for layer_weights in self._model_weights_info.layer_weights:
+            weights = (
+                [layer_weights]
+                if isinstance(layer_weights, WeightModule)
+                else layer_weights
+            )
+            for weight in weights:
+                for component in weight.get_components():
+                    if isinstance(component, LoadQuantPerChannelFp8Weight):
+                        if isinstance(component.kernel, MoeAtomicWeight):
+                            if not component.supports_inline_fp8_quantization():
+                                return False
+                            found_moe = True
+                    elif isinstance(component, MoeAtomicWeight):
+                        # For example, an expert excluded from online quantization.
+                        return False
+        return found_moe
+
     def _should_inline_fp8_quantize(self, weight_info) -> bool:
-        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
         from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
             LoadQuantPerChannelFp8Weight,
         )
@@ -411,7 +439,7 @@ class ModelLoader:
         weight = weight_info.weight
         if not isinstance(weight, LoadQuantPerChannelFp8Weight):
             return False
-        return isinstance(weight.kernel, MoeAtomicWeight) and weight.scale is not None
+        return weight.supports_inline_fp8_quantization()
 
     def _load_from_fastsafetensor(self, device: str):
         logging.info(f"load weight by device: {device}")
