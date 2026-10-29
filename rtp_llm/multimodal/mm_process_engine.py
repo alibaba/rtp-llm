@@ -34,6 +34,7 @@ from rtp_llm.multimodal.mm_preprocess import (
     MultiprocessPreprocessExecutor,
     PreprocessExecutor,
 )
+from rtp_llm.multimodal.mm_preprocess_result import is_http_image_input
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import (
     MMScheduler,
@@ -718,6 +719,7 @@ class MMProcessEngine:
                 if _input_has_url(mm_input)
                 and (
                     self._request_scoped_inspection()
+                    or self._inspection.requires_content_inspection([mm_input])
                     or not self._hash_key_cache.greennet_passed(mm_input.cache_key())
                 )
             ]
@@ -980,6 +982,7 @@ class MMProcessEngine:
                     require_cache_key=self._remote_embedding_cache is not None,
                 )
                 work_items.append(work_item)
+                work_item.benchmark_trace_id = trace_id
                 work_item.capture_inspection_sources = capture_inspection_sources
                 if isinstance(inspection_handle, SourceInspection):
                     inspection_handle.bind_work_item(work_item, index)
@@ -1003,10 +1006,15 @@ class MMProcessEngine:
                     work_item.remote_trace_id = trace_id
                     work_item.remote_cache_observer = remote_cache.record
                     work_item.remote_cache_key = None
+                    work_item.defer_remote_lookup = bool(
+                        getattr(self.mm_part, "supports_remote_source_identity", False)
+                        and (capture_inspection_sources or is_http_image_input(batch))
+                    )
                     try:
-                        work_item.remote_cache_key = remote_cache.key(
-                            batch, trace_id=trace_id
-                        )
+                        if not work_item.defer_remote_lookup:
+                            work_item.remote_cache_key = remote_cache.key(
+                                batch, trace_id=trace_id
+                            )
                     except (ValueError, TypeError, AttributeError) as error:
                         remote_cache.record(
                             "cache_bypass",
@@ -1026,6 +1034,7 @@ class MMProcessEngine:
                     remote_cache is not None
                     # Remote tensors do not carry matching source bytes/verdicts.
                     and not capture_inspection_sources
+                    and not work_item.defer_remote_lookup
                     and work_item.cache_state == "miss"
                     and work_item.should_preprocess
                 ):
@@ -1062,6 +1071,7 @@ class MMProcessEngine:
             work_item.remaining_timeout_s()
             self.preprocess_executor.get_result(work_item)
             work_item.remaining_timeout_s()
+            self._load_preprocessed_remote(work_item)
             if work_item.embedding_result is None and not work_item.waiting_for_cache:
                 estimate = self.mm_part.estimate_work(
                     work_item.preprocess_result, work_item.mm_type
@@ -1073,6 +1083,53 @@ class MMProcessEngine:
                     scheduled.append(
                         self._scheduler.submit([work_item], deadline=deadline)
                     )
+
+    def _load_preprocessed_remote(self, work_item):
+        """Resolve content identity before GPU scheduling, never bypass inspection.
+
+        The loaded tensor stays private until the existing sync/async verdict
+        path publishes this producer. Worker inspection owns the same bytes;
+        it does not borrow a verdict from the remote object or URL hash cache.
+        """
+        if (
+            not work_item.defer_remote_lookup
+            or work_item.cache_state != "miss"
+            or not work_item.should_preprocess
+        ):
+            return
+        remote = work_item.remote_cache
+        trace_id = work_item.remote_trace_id
+        if work_item.source_identity is None:
+            remote.record(
+                "cache_bypass", trace_id=trace_id, reason="source_identity_unavailable"
+            )
+            return
+        try:
+            key = remote.key(
+                work_item.mm_inputs,
+                trace_id=trace_id,
+                source_identity=work_item.source_identity,
+            )
+        except (ValueError, TypeError, AttributeError) as error:
+            remote.record(
+                "cache_bypass",
+                trace_id=trace_id,
+                reason="invalid_source_identity",
+                error_type=type(error).__name__,
+            )
+            return
+        work_item.remote_cache_key = key
+        remote.bind_entry(work_item.cache_entry, key, trace_id)
+        emb_diagnostics.bind_key(trace_id, key)
+        emb_deepseek_diagnostics.bind_key(trace_id, key)
+        work_item.embedding_result = remote.load(
+            key,
+            trace_id=trace_id,
+            timeout_ms=max(1, int(work_item.remaining_timeout_s() * 1000)),
+        )
+        if work_item.embedding_result is not None:
+            work_item.cache_source = "remote"
+            remote.observe_entry(work_item.cache_entry, trace_id)
 
     def _compute_embeddings(
         self,

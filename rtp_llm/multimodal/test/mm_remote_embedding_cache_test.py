@@ -579,6 +579,21 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
         self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
         self.assertFalse(self.clients)
 
+    def test_benchmark_logger_failure_preserves_io_and_releases_resources(self):
+        def log(marker, *args, **kwargs):
+            if marker.startswith("MM_EMB_BENCHMARK_JSON"):
+                raise RuntimeError("diagnostic sink unavailable")
+
+        with patch.dict("os.environ", {"MM_EMB_BENCHMARK_TIMING": "1"}), patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.info", side_effect=log
+        ):
+            self.evict(self.cache)
+            value = self.cache.load("key")
+        self.assertTrue(torch.equal(value[0], self.value[0]))
+        self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
+        self.assertEqual(self.cache.stats()["inflight_bytes"], 0)
+        self.assertEqual(self.cache._client_users, {})
+
     def test_immutable_key_namespace_and_all_preprocessing_fields(self):
         item = self.item()
         key = self.cache.key([item])
@@ -832,6 +847,241 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
         inputs = self.decode(url="", tensor=expected, mm_type=4)
         self.assertTrue(torch.equal(inputs[0].tensor, expected))
         self.assertIsNone(self.cache.key(inputs))
+
+
+class DownloadedSourceModel(FakeEmbeddingLengthInterface):
+    supports_inspection_sources = True
+    supports_remote_source_identity = True
+
+    def __init__(self):
+        super().__init__()
+        self.forward_count = 0
+
+    def get_preprocess_params(self):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41ImageProcessorConfig,
+        )
+
+        return dict(processor_config=V41ImageProcessorConfig(vision_min_pixels=1764))
+
+    @staticmethod
+    def preprocess_input(mm_inputs, vit_config, **kwargs):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+
+        return DeepSeekV41VisionEmbedding.preprocess_input(
+            mm_inputs, vit_config, **kwargs
+        )
+
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        self.forward_count += len(data_list)
+        return [
+            (torch.full((2, 4), float(data.rgb[0, 0, 0])), None) for data in data_list
+        ]
+
+
+class DownloadedImageCacheTest(unittest.TestCase):
+    def image_bytes(self, color="red"):
+        import io
+
+        from PIL import Image
+
+        stream = io.BytesIO()
+        Image.new("RGB", (42, 42), color).save(stream, format="PNG")
+        return stream.getvalue()
+
+    def item(self, url="https://example.invalid/mutable.png"):
+        return MultimodalInput(
+            url,
+            1,
+            torch.empty(0),
+            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+        )
+
+    def engine(self, payload, *, enabled=True, passed=True, hold=False):
+        import io
+
+        from rtp_llm.multimodal.test.mm_inspection_pipeline_test import SourceProvider
+
+        config = VitConfig()
+        config.use_local_preprocess = True
+        config.mm_cache_gpu_max_bytes = 0
+        config.mm_cache_cpu_max_bytes = 1024 * 1024
+        config.mm_hash_key_cache_max_bytes = 4096
+        config.mm_remote_cache_enable = enabled
+        config.mm_remote_cache_namespace = "downloaded-source-test-model-v1"
+        config.mm_remote_cache_read_timeout_ms = 500
+        model = ModelConfig()
+        model.model_type = "deepseek_v41"
+        model.ckpt_path = "/nonexistent/test-model"
+        model.mm_related_params.preprocess_batch_size = 1
+        store = Store()
+        factory = patch(
+            "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env", return_value=store
+        )
+        factory.start()
+        self.addCleanup(factory.stop)
+        interface = DownloadedSourceModel()
+        engine = MMProcessEngine(
+            interface, model, config, ProfilingDebugLoggingConfig(), device="cpu"
+        )
+        self.addCleanup(engine.stop)
+        provider = SourceProvider(passed, hold)
+        engine._inspection._greennet_provider = provider
+        self.addCleanup(provider.release.set)
+        download = patch(
+            "rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision.load_image_source",
+            side_effect=lambda *args, **kw: io.BytesIO(payload),
+        )
+        download.start()
+        self.addCleanup(download.stop)
+        return engine, store, provider, interface, download
+
+    def seed(self, engine, store, payload, value=None):
+        import base64
+
+        item = self.item("data:image/png;base64," + base64.b64encode(payload).decode())
+        key = engine._remote_embedding_cache.key([item])
+        value = (torch.full((2, 4), 37.0), None) if value is None else value
+        store.objects[key] = pack_object(plan_object(value))
+        return key, value
+
+    def test_fresh_inspection_remote_hit_waits_for_matching_verdict_without_encoder(
+        self,
+    ):
+        payload = self.image_bytes()
+        engine, store, provider, model, _ = self.engine(payload, hold=True)
+        item = self.item()
+        key, value = self.seed(engine, store, payload)
+        engine.async_submit([item], request_id=901)
+        self.assertTrue(store.read_started.wait(5))
+        limit = time.monotonic() + 5
+        while not provider.calls and time.monotonic() < limit:
+            time.sleep(0.005)
+        self.assertEqual(provider.calls, [([item.url], [payload])])
+        entry = engine._embedding_cache.peek(item.cache_key())
+        self.assertIsNotNone(entry)
+        self.assertFalse(entry.is_done)
+        self.assertFalse(store.saved.is_set())
+        self.assertEqual(model.forward_count, 0)
+        provider.release.set()
+        result = engine.get_embedding_result([item], request_id=901)
+        self.assertTrue(torch.equal(result[0].embeddings[0], value[0]))
+        self.assertTrue(entry.greennet_passed)
+        self.assertEqual(entry.remote_cache_context["key"], key)
+        self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
+
+    def test_fresh_remote_hit_rejection_never_publishes_or_returns(self):
+        from rtp_llm.config.exceptions import FtRuntimeException
+
+        payload = self.image_bytes()
+        engine, store, provider, model, _ = self.engine(payload, passed=False)
+        self.seed(engine, store, payload)
+        item = self.item()
+        with self.assertRaises(FtRuntimeException):
+            engine.get_embedding_result([item], request_id=902)
+        self.assertEqual(provider.calls, [([item.url], [payload])])
+        self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
+        self.assertEqual(model.forward_count, 0)
+        self.assertIsNone(engine._embedding_cache.peek(item.cache_key()))
+        self.assertFalse(store.saved.is_set())
+
+    def test_fresh_remote_hit_inspection_timeout_never_publishes(self):
+        import concurrent.futures
+
+        payload = self.image_bytes()
+        engine, store, provider, model, _ = self.engine(payload, hold=True)
+        self.seed(engine, store, payload)
+        item = self.item()
+        key = item.cache_key()
+        _, entry = engine._embedding_cache.try_acquire(key)
+        engine._run_async_compute([item], key, entry, 903, time.monotonic() + 0.3)
+        with self.assertRaises(concurrent.futures.TimeoutError):
+            entry.wait(timeout=5)
+        self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
+        self.assertEqual(model.forward_count, 0)
+        self.assertIsNone(engine._embedding_cache.peek(key))
+        self.assertFalse(store.saved.is_set())
+
+    def test_same_url_new_bytes_do_not_reuse_old_identity_or_url_verdict(self):
+        from rtp_llm.config.exceptions import FtRuntimeException
+
+        old, new = self.image_bytes("red"), self.image_bytes("blue")
+        engine, store, provider, model, _ = self.engine(new, passed=False)
+        old_key, _ = self.seed(engine, store, old)
+        item = self.item()
+        with patch.object(engine._hash_key_cache, "greennet_passed", return_value=True):
+            verdict = engine.wait_greennet_verdict([item], request_id=904)
+            self.assertFalse(verdict.passed)
+            with self.assertRaises(FtRuntimeException):
+                engine.get_embedding_result([item], request_id=904)
+        self.assertTrue(provider.calls)
+        self.assertTrue(all(sources == [new] for _, sources in provider.calls))
+        self.assertGreaterEqual(engine._remote_embedding_cache.stats()["miss"], 1)
+        self.assertEqual(engine._remote_embedding_cache.stats().get("hit", 0), 0)
+        self.assertGreaterEqual(model.forward_count, 1)
+        self.assertEqual(list(store.objects), [old_key])
+        self.assertFalse(store.saved.is_set())
+
+    def test_remote_transfer_failure_uses_already_decoded_source_and_encoder(self):
+        payload = self.image_bytes()
+        engine, store, provider, model, _ = self.engine(payload)
+        self.seed(engine, store, payload)
+        store.fail_read = True
+        result = engine.get_embedding_result([self.item()], request_id=905)
+        self.assertEqual(model.forward_count, 1)
+        self.assertEqual(result[0].embeddings[0][0, 0].item(), 255)
+        self.assertEqual(provider.calls[0][1], [payload])
+        self.assertEqual(engine._remote_embedding_cache.stats()["read_error"], 1)
+
+    def test_remote_disabled_keeps_encoder_and_has_no_optional_client(self):
+        payload = self.image_bytes()
+        engine, store, provider, model, _ = self.engine(payload, enabled=False)
+        result = engine.get_embedding_result([self.item()], request_id=906)
+        self.assertEqual(model.forward_count, 1)
+        self.assertEqual(result[0].embeddings[0][0, 0].item(), 255)
+        self.assertEqual(provider.calls[0][1], [payload])
+        self.assertIsNone(engine._remote_embedding_cache)
+        self.assertFalse(store.read_started.is_set())
+        self.assertFalse(store.saved.is_set())
+
+    def test_http_and_inline_actual_bytes_share_key_but_changed_bytes_do_not(self):
+        import base64
+
+        from rtp_llm.multimodal.mm_preprocess_result import ImageSourceIdentity
+
+        payload = self.image_bytes()
+        engine, _, _, _, _ = self.engine(payload)
+        remote = engine._remote_embedding_cache
+        url = self.item()
+        identity = ImageSourceIdentity.from_bytes(payload)
+        http_key = remote.key([url], source_identity=identity)
+        inline = self.item(
+            "data:application/octet-stream;base64," + base64.b64encode(payload).decode()
+        )
+        self.assertEqual(http_key, remote.key([inline]))
+        self.assertNotEqual(
+            http_key,
+            remote.key(
+                [url],
+                source_identity=ImageSourceIdentity.from_bytes(
+                    self.image_bytes("blue")
+                ),
+            ),
+        )
+        self.assertIsNone(remote.key([url]))
+        self.assertIsNone(
+            remote.key(
+                [inline], source_identity=ImageSourceIdentity.from_bytes(b"mismatch")
+            )
+        )
+        for media_type in (2, 3, 4):
+            url.mm_type = media_type
+            self.assertIsNone(remote.key([url], source_identity=identity))
+        url.mm_type = 1
+        url.tensor = torch.ones(1)
+        self.assertIsNone(remote.key([url], source_identity=identity))
 
 
 if __name__ == "__main__":

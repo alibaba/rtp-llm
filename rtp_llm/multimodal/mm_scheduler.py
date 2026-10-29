@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import os
 import queue
 import sys
 import threading
@@ -10,7 +12,7 @@ import traceback
 from collections import Counter
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 import torch
@@ -83,6 +85,80 @@ class MMSchedulerRequestTooLargeError(MMSchedulerError, ValueError):
     """
 
 
+@contextmanager
+def _benchmark_encoder_timing(mm_part, items):
+    """Opt-in synchronized batch timing; default execution is unchanged.
+
+    The measured embedding stage includes device preprocessing, vision layers
+    and projection. CUDA events measure the current stream; the wall interval
+    also includes host dispatch and waiting for completion. Synchronization is
+    intentional for diagnostic runs, never enabled by the remote-cache switch.
+    """
+    if os.environ.get("MM_EMB_BENCHMARK_TIMING") != "1":
+        yield
+        return
+    events = None
+    try:
+        device = getattr(mm_part, "_device", None)
+        if device is not None and torch.device(device).type == "cuda":
+            with torch.cuda.device(device):
+                stream = torch.cuda.current_stream(device)
+                events = (
+                    torch.cuda.Event(enable_timing=True),
+                    torch.cuda.Event(enable_timing=True),
+                    stream,
+                )
+                events[0].record(stream)
+    except Exception:
+        try:
+            logging.exception("Unable to start diagnostic embedding CUDA timer")
+        except Exception:
+            pass
+        events = None
+    started = time.perf_counter_ns()
+    status = "error"
+    try:
+        yield
+        status = "success"
+    finally:
+        gpu_ms = None
+        if events is not None:
+            try:
+                events[1].record(events[2])
+                events[1].synchronize()
+                gpu_ms = events[0].elapsed_time(events[1])
+            except Exception:
+                try:
+                    logging.exception(
+                        "Unable to finish diagnostic embedding CUDA timer"
+                    )
+                except Exception:
+                    pass
+        wall_ms = (time.perf_counter_ns() - started) / 1e6
+        for wi in items:
+            try:
+                logging.info(
+                    "MM_EMB_BENCHMARK_JSON %s",
+                    json.dumps(
+                        dict(
+                            event="encoder_timing",
+                            trace_id=getattr(wi, "benchmark_trace_id", None),
+                            pid=os.getpid(),
+                            timestamp_ns=time.time_ns(),
+                            batch_items=len(items),
+                            status=status,
+                            gpu_ms=gpu_ms,
+                            wall_ms=wall_ms,
+                            scope="batched_embedding_including_device_preprocess",
+                            synchronized=gpu_ms is not None,
+                        ),
+                        sort_keys=True,
+                    ),
+                )
+            except Exception:
+                pass  # Diagnostics must preserve forward results and errors.
+
+
 def _run_embedding(
     mm_part: MultiModalEmbeddingInterface,
     items: List[MMWorkItem],
@@ -108,9 +184,13 @@ def _run_embedding(
                         trace_id=wi.remote_trace_id,
                         batch_items=len(items),
                     )
-            with emb_diagnostics.encoder_scope(
+            with _benchmark_encoder_timing(
+                mm_part, items
+            ), emb_diagnostics.encoder_scope(
                 items
-            ), emb_deepseek_diagnostics.encoder_scope(items):
+            ), emb_deepseek_diagnostics.encoder_scope(
+                items
+            ):
                 batch_outputs = mm_part.batched_embedding(data_list, type_list)
     # Forward-only latency, sampled per merged batch -> its own metric. The
     # historical per-request (wait + forward) latency stays on

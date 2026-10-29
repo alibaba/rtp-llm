@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing.pool
 import os
@@ -83,6 +84,29 @@ def _report_result_path(work_item, payload):
     The receive stamp is recorded by the pool callback, so waiting behind other
     request work in the caller does not inflate the return-path measurement.
     """
+    if os.environ.get("MM_EMB_BENCHMARK_TIMING") == "1":
+        try:
+            identity = getattr(work_item, "source_identity", None)
+            logging.info(
+                "MM_EMB_BENCHMARK_JSON %s",
+                json.dumps(
+                    dict(
+                        event="preprocess_timing",
+                        trace_id=getattr(work_item, "benchmark_trace_id", None),
+                        pid=os.getpid(),
+                        timestamp_ns=time.time_ns(),
+                        wall_ms=payload.total_ms,
+                        download_ms=payload.download_ms,
+                        scope="cpu_preprocess_including_source_download",
+                        synchronized=False,
+                        media_sha256=identity.sha256 if identity is not None else None,
+                        media_nbytes=identity.nbytes if identity is not None else None,
+                    ),
+                    sort_keys=True,
+                ),
+            )
+        except Exception:
+            pass  # Optional diagnostic output must not fail preprocessing.
     for metric, seconds in (
         (
             GaugeMetrics.VIT_PREPROCESS_DISPATCH_RT_METRIC,
@@ -258,10 +282,15 @@ class PreprocessExecutor:
             if work_item.inspection_future is not None:
                 if result.inspection_sources:
                     raise ValueError("Worker inspection leaked source bytes to parent")
-            elif len(result.inspection_sources) != len(work_item.mm_inputs):
-                raise ValueError("CPU inspection sources changed input count")
-            else:
+            elif (
+                work_item.capture_inspection_sources
+                or result.inspection_sources
+                or result.source_identity is None
+            ):
+                if len(result.inspection_sources) != len(work_item.mm_inputs):
+                    raise ValueError("CPU inspection sources changed input count")
                 work_item.inspection_sources = result.inspection_sources
+            work_item.source_identity = result.source_identity
             work_item.preprocess_result = result.data
         elif work_item.capture_inspection_sources:
             raise ValueError("CPU preprocessing did not return inspection sources")

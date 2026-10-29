@@ -35,7 +35,8 @@ class RemoteEmbeddingEngineTest(unittest.TestCase):
         self.engine.preprocess_executor = Mock()
         self.engine.report_vit_error = Mock()
         self.engine.is_proxy_mode = False
-        self.part = Mock()
+        self.part = Mock(supports_remote_source_identity=False)
+        self.engine.mm_part = self.part
         self.part.batched_embedding.side_effect = lambda data, types: [
             self.value for _ in data
         ]

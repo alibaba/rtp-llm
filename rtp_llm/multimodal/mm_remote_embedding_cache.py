@@ -1,6 +1,6 @@
 """Bounded shared KVCM tier, populated only by detached CPU cache evictions.
 
-Remote identity admits immutable inline image bytes with a model namespace.
+Remote identity binds actual image bytes to an immutable model namespace.
 The local GPU/CPU scheduler and asynchronous eviction policy remain unchanged.
 """
 
@@ -24,6 +24,10 @@ from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
     unpack_object,
+)
+from rtp_llm.multimodal.mm_preprocess_result import (
+    ImageSourceIdentity,
+    is_http_image_input,
 )
 
 
@@ -159,7 +163,7 @@ class MMRemoteEmbeddingCache:
                 tensor_device="cpu",
             )
 
-    def key(self, mm_inputs, *, trace_id=None):
+    def key(self, mm_inputs, *, trace_id=None, source_identity=None):
         def bypass(reason, **fields):
             self.record("cache_bypass", trace_id=trace_id, reason=reason, **fields)
             return None
@@ -178,8 +182,6 @@ class MMRemoteEmbeddingCache:
         match = re.match(
             r"^data:(?:image/[^;,]+|application/octet-stream);base64,", item.url
         )
-        if match is None:
-            return bypass("non_inline_image")
         if item.tensor is not None and item.tensor.numel():
             return bypass(
                 "nonempty_tensor",
@@ -187,15 +189,33 @@ class MMRemoteEmbeddingCache:
                 tensor_dtype=str(item.tensor.dtype),
                 tensor_device=str(item.tensor.device),
             )
-        try:
-            media = base64.b64decode(item.url[match.end() :], validate=True)
-        except (binascii.Error, ValueError):
-            return bypass("invalid_inline_base64")
-        if not media:
-            return bypass("empty_inline_image")
+        identity_source = "inline_image_bytes"
+        if match is not None:
+            try:
+                media = base64.b64decode(item.url[match.end() :], validate=True)
+            except (binascii.Error, ValueError):
+                return bypass("invalid_inline_base64")
+            if not media:
+                return bypass("empty_inline_image")
+            identity = ImageSourceIdentity.from_bytes(media)
+            if source_identity is not None and source_identity != identity:
+                return bypass("source_identity_mismatch")
+        elif is_http_image_input(mm_inputs) and isinstance(
+            source_identity, ImageSourceIdentity
+        ):
+            # Only the trusted CPU preprocessor can supply this sidecar. The
+            # public request/RPC contains no digest field. URL strings, headers
+            # and signed query parameters are never accepted as content identity.
+            identity = source_identity
+            identity_source = "downloaded_image_bytes"
+        else:
+            return bypass("non_inline_image")
         limits = self._model_identity.get("input_limits", [])
-        if limits and limits[0] > 0 and len(media) > limits[0] * 1024:
-            return bypass("inline_image_too_large", media_nbytes=len(media))
+        if limits and limits[0] > 0 and identity.nbytes > limits[0] * 1024:
+            return bypass(
+                "inline_image_too_large" if match else "downloaded_image_too_large",
+                media_nbytes=identity.nbytes,
+            )
         config = item.mm_preprocess_config
         fields = (
             "width",
@@ -209,7 +229,7 @@ class MMRemoteEmbeddingCache:
             "max_long_side_pixel",
         )
         preprocessing = {name: getattr(config, name, None) for name in fields}
-        media_sha256 = hashlib.sha256(media).hexdigest()
+        media_sha256 = identity.sha256
         material = dict(
             schema="rtp-mm-result-v2",
             namespace=self._namespace,
@@ -226,9 +246,9 @@ class MMRemoteEmbeddingCache:
             "cache_admitted",
             key=key,
             trace_id=trace_id,
-            identity_source="inline_image_bytes",
+            identity_source=identity_source,
             media_sha256=media_sha256,
-            media_nbytes=len(media),
+            media_nbytes=identity.nbytes,
         )
         return key
 
@@ -248,6 +268,27 @@ class MMRemoteEmbeddingCache:
             **fields
         )
         logging.info("MM_EMB_REMOTE_JSON %s", json.dumps(payload, sort_keys=True))
+
+    def _benchmark(self, event, key, trace_id, **fields):
+        if os.environ.get("MM_EMB_BENCHMARK_TIMING") == "1":
+            try:
+                logging.info(
+                    "MM_EMB_BENCHMARK_JSON %s",
+                    json.dumps(
+                        dict(
+                            event=event,
+                            key=key,
+                            trace_id=trace_id,
+                            pid=os.getpid(),
+                            timestamp_ns=time.time_ns(),
+                            synchronized=False,
+                            **fields
+                        ),
+                        sort_keys=True,
+                    ),
+                )
+            except Exception:
+                pass  # Never prevent IO-task/client release in a finally block.
 
     def _get_client(self):
         with self._client_lock:
@@ -374,6 +415,9 @@ class MMRemoteEmbeddingCache:
 
         def write():
             client = None
+            started = time.perf_counter()
+            api_ms = None
+            outcome = "error"
             try:
                 buffer = pack_object(plan)
                 emb_diagnostics.eviction_serialized(
@@ -383,7 +427,10 @@ class MMRemoteEmbeddingCache:
                     trace_id, context.get("deepseek_origin"), plan, buffer
                 )
                 client = self._get_client()
+                api_started = time.perf_counter()
                 client.save_one(key, buffer, trace_id=trace_id)
+                api_ms = (time.perf_counter() - api_started) * 1000
+                outcome = "success"
                 self._count("write_success")
                 self.record(
                     "store_success",
@@ -407,6 +454,15 @@ class MMRemoteEmbeddingCache:
                 if client is not None:
                     self._retire_client(client)
             finally:
+                self._benchmark(
+                    "remote_store_timing",
+                    key,
+                    trace_id,
+                    wall_ms=(time.perf_counter() - started) * 1000,
+                    sdk_api_ms=api_ms,
+                    status=outcome,
+                    scope="eviction_pack_client_init_sdk_save_and_validation",
+                )
                 if client is not None:
                     self._release_client(client)
 
@@ -427,6 +483,9 @@ class MMRemoteEmbeddingCache:
             return None
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
+        started = time.perf_counter()
+        timing = {}
+        outcome = "error"
         if not self._reserve(0):
             return None
         cost = 0
@@ -440,10 +499,12 @@ class MMRemoteEmbeddingCache:
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     raise TimeoutError("remote embedding lookup deadline expired")
+                api_started = time.perf_counter()
                 size = client.object_size(
                     key, trace_id=trace_id, timeout_ms=remaining_ms
                 )
                 if size is None:
+                    timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                     self._count("miss")
                     self.record("load_miss", key=key, trace_id=trace_id)
                     return None
@@ -459,6 +520,7 @@ class MMRemoteEmbeddingCache:
                     raise TimeoutError("remote embedding transfer deadline expired")
                 buffer = torch.empty(size, dtype=torch.uint8)
                 client.load_one(key, buffer, trace_id=trace_id)
+                timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                 return buffer
             except Exception:
                 if client is not None:
@@ -475,6 +537,7 @@ class MMRemoteEmbeddingCache:
             future = self._executor.submit(read)
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
+                outcome = "miss_or_admission_skip"
                 return None
             value = unpack_object(
                 buffer, max_bytes=self.max_object_bytes, cuda_device=self.cuda_device
@@ -488,6 +551,7 @@ class MMRemoteEmbeddingCache:
                     trace_id, plan, buffer, loading=True
                 )
             self._count("hit")
+            outcome = "hit"
             self.record(
                 "load_hit",
                 key=key,
@@ -514,6 +578,15 @@ class MMRemoteEmbeddingCache:
             )
             return None
         finally:
+            self._benchmark(
+                "remote_load_timing",
+                key,
+                trace_id,
+                wall_ms=(time.perf_counter() - started) * 1000,
+                sdk_api_ms=timing.get("sdk_api_ms"),
+                status=outcome,
+                scope="caller_queue_client_init_sdk_load_unpack_and_validation",
+            )
             if future is None or future.done():
                 self._release(cost)
             else:

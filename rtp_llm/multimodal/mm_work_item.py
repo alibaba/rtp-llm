@@ -160,6 +160,8 @@ class MMWorkItem:
 
         self.preprocess_result: Optional[Any] = None
         self.capture_inspection_sources = False
+        self.source_identity = None
+        self.defer_remote_lookup = False
         self.inspection_sources: Optional[List[bytes]] = None
         self.inspection_request = None
         self.inspection_future = None
