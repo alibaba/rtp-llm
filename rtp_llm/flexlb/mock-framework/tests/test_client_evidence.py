@@ -11,7 +11,7 @@ from mock_framework import client_evidence_pb2 as pb
 from mock_framework.config import Registry
 from mock_framework.evidence import read_requests, playback_directories, main
 from mock_framework.execution.transport import ExecutionError
-from mock_framework.interfaces import client
+from mock_framework.execution import clients as client_runtime
 
 
 def frame(batch):
@@ -86,7 +86,7 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(evidence, t
     evidence(index=0, stride=2)
     evidence('client-1', index=1, stride=2, outcome='timeout')
     topology = [dict(id=f'client-{i}', role='client', rpc=f'c:{i}', control=f'http://c:{i}') for i in range(2)]
-    ctx = SimpleNamespace(records=SimpleNamespace(directory=tmp_path), processes=SimpleNamespace(topology=topology))
+    ctx = SimpleNamespace(records=SimpleNamespace(directory=tmp_path), runtime=SimpleNamespace(topology=SimpleNamespace(active=lambda: topology)))
     query = Registry.standard().get('client/requests')
     result = asyncio.run(query.invoke(ctx, {'limit': 1}))
     assert result['matched'] == 2 and result['truncated'] and len(result['records']) == 1
@@ -102,12 +102,12 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(evidence, t
 
 def test_collect_rejects_missing_evidence_even_when_rpc_summary_passes(monkeypatch, tmp_path):
     from test_client_interfaces import context, state
-    ctx = context(); ctx.records.directory = tmp_path; ctx.processes.client_pending = True
+    ctx = context(); ctx.records.directory = tmp_path; ctx.runtime.clients.pending = True
     async def post(*args): return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
-    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client_runtime, 'post', post)
     with pytest.raises(ExecutionError, match='No Client playback'):
         asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
-    assert ctx.processes.client_pending
+    assert ctx.runtime.clients.pending
 
 
 def test_cli_partial_output_is_nonzero_and_explicit(evidence, tmp_path, monkeypatch, capsys):

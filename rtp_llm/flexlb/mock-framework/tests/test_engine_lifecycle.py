@@ -72,10 +72,10 @@ def no_children(output):
 def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(tmp_path, mode, monkeypatch):
     @case_interface('probe/lifecycle', effect='write')
     async def exercise(ctx, args: Args) -> list[str]:
-        owner = ctx.processes
+        owner = ctx.runtime
         assert len(owner.engines.hosts) == (1 if mode == 'shared' else 3)
         original = ctx.globals()['prefill']
-        first = next(item for item in owner.history if item['rpc'] == original[0])
+        first = next(item for item in owner.topology.history() if item['rpc'] == original[0])
         original_files = {name: (ctx.records.directory / 'components' / first['id'] / name).read_bytes()
                           for name in ('config.json', 'effective-config.json', 'endpoints.json')}
         removed = await scale_in(ctx, ScaleIn(count=1))
@@ -97,11 +97,11 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         assert not candidates
         for name, content in original_files.items():
             assert (ctx.records.directory / 'components' / first['id'] / name).read_bytes() == content
-        if owner.prometheus:
+        if owner.monitoring:
             # Keep an obsolete discovery target present while new instances are already serving.
             from mock_framework.execution.records import write_json
             from mock_framework.execution.monitoring import _get
-            prom = owner.prometheus
+            prom = owner.monitoring
             retired = prom.metadata['retired_targets'][first['id']]
             write_json(prom.directory / 'targets.json', list(prom.targets.values()) + [{key: retired[key] for key in ('targets', 'labels')}])
             expression = 'up{job="mock",instance="' + first['rpc'] + '"}'
@@ -119,7 +119,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         assert len(ctx.globals()['prefill']) == 3 and not set(created) & set(original)
         assert await scale_in(ctx, ScaleIn(targets=created[:1])) == created[:1]
         assert len(ctx.globals()['prefill']) == 2
-        for item in owner.history:
+        for item in owner.topology.history():
             folder = ctx.records.directory / 'components' / item['id']
             assert json.loads((folder / 'endpoints.json').read_text())['rpc'] == item['rpc']
             assert (folder / 'ready.json').exists() == ('stopped_at' not in item)
@@ -129,9 +129,9 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', ctx.globals()['decode'][0],
             str(tmp_path / 'traffic.json'), ctx.globals()['prefill'][0]], capture_output=True, text=True, timeout=15)
         assert probe.returncode == 0, probe.stderr
-        if owner.prometheus:
+        if owner.monitoring:
             samples = await query(replace(ctx, query_time=timestamp()), Promql('count_over_time(mock_engine_requests_started_total[1m])'))
-            assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in owner.history}
+            assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in owner.topology.history()}
         assert len(await scale_in(ctx, ScaleIn())) == 2
         assert ctx.globals()['prefill'] == []
         assert len(await scale_out(ctx, ScaleOut())) == 1
@@ -160,7 +160,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
 def test_host_failure_or_partial_startup_fails_the_run_and_cleans_every_process(tmp_path, invalid):
     @case_interface('probe/crash', effect='write')
     async def crash(ctx, args: Args) -> bool:
-        next(iter(ctx.processes.engines.hosts.values()))['child'].kill()
+        next(iter(ctx.runtime.engines.hosts.values()))['child'].kill()
         await asyncio.sleep(20)
         return True
     case, registry, launch = setup_case(tmp_path, crash, invalid=invalid)
@@ -188,7 +188,7 @@ def test_shared_host_rejects_conflicting_process_environment_and_bad_mode(tmp_pa
 
 def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypatch):
     from mock_framework.execution.engines import EngineHosts
-    owner = EngineHosts(None)
+    owner = EngineHosts(supervisor=None, topology=None, records=None, environment={}, recipes={}, mode='shared', monitoring=None)
     owner.used_ports.add(12345)
     class Probe:
         def __enter__(self): return self
@@ -204,7 +204,7 @@ def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypat
 def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, operation):
     @case_interface('probe/partial', effect='write')
     async def exercise(ctx, args: Args) -> bool:
-        original = ctx.processes.engines.call
+        original = ctx.runtime.engines.call
         calls = []
         async def fail_second(host, name, body):
             if name == operation:
@@ -213,7 +213,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, 
                     ctx.records.emit(event='injected_failure', operation=name, calls=calls)
                     body = {**body, **({'controlPort': body['rpcPort']} if name == 'create' else {'id': 'prefill-999999'})}
             return await original(host, name, body)
-        ctx.processes.engines.call = fail_second
+        ctx.runtime.engines.call = fail_second
         if operation == 'create': await scale_out(ctx, ScaleOut(count=2))
         else: await scale_in(ctx, ScaleIn(count=2))
         raise AssertionError('Partial failure was swallowed')
@@ -274,7 +274,7 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                     subsequent = [r for r in rows() if datetime.fromisoformat(r['sent_at']) >= datetime.fromisoformat(converged_at)]
                     return len(subsequent) >= 5 and all(r['outcome'] == 'success' and r['tokens'] == 3 for r in subsequent[-5:])
                 await until(recovered, 10)
-                prom = ctx.processes.prometheus
+                prom = ctx.runtime.monitoring
                 async def new_engine_received_requests():
                     expr = 'mock_engine_requests_started_total{instance="' + created[0] + '"}'
                     value = await asyncio.to_thread(_get, prom.url + '/api/v1/query?' + urllib.parse.urlencode({'query': expr}))

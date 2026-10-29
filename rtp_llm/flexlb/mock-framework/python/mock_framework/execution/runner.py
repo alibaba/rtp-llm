@@ -7,7 +7,7 @@ from ..config.model import Reference
 from ..config.validation import validate
 from ..config.values import duration
 from .assertions import compare
-from .processes import Processes
+from .environment import RunEnvironment
 from .records import Records, timestamp, write_json
 from .transport import ExecutionError
 
@@ -30,7 +30,7 @@ def resolve(value, results, globals):
 
 @dataclass(frozen=True)
 class CaseContext:
-    processes: Processes
+    runtime: RunEnvironment
     records: Records
     query_time: str
     deadline: float
@@ -43,13 +43,13 @@ class CaseContext:
         return remaining
 
     def globals(self):
-        return {name: sorted(item['rpc'] for item in self.processes.topology if item['role'] == role)
+        return {name: sorted(item['rpc'] for item in self.runtime.topology.active() if item['role'] == role)
                 for name, role in [('masters', 'master'), ('prefill', 'prefill'), ('decode', 'decode'), ('vit', 'vit')]}
 
 
 async def run_case(case, registry, launch, directory):
     records = Records(directory, case, launch)
-    processes = Processes(case, launch, records)
+    runtime = RunEnvironment(case, launch, records)
     results = {}
     result = {'status': 'ERROR', 'started_at': timestamp()}
     cancelled = False
@@ -58,7 +58,7 @@ async def run_case(case, registry, launch, directory):
                           *[r['cwd'] for r in launch['components'].values()]])
         write_json(records.directory / 'interfaces.json', {'interfaces': registry.interfaces})
         records.emit(event='setup_started')
-        await processes.start()
+        await runtime.start()
         records.emit(event='setup_finished')
         for phase in case.phases:
             phase_deadline = time.monotonic() + float(duration(phase.timeout))
@@ -68,7 +68,7 @@ async def run_case(case, registry, launch, directory):
                 for step in phase.steps:
                     interface = registry.get(step.interface)
                     deadline = min(phase_deadline, time.monotonic() + float(duration(step.within))) if step.within else phase_deadline
-                    context = CaseContext(processes, records, timestamp(), deadline)
+                    context = CaseContext(runtime, records, timestamp(), deadline)
                     gate, invoked, returned = None, False, False
                     stage = 'arguments'
                     records.emit(event='step_started', phase=phase.id, step=step.id, interface=step.interface,
@@ -85,7 +85,7 @@ async def run_case(case, registry, launch, directory):
                         budget = context.timeout
                         stage = 'invoke'
                         invoked = True
-                        actual = await processes.guard(interface.invoke(context, args), budget)
+                        actual = await runtime.supervisor.guard(interface.invoke(context, args), budget)
                         returned = True
                         results[step.id] = actual
                         stage = 'expect'
@@ -99,7 +99,7 @@ async def run_case(case, registry, launch, directory):
                             stage = 'wait_after'
                             records.emit(event='wait_started', step=step.id, duration=step.wait_after)
                             budget = context.timeout
-                            await processes.guard(asyncio.sleep(wait), budget)
+                            await runtime.supervisor.guard(asyncio.sleep(wait), budget)
                         records.emit(event='step_finished', step=step.id, status='PASS', args=args, result=actual)
                     except BaseException as error:
                         status = ('CANCELLED' if isinstance(error, asyncio.CancelledError) else
@@ -132,7 +132,7 @@ async def run_case(case, registry, launch, directory):
         result.update(status='ERROR', error=f'{type(error).__name__}: {error}')
     finally:
         records.emit(event='teardown_started')
-        closing = asyncio.create_task(processes.close())
+        closing = asyncio.create_task(runtime.close())
         while True:
             try:
                 cleanup = await asyncio.shield(closing)

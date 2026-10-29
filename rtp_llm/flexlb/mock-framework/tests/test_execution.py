@@ -34,7 +34,7 @@ async def read(ctx, args: Args) -> int:
 async def write(ctx, args: Args) -> int:
     ctx.records.emit(event='mutation')
     if args.crash:
-        ctx.processes.children[0][1].kill()
+        ctx.runtime.supervisor.children[0][1].kill()
     await asyncio.sleep(args.delay)
     return args.value
 
@@ -242,32 +242,38 @@ def test_multiple_masters_always_use_distinct_processes(setup, tmp_path):
 
 
 @pytest.mark.parametrize('exit_code', [None, 0])
-def test_intentional_stop_retains_unreaped_process_for_final_cleanup(exit_code):
+def test_intentional_stop_retains_unreaped_process_for_final_cleanup(exit_code, monkeypatch):
     from types import SimpleNamespace
-    from mock_framework.execution.processes import Processes
+    from mock_framework.execution.processes import ProcessSupervisor
     async def exercise():
-        p = Processes(None, {}, SimpleNamespace())
-        child = SimpleNamespace(returncode=None)
-        p.children.append(('engine-prefill-0', child))
-        async def stop(*args):
+        p = ProcessSupervisor(SimpleNamespace(emit=lambda **event: None))
+        async def wait():
             child.returncode = exit_code
-            return ['did not exit'] if exit_code is None else []
-        p._stop = stop
-        errors = await p.stop_expected('engine-prefill-0', child)
+            if exit_code is None:
+                raise TimeoutError()
+        child = SimpleNamespace(returncode=None, pid=123, wait=wait)
+        p._children['engine-prefill-0'] = child
+        monkeypatch.setattr('mock_framework.execution.processes.os.killpg',
+                            lambda *args: setattr(child, 'returncode', exit_code))
+        original = p.stop
+        async def stop(names, grace):
+            return await original(names, 0)
+        p.stop = stop
+        errors = await p.stop_expected('engine-prefill-0')
         assert bool(p.children) == (exit_code is None)
         assert bool(errors) == (exit_code is None)
-        assert 'engine-prefill-0' in p.expected_stops
+        assert 'engine-prefill-0' in p._expected
     asyncio.run(exercise())
 
 
 def test_master_ports_avoid_ephemeral_range_and_retry_busy_pair(monkeypatch):
     import socket
-    from mock_framework.execution import processes
-    first = processes.master_port(1)
+    from mock_framework.execution import master as master_runtime
+    first = master_runtime.master_port(1)
     assert 10000 <= first < 30000
     with socket.socket() as busy:
         busy.bind(('127.0.0.1', first + 2))
-        second = processes.master_port(1)
+        second = master_runtime.master_port(1)
         choices = iter([first - 10000, second - 10000])
-        monkeypatch.setattr(processes.secrets, 'randbelow', lambda bound: next(choices))
-        assert processes.master_port(1) == second
+        monkeypatch.setattr(master_runtime.secrets, 'randbelow', lambda bound: next(choices))
+        assert master_runtime.master_port(1) == second

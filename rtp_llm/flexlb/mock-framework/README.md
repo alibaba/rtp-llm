@@ -296,7 +296,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 | 目录 | 负责内容 |
 | --- | --- |
 | `python/mock_framework/config/` | YAML 解析、检查、点分配置展开、引用和可执行步骤编译。 |
-| `python/mock_framework/execution/` | 初始化、统一 Step 执行、HTTP 传输、断言、记录和清理；`master.py` 负责 Master 原生配置接线，`processes.py` 管理进程和端点。 |
+| `python/mock_framework/execution/` | 运行环境装配、统一 Step 执行、角色生命周期、拓扑、采集、HTTP 传输、断言与记录；各模块边界见下表。 |
 | `python/mock_framework/interfaces/` | 已接通的 Case 函数：逐 Master 状态、Client start/stop、公共指标与原始 PromQL。 |
 | `java/interfaces/` | Java 内部端点的类型/校验及共享模型定义；不再定义或导出 Case API。 |
 | `java/runtime/` | HTTP 接口绑定、参数和回执校验、调用上下文。 |
@@ -309,6 +309,28 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 | `java/shared/metrics/` | Engine 指标、注册表和 Prometheus 导出；不提供查询代理。 |
 | `tests/`、各模块 `src/test/` | Python/跨语言集成与 Java 测试；探针不作为正式业务入口。 |
 | `scripts/` | 构建和检查入口。 |
+
+Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排启动和收尾顺序，不分发 Case 业务操作；各服务显式接收所需依赖，不接收整个运行环境再修改它的内部状态。
+
+| 模块 | 唯一负责的状态与行为 |
+| --- | --- |
+| `execution/runner.py` | Step 的引用、参数、预算、调用、返回校验、断言、等待与结果；不判断具体接口名。 |
+| `execution/environment.py` | `RunEnvironment` 的静态装配、启动与收尾顺序。 |
+| `execution/processes.py` | `ProcessSupervisor` 的子进程所有权、退出监视、操作中断和回收；不识别 Master、Engine 或 Client 业务。 |
+| `execution/topology.py` | `Topology` 的当前实例端点、历史生命期及文件发布；读者拿到独立快照。 |
+| `execution/components.py` | Master/Client 通用的配置文件、进程启动、ready 检查与端点登记；原生配置与端点额外校验由调用方提供。 |
+| `execution/master.py` | `MasterGroup` 的 ZK 选举环境、独立 JVM 增减、原生配置和 Master discovery 发布。 |
+| `execution/engines.py` | `EngineHosts` 的实例分配、JVM 放置、扩缩容、成员检查和宿主退出影响范围。 |
+| `execution/clients.py` | `ClientGroup` 的 Client JVM、当前播放待收尾状态、client0 控制与结果/证据完整性检查；流量分片和控速仍由 Java 负责。 |
+| `execution/monitoring.py` | `Prometheus` 的采集器、目标、基线、末次采样和采集完整性记录；不执行 Case 语义查询。 |
+| `execution/launch.py` | 启动配方的结构校验与规范化，不持有运行状态。 |
+| `interfaces/` | Case 参数/返回契约及操作组合；调用对应服务或传输/查询函数。运行时服务不反向导入这一层。 |
+
+拓扑是 Python 根据已校验的实例端点生产的运行记录，不代表生产 Master 的成员状态或主备判断。`Topology` 统一登记与退役，发布当前/历史文件，并把快照交给 `MasterGroup` 更新活动 Master 的 discovery。Master、Client 等消费者自行加载配置；Python 不替它们推导主节点。发布失败使实验报错，保留已登记状态与进程所有权，随后清理；不宣称多个文件的发布是一个事务。
+
+启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先停止 Engine 健康检查，再收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑，保留历史。
+
+新增 Case 操作在 `interfaces/` 用现有装饰器注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
 共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RtpTasks/RtpErrors 在边界转换输入、状态和错误码。RtpScheduler 无 gRPC/protobuf/执行器依赖，拥有 FIFO、持续 running、资源准入和执行结果提交。
 
@@ -452,7 +474,7 @@ Prometheus 对每个实例独立抓取，以 RPC 地址作为 instance；宿主�
 
 Runner 每秒开始一轮宿主健康检查，单次 HTTP 调用限时 10 秒，检查实际成员与 Engine 状态；进程退出另行实时监视。操作期间用同一管理锁隔离成员变更与健康快照。共享宿主意外退出记录受影响实例并使整个实验 ERROR；预期停止仅登记将回收的独立宿主，不屏蔽共享 JVM 意外退出。Master 始终单独 spawn，不进入 EngineHost。
 
-Runner 是持续存活的进程所有者，负责启动、退出监视和最终清理。`Processes` 不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `interfaces/master.py` 按 targets 逐实例调用，并保留每个 Master 的独立结果。
+Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退出，各角色服务负责自己的生命周期，`RunEnvironment` 统一安排最终清理。进程监督器不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `interfaces/master.py` 按 targets 逐实例调用，并保留每个 Master 的独立结果。
 
 `master/stop(targets)` 由 Python 停止选定的独立 Master JVM，省略 targets 时停止全部活动 Master；空集合、重复或失效地址在任何停止前报错。停止前完成末次采样、登记预期退出，确认退出后移出活动发现与 Prometheus 目标，删除 ready，保留原 endpoints、日志、配置和历史生命期。意外退出仍使整个实验 ERROR；强制 SIGKILL、部分停止失败同样报错，不重放已完成动作。
 

@@ -43,8 +43,8 @@ def _epoch(value):
 class Prometheus:
     JOB = 'mock'
 
-    def __init__(self, owner, records, recipe):
-        self.owner, self.records, self.recipe = owner, records, recipe
+    def __init__(self, supervisor, records, recipe):
+        self.supervisor, self.records, self.recipe = supervisor, records, recipe
         self.directory = records.directory / 'prometheus'
         self.startup_timeout = float(duration(recipe['startup_timeout']))
         self.interval = float(duration(recipe['scrape_interval']))
@@ -68,7 +68,7 @@ class Prometheus:
                    '--web.listen-address=127.0.0.1:0', '--storage.tsdb.path=' + str(self.directory / 'data'), '--log.format=json']
         self.metadata['command'] = command
         self.save()
-        self.child = await self.owner.spawn('prometheus', command, str(self.directory), dict(os.environ), self.directory)
+        self.child = await self.supervisor.spawn('prometheus', command, str(self.directory), dict(os.environ), self.directory, zero_exit=True)
         while self.url is None:
             # Discover the actual bound port from this process's structured log, not a guessed free port.
             for line in (self.directory / 'stderr.log').read_text(encoding='utf-8', errors='replace').splitlines():
@@ -156,7 +156,7 @@ class Prometheus:
             while True:
                 if self.child.returncode is not None:
                     raise ExecutionError('Prometheus exited before final collection')
-                for node, child in self.owner.children:
+                for node, child in self.supervisor.children:
                     if node in self.targets and child.returncode is not None:
                         raise ExecutionError(f'{node} exited before final collection')
                 targets = await self.scrapes()
@@ -174,3 +174,6 @@ class Prometheus:
         self.metadata.update(complete=self.baselined and 'final_scrapes' in self.metadata and not errors,
                              finished_at=timestamp(), errors=list(errors))
         self.save()
+
+    async def close(self):
+        return await self.supervisor.stop(['prometheus'], 5)

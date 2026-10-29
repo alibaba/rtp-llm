@@ -79,7 +79,7 @@ def fetch(url, expression, at, timeout):
 
 
 async def instant(ctx, expression, at):
-    monitor = ctx.processes.prometheus
+    monitor = ctx.runtime.monitoring
     if monitor is None or monitor.url is None:
         raise ExecutionError('This Case needs a runner-managed Prometheus')
     # A cancelled read can outlive its await only until the same bounded HTTP timeout.
@@ -110,7 +110,7 @@ def window(ctx, args):
 
 def scope(ctx, args, role):
     at, millis, _ = window(ctx, args)
-    available = {item['rpc'] for item in ctx.processes.history if item['role'] == role
+    available = {item['rpc'] for item in ctx.runtime.topology.history() if item['role'] == role
                  and epoch(item['started_at']) <= at
                  and ('stopped_at' not in item or epoch(item['stopped_at']) > at - millis / 1000)}
     targets = sorted(available) if args.targets is None else args.targets

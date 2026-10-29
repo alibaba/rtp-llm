@@ -56,7 +56,7 @@ def test_generic_transport_probe_does_not_require_a_native_master(tmp_path):
     (1, False, False), (2, False, False), (1, True, False), (2, True, False), (1, False, True),
 ], ids=['single-one-master', 'single-two-masters', 'batch-one-master', 'batch-two-masters', 'late-master-after-history-overflow'])
 def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replicas, history_overflow):
-    from mock_framework.execution.processes import master_port
+    from mock_framework.execution.master import master_port
     try:
         master_port(replicas)
     except ExecutionError as error:
@@ -214,7 +214,9 @@ def adapter_context():
         {'id': 'master-0', 'rpc': 'm0:1', 'control': 'http://m0', 'role': 'master'},
         {'id': 'master-1', 'rpc': 'm1:1', 'control': 'http://m1', 'role': 'master'},
         {'id': 'p0', 'rpc': 'p0:1', 'role': 'prefill'}]
-    return SimpleNamespace(processes=SimpleNamespace(topology=topology, history=topology), query_time='2026-10-28T00:00:00Z', timeout=2)
+    return SimpleNamespace(runtime=SimpleNamespace(topology=SimpleNamespace(
+        active=lambda role=None: [item for item in topology if role is None or item['role'] == role],
+        history=lambda: topology)), query_time='2026-10-28T00:00:00Z', timeout=2)
 
 
 @pytest.mark.parametrize('operation,responses,expected', [

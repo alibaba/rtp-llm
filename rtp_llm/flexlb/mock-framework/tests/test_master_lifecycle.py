@@ -11,7 +11,8 @@ import yaml
 from mock_framework.config import Registry, compile_case
 from mock_framework.config.registry import case_interface
 from mock_framework.execution import prepare_launch, run_case
-from mock_framework.execution.processes import Processes, master_port
+from mock_framework.execution.processes import ProcessSupervisor
+from mock_framework.execution.master import master_port
 from mock_framework.execution.transport import ExecutionError, post
 
 
@@ -90,11 +91,11 @@ def test_partial_start_failure_is_not_retried_and_reclaims_started_jvms(tmp_path
 
 
 def test_partial_stop_failure_aborts_and_keeps_completed_operations(tmp_path, monkeypatch):
-    original = Processes.stop_expected
-    async def fail_second(self, node, child):
-        errors = await original(self, node, child)
+    original = ProcessSupervisor.stop_expected
+    async def fail_second(self, node):
+        errors = await original(self, node)
         return [*errors, 'injected stop failure'] if node == 'master-1' else errors
-    monkeypatch.setattr(Processes, 'stop_expected', fail_second)
+    monkeypatch.setattr(ProcessSupervisor, 'stop_expected', fail_second)
     case, registry, launch = generic(tmp_path, [step('stop', 'master/stop'), step('never', 'master/start')])
     output = tmp_path / 'run'
     result = asyncio.run(run_case(case, registry, launch, output))
@@ -112,7 +113,7 @@ class Empty:
 @case_interface('test/client_progress', effect='read')
 async def progress(ctx, args: Empty) -> int:
     successes = 0
-    for node in ctx.processes.topology:
+    for node in ctx.runtime.topology.active():
         if node['role'] == 'client':
             value = await post(node['control'], {'interface': 'worker/state', 'args': {'sequence': 1},
                 'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None, 'timeout_ms': 1000}})

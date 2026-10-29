@@ -20,7 +20,7 @@ class EngineSelection(Targets):
 
 
 def selected(ctx, targets):
-    available = {item['rpc']: item for item in ctx.processes.topology if item['role'] == 'master'}
+    available = {item['rpc']: item for item in ctx.runtime.topology.active('master')}
     addresses = sorted(available) if targets is None else targets
     if not addresses or set(addresses) - available.keys():
         raise ExecutionError('Master targets are empty or unknown')
@@ -34,7 +34,7 @@ async def read(ctx, master, operation, args):
 
 
 def identities(ctx):
-    return {item['id']: item['rpc'] for item in ctx.processes.history}
+    return {item['id']: item['rpc'] for item in ctx.runtime.topology.history()}
 
 
 @case_interface('master/leadership/get', effect='read')
@@ -77,10 +77,10 @@ class Start:
 @case_interface('master/start', effect='write')
 async def start(ctx, args: Start) -> list[str]:
     """Create new Master JVMs in this run's election group; never reuse stopped identities."""
-    return await ctx.processes.start_masters(args.count)
+    return await ctx.runtime.masters.start(args.count)
 
 
 @case_interface('master/stop', effect='write')
 async def stop(ctx, args: Targets) -> list[str]:
     """Stop selected Master JVMs, or all active Masters when targets is omitted."""
-    return await ctx.processes.stop_masters(args.targets)
+    return await ctx.runtime.masters.stop(args.targets)

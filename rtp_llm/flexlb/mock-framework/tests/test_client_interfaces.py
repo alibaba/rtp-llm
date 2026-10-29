@@ -3,17 +3,25 @@ from types import SimpleNamespace
 import pytest
 from mock_framework.config import Registry
 from mock_framework.config.errors import ConfigError
-from mock_framework.interfaces import client, metrics
+from mock_framework.interfaces import metrics
 from mock_framework.execution.transport import ExecutionError
+from mock_framework.execution import clients as client_runtime
+from mock_framework.execution.clients import ClientGroup
+from mock_framework import evidence
 
 
 def context():
     events = []
-    return SimpleNamespace(processes=SimpleNamespace(client_pending=False, topology=[
+    nodes = [
         {'id': 'master-0', 'role': 'master', 'rpc': 'master:1'},
         {'id': 'client-0', 'role': 'client', 'rpc': 'c:1', 'control': 'http://c:1'},
-        {'id': 'client-1', 'role': 'client', 'rpc': 'c:2', 'control': 'http://c:2'}]),
-        query_time='2026-10-28T00:00:00Z', timeout=20, records=SimpleNamespace(emit=lambda **v: events.append(v)), events=events)
+        {'id': 'client-1', 'role': 'client', 'rpc': 'c:2', 'control': 'http://c:2'}]
+    topology = SimpleNamespace(active=lambda role=None: [item for item in nodes if role is None or item['role'] == role])
+    records = SimpleNamespace(emit=lambda **v: events.append(v))
+    clients = ClientGroup(component=None, recipe=None, launcher=None, supervisor=None,
+        topology=topology, records=records, monitoring=None)
+    return SimpleNamespace(runtime=SimpleNamespace(topology=topology, clients=clients), nodes=nodes,
+        query_time='2026-10-28T00:00:00Z', timeout=20, records=records, events=events)
 
 
 def args():
@@ -25,14 +33,14 @@ def test_start_only_calls_client_zero_and_does_not_multiply_total_rate(monkeypat
     calls = []
     async def post(url, body):
         calls.append((url, body)); return {'accepted': True}
-    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context()
     assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, args())) is True
     assert len(calls) == 1 and calls[0][0] == 'http://c:1'
     assert calls[0][1]['args']['qps'] == 10
     assert calls[0][1]['args']['concurrency'] == 2
     assert calls[0][1]['args']['masters'] == ['master:1']
-    assert 'master' not in calls[0][1]['args'] and ctx.processes.client_pending
+    assert 'master' not in calls[0][1]['args'] and ctx.runtime.clients.pending
     with pytest.raises(ExecutionError, match='previous'):
         asyncio.run(Registry.standard().get('client/start').invoke(ctx, args()))
 
@@ -40,11 +48,11 @@ def test_start_only_calls_client_zero_and_does_not_multiply_total_rate(monkeypat
 def test_unknown_start_response_is_still_cleaned_up(monkeypatch):
     async def post(*a):
         raise OSError('connection lost')
-    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context()
     with pytest.raises(OSError):
         asyncio.run(Registry.standard().get('client/start').invoke(ctx, args()))
-    assert ctx.processes.client_pending
+    assert ctx.runtime.clients.pending
 
 
 def state():
@@ -56,12 +64,12 @@ def test_stop_collects_all_original_clients_without_task_id(monkeypatch, tmp_pat
     async def post(url, body):
         calls.append(body)
         return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
-    monkeypatch.setattr(client, 'post', post)
-    ctx = context(); ctx.processes.client_pending = True; ctx.records.directory = tmp_path
+    monkeypatch.setattr(client_runtime, 'post', post)
+    ctx = context(); ctx.runtime.clients.pending = True; ctx.records.directory = tmp_path
     verified = []
-    monkeypatch.setattr(client, 'verify_playback', lambda *args: verified.append(args))
+    monkeypatch.setattr(evidence, 'verify_playback', lambda *args: verified.append(args))
     result = asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
-    assert set(result) == {'c:1', 'c:2'} and not ctx.processes.client_pending
+    assert set(result) == {'c:1', 'c:2'} and not ctx.runtime.clients.pending
     assert calls[0]['args'] == {} and ctx.events[0]['event'] == 'client_result'
     assert len(verified) == 1 and verified[0][0] == tmp_path
 
@@ -73,7 +81,7 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
     if bad == 'overflow': value['errors'] = ['queue full']
     if bad == 'unfinished': value['clients']['http://c:2']['done'] = False
     async def post(*a): return value
-    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client_runtime, 'post', post)
     with pytest.raises(ExecutionError):
         asyncio.run(Registry.standard().get('client/stop').invoke(context(), {}))
 
@@ -193,24 +201,24 @@ def test_client_playback_through_real_master(tmp_path, replicas, file_input):
 
 
 @pytest.mark.parametrize('failed', [False, True])
-def test_teardown_collects_unstopped_playback_before_final_scrape(monkeypatch, failed, tmp_path):
-    from mock_framework.execution.processes import Processes
+def test_teardown_collects_unstopped_playback_before_final_scrape(failed, tmp_path):
+    from mock_framework.execution.environment import RunEnvironment
     order = []
     async def collect(*a):
         order.append('client')
         if failed:
             raise ExecutionError('queue full')
     async def scrape(): order.append('scrape')
-    async def stop_processes(*a): order.append('processes'); return []
-    monkeypatch.setattr(client, 'collect', collect)
+    async def close_monitor(): order.append('monitor stopped')
     async def exercise():
-        p = Processes(None, {}, SimpleNamespace(directory=tmp_path))
-        p.client_pending = True
-        p.prometheus = SimpleNamespace(final_scrape=scrape, finish=lambda errors: None)
-        p._stop = stop_processes
-        return await p.close()
+        runtime = RunEnvironment(SimpleNamespace(environment={}), {'components': {}, 'engine_mode': 'shared'},
+            SimpleNamespace(directory=tmp_path, emit=lambda **event: None))
+        runtime.clients.pending = True
+        runtime.clients.collect = collect
+        runtime.monitoring = SimpleNamespace(final_scrape=scrape, close=close_monitor, finish=lambda errors: None)
+        return await runtime.close()
     errors = asyncio.run(exercise())
-    assert order[:2] == ['client', 'scrape']
+    assert order == ['client', 'scrape', 'monitor stopped']
     assert bool(errors) is failed
     if failed: assert 'queue full' in errors[0]
 
@@ -220,9 +228,9 @@ def test_master_selection_is_forwarded_without_freezing_default_discovery(monkey
     calls = []
     async def post(url, body):
         calls.append(body['args']); return {'accepted': True}
-    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context()
-    ctx.processes.topology.append({'id': 'master-1', 'role': 'master', 'rpc': 'master:2'})
+    ctx.nodes.append({'id': 'master-1', 'role': 'master', 'rpc': 'master:2'})
     values = args(); values.pop('masters')
     if selection is not None: values['masters'] = selection
     assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
@@ -232,21 +240,21 @@ def test_master_selection_is_forwarded_without_freezing_default_discovery(monkey
 
 def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
     async def post(*args): raise AssertionError('must not contact Client')
-    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context()
     with pytest.raises(ExecutionError, match='Unknown Master'):
         asyncio.run(Registry.standard().get('client/start').invoke(ctx, args() | {'masters': ['master:1', 'missing:2']}))
-    assert not ctx.processes.client_pending
+    assert not ctx.runtime.clients.pending
 
 
 def test_file_input_resolves_against_case_and_only_sends_metadata(tmp_path, monkeypatch):
     import json
     source = tmp_path / 'requests.jsonl'
     source.write_text(json.dumps({'token_ids': [1], 'max_new_tokens': 2}) + '\n')
-    ctx = context(); ctx.processes.case = SimpleNamespace(directory=tmp_path)
+    ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     calls = []
     async def post(url, body): calls.append(body['args']); return {'accepted': True}
-    monkeypatch.setattr(client, 'post', post)
+    monkeypatch.setattr(client_runtime, 'post', post)
     value = args(); value.pop('requests'); value['requests_file'] = source.name
     assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
     assert calls[0]['requests_file'] == str(source) and 'requests' not in calls[0]
@@ -263,8 +271,8 @@ def test_two_input_sources_are_rejected():
 
 
 def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
-    ctx = context(); ctx.processes.case = SimpleNamespace(directory=tmp_path)
+    ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     value = args(); value.pop('requests'); value['requests_file'] = str(tmp_path)
     with pytest.raises(ExecutionError, match='regular file'):
         asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
-    assert not ctx.processes.client_pending
+    assert not ctx.runtime.clients.pending
