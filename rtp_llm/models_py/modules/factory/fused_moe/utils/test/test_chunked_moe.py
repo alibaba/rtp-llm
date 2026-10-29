@@ -1,6 +1,8 @@
 import itertools
+import tempfile
 import unittest
 from contextlib import nullcontext
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest import mock
 
@@ -16,12 +18,74 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     ChunkedFp8Fp4MoeLayer,
     cp_padded_tokens_per_rank_bound,
     resolve_moe_max_tokens_per_rank,
+    run_moe_chunks,
     synchronized_moe_chunk_plan,
 )
 from rtp_llm.models_py.utils.profiler import (
     disable_record_function_ranges,
     record_function_ranges_enabled,
 )
+
+
+def _mixed_phase_worker(rank, rendezvous):
+    from rtp_llm.models_py.model_desc.glm5 import Glm5ModelBase
+
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=20),
+    )
+    try:
+        model = SimpleNamespace(moe_config=SimpleNamespace(moe_strategy="mega_moe"))
+        layers = [SimpleNamespace(_prepared_policy=object(), _is_decode_role=False)]
+        # A long prefill peer, pure decode, then an empty peer next to prefill.
+        for counts, phases, expected_chunks in (
+            ((11, 1), (True, False), 3),
+            ((2, 3), (False, False), 1),
+            ((0, 9), (False, True), 3),
+        ):
+            tokens = counts[rank]
+            allow_graph = Glm5ModelBase.prepare_moe_forward(model, tokens, phases[rank])
+            assert allow_graph == (not any(phases))
+            planned_tokens, any_prefill = model._moe_forward_plan
+            assert planned_tokens == max(counts)
+            x = torch.ones(tokens, 4)
+            calls = []
+
+            def execute(start, end, out):
+                # Model the symmetric kernel rendezvous: extra/missing calls
+                # on either rank time out instead of silently passing.
+                torch.distributed.barrier()
+                calls.append((start, end))
+                return x[start:end] * 3
+
+            with synchronized_moe_chunk_plan(
+                layers,
+                tokens,
+                x.device,
+                is_decode_forward=not any_prefill,
+                synchronized_tokens=planned_tokens,
+            ):
+                result = run_moe_chunks(
+                    x, 4, execute, is_decode_forward=not any_prefill
+                )
+            assert len(calls) == expected_chunks, calls
+            torch.testing.assert_close(result, x * 3)
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+class MixedPhaseMoeTest(unittest.TestCase):
+    def test_prefill_decode_and_empty_ranks_share_kernel_schedule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            torch.multiprocessing.spawn(
+                _mixed_phase_worker,
+                args=("file://" + directory + "/rendezvous",),
+                nprocs=2,
+                join=True,
+            )
 
 
 class _FakeMoe(nn.Module):
@@ -65,6 +129,63 @@ def _fake_layer(dim=4, capacity=5, is_decode_role=False):
 
 
 class ChunkedMoeTest(unittest.TestCase):
+    def test_public_runner_preserves_backend_output_for_single_chunk(self):
+        x = torch.ones(3, 4)
+        expected = x * 2
+        call = mock.Mock(return_value=expected)
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.synchronize_moe_chunk_tokens"
+        ) as sync:
+            actual = run_moe_chunks(x, 4, call, synchronized_tokens=3)
+        self.assertIs(actual, expected)
+        call.assert_called_once_with(0, 3, None)
+        sync.assert_not_called()
+
+    def test_public_runner_copies_results_and_keeps_peer_chunk_count(self):
+        x = torch.arange(20, dtype=torch.float32).view(5, 4)
+        calls = []
+
+        def call(start, end, out):
+            calls.append((start, end))
+            self.assertIsNotNone(out)
+            return x[start:end] * 3
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.synchronize_moe_chunk_tokens",
+            return_value=11,
+        ) as sync:
+            actual = run_moe_chunks(x, 4, call)
+        sync.assert_called_once_with(5, x.device)
+        self.assertEqual(calls, [(0, 4), (4, 5), (5, 5)])
+        torch.testing.assert_close(actual, x * 3)
+
+    def test_public_runner_executes_all_chunks_on_empty_rank(self):
+        x = torch.empty(0, 4)
+        calls = []
+
+        def call(start, end, out):
+            calls.append((start, end))
+            out.copy_(x)
+
+        actual = run_moe_chunks(x, 4, call, synchronized_tokens=9)
+        self.assertEqual(calls, [(0, 0), (0, 0), (0, 0)])
+        self.assertEqual(actual.shape, x.shape)
+
+    def test_public_runner_keeps_supplied_output_for_inplace_callbacks(self):
+        x = torch.arange(20, dtype=torch.float32).view(5, 4)
+        for capacity in (3, 8):
+            with self.subTest(capacity=capacity):
+                output = torch.empty_like(x)
+
+                def call(start, end, out):
+                    out.copy_(x[start:end] * 2)
+
+                actual = run_moe_chunks(
+                    x, capacity, call, synchronized_tokens=5, out=output
+                )
+                self.assertIs(actual, output)
+                torch.testing.assert_close(actual, x * 2)
+
     def test_observer_receives_positions_for_each_chunk(self):
         layer = _fake_layer(dim=2, capacity=3)
         records = []
@@ -325,8 +446,12 @@ class ChunkedMoeTest(unittest.TestCase):
                 self.assertEqual(
                     second._synchronized_chunk_tokens(3, torch.device("cpu")), 9
                 )
+                first(torch.ones(3, 4))
+                second(torch.ones(3, 4))
 
         all_reduce.assert_called_once()
+        self.assertEqual(first._moe.token_chunks, [3, 0])
+        self.assertEqual(second._moe.token_chunks, [3, 0])
 
     def test_mixed_non_mega_layer_ignores_synchronized_token_count(self):
         mega = _fake_layer()

@@ -45,6 +45,12 @@ struct GptModelDescription {
     MoeConfig moe_runtime_config;
 };
 
+enum class MtpIndexerRole : int32_t {
+    NORMAL = 0,
+    SEED   = 1,
+    REUSE  = 2,
+};
+
 struct GptModelInitParams {
     const rtp_llm::Weights                       weights;
     const GptModelDescription                    description;
@@ -175,6 +181,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlPdSeparation        = 1u << 7,
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
+    kControlDraftExtend         = 1u << 10,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -241,6 +248,10 @@ public:
     // Prefill CP cannot recover the full target hidden sequence from its
     // last-hidden output, so initialization must know whether this rank-local
     // hand-off exists before admitting CPRR execution.
+    virtual void          loadMtpIndexerTopk(const torch::Tensor&) {}
+    virtual torch::Tensor snapshotMtpIndexerTopk(int64_t) {
+        return {};
+    }
     virtual bool hasMtpTargetHiddenBuffer() const {
         return false;
     }

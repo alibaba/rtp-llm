@@ -85,6 +85,9 @@ else:
         CudaFp8PerTensorNoDPStrategy,
         CudaGroupedFp4Strategy,
         CudaLocalLoopStrategy,
+        CudaMegaMoeFp8SEStrategy,
+        CudaMegaMoeFp8Strategy,
+        CudaMegaMoeFusedStrategy,
         CudaMegaMoeSEStrategy,
         CudaMegaMoeStrategy,
         CudaNoQuantCppStrategy,
@@ -100,6 +103,9 @@ else:
     # FP8/FP4 EP models. ``mega_moe`` remains an explicit rollback path.
     registry.register(CudaMegaMoeSEStrategy())
     registry.register(CudaMegaMoeStrategy())
+    registry.register(CudaMegaMoeFp8Strategy())
+    registry.register(CudaMegaMoeFp8SEStrategy())
+    registry.register(CudaMegaMoeFusedStrategy())
     registry.register(CudaGroupedFp4Strategy())
     registry.register(CudaLocalLoopStrategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())

@@ -140,18 +140,18 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
 
 TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     GptModelInputs inputs;
-    inputs.combo_tokens             = torch::zeros({8}, torch::kInt32).cuda();
-    inputs.input_lengths            = torch::zeros({1}, torch::kInt32).cuda();
-    inputs.sequence_lengths         = torch::zeros({1}, torch::kInt32).cuda();
-    inputs.prefix_lengths           = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.combo_tokens                     = torch::zeros({8}, torch::kInt32).cuda();
+    inputs.input_lengths                    = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.sequence_lengths                 = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.prefix_lengths                   = torch::zeros({1}, torch::kInt32).cuda();
     inputs.cache_store_publish_start_tokens = torch::tensor({4}, torch::kInt32);
-    inputs.kv_cache_kernel_block_id = torch::zeros({4, 1, 93}, torch::kInt32).cuda();
-    inputs.kv_cache_block_id        = torch::zeros({4, 1, 93}, torch::kInt32);
-    inputs.kv_cache_group_types     = torch::zeros({4}, torch::kInt32);
-    inputs.kv_cache_update_mapping  = torch::zeros({2, 3}, torch::kInt32).cuda();
-    inputs.request_id               = torch::zeros({1}, torch::kInt64);
-    inputs.request_pd_separation    = torch::zeros({1}, torch::kBool);
-    inputs.lm_output_indexes        = torch::zeros({7}, torch::kInt32).cuda();
+    inputs.kv_cache_kernel_block_id         = torch::zeros({4, 1, 93}, torch::kInt32).cuda();
+    inputs.kv_cache_block_id                = torch::zeros({4, 1, 93}, torch::kInt32);
+    inputs.kv_cache_group_types             = torch::zeros({4}, torch::kInt32);
+    inputs.kv_cache_update_mapping          = torch::zeros({2, 3}, torch::kInt32).cuda();
+    inputs.request_id                       = torch::zeros({1}, torch::kInt64);
+    inputs.request_pd_separation            = torch::zeros({1}, torch::kBool);
+    inputs.lm_output_indexes                = torch::zeros({7}, torch::kInt32).cuda();
     // This is the exact mixed-device DSpARK TP2 case that previously made
     // rank 0 send 1504 CPU bytes while rank 1 waited for 1600.
     inputs.combo_position_ids = torch::zeros({24}, torch::kInt32).cuda();
@@ -228,6 +228,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.skip_run                  = true;
     inputs.is_fake_stream            = true;
     inputs.is_target_verify          = true;
+    inputs.is_draft_extend           = true;
     inputs.pd_separation             = true;
     inputs.decode_entrance           = true;
     inputs.use_opaque_kv_cache_store = true;
@@ -247,6 +248,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlDraftExtend));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlDecodeEntrance));
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlOpaqueKvCacheStore));
@@ -292,13 +294,13 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     }
     inputs.kv_cache_group_tags = local_tags;
     if (rank == 0) {
-        inputs.combo_tokens             = torch::tensor({7, 8}, torch::kInt32);
-        inputs.input_lengths            = torch::tensor({1, 1}, torch::kInt32);
-        inputs.sequence_lengths         = torch::tensor({4, 5}, torch::kInt32);
-        inputs.kv_cache_block_id        = physical.clone();
-        inputs.kv_cache_kernel_block_id = kernel.clone();
-        inputs.kv_cache_group_types     = types.clone();
-        inputs.kv_cache_update_mapping  = copies.clone();
+        inputs.combo_tokens                     = torch::tensor({7, 8}, torch::kInt32);
+        inputs.input_lengths                    = torch::tensor({1, 1}, torch::kInt32);
+        inputs.sequence_lengths                 = torch::tensor({4, 5}, torch::kInt32);
+        inputs.kv_cache_block_id                = physical.clone();
+        inputs.kv_cache_kernel_block_id         = kernel.clone();
+        inputs.kv_cache_group_types             = types.clone();
+        inputs.kv_cache_update_mapping          = copies.clone();
         inputs.cache_store_publish_start_tokens = torch::tensor({0, 8}, torch::kInt32);
     }
     const auto        original_physical = inputs.kv_cache_block_id;
@@ -414,9 +416,9 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     invalid.kv_cache_group_tags.clear();
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
-    invalid.kv_cache_group_tags      = {"first", "second"};
-    invalid.kv_cache_block_id        = torch::zeros({2, 1, 1}, torch::kInt32);
-    invalid.kv_cache_update_mapping  = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
+    invalid.kv_cache_group_tags     = {"first", "second"};
+    invalid.kv_cache_block_id       = torch::zeros({2, 1, 1}, torch::kInt32);
+    invalid.kv_cache_update_mapping = torch::tensor({2, 1, 2}, torch::kInt32).reshape({1, 3});
     EXPECT_THROW(tpSyncModelInputs(invalid, config), RTPException);
     broadcaster.reset();
     ::alarm(0);

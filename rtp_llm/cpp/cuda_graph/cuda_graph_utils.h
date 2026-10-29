@@ -32,9 +32,10 @@ public:
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
         decoder_layer_hidden_states_(hidden_states) {
-        py_model_inputs_.attention_inputs.input_lengths        = inputs.attention_inputs.input_lengths;
-        py_model_inputs_.attention_inputs.input_lengths_device = inputs.attention_inputs.input_lengths_device;
-        py_model_inputs_.attention_inputs.sequence_lengths     = inputs.attention_inputs.sequence_lengths;
+        py_model_inputs_.attention_inputs.input_lengths         = inputs.attention_inputs.input_lengths;
+        py_model_inputs_.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths_device;
+        py_model_inputs_.attention_inputs.mtp_indexer_seed_rows = inputs.attention_inputs.mtp_indexer_seed_rows;
+        py_model_inputs_.attention_inputs.sequence_lengths      = inputs.attention_inputs.sequence_lengths;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device =
             inputs.attention_inputs.kv_cache_kernel_block_id_device;
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id = inputs.attention_inputs.kv_cache_kernel_block_id;
@@ -56,6 +57,7 @@ public:
         py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
         py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
         py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
+        py_model_inputs_.attention_inputs.is_draft_extend         = inputs.attention_inputs.is_draft_extend;
         py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
 
