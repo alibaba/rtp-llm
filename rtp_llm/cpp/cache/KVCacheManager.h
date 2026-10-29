@@ -24,6 +24,8 @@ namespace rtp_llm {
 class CPSlotMapper;
 class CacheStore;
 class BroadcastManager;
+struct BlockTreeCacheLayout;
+using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 
@@ -38,7 +40,8 @@ public:
                    const SpeculativeExecutionConfig&  sp_config                    = SpeculativeExecutionConfig{},
                    const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
                    const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
-                   bool                               use_device_malloc_block_pool = false);
+                   bool                               use_device_malloc_block_pool = false,
+                   BlockTreeCacheLayoutConstPtr       block_tree_layout            = nullptr);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -47,9 +50,9 @@ public:
         return coordinator_manager_ != nullptr;
     }
 
-    // TP0 owns request block allocation; other ranks only receive the block IDs.
+    /** The first stage's TP0 allocates request blocks; other ranks receive its block IDs. */
     bool isAllocatorOwner() const {
-        return parallelism_config_.tp_rank == 0;
+        return parallelism_config_.pp_rank == 0 && parallelism_config_.tp_rank == 0;
     }
 
     const CacheConfig& cacheConfig() const;
@@ -149,9 +152,9 @@ public:
     }
 
 private:
-    std::function<void()> allocationChangeCallback() const;
-    void                  reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    std::function<void()>             allocationChangeCallback() const;
+    void                              reportMetricsLoop();
+    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量
@@ -166,6 +169,7 @@ private:
     const PDSepConfig                  pd_sep_config_;
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
+    const BlockTreeCacheLayoutConstPtr block_tree_layout_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
     bool                               hasTailSparseReuseGroup() const;
     void                               initCacheEventPublisher();

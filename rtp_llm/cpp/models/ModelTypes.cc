@@ -94,6 +94,10 @@ torch::Tensor reorderCacheCopyRows(const torch::Tensor& mapping, const std::vect
 
 }  // namespace
 
+PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&, bool) {
+    RTP_LLM_FAIL("PP warmup input construction is not implemented by this model");
+}
+
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
     const auto kernel_block_table = inspectKvBlockTable(inputs.kv_cache_kernel_block_id, "kv_cache_kernel_block_id");
@@ -182,6 +186,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.need_moe_gating, GptModelInputControlFlag::kControlNeedMoeGating);
     encode_flag(inputs.warmup, GptModelInputControlFlag::kControlWarmup);
     encode_flag(inputs.skip_run, GptModelInputControlFlag::kControlSkipRun);
+    encode_flag(inputs.shutdown, GptModelInputControlFlag::kControlShutdown);
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
@@ -334,6 +339,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_moe_gating           = has_flag(GptModelInputControlFlag::kControlNeedMoeGating);
     inputs.warmup                    = has_flag(GptModelInputControlFlag::kControlWarmup);
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
+    inputs.shutdown                  = has_flag(GptModelInputControlFlag::kControlShutdown);
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
@@ -478,11 +484,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths       = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
-        const auto publish_count = checkedHint(GptModelInputIndex::cacheStorePublishStartTokens,
-                                               "cacheStorePublishStartTokens");
-        inputs.cache_store_publish_start_tokens = publish_count ?
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) :
-            torch::Tensor();
+        const auto publish_count =
+            checkedHint(GptModelInputIndex::cacheStorePublishStartTokens, "cacheStorePublishStartTokens");
+        inputs.cache_store_publish_start_tokens =
+            publish_count ? allocBuf(rtp_llm::DataType::TYPE_INT32, {publish_count}) : torch::Tensor();
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id residency follows the producer (rank 0): device only when
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer

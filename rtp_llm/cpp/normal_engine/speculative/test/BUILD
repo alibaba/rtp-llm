@@ -34,9 +34,8 @@ cc_test(
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps(),
-    # CPU-only logic, but normal_engine links libtorch_cuda, so the loader needs a
-    # CUDA host. Any generic CUDA worker suffices (pinned L20_CU13) — no H20.
+    ] + torch_deps() + cuda13_torch_link_deps,
+    # Includes CUDA point-mass rejection sampling and force-accept coverage.
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
@@ -60,6 +59,31 @@ cc_test(
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "mtp_compute_test",
+    srcs = glob([
+        "MtpComputeTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/models:logits_processor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",

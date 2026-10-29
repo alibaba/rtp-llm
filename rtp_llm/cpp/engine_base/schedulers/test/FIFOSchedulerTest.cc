@@ -87,14 +87,14 @@ protected:
     void verifyOnlyScheduledStream(SchedulerBase& scheduler, const GenerateStreamPtr& expected) {
         auto result = scheduler.schedule();
         ASSERT_TRUE(result.ok());
-        ASSERT_EQ(result->size(), 1);
-        EXPECT_EQ(result->front().get(), expected.get());
+        ASSERT_EQ(result->streams.size(), 1);
+        EXPECT_EQ(result->streams.front().get(), expected.get());
         EXPECT_FALSE(expected->hasError());
     }
 
-    void verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                       int second_max_new_tokens,
-                                                       bool with_group_metadata = false);
+    void verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                      int  second_max_new_tokens,
+                                                      bool with_group_metadata = false);
     void verifyBatchDecodeSchedulerDrainsMixedModeTail(const std::vector<int>& max_new_tokens);
 
     std::shared_ptr<LoadAsyncContext> setupPendingCacheLoad(const std::shared_ptr<KVCacheManager>& cache_manager) {
@@ -225,13 +225,13 @@ static void expireStream(const GenerateStreamPtr& stream) {
     stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 100 * 1000);
 }
 
-static testing::AssertionResult expectPrefillBatch(const absl::StatusOr<std::list<GenerateStreamPtr>>& batch_status,
-                                                   const std::vector<GenerateStreamPtr>&               expected_streams,
-                                                   const std::vector<int>& expected_chunk_lens) {
+static testing::AssertionResult expectPrefillBatch(const absl::StatusOr<ScheduleOutput>& batch_status,
+                                                   const std::vector<GenerateStreamPtr>& expected_streams,
+                                                   const std::vector<int>&               expected_chunk_lens) {
     if (!batch_status.ok()) {
         return testing::AssertionFailure() << "schedule failed: " << batch_status.status().ToString();
     }
-    const auto& batch = batch_status.value();
+    const auto& batch = batch_status.value().streams;
     if (batch.size() != expected_streams.size()) {
         return testing::AssertionFailure() << "batch size " << batch.size() << ", expected " << expected_streams.size();
     }
@@ -267,8 +267,9 @@ class ChunkSchedulerTestEnv {
 public:
     explicit ChunkSchedulerTestEnv(const ChunkSchedulerTestConfig& config, const CacheConfig* cache_config = nullptr):
         cache_manager(std::make_shared<KVCacheManager>(
-            cache_config ? *cache_config : rtp_llm::test::makeSimpleMhaCacheConfig(
-                1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
+            cache_config ? *cache_config :
+                           rtp_llm::test::makeSimpleMhaCacheConfig(
+                               1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4))) {
         resource_context.cache_manager = cache_manager;
         resource_context.role_type     = config.role_type;
 
@@ -344,7 +345,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 1);
+    ASSERT_EQ(streams_status.value().streams.size(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
 
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -354,7 +355,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
 
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 0);
+    ASSERT_EQ(streams_status2.value().streams.size(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
@@ -425,7 +426,7 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsBlocksNewInit) {
 
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 1);
+    ASSERT_EQ(result1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_GT(stream1->curBlocksNum(), 0);
@@ -434,7 +435,7 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsBlocksNewInit) {
     stream1->reportEvent(StreamEvents::GenerateDone);
     auto result2 = scheduler.schedule();
     ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
+    ASSERT_EQ(result2.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_GT(stream2->curBlocksNum(), 0);
@@ -598,7 +599,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 1);
+    ASSERT_EQ(streams_status.value().streams.size(), 1);
     ASSERT_FALSE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
@@ -606,7 +607,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     stream->setSeqLength(stream->seqLength() + 1);
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 0);
+    ASSERT_EQ(streams_status2.value().streams.size(), 0);
     ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "incrKVBlock failed: LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
@@ -654,7 +655,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
 
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 0);
+    ASSERT_EQ(streams_status.value().streams.size(), 0);
     ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
@@ -711,14 +712,14 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status1 = scheduler.schedule();
     ASSERT_TRUE(streams_status1.ok());
-    ASSERT_EQ(streams_status1.value().size(), 1);
+    ASSERT_EQ(streams_status1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_FALSE(stream->hasError());
 
     stream->setSeqLength(9);
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 1);
+    ASSERT_EQ(streams_status2.value().streams.size(), 1);
     ASSERT_FALSE(stream->hasError());
 }
 
@@ -979,7 +980,7 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         EXPECT_TRUE(enqueueIndividually(scheduler, streams));
         auto streams_status = scheduler.schedule();
         EXPECT_TRUE(streams_status.ok());
-        return streams_status.value().size();
+        return streams_status.value().streams.size();
     };
 
     ASSERT_EQ(schedule_two_prefills(true), 1);
@@ -989,7 +990,6 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
 // ---------------------------------------------------------------------------
 // Helper used by the prefill-first cadence / KV-gate tests (Tasks 5–7)
 // ---------------------------------------------------------------------------
-
 
 static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<int>& ids,
                                                             int64_t                 group_id,
@@ -1008,8 +1008,8 @@ static std::shared_ptr<GenerateStream> makeForceBatchStream(const std::vector<in
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
-void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_max_new_tokens,
-                                                                     int second_max_new_tokens,
+void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int  first_max_new_tokens,
+                                                                     int  second_max_new_tokens,
                                                                      bool with_group_metadata) {
     ModelConfig model_config;
     model_config.max_seq_len                  = 8192;
@@ -1023,8 +1023,8 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
     ModelSpecificConfig model_specific_config;
 
     const auto make_stream = [&](const std::vector<int>& ids,
-                                  const ResourceContext& resource_context,
-                                  int max_new_tokens) {
+                                 const ResourceContext&  resource_context,
+                                 int                     max_new_tokens) {
         if (with_group_metadata) {
             return makeForceBatchStream(ids, 800, 2, model_config, runtime_config, resource_context, max_new_tokens);
         }
@@ -1085,8 +1085,8 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
         BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
-        auto first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
-        auto second = make_stream({3, 4}, resource_context, second_max_new_tokens);
+        auto                 first  = make_stream({1, 2}, resource_context, first_max_new_tokens);
+        auto                 second = make_stream({3, 4}, resource_context, second_max_new_tokens);
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
 
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
@@ -1135,19 +1135,19 @@ void FIFOSchedulerTest::verifyBatchDecodeSchedulerDrainsMixedModeTail(const std:
 
     auto first_batch = scheduler.schedule();
     ASSERT_TRUE(first_batch.ok());
-    ASSERT_EQ(first_batch->size(), 2);
-    auto first_it = first_batch->begin();
+    ASSERT_EQ(first_batch->streams.size(), 2);
+    auto first_it = first_batch->streams.begin();
     EXPECT_EQ(first_it->get(), streams[0].get());
     ++first_it;
     EXPECT_EQ(first_it->get(), streams[1].get());
-    for (const auto& stream : first_batch.value()) {
+    for (const auto& stream : first_batch.value().streams) {
         stream->reportEvent(StreamEvents::GenerateDone);
     }
 
     auto tail_batch = scheduler.schedule();
     ASSERT_TRUE(tail_batch.ok());
-    ASSERT_EQ(tail_batch->size(), 1);
-    EXPECT_EQ(tail_batch->front().get(), streams[2].get());
+    ASSERT_EQ(tail_batch->streams.size(), 1);
+    EXPECT_EQ(tail_batch->streams.front().get(), streams[2].get());
     EXPECT_EQ(scheduler.onflightStreams(), 1);
 }
 
@@ -1172,15 +1172,15 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterMixedMod
 
     auto first_batch = scheduler.schedule();
     ASSERT_TRUE(first_batch.ok());
-    ASSERT_EQ(first_batch->size(), 2);
-    for (const auto& stream : first_batch.value()) {
+    ASSERT_EQ(first_batch->streams.size(), 2);
+    for (const auto& stream : first_batch.value().streams) {
         stream->reportEvent(StreamEvents::GenerateDone);
     }
 
     auto tail_batch = scheduler.schedule();
     ASSERT_TRUE(tail_batch.ok());
-    ASSERT_EQ(tail_batch->size(), 1);
-    EXPECT_EQ(tail_batch->front().get(), mixed_tail.get());
+    ASSERT_EQ(tail_batch->streams.size(), 1);
+    EXPECT_EQ(tail_batch->streams.front().get(), mixed_tail.get());
 
     auto late_same_mode = makeStream({7, 8}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
     ASSERT_TRUE(scheduler.enqueue(late_same_mode).ok());
@@ -1188,7 +1188,7 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterMixedMod
 
     auto gated = scheduler.schedule();
     ASSERT_TRUE(gated.ok());
-    EXPECT_TRUE(gated->empty());
+    EXPECT_TRUE(gated->streams.empty());
     EXPECT_EQ(scheduler.onflightStreams(), 1);
     EXPECT_FALSE(late_same_mode->hasEvent(StreamEvents::CanRun));
 
@@ -1196,8 +1196,8 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRestoresBatchGateAfterMixedMod
     ASSERT_TRUE(scheduler.enqueue(batch_peer).ok());
     auto full_batch = scheduler.schedule();
     ASSERT_TRUE(full_batch.ok());
-    ASSERT_EQ(full_batch->size(), 2);
-    auto full_batch_it = full_batch->begin();
+    ASSERT_EQ(full_batch->streams.size(), 2);
+    auto full_batch_it = full_batch->streams.begin();
     EXPECT_EQ(full_batch_it->get(), late_same_mode.get());
     ++full_batch_it;
     EXPECT_EQ(full_batch_it->get(), batch_peer.get());
@@ -1216,14 +1216,14 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsHomogeneousPositiveTailBe
 
     auto first_batch = scheduler.schedule();
     ASSERT_TRUE(first_batch.ok());
-    ASSERT_EQ(first_batch->size(), 2);
-    for (const auto& stream : first_batch.value()) {
+    ASSERT_EQ(first_batch->streams.size(), 2);
+    for (const auto& stream : first_batch.value().streams) {
         stream->reportEvent(StreamEvents::GenerateDone);
     }
 
     auto gated_tail = scheduler.schedule();
     ASSERT_TRUE(gated_tail.ok());
-    EXPECT_TRUE(gated_tail->empty());
+    EXPECT_TRUE(gated_tail->streams.empty());
     EXPECT_EQ(scheduler.onflightStreams(), 1);
     EXPECT_FALSE(tail->hasEvent(StreamEvents::CanRun));
 }
@@ -1249,7 +1249,7 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsBatchGateAfterReapingErro
         // The stale queue size opens the outer gate, but the error cannot count as a batch member.
         auto gated = scheduler.schedule();
         ASSERT_TRUE(gated.ok());
-        EXPECT_TRUE(gated->empty()) << "Reaping an error must not dispatch a partial homogeneous batch";
+        EXPECT_TRUE(gated->streams.empty()) << "Reaping an error must not dispatch a partial homogeneous batch";
         EXPECT_EQ(errored->getStatus(), StreamState::FINISHED);
         EXPECT_TRUE(errored->hasError());
         EXPECT_EQ(errored->statusInfo().code(), ErrorCode::CANCELLED);
@@ -1266,13 +1266,13 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsBatchGateAfterReapingErro
         ASSERT_TRUE(scheduler.enqueue(peer).ok());
         auto full_batch = scheduler.schedule();
         ASSERT_TRUE(full_batch.ok());
-        ASSERT_EQ(full_batch->size(), 2);
-        EXPECT_EQ(full_batch->front(), healthy);
-        EXPECT_EQ(full_batch->back(), peer);
+        ASSERT_EQ(full_batch->streams.size(), 2);
+        EXPECT_EQ(full_batch->streams.front(), healthy);
+        EXPECT_EQ(full_batch->streams.back(), peer);
         EXPECT_TRUE(scheduler.waiting_streams_.empty());
         EXPECT_FALSE(scheduler.draining_mixed_modes_);
         EXPECT_EQ(scheduler.onflightStreams(), 2);
-        for (const auto& stream : full_batch.value()) {
+        for (const auto& stream : full_batch.value().streams) {
             EXPECT_FALSE(stream->hasError());
             EXPECT_FALSE(stream->isContextStream());
         }
@@ -1316,7 +1316,7 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRechecksBatchGateAfterReapingE
         EXPECT_FALSE(scheduler.draining_mixed_modes_);
         EXPECT_EQ(scheduler.onflightStreams(), healthy_count);
         if (healthy_count < 2) {
-            EXPECT_TRUE(result->empty());
+            EXPECT_TRUE(result->streams.empty());
             EXPECT_EQ(cache_manager->freeBlocksNum(), free_blocks_before);
             ASSERT_EQ(scheduler.waiting_streams_.size(), healthy_count);
             for (const auto& stream : healthy) {
@@ -1332,9 +1332,9 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRechecksBatchGateAfterReapingE
             result = scheduler.schedule();
             ASSERT_TRUE(result.ok());
         }
-        ASSERT_EQ(result->size(), 2);
-        EXPECT_EQ(result->front(), healthy.front());
-        EXPECT_EQ(result->back(), healthy.back());
+        ASSERT_EQ(result->streams.size(), 2);
+        EXPECT_EQ(result->streams.front(), healthy.front());
+        EXPECT_EQ(result->streams.back(), healthy.back());
         EXPECT_TRUE(scheduler.waiting_streams_.empty());
         for (const auto& stream : healthy) {
             EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
@@ -1357,9 +1357,9 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerDrainsMixedTailAfterReapingErr
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second, tail}));
         auto initial = scheduler.schedule();
         ASSERT_TRUE(initial.ok());
-        ASSERT_EQ(initial->size(), 2);
-        ASSERT_EQ(initial->front(), first);
-        ASSERT_EQ(initial->back(), second);
+        ASSERT_EQ(initial->streams.size(), 2);
+        ASSERT_EQ(initial->streams.front(), first);
+        ASSERT_EQ(initial->streams.back(), second);
         ASSERT_TRUE(scheduler.draining_mixed_modes_);
         first->reportEvent(StreamEvents::GenerateDone);
         second->reportEvent(StreamEvents::GenerateDone);
@@ -1369,8 +1369,8 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerDrainsMixedTailAfterReapingErr
         errored->reportError(ErrorCode::CANCELLED, "cancelled during mixed-mode tail drain");
         auto drained = scheduler.schedule();
         ASSERT_TRUE(drained.ok());
-        ASSERT_EQ(drained->size(), 1);
-        EXPECT_EQ(drained->front(), tail);
+        ASSERT_EQ(drained->streams.size(), 1);
+        EXPECT_EQ(drained->streams.front(), tail);
         EXPECT_EQ(tail->getStatus(), StreamState::RUNNING);
         EXPECT_FALSE(tail->hasError());
         EXPECT_EQ(errored->getStatus(), StreamState::FINISHED);
@@ -1395,8 +1395,8 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 2);
-    for (const auto& stream : result.value()) {
+    ASSERT_EQ(result.value().streams.size(), 2);
+    for (const auto& stream : result.value().streams) {
         EXPECT_FALSE(stream->isContextStream());
     }
 }
@@ -1424,14 +1424,14 @@ TEST_F(FIFOSchedulerTest, testFIFOAdmissionModeStillIncludesRunningStream) {
     ASSERT_TRUE(scheduler.enqueue(running).ok());
     auto initial = scheduler.schedule();
     ASSERT_TRUE(initial.ok());
-    ASSERT_EQ(initial->size(), 1);
+    ASSERT_EQ(initial->streams.size(), 1);
 
     auto prefill_only = makeStream({3, 4}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
     ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 1);
-    EXPECT_EQ(result->front().get(), running.get());
+    ASSERT_EQ(result->streams.size(), 1);
+    EXPECT_EQ(result->streams.front().get(), running.get());
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
     EXPECT_FALSE(prefill_only->hasEvent(StreamEvents::CanRun));
 }
@@ -1455,7 +1455,7 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     ASSERT_TRUE(enqueueIndividually(scheduler, {generation, prefill_only}));
     auto loading = scheduler.schedule();
     ASSERT_TRUE(loading.ok());
-    ASSERT_TRUE(loading->empty());
+    ASSERT_TRUE(loading->streams.empty());
     ASSERT_EQ(generation->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(generation->curBlocksNum(), 2);
     EXPECT_EQ(prefill_only->getStatus(), StreamState::WAITING);
@@ -1466,8 +1466,8 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     ASSERT_TRUE(load_context->settle(true));
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill->size(), 1);
-    EXPECT_EQ(prefill->front(), prefill_only);
+    ASSERT_EQ(prefill->streams.size(), 1);
+    EXPECT_EQ(prefill->streams.front(), prefill_only);
     EXPECT_EQ(generation->getStatus(), StreamState::WAITING);
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
     EXPECT_EQ(scheduler.waiting_streams_.front(), generation);
@@ -1475,8 +1475,8 @@ TEST_F(FIFOSchedulerTest, testFIFOAsyncLoadAdmissionStillSelectsExecutionMode) {
     prefill_only->reportEvent(StreamEvents::GenerateDone);
     auto loaded = scheduler.schedule();
     ASSERT_TRUE(loaded.ok());
-    ASSERT_EQ(loaded->size(), 1);
-    EXPECT_EQ(loaded->front(), generation);
+    ASSERT_EQ(loaded->streams.size(), 1);
+    EXPECT_EQ(loaded->streams.front(), generation);
     EXPECT_EQ(generation->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(generation->hasError());
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -1510,8 +1510,8 @@ TEST_F(FIFOSchedulerTest, testFIFOFailedAdmissionDoesNotSelectExecutionMode) {
     ASSERT_FALSE(oversized->hasError());
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 1);
-    EXPECT_EQ(result->front(), prefill_only);
+    ASSERT_EQ(result->streams.size(), 1);
+    EXPECT_EQ(result->streams.front(), prefill_only);
     EXPECT_EQ(oversized->getStatus(), StreamState::FINISHED);
     EXPECT_EQ(oversized->statusInfo().code(), ErrorCode::MALLOC_FAILED);
     EXPECT_EQ(oversized->curBlocksNum(), 0);
@@ -1540,7 +1540,7 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     ASSERT_TRUE(scheduler.enqueue(generation).ok());
     auto loading = scheduler.schedule();
     ASSERT_TRUE(loading.ok());
-    ASSERT_TRUE(loading->empty());
+    ASSERT_TRUE(loading->streams.empty());
     ASSERT_EQ(generation->getStatus(), StreamState::LOADING_CACHE);
     ASSERT_EQ(generation->curBlocksNum(), 2);
     ASSERT_TRUE(generation->hasEvent(StreamEvents::CanRun));
@@ -1553,7 +1553,7 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
     auto blocked = scheduler.schedule();
     ASSERT_TRUE(blocked.ok());
-    ASSERT_TRUE(blocked->empty());
+    ASSERT_TRUE(blocked->streams.empty());
     ASSERT_EQ(prefill_only->getStatus(), StreamState::WAITING);
     ASSERT_FALSE(prefill_only->hasError());
     ASSERT_TRUE(prefill_only->hasEvent(StreamEvents::CanRun));
@@ -1567,8 +1567,9 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     ASSERT_TRUE(load_context->settle(true));
     auto ready = scheduler.schedule();
     ASSERT_TRUE(ready.ok());
-    ASSERT_EQ(ready->size(), 1) << "A KV-blocked prefill-only waiter must not starve a loaded generation stream";
-    EXPECT_EQ(ready->front(), generation);
+    ASSERT_EQ(ready->streams.size(), 1)
+        << "A KV-blocked prefill-only waiter must not starve a loaded generation stream";
+    EXPECT_EQ(ready->streams.front(), generation);
     EXPECT_EQ(generation->getStatus(), StreamState::RUNNING);
     EXPECT_TRUE(scheduler.loading_cache_streams_.empty());
     ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
@@ -1579,8 +1580,8 @@ TEST_F(FIFOSchedulerTest, testFIFORetryableKVShortageDoesNotBlockLoadedOppositeM
     generation->reportEvent(StreamEvents::GenerateDone);
     auto recovered = scheduler.schedule();
     ASSERT_TRUE(recovered.ok());
-    ASSERT_EQ(recovered->size(), 1);
-    EXPECT_EQ(recovered->front(), prefill_only);
+    ASSERT_EQ(recovered->streams.size(), 1);
+    EXPECT_EQ(recovered->streams.front(), prefill_only);
     EXPECT_EQ(generation->getStatus(), StreamState::FINISHED);
     EXPECT_EQ(prefill_only->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(prefill_only->curBlocksNum(), 3);
@@ -1605,7 +1606,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionLoadedOppositeModeWaitsForItsOwnPrefillRou
     ASSERT_TRUE(scheduler.enqueue(generation).ok());
     auto loading = scheduler.schedule();
     ASSERT_TRUE(loading.ok());
-    ASSERT_TRUE(loading->empty());
+    ASSERT_TRUE(loading->streams.empty());
     ASSERT_EQ(generation->getStatus(), StreamState::LOADING_CACHE);
     ASSERT_EQ(generation->curBlocksNum(), 2);
     ASSERT_TRUE(generation->hasEvent(StreamEvents::CanRun));
@@ -1623,9 +1624,10 @@ TEST_F(FIFOSchedulerTest, testPDFusionLoadedOppositeModeWaitsForItsOwnPrefillRou
     ASSERT_TRUE(load_context->settle(true));
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill->size(), 1) << "Completed cache loading must not bypass this round's execution-mode filter";
-    EXPECT_EQ(prefill->front(), prefill_only);
-    EXPECT_TRUE(prefill->front()->generateConfig()->isPrefillOnly());
+    ASSERT_EQ(prefill->streams.size(), 1)
+        << "Completed cache loading must not bypass this round's execution-mode filter";
+    EXPECT_EQ(prefill->streams.front(), prefill_only);
+    EXPECT_TRUE(prefill->streams.front()->generateConfig()->isPrefillOnly());
     EXPECT_TRUE(scheduler.loading_cache_streams_.empty());
     EXPECT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     EXPECT_EQ(scheduler.runningStreamsSize(), 0);
@@ -1640,9 +1642,9 @@ TEST_F(FIFOSchedulerTest, testPDFusionLoadedOppositeModeWaitsForItsOwnPrefillRou
     prefill_only->reportEvent(StreamEvents::GenerateDone);
     auto next_prefill = scheduler.schedule();
     ASSERT_TRUE(next_prefill.ok());
-    ASSERT_EQ(next_prefill->size(), 1);
-    EXPECT_EQ(next_prefill->front(), generation);
-    EXPECT_FALSE(next_prefill->front()->generateConfig()->isPrefillOnly());
+    ASSERT_EQ(next_prefill->streams.size(), 1);
+    EXPECT_EQ(next_prefill->streams.front(), generation);
+    EXPECT_FALSE(next_prefill->streams.front()->generateConfig()->isPrefillOnly());
     EXPECT_EQ(prefill_only->getStatus(), StreamState::FINISHED);
     EXPECT_EQ(generation->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(generation->hasError());
@@ -1670,7 +1672,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadIsNotCountedTwice) {
         ASSERT_TRUE(scheduler.enqueue(loaded).ok());
         auto loading = scheduler.schedule();
         ASSERT_TRUE(loading.ok());
-        ASSERT_TRUE(loading->empty());
+        ASSERT_TRUE(loading->streams.empty());
         ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
         ASSERT_EQ(loaded->curBlocksNum(), 1);
         ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
@@ -1685,8 +1687,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadIsNotCountedTwice) {
         ASSERT_TRUE(result.ok());
         // At limit 1 the new request exceeds the batch cap; at limit 2 it exceeds the KV peak.
         // In both cases the already-accounted load must execute without counting itself twice.
-        ASSERT_EQ(result->size(), 1);
-        EXPECT_EQ(result->front(), loaded);
+        ASSERT_EQ(result->streams.size(), 1);
+        EXPECT_EQ(result->streams.front(), loaded);
         EXPECT_EQ(loaded->getStatus(), StreamState::RUNNING);
         EXPECT_FALSE(loaded->hasError());
         EXPECT_TRUE(scheduler.loading_cache_streams_.empty());
@@ -1700,8 +1702,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadIsNotCountedTwice) {
         loaded->reportEvent(StreamEvents::GenerateDone);
         auto recovered = scheduler.schedule();
         ASSERT_TRUE(recovered.ok());
-        ASSERT_EQ(recovered->size(), 1);
-        EXPECT_EQ(recovered->front(), candidate);
+        ASSERT_EQ(recovered->streams.size(), 1);
+        EXPECT_EQ(recovered->streams.front(), candidate);
         EXPECT_FALSE(candidate->hasError());
         EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
     }
@@ -1726,7 +1728,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadRespectsTokenAdmission) {
         ASSERT_TRUE(scheduler.enqueue(loaded).ok());
         auto loading = scheduler.schedule();
         ASSERT_TRUE(loading.ok());
-        ASSERT_TRUE(loading->empty());
+        ASSERT_TRUE(loading->streams.empty());
         ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
         ASSERT_EQ(loaded->curBlocksNum(), 2);
 
@@ -1737,8 +1739,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadRespectsTokenAdmission) {
         auto result = scheduler.schedule();
         ASSERT_TRUE(result.ok());
         // Both requests have the same mode. The existing token gate is strict: 2 * 2 < budget.
-        ASSERT_EQ(result->size(), token_budget == 4 ? 1 : 2);
-        EXPECT_EQ(result->front(), first);
+        ASSERT_EQ(result->streams.size(), token_budget == 4 ? 1 : 2);
+        EXPECT_EQ(result->streams.front(), first);
         EXPECT_TRUE(scheduler.loading_cache_streams_.empty());
         EXPECT_FALSE(first->hasError());
         EXPECT_FALSE(loaded->hasError());
@@ -1752,10 +1754,10 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadRespectsTokenAdmission) {
             first->reportEvent(StreamEvents::GenerateDone);
             result = scheduler.schedule();
             ASSERT_TRUE(result.ok());
-            ASSERT_EQ(result->size(), 1);
-            EXPECT_EQ(result->front(), loaded);
+            ASSERT_EQ(result->streams.size(), 1);
+            EXPECT_EQ(result->streams.front(), loaded);
         } else {
-            EXPECT_EQ(result->back(), loaded);
+            EXPECT_EQ(result->streams.back(), loaded);
         }
         EXPECT_EQ(loaded->getStatus(), StreamState::RUNNING);
         EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -1783,7 +1785,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
         ASSERT_TRUE(scheduler.enqueue(loaded).ok());
         auto loading = scheduler.schedule();
         ASSERT_TRUE(loading.ok());
-        ASSERT_TRUE(loading->empty());
+        ASSERT_TRUE(loading->streams.empty());
         ASSERT_EQ(loaded->getStatus(), StreamState::LOADING_CACHE);
         ASSERT_EQ(loaded->curBlocksNum(), 2);
 
@@ -1796,8 +1798,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
         ASSERT_TRUE(load_context->settle(true));
         auto selected = scheduler.schedule();
         ASSERT_TRUE(selected.ok());
-        ASSERT_EQ(selected->size(), 1);
-        ASSERT_EQ(selected->front(), first);
+        ASSERT_EQ(selected->streams.size(), 1);
+        ASSERT_EQ(selected->streams.front(), first);
         // Loading returns behind both waiters; the in-flight batch cap admits only the first.
         ASSERT_EQ(scheduler.waiting_streams_.size(), 2);
         ASSERT_EQ(scheduler.waiting_streams_.front(), second);
@@ -1818,8 +1820,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutLoadedWaiterRejectedByAdmissi
         // release KV, even though the second waiter makes loaded fail admission again this round.
         auto reaped = scheduler.schedule();
         ASSERT_TRUE(reaped.ok());
-        ASSERT_EQ(reaped->size(), 1);
-        EXPECT_EQ(reaped->front(), second);
+        ASSERT_EQ(reaped->streams.size(), 1);
+        EXPECT_EQ(reaped->streams.front(), second);
         EXPECT_EQ(loaded->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
         EXPECT_EQ(loaded->getStatus(), StreamState::FINISHED);
         EXPECT_EQ(loaded->curBlocksNum(), 0);
@@ -1857,11 +1859,11 @@ TEST_F(FIFOSchedulerTest, testPDFusionPrefillModeIgnoresRunningDecodeForComplete
     ASSERT_TRUE(scheduler.enqueue(running).ok());
     auto seed = scheduler.schedule();
     ASSERT_TRUE(seed.ok());
-    ASSERT_EQ(seed->size(), 1);
+    ASSERT_EQ(seed->streams.size(), 1);
     running->setSeqLength(running->seqLength() + 1);
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode->size(), 1);
+    ASSERT_EQ(decode->streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 
     const int64_t group_id = 900;
@@ -1874,8 +1876,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionPrefillModeIgnoresRunningDecodeForComplete
 
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill->size(), 2);
-    auto prefill_it = prefill->begin();
+    ASSERT_EQ(prefill->streams.size(), 2);
+    auto prefill_it = prefill->streams.begin();
     EXPECT_EQ(prefill_it->get(), prefill_only_1.get());
     ++prefill_it;
     EXPECT_EQ(prefill_it->get(), prefill_only_2.get());
@@ -1897,8 +1899,8 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerKeepsZeroBatchInContext) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 2);
-    for (const auto& stream : result.value()) {
+    ASSERT_EQ(result.value().streams.size(), 2);
+    for (const auto& stream : result.value().streams) {
         EXPECT_TRUE(stream->isContextStream());
         EXPECT_EQ(stream->curBlocksNum(), 2);
     }
@@ -1991,7 +1993,7 @@ TEST_F(FIFOSchedulerTest, testPrefillFirstAlternation) {
     // R1: seed PREFILL (running+pending empty). Admits s1 -> pending; not yet running.
     auto r1 = scheduler.schedule();
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     s1->setSeqLength(s1->seqLength() + 1);  // simulate prefill forward
@@ -2006,13 +2008,13 @@ TEST_F(FIFOSchedulerTest, testPrefillFirstAlternation) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
-    ASSERT_EQ(r2.value().size(), 1);  // pure-decode batch (s1)
+    ASSERT_EQ(r2.value().streams.size(), 1);  // pure-decode batch (s1)
     s1->setSeqLength(s1->seqLength() + 1);
 
     // R3: PREFILL (decode_since_prefill_=1 >= 1). Admits s2 (pure context); s1 held back in running.
     auto r3 = scheduler.schedule();
     ASSERT_TRUE(r3.ok());
-    ASSERT_EQ(r3.value().size(), 1);                     // pure-context batch (s2 only)
+    ASSERT_EQ(r3.value().streams.size(), 1);             // pure-context batch (s2 only)
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);        // s1 still running, held back
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);  // s2 pending
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -2042,7 +2044,7 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadence) {
     // R1: seed PREFILL s1.
     auto r1 = scheduler.schedule();
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
 
     // Keep s2 waiting throughout to prove the 3 decode rounds are cadence-forced (not "no work").
@@ -2060,7 +2062,7 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadence) {
     // R5: PREFILL (decode_since_prefill_ == 3 >= 3) -> admits s2.
     auto r5 = scheduler.schedule();
     ASSERT_TRUE(r5.ok());
-    ASSERT_EQ(r5.value().size(), 1);  // pure-context (s2)
+    ASSERT_EQ(r5.value().streams.size(), 1);  // pure-context (s2)
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
@@ -2087,7 +2089,7 @@ TEST_F(FIFOSchedulerTest, testDecodeRoundReapsErroredWaitingStream) {
 
     auto r1 = scheduler.schedule();  // PREFILL s1
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
 
     auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
@@ -2095,7 +2097,7 @@ TEST_F(FIFOSchedulerTest, testDecodeRoundReapsErroredWaitingStream) {
 
     auto r2 = scheduler.schedule();  // DECODE s1, keep s2 waiting
     ASSERT_TRUE(r2.ok());
-    ASSERT_EQ(r2.value().size(), 1);
+    ASSERT_EQ(r2.value().streams.size(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
 
@@ -2103,8 +2105,8 @@ TEST_F(FIFOSchedulerTest, testDecodeRoundReapsErroredWaitingStream) {
 
     auto r3 = scheduler.schedule();  // still a DECODE round; should reap cancelled s2 without admitting it
     ASSERT_TRUE(r3.ok());
-    ASSERT_EQ(r3.value().size(), 1);
-    ASSERT_EQ(r3.value().front().get(), s1.get());
+    ASSERT_EQ(r3.value().streams.size(), 1);
+    ASSERT_EQ(r3.value().streams.front().get(), s1.get());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_TRUE(s2->isFinished());
     ASSERT_EQ(s2->stopReason(), "cancelled while waiting");
@@ -2134,21 +2136,21 @@ TEST_F(FIFOSchedulerTest, testInvalidDecodePrefillRatioFallsBackToAlternation) {
         ASSERT_TRUE(scheduler.enqueue(s1).ok()) << ratio;
         auto seed = scheduler.schedule();
         ASSERT_TRUE(seed.ok()) << ratio;
-        ASSERT_EQ(seed.value().size(), 1) << ratio;
+        ASSERT_EQ(seed.value().streams.size(), 1) << ratio;
         s1->setSeqLength(s1->seqLength() + 1);
 
         auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
         ASSERT_TRUE(scheduler.enqueue(s2).ok()) << ratio;
         auto decode = scheduler.schedule();
         ASSERT_TRUE(decode.ok()) << ratio;
-        ASSERT_EQ(decode.value().size(), 1) << ratio;
-        ASSERT_EQ(decode.value().front().get(), s1.get()) << ratio;
+        ASSERT_EQ(decode.value().streams.size(), 1) << ratio;
+        ASSERT_EQ(decode.value().streams.front().get(), s1.get()) << ratio;
         s1->setSeqLength(s1->seqLength() + 1);
 
         auto prefill = scheduler.schedule();
         ASSERT_TRUE(prefill.ok()) << ratio;
-        ASSERT_EQ(prefill.value().size(), 1) << ratio;
-        ASSERT_EQ(prefill.value().front().get(), s2.get()) << ratio;
+        ASSERT_EQ(prefill.value().streams.size(), 1) << ratio;
+        ASSERT_EQ(prefill.value().streams.front().get(), s2.get()) << ratio;
     }
 }
 
@@ -2174,21 +2176,21 @@ TEST_F(FIFOSchedulerTest, testDecodeHeavyCadenceSeedsAfterInFlightDrains) {
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
     auto seed = scheduler.schedule();
     ASSERT_TRUE(seed.ok());
-    ASSERT_EQ(seed.value().size(), 1);
+    ASSERT_EQ(seed.value().streams.size(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
 
     auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s2).ok());
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode.value().size(), 1);
-    ASSERT_EQ(decode.value().front().get(), s1.get());
+    ASSERT_EQ(decode.value().streams.size(), 1);
+    ASSERT_EQ(decode.value().streams.front().get(), s1.get());
 
     s1->reportEventWithoutLock(StreamEvents::GenerateDone);
     auto reseed = scheduler.schedule();
     ASSERT_TRUE(reseed.ok());
-    ASSERT_EQ(reseed.value().size(), 1);
-    ASSERT_EQ(reseed.value().front().get(), s2.get());
+    ASSERT_EQ(reseed.value().streams.size(), 1);
+    ASSERT_EQ(reseed.value().streams.front().get(), s2.get());
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
 }
@@ -2217,21 +2219,21 @@ TEST_F(FIFOSchedulerTest, testPrefillHeavyCadence) {
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
     auto r1 = scheduler.schedule();  // seed PREFILL s1
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
 
     auto s2 = makeStream({3, 4}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s2).ok());
     auto r2 = scheduler.schedule();  // PREFILL (prefill_since_decode_=1 < 3) -> s2
     ASSERT_TRUE(r2.ok());
-    ASSERT_EQ(r2.value().size(), 1);
+    ASSERT_EQ(r2.value().streams.size(), 1);
     s2->setSeqLength(s2->seqLength() + 1);
 
     auto s3 = makeStream({5, 6}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s3).ok());
     auto r3 = scheduler.schedule();  // PREFILL (prefill_since_decode_=2 < 3) -> s3
     ASSERT_TRUE(r3.ok());
-    ASSERT_EQ(r3.value().size(), 1);
+    ASSERT_EQ(r3.value().streams.size(), 1);
     s3->setSeqLength(s3->seqLength() + 1);
 
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 3);  // s1,s2,s3 all pending
@@ -2275,7 +2277,7 @@ TEST_F(FIFOSchedulerTest, testLargeStepDecodeFirst) {
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
     auto r1 = scheduler.schedule();  // seed PREFILL s1
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
 
     // s2 queued but must NOT be admitted while s1 decodes (huge step => always decode).
@@ -2318,7 +2320,7 @@ TEST_F(FIFOSchedulerTest, testZeroRatioTriesPrefillBeforeDecode) {
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
     auto r1 = scheduler.schedule();  // seed PREFILL s1
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
 
@@ -2328,8 +2330,8 @@ TEST_F(FIFOSchedulerTest, testZeroRatioTriesPrefillBeforeDecode) {
     // decode_prefill_ratio=0 means any waiting stream gets a PREFILL attempt before decode.
     auto r2 = scheduler.schedule();
     ASSERT_TRUE(r2.ok());
-    ASSERT_EQ(r2.value().size(), 1);
-    ASSERT_EQ(r2.value().front().get(), s2.get());
+    ASSERT_EQ(r2.value().streams.size(), 1);
+    ASSERT_EQ(r2.value().streams.front().get(), s2.get());
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -2363,7 +2365,7 @@ TEST_F(FIFOSchedulerTest, testConcurrencyCapCountsPending) {
     // R1: seed PREFILL. Cap = running(0)+pending(0)+streams+1 > 2 => admits exactly 2, rejects 2.
     auto r1 = scheduler.schedule();
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 2);
+    ASSERT_EQ(r1.value().streams.size(), 2);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
     streams[0]->setSeqLength(streams[0]->seqLength() + 1);
@@ -2400,7 +2402,7 @@ TEST_F(FIFOSchedulerTest, testZeroRatioFallsBackToDecodeWhenKvAdmissionRejectsAl
     ASSERT_TRUE(scheduler.enqueue(running).ok());
     auto r1 = scheduler.schedule();  // seed PREFILL running
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     running->setSeqLength(running->seqLength() + 1);
 
@@ -2411,8 +2413,8 @@ TEST_F(FIFOSchedulerTest, testZeroRatioFallsBackToDecodeWhenKvAdmissionRejectsAl
     // waiting stream. The scheduler must then fall back to DECODE and promote the pending stream.
     auto r2 = scheduler.schedule();
     ASSERT_TRUE(r2.ok());
-    ASSERT_EQ(r2.value().size(), 1);
-    ASSERT_EQ(r2.value().front().get(), running.get());
+    ASSERT_EQ(r2.value().streams.size(), 1);
+    ASSERT_EQ(r2.value().streams.front().get(), running.get());
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
@@ -2444,7 +2446,7 @@ TEST_F(FIFOSchedulerTest, testEmptyDegradedPrefillDoesNotAdvanceDecodeCounter) {
     auto r1         = scheduler.schedule();  // PREFILL selected, admission fails, no decode batch runs.
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 0);
+    ASSERT_EQ(r1.value().streams.size(), 0);
     ASSERT_GE(elapsed_ms.count(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.decodeSincePrefillForTest(), 0);
@@ -2482,7 +2484,7 @@ TEST_F(FIFOSchedulerTest, testKvGatedAdmission) {
 
     auto r1 = scheduler.schedule();  // seed PREFILL: KV admission admits both prompts
     ASSERT_TRUE(r1.ok());
-    ASSERT_EQ(r1.value().size(), 2);
+    ASSERT_EQ(r1.value().streams.size(), 2);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_FALSE(s1->hasError());
@@ -2516,15 +2518,15 @@ TEST_F(FIFOSchedulerTest, testMultiBlockPromptPromotesWithIncrementalKv) {
 
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
+    ASSERT_EQ(prefill.value().streams.size(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
 
     stream->setSeqLength(stream->seqLength() + 1);
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode.value().size(), 1);
-    ASSERT_EQ(decode.value().front().get(), stream.get());
+    ASSERT_EQ(decode.value().streams.size(), 1);
+    ASSERT_EQ(decode.value().streams.front().get(), stream.get());
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_FALSE(stream->hasError());
@@ -2558,7 +2560,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsPromptBlocksAcrossRound) {
 
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
+    ASSERT_EQ(prefill.value().streams.size(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_FALSE(s1->hasError());
@@ -2601,8 +2603,8 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
 
     auto seed = scheduler.schedule();
     ASSERT_TRUE(seed.ok());
-    ASSERT_EQ(seed.value().size(), 1);
-    ASSERT_EQ(seed.value().front().get(), high_fanout.get());
+    ASSERT_EQ(seed.value().streams.size(), 1);
+    ASSERT_EQ(seed.value().streams.front().get(), high_fanout.get());
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 40);
 
@@ -2616,8 +2618,8 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionAccountsFanOutAtShortLifetimePeak)
 
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode.value().size(), 1);
-    ASSERT_EQ(decode.value().front().get(), high_fanout.get());
+    ASSERT_EQ(decode.value().streams.size(), 1);
+    ASSERT_EQ(decode.value().streams.front().get(), high_fanout.get());
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
@@ -2705,7 +2707,7 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
     ASSERT_TRUE(scheduler.enqueue(in_flight).ok());
     auto first_prefill = scheduler.schedule();
     ASSERT_TRUE(first_prefill.ok());
-    ASSERT_EQ(first_prefill.value().size(), 1);
+    ASSERT_EQ(first_prefill.value().streams.size(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
 
     auto         candidate             = makeStream({1, 2, 3, 4, 5, 6, 7, 8},
@@ -2722,8 +2724,8 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
 
     auto candidate_prefill = scheduler.schedule();
     ASSERT_TRUE(candidate_prefill.ok());
-    ASSERT_EQ(candidate_prefill.value().size(), 1);
-    ASSERT_EQ(candidate_prefill.value().front().get(), candidate.get());
+    ASSERT_EQ(candidate_prefill.value().streams.size(), 1);
+    ASSERT_EQ(candidate_prefill.value().streams.front().get(), candidate.get());
     ASSERT_FALSE(candidate->hasError());
 
     size_t min_free_blocks = cache_manager->freeBlocksNum();
@@ -2731,12 +2733,12 @@ TEST_F(FIFOSchedulerTest, testMultiSequenceAdmissionMatchesPhysicalFreeBlockWate
 
     auto promote = scheduler.schedule();
     ASSERT_TRUE(promote.ok());
-    ASSERT_EQ(promote.value().size(), 2);
+    ASSERT_EQ(promote.value().streams.size(), 2);
 
     candidate->setSeqLength(candidate->seqLength() + 1);
     auto cross_boundary = scheduler.schedule();
     ASSERT_TRUE(cross_boundary.ok());
-    ASSERT_EQ(cross_boundary.value().size(), 2);
+    ASSERT_EQ(cross_boundary.value().streams.size(), 2);
     ASSERT_FALSE(candidate->hasError());
     min_free_blocks = std::min(min_free_blocks, cache_manager->freeBlocksNum());
 
@@ -2925,7 +2927,7 @@ TEST_F(FIFOSchedulerTest, testScheduleBatchKVAdmissionCostAcrossWaitingCounts) {
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
 
         ASSERT_TRUE(scheduled.ok());
-        ASSERT_EQ(scheduled.value().size(), stream_count);
+        ASSERT_EQ(scheduled.value().streams.size(), stream_count);
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), stream_count);
         ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
@@ -2975,7 +2977,7 @@ TEST_F(FIFOSchedulerTest, testReserveOnlyLimitsInitialAllocationNotLifecycleGrow
     ASSERT_TRUE(scheduler.enqueue(long_running).ok());
     auto first_prefill = scheduler.schedule();
     ASSERT_TRUE(first_prefill.ok());
-    ASSERT_EQ(first_prefill.value().size(), 1);
+    ASSERT_EQ(first_prefill.value().streams.size(), 1);
     ASSERT_EQ(cache_manager->availableBlocksNum(), 8);
 
     auto candidate = makeStream({3, 4, 5},
@@ -2994,20 +2996,20 @@ TEST_F(FIFOSchedulerTest, testReserveOnlyLimitsInitialAllocationNotLifecycleGrow
 
     auto second_prefill = scheduler.schedule();
     ASSERT_TRUE(second_prefill.ok());
-    ASSERT_EQ(second_prefill.value().size(), 1);
-    ASSERT_EQ(second_prefill.value().front().get(), candidate.get());
+    ASSERT_EQ(second_prefill.value().streams.size(), 1);
+    ASSERT_EQ(second_prefill.value().streams.front().get(), candidate.get());
     ASSERT_FALSE(candidate->hasError());
     ASSERT_EQ(cache_manager->freeBlocksNum(), 5);
 
     auto promote = scheduler.schedule();
     ASSERT_TRUE(promote.ok());
-    ASSERT_EQ(promote.value().size(), 2);
+    ASSERT_EQ(promote.value().streams.size(), 2);
     for (int step = 0; step < 2; ++step) {
         long_running->setSeqLength(long_running->seqLength() + 1);
         candidate->setSeqLength(candidate->seqLength() + 1);
         auto decode = scheduler.schedule();
         ASSERT_TRUE(decode.ok());
-        ASSERT_EQ(decode.value().size(), 2);
+        ASSERT_EQ(decode.value().streams.size(), 2);
         ASSERT_FALSE(long_running->hasError());
         ASSERT_FALSE(candidate->hasError());
     }
@@ -3041,10 +3043,10 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
     ASSERT_TRUE(scheduler.enqueue(running).ok());
     auto running_prefill = scheduler.schedule();
     ASSERT_TRUE(running_prefill.ok());
-    ASSERT_EQ(running_prefill.value().size(), 1);
+    ASSERT_EQ(running_prefill.value().streams.size(), 1);
     auto promote = scheduler.schedule();
     ASSERT_TRUE(promote.ok());
-    ASSERT_EQ(promote.value().size(), 1);
+    ASSERT_EQ(promote.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
 
@@ -3053,8 +3055,8 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
     ASSERT_TRUE(scheduler.enqueue(candidate).ok());
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
-    ASSERT_EQ(prefill.value().front().get(), candidate.get());
+    ASSERT_EQ(prefill.value().streams.size(), 1);
+    ASSERT_EQ(prefill.value().streams.front().get(), candidate.get());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
@@ -3076,8 +3078,8 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
 
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode.value().size(), 1);
-    ASSERT_EQ(decode.value().front().get(), running.get());
+    ASSERT_EQ(decode.value().streams.size(), 1);
+    ASSERT_EQ(decode.value().streams.front().get(), running.get());
     ASSERT_FALSE(candidate->hasError());
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
@@ -3125,7 +3127,7 @@ TEST_F(FIFOSchedulerTest, testSinglePrefillDefersReserveCapacityFailureToAllocat
 
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 0);
+    ASSERT_EQ(prefill.value().streams.size(), 0);
     ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
     ASSERT_EQ(stream->stopReason(), "LACK MEM");
@@ -3161,7 +3163,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionUsesMaxTokenNumRemainingTokens) {
     ASSERT_TRUE(scheduler.enqueue(seed).ok());
     auto seed_prefill = scheduler.schedule();
     ASSERT_TRUE(seed_prefill.ok());
-    ASSERT_EQ(seed_prefill.value().size(), 1);
+    ASSERT_EQ(seed_prefill.value().streams.size(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
 
@@ -3174,8 +3176,8 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionUsesMaxTokenNumRemainingTokens) {
 
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
-    ASSERT_EQ(prefill.value().front().get(), stream.get());
+    ASSERT_EQ(prefill.value().streams.size(), 1);
+    ASSERT_EQ(prefill.value().streams.front().get(), stream.get());
     ASSERT_FALSE(stream->hasError());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 2);
@@ -3206,13 +3208,13 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureFinishes) {
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     auto prefill = scheduler.schedule();
     ASSERT_TRUE(prefill.ok());
-    ASSERT_EQ(prefill.value().size(), 1);
+    ASSERT_EQ(prefill.value().streams.size(), 1);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
 
     stream->setSeqLength(64);
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode.value().size(), 0);
+    ASSERT_EQ(decode.value().streams.size(), 0);
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 0);
     ASSERT_TRUE(stream->hasError());
 }
@@ -3240,7 +3242,7 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureDoesNotSpin) {
     auto s1 = makeStream({1, 2}, model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(s1).ok());
     auto r1 = scheduler.schedule();  // PREFILL s1
-    ASSERT_EQ(r1.value().size(), 1);
+    ASSERT_EQ(r1.value().streams.size(), 1);
     s1->setSeqLength(s1->seqLength() + 1);
     auto r2 = scheduler.schedule();  // DECODE: promote s1 into running
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
@@ -3251,7 +3253,7 @@ TEST_F(FIFOSchedulerTest, testPendingDecodePromotionMallocFailureDoesNotSpin) {
     ASSERT_TRUE(scheduler.enqueue(s2).ok());
     s1->setSeqLength(s1->seqLength() + 1);
     auto r3 = scheduler.schedule();  // PREFILL s2 (held in pending)
-    ASSERT_EQ(r3.value().size(), 1);
+    ASSERT_EQ(r3.value().streams.size(), 1);
     s2->setSeqLength(64);
     s1->setSeqLength(s1->seqLength() + 1);
 
@@ -3303,12 +3305,12 @@ TEST_F(FIFOSchedulerTest, testNoIncrKvBlockOnPrefillRounds) {
     const size_t blocks_after = cache_manager->freeBlocksNum();
 
     // `held` is not in the returned (pure-context) batch ...
-    for (const auto& s : rp.value()) {
+    for (const auto& s : rp.value().streams) {
         ASSERT_NE(s.get(), held.get());
     }
     // ... and the prefill consumed at most the admitted prompts' blocks. With a 2-token prompt and
     // block_size 8, one admitted prefill needs exactly 1 block; `held` (held back) must add 0.
-    ASSERT_LE(blocks_before - blocks_after, static_cast<size_t>(rp.value().size()));
+    ASSERT_LE(blocks_before - blocks_after, static_cast<size_t>(rp.value().streams.size()));
 }
 
 TEST_F(FIFOSchedulerTest, testPrefillRoundDoesNotAccountHeldDecodeAsBatchedWithPrefill) {
@@ -3343,8 +3345,8 @@ TEST_F(FIFOSchedulerTest, testPrefillRoundDoesNotAccountHeldDecodeAsBatchedWithP
     held->setSeqLength(held->seqLength() + 1);
     auto prefill_round = scheduler.schedule();  // PREFILL prefill; held stays out of returned batch
     ASSERT_TRUE(prefill_round.ok());
-    ASSERT_EQ(prefill_round.value().size(), 1);
-    ASSERT_EQ(prefill_round.value().front().get(), prefill.get());
+    ASSERT_EQ(prefill_round.value().streams.size(), 1);
+    ASSERT_EQ(prefill_round.value().streams.front().get(), prefill.get());
     ASSERT_EQ(held->batch_with_prefill_times_, 0);
     ASSERT_EQ(held->batch_with_prefill_len_, 0);
 }
@@ -3393,7 +3395,7 @@ TEST_F(FIFOSchedulerTest, permanentlyOversizedStreamDoesNotBlockLaterStream) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
+    ASSERT_EQ(result.value().streams.size(), 1);
     EXPECT_TRUE(streams[0]->hasError());
     EXPECT_EQ(streams[0]->getStatus(), StreamState::FINISHED);
     EXPECT_EQ(streams[1]->getStatus(), StreamState::RUNNING);
@@ -3436,7 +3438,7 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageStillAdmitsLaterSmallerStreams) {
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
-    ASSERT_EQ(first_result.value().size(), 2);
+    ASSERT_EQ(first_result.value().streams.size(), 2);
     EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(streams[1]->getStatus(), StreamState::WAITING);
     EXPECT_EQ(streams[2]->getStatus(), StreamState::RUNNING);
@@ -3449,7 +3451,7 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageStillAdmitsLaterSmallerStreams) {
     streams[2]->reportEvent(StreamEvents::GenerateDone);
     auto second_result = scheduler.schedule();
     ASSERT_TRUE(second_result.ok());
-    ASSERT_EQ(second_result.value().size(), 2);
+    ASSERT_EQ(second_result.value().streams.size(), 2);
     EXPECT_EQ(streams[1]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(streams[3]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -3496,8 +3498,8 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageDoesNotConsumeBatchTokenBudget) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
-    EXPECT_EQ(result.value().front(), kv_holder);
+    ASSERT_EQ(result.value().streams.size(), 1);
+    EXPECT_EQ(result.value().streams.front(), kv_holder);
     EXPECT_EQ(blocked_front_1->getStatus(), StreamState::WAITING);
     EXPECT_EQ(blocked_front_2->getStatus(), StreamState::WAITING);
     EXPECT_EQ(kv_holder->getStatus(), StreamState::RUNNING);
@@ -3544,7 +3546,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result->size(), 1);
+    EXPECT_EQ(result->streams.size(), 1);
     EXPECT_EQ(cached_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(new_stream->getStatus(), StreamState::WAITING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
@@ -3584,7 +3586,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result->size(), 1);
+    EXPECT_EQ(result->streams.size(), 1);
     EXPECT_EQ(batched_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(single_stream->getStatus(), StreamState::WAITING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
@@ -3634,7 +3636,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 2);
+    ASSERT_EQ(result->streams.size(), 2);
     EXPECT_EQ(cached_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(threshold_crossing_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(tail_stream->getStatus(), StreamState::WAITING);
@@ -3645,7 +3647,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     threshold_crossing_stream->reportEvent(StreamEvents::GenerateDone);
     auto next_result = scheduler.schedule();
     ASSERT_TRUE(next_result.ok());
-    ASSERT_EQ(next_result->size(), 1);
+    ASSERT_EQ(next_result->streams.size(), 1);
     EXPECT_EQ(tail_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
@@ -3689,7 +3691,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) 
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result->size(), 2);
+    EXPECT_EQ(result->streams.size(), 2);
     EXPECT_EQ(first_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(second_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(tail_stream->getStatus(), StreamState::WAITING);
@@ -3768,7 +3770,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsMetadataResidualToProgress) {
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
-    ASSERT_EQ(first_result->size(), 2);
+    ASSERT_EQ(first_result->streams.size(), 2);
     EXPECT_EQ(first_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(crossing_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(residual_stream->getStatus(), StreamState::WAITING);
@@ -3777,7 +3779,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsMetadataResidualToProgress) {
     crossing_stream->reportEvent(StreamEvents::GenerateDone);
     auto second_result = scheduler.schedule();
     ASSERT_TRUE(second_result.ok());
-    ASSERT_EQ(second_result->size(), 1);
+    ASSERT_EQ(second_result->streams.size(), 1);
     EXPECT_EQ(residual_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 
@@ -3786,7 +3788,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsMetadataResidualToProgress) {
     residual_stream->reportEvent(StreamEvents::GenerateDone);
     auto third_result = scheduler.schedule();
     ASSERT_TRUE(third_result.ok());
-    ASSERT_EQ(third_result->size(), 1);
+    ASSERT_EQ(third_result->streams.size(), 1);
     EXPECT_EQ(metadata_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
@@ -3836,8 +3838,8 @@ TEST_F(FIFOSchedulerTest, retryableMetadataStreamDoesNotBlockFollowingNormalStre
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
-    EXPECT_EQ(result.value().front(), kv_holder);
+    ASSERT_EQ(result.value().streams.size(), 1);
+    EXPECT_EQ(result.value().streams.front(), kv_holder);
     EXPECT_EQ(blocked_group_1->getStatus(), StreamState::WAITING);
     EXPECT_EQ(blocked_group_2->getStatus(), StreamState::WAITING);
     EXPECT_EQ(kv_holder->getStatus(), StreamState::RUNNING);
@@ -3885,7 +3887,7 @@ TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
-    ASSERT_EQ(first_result.value().size(), 2);
+    ASSERT_EQ(first_result.value().streams.size(), 2);
     EXPECT_EQ(first_group[0]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(first_group[1]->getStatus(), StreamState::WAITING);
     EXPECT_EQ(first_group[2]->getStatus(), StreamState::RUNNING);
@@ -3896,7 +3898,7 @@ TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
     first_group[2]->reportEvent(StreamEvents::GenerateDone);
     auto second_result = scheduler.schedule();
     ASSERT_TRUE(second_result.ok());
-    ASSERT_EQ(second_result.value().size(), 2);
+    ASSERT_EQ(second_result.value().streams.size(), 2);
     EXPECT_EQ(first_group[1]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(first_group[3]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(following_group[0]->getStatus(), StreamState::WAITING);
@@ -3905,7 +3907,7 @@ TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
     first_group[3]->reportEvent(StreamEvents::GenerateDone);
     auto third_result = scheduler.schedule();
     ASSERT_TRUE(third_result.ok());
-    ASSERT_EQ(third_result.value().size(), 1);
+    ASSERT_EQ(third_result.value().streams.size(), 1);
     EXPECT_EQ(following_group[0]->getStatus(), StreamState::RUNNING);
 }
 
@@ -3951,7 +3953,7 @@ TEST_F(FIFOSchedulerTest, testEnqueueGroup) {
     // Single schedule: both streams transition to RUNNING (no cache loading needed)
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 2);
+    ASSERT_EQ(streams_status.value().streams.size(), 2);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -3973,16 +3975,16 @@ std::shared_ptr<GenerateStream> makeSingleStream(const ModelConfig&     model_co
 }  // namespace
 
 TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 512, 32, rtp_llm::DataType::TYPE_FP16, 1, 4), 32);
     ASSERT_TRUE(cache_manager->init());
     model_config.max_seq_len               = 4096;
     runtime_config.max_generate_batch_size = 4;
     for (bool grouped : {false, true}) {
         for (int prompt_length : {4095, 4096}) {
             for (int budget : {0, 4094, 4095, 4096, 4097}) {
-                SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " length=" << prompt_length
-                                                 << " budget=" << budget);
+                SCOPED_TRACE(::testing::Message()
+                             << "grouped=" << grouped << " length=" << prompt_length << " budget=" << budget);
                 runtime_config.fifo_scheduler_config.max_batch_tokens_size = budget;
                 FIFOScheduler scheduler(runtime_config,
                                         model_config,
@@ -3990,8 +3992,8 @@ TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
                                         ParallelismConfig{},
                                         ModelSpecificConfig{},
                                         cache_manager);
-                auto stream = makeStream(std::vector<int>(prompt_length, 1),
-                                         model_config, runtime_config, resource_context, 0);
+                auto          stream =
+                    makeStream(std::vector<int>(prompt_length, 1), model_config, runtime_config, resource_context, 0);
                 ASSERT_EQ(stream->currentBatchSize(), 1);
                 if (grouped) {
                     ASSERT_EQ(scheduler.enqueueGroup({stream}).first, std::vector<bool>({true}));
@@ -4004,12 +4006,12 @@ TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
                 // admission retain the historical fast path, even with a zero budget.
                 // At max_seq_len, the logical token and rectangle limits must apply.
                 const bool fits = prompt_length < model_config.max_seq_len || budget >= prompt_length;
-                ASSERT_EQ(result->size(), fits ? 1 : 0);
+                ASSERT_EQ(result->streams.size(), fits ? 1 : 0);
                 EXPECT_EQ(scheduler.waitingStreamsSize(), fits ? 0 : 1);
                 EXPECT_EQ(stream->getStatus(), fits ? StreamState::RUNNING : StreamState::WAITING);
                 EXPECT_FALSE(stream->hasError());
                 if (fits) {
-                    EXPECT_EQ(result->front().get(), stream.get());
+                    EXPECT_EQ(result->streams.front().get(), stream.get());
                 }
             }
         }
@@ -4017,8 +4019,8 @@ TEST_F(FIFOSchedulerTest, prefillOnlySingletonCanFillTokenBudget) {
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 256, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
     runtime_config.max_generate_batch_size = 4;
     // Equal lengths reach the logical sum and rectangle together. Unequal lengths
@@ -4030,9 +4032,9 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
             for (int width : {1, 3}) {
                 for (bool reuse_prefix : {false, true}) {
                     for (int delta : {-1, 0, 1}) {
-                        SCOPED_TRACE(::testing::Message() << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
-                                                         << " width=" << width << " reuse=" << reuse_prefix
-                                                         << " delta=" << delta);
+                        SCOPED_TRACE(::testing::Message()
+                                     << "grouped=" << grouped << " max_new_tokens=" << max_new_tokens
+                                     << " width=" << width << " reuse=" << reuse_prefix << " delta=" << delta);
                         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 32 * (1 + width) + delta;
                         FIFOScheduler scheduler(runtime_config,
                                                 model_config,
@@ -4040,16 +4042,19 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
                                                 ParallelismConfig{},
                                                 ModelSpecificConfig{},
                                                 cache_manager);
-                        auto first = makeStream(std::vector<int>(32, 1),
-                                                model_config, runtime_config, resource_context, max_new_tokens);
-                        auto second = makeStream(std::vector<int>(width == 1 ? 32 : 16, 2),
-                                                 model_config, runtime_config, resource_context, max_new_tokens,
+                        auto          first = makeStream(
+                            std::vector<int>(32, 1), model_config, runtime_config, resource_context, max_new_tokens);
+                        auto                      second  = makeStream(std::vector<int>(width == 1 ? 32 : 16, 2),
+                                                 model_config,
+                                                 runtime_config,
+                                                 resource_context,
+                                                 max_new_tokens,
                                                  max_new_tokens == 0 ? 1 : width);
                         vector<GenerateStreamPtr> streams = {first, second};
                         if (max_new_tokens == 0) {
                             for (int i = 1; i < width; ++i) {
-                                streams.push_back(makeStream(std::vector<int>(16, 2),
-                                                             model_config, runtime_config, resource_context, 0));
+                                streams.push_back(makeStream(
+                                    std::vector<int>(16, 2), model_config, runtime_config, resource_context, 0));
                             }
                         }
                         if (reuse_prefix) {
@@ -4065,13 +4070,14 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
                         }
                         auto result = scheduler.schedule();
                         ASSERT_TRUE(result.ok());
-                        const size_t admitted = max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) :
-                                                                     (delta > 0 ? 2 : 1);
-                        ASSERT_EQ(result->size(), admitted);
-                        EXPECT_EQ(result->front().get(), first.get());
+                        const size_t admitted =
+                            max_new_tokens == 0 ? 1 + width - (delta < 0 ? 1 : 0) : (delta > 0 ? 2 : 1);
+                        ASSERT_EQ(result->streams.size(), admitted);
+                        EXPECT_EQ(result->streams.front().get(), first.get());
                         EXPECT_EQ(scheduler.waitingStreamsSize(), streams.size() - admitted);
                         for (size_t i = 0; i < streams.size(); ++i) {
-                            EXPECT_EQ(streams[i]->getStatus(), i < admitted ? StreamState::RUNNING : StreamState::WAITING);
+                            EXPECT_EQ(streams[i]->getStatus(),
+                                      i < admitted ? StreamState::RUNNING : StreamState::WAITING);
                             EXPECT_FALSE(streams[i]->hasError());
                         }
                     }
@@ -4082,19 +4088,15 @@ TEST_F(FIFOSchedulerTest, prefillTokenBudgetBoundaryIncludesPaddedWidthAndPrefix
 }
 
 TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
-    model_config.max_seq_len                                    = 8;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8;
-    FIFOScheduler scheduler(runtime_config,
-                            model_config,
-                            PDSepConfig{},
-                            ParallelismConfig{},
-                            ModelSpecificConfig{},
-                            cache_manager);
-    auto prefill = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 4;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+    auto prefill    = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
     auto generation = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 2);
     for (size_t admitted_tokens : {size_t(3), size_t(4), size_t(5)}) {
         // Two rows of length four: the rectangle itself exactly fills the cap.
@@ -4123,31 +4125,27 @@ TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
         EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 0, 0, prefill));
     }
     scheduler.max_batch_tokens_size_ = 8;
-    const auto max_size = std::numeric_limits<size_t>::max();
+    const auto max_size              = std::numeric_limits<size_t>::max();
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, max_size, 4, 1, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, 4, max_size, prefill));
     EXPECT_FALSE(scheduler.fitsPrefillTokenLimits(1, 0, max_size, 1, prefill));
 }
 
 TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {
-    auto [cache_manager, resource_context, model_config, runtime_config] = makeSchedulerResources(
-        test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeSchedulerResources(test::makeSimpleMhaCacheConfig(1, 32, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
     ASSERT_TRUE(cache_manager->init());
-    model_config.max_seq_len                                  = 8;
-    runtime_config.max_generate_batch_size                    = 2;
+    model_config.max_seq_len                                   = 8;
+    runtime_config.max_generate_batch_size                     = 2;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
     for (bool prefill_first : {false, true}) {
         SCOPED_TRACE(prefill_first);
-        FIFOScheduler scheduler(runtime_config,
-                                model_config,
-                                PDSepConfig{},
-                                ParallelismConfig{},
-                                ModelSpecificConfig{},
-                                cache_manager);
-        auto prefill = makeStream(std::vector<int>(8, 1), model_config, runtime_config, resource_context, 0);
+        FIFOScheduler scheduler(
+            runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+        auto prefill    = makeStream(std::vector<int>(8, 1), model_config, runtime_config, resource_context, 0);
         auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, 2);
-        auto first = prefill_first ? prefill : generation;
-        auto second = prefill_first ? generation : prefill;
+        auto first      = prefill_first ? prefill : generation;
+        auto second     = prefill_first ? generation : prefill;
         ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
         ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
         EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
@@ -4189,7 +4187,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeLimitAppliesToOrdinaryAndGroupAdmission) {
 
         auto result = scheduler.schedule();
         ASSERT_TRUE(result.ok());
-        ASSERT_EQ(result->size(), 1);
+        ASSERT_EQ(result->streams.size(), 1);
         EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
         EXPECT_EQ(streams[1]->getStatus(), StreamState::WAITING);
     };
@@ -4230,7 +4228,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeIncludesReusedPrefixLength) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 1);
+    ASSERT_EQ(result->streams.size(), 1);
     EXPECT_EQ(cached_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(short_stream->getStatus(), StreamState::WAITING);
 }
@@ -4267,7 +4265,7 @@ TEST_F(FIFOSchedulerTest, prefillShapeUsesCurrentBatchSizeAsWidth) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 1);
+    ASSERT_EQ(result->streams.size(), 1);
     EXPECT_EQ(long_single->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(short_triple->getStatus(), StreamState::WAITING);
 }
@@ -4347,7 +4345,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result.value().size(), 1);
+    EXPECT_EQ(result.value().streams.size(), 1);
     EXPECT_EQ(scheduler.runningStreamsSize(), 1);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
@@ -4384,7 +4382,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupFallsBackToIndividualStreamsWhenGroupExcee
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result.value().size(), 1);
+    EXPECT_EQ(result.value().streams.size(), 1);
     EXPECT_EQ(scheduler.runningStreamsSize(), 1);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
@@ -4427,7 +4425,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupIgnoresCurrentlyInitedStreamsWhenGroupFits
     running_stream->reportEvent(StreamEvents::GenerateDone);
     auto group_result = scheduler.schedule();
     ASSERT_TRUE(group_result.ok());
-    EXPECT_EQ(group_result.value().size(), 2);
+    EXPECT_EQ(group_result.value().streams.size(), 2);
     EXPECT_EQ(scheduler.runningStreamsSize(), 2);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
@@ -4461,7 +4459,7 @@ TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupAtInitedLimit) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result.value().size(), 1);
+    EXPECT_EQ(result.value().streams.size(), 1);
     EXPECT_EQ(scheduler.runningStreamsSize(), 1);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
     EXPECT_EQ(waiting_stream->getStatus(), StreamState::RUNNING);
@@ -4469,7 +4467,7 @@ TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupAtInitedLimit) {
     waiting_stream->reportEvent(StreamEvents::GenerateDone);
     auto group_result = scheduler.schedule();
     ASSERT_TRUE(group_result.ok());
-    EXPECT_EQ(group_result.value().size(), 2);
+    EXPECT_EQ(group_result.value().streams.size(), 2);
     EXPECT_EQ(scheduler.runningStreamsSize(), 2);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
@@ -4539,7 +4537,7 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageDefersUnallocatedStreams) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
+    ASSERT_EQ(result.value().streams.size(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
@@ -4582,7 +4580,7 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageStillAdmitsLaterSmallerStreams) {
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
-    ASSERT_EQ(first_result.value().size(), 2);
+    ASSERT_EQ(first_result.value().streams.size(), 2);
     EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(streams[1]->getStatus(), StreamState::WAITING);
     EXPECT_EQ(streams[2]->getStatus(), StreamState::RUNNING);
@@ -4596,7 +4594,7 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageStillAdmitsLaterSmallerStreams) {
     streams[2]->reportEvent(StreamEvents::GenerateDone);
     auto second_result = scheduler.schedule();
     ASSERT_TRUE(second_result.ok());
-    ASSERT_EQ(second_result.value().size(), 2);
+    ASSERT_EQ(second_result.value().streams.size(), 2);
     EXPECT_EQ(streams[1]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(streams[3]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -4634,7 +4632,7 @@ TEST_F(FIFOSchedulerTest, residualGroupPrecedesFollowingGroups) {
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
-    ASSERT_EQ(first_result.value().size(), 2);
+    ASSERT_EQ(first_result.value().streams.size(), 2);
     ASSERT_EQ(first_group[1]->getStatus(), StreamState::WAITING);
     ASSERT_EQ(first_group[3]->getStatus(), StreamState::WAITING);
     ASSERT_EQ(second_group[0]->getStatus(), StreamState::WAITING);
@@ -4643,7 +4641,7 @@ TEST_F(FIFOSchedulerTest, residualGroupPrecedesFollowingGroups) {
     first_group[2]->reportEvent(StreamEvents::GenerateDone);
     auto second_result = scheduler.schedule();
     ASSERT_TRUE(second_result.ok());
-    ASSERT_EQ(second_result.value().size(), 2);
+    ASSERT_EQ(second_result.value().streams.size(), 2);
     EXPECT_EQ(first_group[1]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(first_group[3]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(second_group[0]->getStatus(), StreamState::WAITING);
@@ -4676,7 +4674,7 @@ TEST_F(FIFOSchedulerTest, groupTokenCapStillAdmitsLaterSmallerStreams) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 2);
+    ASSERT_EQ(result.value().streams.size(), 2);
     EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(streams[1]->getStatus(), StreamState::WAITING);
     EXPECT_EQ(streams[2]->getStatus(), StreamState::RUNNING);
@@ -4849,7 +4847,7 @@ TEST_F(FIFOSchedulerTest, continuousOrdinaryTrafficCannotStarveExplicitGroup) {
 
     auto running_normal = makeSingleStream(model_config, runtime_config, resource_context);
     ASSERT_TRUE(scheduler.enqueue(running_normal).ok());
-    ASSERT_EQ(scheduler.schedule()->size(), 1);
+    ASSERT_EQ(scheduler.schedule()->streams.size(), 1);
 
     vector<GenerateStreamPtr> group_streams = {
         makeSingleStream(model_config, runtime_config, resource_context),
@@ -4861,7 +4859,7 @@ TEST_F(FIFOSchedulerTest, continuousOrdinaryTrafficCannotStarveExplicitGroup) {
     ASSERT_TRUE(scheduler.enqueue(ordinary_tail_1).ok());
     auto drain_result = scheduler.schedule();
     ASSERT_TRUE(drain_result.ok());
-    ASSERT_EQ(drain_result->size(), 1);
+    ASSERT_EQ(drain_result->streams.size(), 1);
     EXPECT_EQ(ordinary_tail_1->getStatus(), StreamState::WAITING);
 
     // A second ordinary arrival before the running stream completes must not
@@ -4871,7 +4869,7 @@ TEST_F(FIFOSchedulerTest, continuousOrdinaryTrafficCannotStarveExplicitGroup) {
     running_normal->reportEvent(StreamEvents::GenerateDone);
     auto group_result = scheduler.schedule();
     ASSERT_TRUE(group_result.ok());
-    ASSERT_EQ(group_result->size(), 2);
+    ASSERT_EQ(group_result->streams.size(), 2);
     for (const auto& stream : group_streams) {
         EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     }
@@ -4883,7 +4881,7 @@ TEST_F(FIFOSchedulerTest, continuousOrdinaryTrafficCannotStarveExplicitGroup) {
     }
     auto normal_result = scheduler.schedule();
     ASSERT_TRUE(normal_result.ok());
-    ASSERT_EQ(normal_result->size(), 2);
+    ASSERT_EQ(normal_result->streams.size(), 2);
     EXPECT_EQ(ordinary_tail_1->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(ordinary_tail_2->getStatus(), StreamState::RUNNING);
 }
@@ -4918,7 +4916,7 @@ TEST_F(FIFOSchedulerTest, blockedNormalLaneLeavesResidualCapacityToExplicitGroup
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 2);
+    ASSERT_EQ(result->streams.size(), 2);
     EXPECT_EQ(blocked_normal->getStatus(), StreamState::WAITING);
     EXPECT_EQ(small_group[0]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(small_group[1]->getStatus(), StreamState::RUNNING);
@@ -5001,7 +4999,7 @@ TEST_F(FIFOSchedulerTest, waitingFallbackFromFrontGroupPrecedesNextGroup) {
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
-    EXPECT_EQ(first_result.value().size(), 1);
+    EXPECT_EQ(first_result.value().streams.size(), 1);
     EXPECT_EQ(scheduler.runningStreamsSize(), 1);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 4);
     EXPECT_EQ(rejected_group[0]->getStatus(), StreamState::WAITING);
@@ -5017,7 +5015,7 @@ TEST_F(FIFOSchedulerTest, waitingFallbackFromFrontGroupPrecedesNextGroup) {
     waiting_stream->reportEvent(StreamEvents::GenerateDone);
     auto second_result = scheduler.schedule();
     ASSERT_TRUE(second_result.ok());
-    EXPECT_EQ(second_result.value().size(), 1);
+    EXPECT_EQ(second_result.value().streams.size(), 1);
     EXPECT_EQ(scheduler.runningStreamsSize(), 1);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 3);
     EXPECT_EQ(rejected_group[0]->getStatus(), StreamState::RUNNING);
@@ -5028,7 +5026,7 @@ TEST_F(FIFOSchedulerTest, waitingFallbackFromFrontGroupPrecedesNextGroup) {
     rejected_group[0]->reportEvent(StreamEvents::GenerateDone);
     auto third_result = scheduler.schedule();
     ASSERT_TRUE(third_result.ok());
-    EXPECT_EQ(third_result.value().size(), 1);
+    EXPECT_EQ(third_result.value().streams.size(), 1);
     EXPECT_EQ(rejected_group[1]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(next_group[0]->getStatus(), StreamState::WAITING);
     EXPECT_EQ(next_group[1]->getStatus(), StreamState::WAITING);
@@ -5036,7 +5034,7 @@ TEST_F(FIFOSchedulerTest, waitingFallbackFromFrontGroupPrecedesNextGroup) {
     rejected_group[1]->reportEvent(StreamEvents::GenerateDone);
     auto fourth_result = scheduler.schedule();
     ASSERT_TRUE(fourth_result.ok());
-    EXPECT_EQ(fourth_result.value().size(), 2);
+    EXPECT_EQ(fourth_result.value().streams.size(), 2);
     EXPECT_EQ(next_group[0]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(next_group[1]->getStatus(), StreamState::RUNNING);
 }
@@ -5164,14 +5162,14 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunStillRespectsMaxGenerateBatchSize
 
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 1);
+    ASSERT_EQ(result1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
 
     stream1->reportEvent(StreamEvents::GenerateDone);
     auto result2 = scheduler.schedule();
     ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
+    ASSERT_EQ(result2.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
@@ -5218,7 +5216,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunCanTopUpToMaxGenerateBatchSize) {
 
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 1);
+    ASSERT_EQ(result1.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 
@@ -5227,7 +5225,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunCanTopUpToMaxGenerateBatchSize) {
 
     auto result2 = scheduler.schedule();
     ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 2);
+    ASSERT_EQ(result2.value().streams.size(), 2);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 
@@ -5236,7 +5234,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunCanTopUpToMaxGenerateBatchSize) {
 
     auto result3 = scheduler.schedule();
     ASSERT_TRUE(result3.ok());
-    ASSERT_EQ(result3.value().size(), 2);
+    ASSERT_EQ(result3.value().streams.size(), 2);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
 }
@@ -5284,7 +5282,7 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsAllowsAlreadyInitedStreams)
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 2);
+    ASSERT_EQ(result.value().streams.size(), 2);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
@@ -5331,7 +5329,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
 
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 1);
+    ASSERT_EQ(result1.value().streams.size(), 1);
     ASSERT_EQ(stream1->getStatus(), StreamState::RUNNING);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
@@ -5345,7 +5343,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
 
     auto result2 = scheduler.schedule();
     ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
+    ASSERT_EQ(result2.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(stream2->getStatus(), StreamState::WAITING);
@@ -5356,7 +5354,7 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
 
     auto result3 = scheduler.schedule();
     ASSERT_TRUE(result3.ok());
-    ASSERT_EQ(result3.value().size(), 1);
+    ASSERT_EQ(result3.value().streams.size(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(stream2->getStatus(), StreamState::RUNNING);
@@ -5395,7 +5393,7 @@ TEST_F(FIFOSchedulerTest, testCpPrefillBatchesMultipleStreams) {
     ASSERT_TRUE(enqueueIndividually(scheduler, streams));
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 2);
+    ASSERT_EQ(streams_status.value().streams.size(), 2);
 }
 
 TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotDelayWaitingStreams) {
@@ -5431,7 +5429,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotDelayWaitingStreams) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 2);
+    ASSERT_EQ(result.value().streams.size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
     for (const auto& task : scheduler.runningTaskList()) {
@@ -5475,7 +5473,7 @@ TEST_F(FIFOSchedulerTest, enqueueGroupDissolvesWhenOnlyPartFitsTokenCap) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
+    ASSERT_EQ(result.value().streams.size(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
@@ -5535,7 +5533,7 @@ TEST_F(FIFOSchedulerTest, testExpiredGroupMetadataDoesNotAffectWaitingStreams) {
 
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 2);
+    ASSERT_EQ(result1.value().streams.size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
@@ -5577,7 +5575,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotBypassNormalTokenCap) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 1);
+    ASSERT_EQ(result.value().streams.size(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 }
@@ -5640,7 +5638,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotIsolateWaitingStreams) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 3);
+    ASSERT_EQ(result.value().streams.size(), 3);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 3);
 }
@@ -5693,7 +5691,7 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 4);
+    ASSERT_EQ(result.value().streams.size(), 4);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
@@ -5731,17 +5729,17 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillNeverReturnsMixedContextAndDecodeBat
     ASSERT_TRUE(env.init());
     auto& scheduler = env.scheduler();
 
-    auto   short_stream = env.makeStream({1, 2}, 4);
-    auto   long_stream  = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10}, 4);
+    auto   short_stream             = env.makeStream({1, 2}, 4);
+    auto   long_stream              = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10}, 4);
     size_t short_blocks_before_park = 0;
     ASSERT_NO_FATAL_FAILURE(
         runShortAndLongPrefillRounds(scheduler, short_stream, long_stream, short_blocks_before_park));
 
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode->size(), 2);
+    ASSERT_EQ(decode->streams.size(), 2);
     ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_park + 1);
-    for (const auto& stream : *decode) {
+    for (const auto& stream : decode->streams) {
         ASSERT_FALSE(stream->isContextStream());
     }
 }
@@ -5779,8 +5777,8 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillReapsTerminalStreamsBeforeDeferredDe
     cancelled_stream->reportError(ErrorCode::CANCELLED, "cancelled while deferred");
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode->size(), 1);
-    ASSERT_EQ(decode->front().get(), parked_stream.get());
+    ASSERT_EQ(decode->streams.size(), 1);
+    ASSERT_EQ(decode->streams.front().get(), parked_stream.get());
     ASSERT_TRUE(cancelled_stream->isFinished());
     ASSERT_TRUE(final_stream->isFinished());
     ASSERT_FALSE(parked_stream->hasError());
@@ -5815,8 +5813,8 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillDeferredDecodeMallocFailureOccursOnP
 
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode->size(), 1);
-    ASSERT_EQ(decode->front().get(), long_stream.get());
+    ASSERT_EQ(decode->streams.size(), 1);
+    ASSERT_EQ(decode->streams.front().get(), long_stream.get());
     ASSERT_TRUE(short_stream->isFinished());
     ASSERT_TRUE(short_stream->hasError());
     ASSERT_FALSE(long_stream->hasError());
@@ -5843,8 +5841,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionReapsTimedOutDecodeStreams) {
     expireStream(first);
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode->size(), 1);
-    ASSERT_EQ(decode->front().get(), second.get());
+    ASSERT_EQ(decode->streams.size(), 1);
+    ASSERT_EQ(decode->streams.front().get(), second.get());
     ASSERT_EQ(first->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
 
     auto next_prefill = env.makeStream({5, 6});
@@ -5873,7 +5871,7 @@ TEST_F(FIFOSchedulerTest, testPDFusionContinuationKeepsPrefillBatchBoundary) {
     decode_stream->update(makeSingleTokenUpdate(100));
     auto seed_decode = scheduler.schedule();
     ASSERT_TRUE(seed_decode.ok());
-    ASSERT_EQ(seed_decode->size(), 1);
+    ASSERT_EQ(seed_decode->streams.size(), 1);
     decode_stream->update(makeSingleTokenUpdate(101));
 
     auto first_long  = env.makeStream({2, 3, 4, 5, 6, 7});
@@ -5892,8 +5890,8 @@ TEST_F(FIFOSchedulerTest, testPDFusionContinuationKeepsPrefillBatchBoundary) {
 
     auto decode_round = scheduler.schedule();
     ASSERT_TRUE(decode_round.ok());
-    ASSERT_EQ(decode_round->size(), 1);
-    ASSERT_EQ(decode_round->front().get(), decode_stream.get());
+    ASSERT_EQ(decode_round->streams.size(), 1);
+    ASSERT_EQ(decode_round->streams.front().get(), decode_stream.get());
     ASSERT_EQ(scheduler.pendingDecodeStreamsSize(), 1);
 }
 
@@ -5907,16 +5905,16 @@ TEST_F(FIFOSchedulerTest, testPDFusionMixedActiveBatchSeparatesFinalAndMiddleChu
     ASSERT_TRUE(env.init());
     auto& scheduler = env.scheduler();
 
-    auto   short_stream = env.makeStream({1, 2});
-    auto   long_stream  = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10});
+    auto   short_stream                     = env.makeStream({1, 2});
+    auto   long_stream                      = env.makeStream({3, 4, 5, 6, 7, 8, 9, 10});
     size_t short_blocks_before_continuation = 0;
     ASSERT_NO_FATAL_FAILURE(
         runShortAndLongPrefillRounds(scheduler, short_stream, long_stream, short_blocks_before_continuation));
 
     auto decode = scheduler.schedule();
     ASSERT_TRUE(decode.ok());
-    ASSERT_EQ(decode->size(), 2);
-    auto decode_it = decode->begin();
+    ASSERT_EQ(decode->streams.size(), 2);
+    auto decode_it = decode->streams.begin();
     ASSERT_EQ((decode_it++)->get(), short_stream.get());
     ASSERT_EQ(decode_it->get(), long_stream.get());
     ASSERT_EQ(short_stream->curBlocksNum(), short_blocks_before_continuation + 1);
@@ -5996,16 +5994,13 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {
     verifyGlobalChunkBudgetFourRoundPrefix<PDFusionRatioScheduler>(RoleType::PDFUSION, "1/100");
 }
 
-static CacheConfig makeChunkCpGroupCacheConfig(size_t group_block_size,
-                                               bool   prefix_reuse,
-                                               size_t block_size,
-                                               bool   shared_chunk_state) {
-    auto config = test::makeSimpleMhaCacheConfig(1, 64, block_size, DataType::TYPE_FP16, 1, 4);
+static CacheConfig
+makeChunkCpGroupCacheConfig(size_t group_block_size, bool prefix_reuse, size_t block_size, bool shared_chunk_state) {
+    auto      config = test::makeSimpleMhaCacheConfig(1, 64, block_size, DataType::TYPE_FP16, 1, 4);
     GroupBase swa;
-    swa.tag       = "swa";
-    swa.spec      =
-        test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
-    swa.policy    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa.tag    = "swa";
+    swa.spec   = test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
+    swa.policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa.policy.enable_prefix_reuse = prefix_reuse;
     swa.policy.shared_chunk_state  = shared_chunk_state;
     if (shared_chunk_state) {
@@ -6072,7 +6067,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
             env.cache_manager->cp_slot_mapper_ =
                 std::make_shared<CPSlotMapper>(0, test_case.cp_size, test_case.block_size);
         }
-        auto stream = env.makeStream(std::vector<int>(1200, 1));
+        auto stream                           = env.makeStream(std::vector<int>(1200, 1));
         stream->generateConfig()->reuse_cache = test_case.request_reuse;
         bool accepted;
         if (group_enqueue) {
@@ -6096,12 +6091,10 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCyclicGroupBlocks) {
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        auto cache_config = makeChunkCpGroupCacheConfig(test_case.group_block_size,
-                                                        test_case.prefix_reuse,
-                                                        test_case.block_size,
-                                                        test_case.shared_chunk_state);
+        auto cache_config = makeChunkCpGroupCacheConfig(
+            test_case.group_block_size, test_case.prefix_reuse, test_case.block_size, test_case.shared_chunk_state);
         if (test_case.round_robin) {
-            auto groups = cache_config.groups();
+            auto groups                     = cache_config.groups();
             groups.back().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
             cache_config.setTopology(std::move(groups), cache_config.topology().layers());
         }
@@ -6162,7 +6155,7 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
         env.resource_context.reuse_cache                   = test_case.global_reuse;
         env.resource_context.ignore_request_cache_switches = test_case.ignore_request_switches;
         ASSERT_TRUE(env.init());
-        auto stream = env.makeStream(std::vector<int>(641, 1));
+        auto stream                           = env.makeStream(std::vector<int>(641, 1));
         stream->generateConfig()->reuse_cache = test_case.request_reuse;
         bool accepted;
         if (group_enqueue) {
@@ -6181,18 +6174,18 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        auto cache_config = test_case.has_linear ?
-                                test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
-                                test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
+        auto cache_config        = test_case.has_linear ?
+                                       test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
+                                       test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
         cache_config.linear_step = test_case.step;
         if (test_case.group_block_size > 0) {
             auto groups = cache_config.groups();
             for (auto& group : groups) {
                 if (group.policy.group_type == CacheGroupType::LINEAR) {
-                    auto spec = group.spec->clone();
+                    auto spec                = group.spec->clone();
                     spec->seq_size_per_block = spec->kernel_seq_size_per_block = test_case.group_block_size;
-                    group.spec                      = std::move(spec);
-                    group.policy.enable_prefix_reuse = test_case.group_reuse;
+                    group.spec                                                 = std::move(spec);
+                    group.policy.enable_prefix_reuse                           = test_case.group_reuse;
                 }
             }
             cache_config.setTopology(std::move(groups), cache_config.topology().layers());
@@ -6246,7 +6239,7 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_TRUE(scheduler.enqueue(long_stream).ok());
     auto rejected_batch = scheduler.schedule();
     ASSERT_TRUE(rejected_batch.ok());
-    ASSERT_TRUE(rejected_batch->empty());
+    ASSERT_TRUE(rejected_batch->streams.empty());
     ASSERT_TRUE(long_stream->hasError());
     ASSERT_TRUE(long_stream->isFinished());
     EXPECT_EQ(long_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);

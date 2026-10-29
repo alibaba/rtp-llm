@@ -378,16 +378,16 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* compile_qps_metric                  = nullptr;
-    kmonitor::MutableMetric* compile_invalid_qps_metric          = nullptr;
-    kmonitor::MutableMetric* cache_hit_qps_metric                = nullptr;
-    kmonitor::MutableMetric* overload_qps_metric                 = nullptr;
-    kmonitor::MutableMetric* compile_latency_us_metric           = nullptr;
-    kmonitor::MutableMetric* compile_inflight_metric             = nullptr;
-    kmonitor::MutableMetric* verdict_cache_bytes_metric          = nullptr;
-    kmonitor::MutableMetric* total_cache_budget_bytes_metric     = nullptr;
-    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric  = nullptr;
-    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric   = nullptr;
+    kmonitor::MutableMetric* compile_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* compile_invalid_qps_metric         = nullptr;
+    kmonitor::MutableMetric* cache_hit_qps_metric               = nullptr;
+    kmonitor::MutableMetric* overload_qps_metric                = nullptr;
+    kmonitor::MutableMetric* compile_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* compile_inflight_metric            = nullptr;
+    kmonitor::MutableMetric* verdict_cache_bytes_metric         = nullptr;
+    kmonitor::MutableMetric* total_cache_budget_bytes_metric    = nullptr;
+    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric = nullptr;
+    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -636,14 +636,14 @@ private:
     }
 
 private:
-    int64_t                                       context_token_num_            = 0;
-    int64_t                                       context_time_us_              = 0;
-    int64_t                                       context_token_num_with_cache_ = 0;
-    int64_t                                       context_time_us_with_cache_   = 0;
-    int64_t                                       generate_token_num_           = 0;
-    int64_t                                       total_token_num_              = 0;
-    int64_t                                       report_window_us_             = 0;
-    bool                                          report_zero_tps_              = false;
+    int64_t                                          context_token_num_            = 0;
+    int64_t                                          context_time_us_              = 0;
+    int64_t                                          context_token_num_with_cache_ = 0;
+    int64_t                                          context_time_us_with_cache_   = 0;
+    int64_t                                          generate_token_num_           = 0;
+    int64_t                                          total_token_num_              = 0;
+    int64_t                                          report_window_us_             = 0;
+    bool                                             report_zero_tps_              = false;
     std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
@@ -945,6 +945,16 @@ public:
 
     // eplb metrics
     int64_t eplb_step_latency_us = 0;
+
+    /* PP stage-local segments. pp_rank < 0 marks a non-PP report so the legacy
+       untagged series is preserved; >= 0 tags the series with this stage. */
+    int64_t pp_rank            = -1;
+    int64_t plan_wait_us       = 0;
+    int64_t activation_wait_us = 0;
+    int64_t slot_reuse_wait_us = 0;
+    int64_t last_run_wait_us   = 0;
+    int64_t send_activation_us = 0;
+    int64_t send_result_us     = 0;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -970,6 +980,14 @@ public:
 
     // eplb metrics
     kmonitor::MutableMetric* eplb_step_latency_us_metric = nullptr;
+
+    // PP stage-local segments
+    kmonitor::MutableMetric* plan_wait_us_metric       = nullptr;
+    kmonitor::MutableMetric* activation_wait_us_metric = nullptr;
+    kmonitor::MutableMetric* slot_reuse_wait_us_metric = nullptr;
+    kmonitor::MutableMetric* last_run_wait_us_metric   = nullptr;
+    kmonitor::MutableMetric* send_activation_us_metric = nullptr;
+    kmonitor::MutableMetric* send_result_us_metric     = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1126,10 +1144,10 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheCopyErrorMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* transfer_qps_metric             = nullptr;
-    kmonitor::MutableMetric* transfer_failed_qps_metric      = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric         = nullptr;
     kmonitor::MutableMetric* memory_cache_copy_error_qps_metric = nullptr;
-    kmonitor::MutableMetric* descriptors_per_transfer_metric = nullptr;
+    kmonitor::MutableMetric* descriptors_per_transfer_metric    = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
@@ -1394,6 +1412,7 @@ public:
     int64_t update_weights_latency_ms;
     bool    update_weights_qps;
 
+    int64_t              layer_begin = 0;  // Global ID of the first reported layer.
     std::vector<int64_t> gpu_loads;
 };
 

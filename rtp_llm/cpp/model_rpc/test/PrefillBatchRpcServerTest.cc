@@ -35,8 +35,8 @@ public:
         enqueueGroup(const std::vector<GenerateStreamPtr>&) override {
             return {{}, {}};
         }
-        absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
-            return std::list<GenerateStreamPtr>();
+        absl::StatusOr<ScheduleOutput> schedule() override {
+            return ScheduleOutput{};
         }
         absl::Status stop() override {
             return absl::OkStatus();
@@ -1588,7 +1588,7 @@ TEST_F(PrefillBatchTraceTest, VitPreservesErrorsAndEndsOnException) {
         EXPECT_EQ(result.code(), code);
         EXPECT_EQ(result.ToString(), "embedding failed");
     }
-    processor->throws = true;
+    processor->throws           = true;
     const auto exception_result = server.prepareInput(makeVitRequest(4301), input, parent);
     EXPECT_EQ(exception_result.code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_EQ(exception_result.ToString(), "embedding failed");

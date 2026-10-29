@@ -30,16 +30,24 @@ from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
 
 
-def _calculate_group_ranks(rank: int, world_size: int, tp_size: int, group_type: Group):
+def _calculate_group_ranks(
+    rank: int, world_size: int, tp_size: int, dp_size: int, group_type: Group
+):
     """Calculate ranks in a specific group"""
-    if group_type == Group.DP_AND_TP:
+    if group_type == Group.WORLD:
         return list(range(world_size))
-    elif group_type == Group.DP:
-        tp_rank = rank % tp_size
-        return [r for r in range(world_size) if r % tp_size == tp_rank]
-    else:  # Group.TP
-        dp_rank = rank // tp_size
-        return [r for r in range(world_size) if r // tp_size == dp_rank]
+    stage_size = tp_size * dp_size
+    stage_start = rank // stage_size * stage_size
+    if group_type == Group.STAGE:
+        return list(range(stage_start, stage_start + stage_size))
+    if group_type == Group.DP:
+        return list(
+            range(stage_start + rank % tp_size, stage_start + stage_size, tp_size)
+        )
+    if group_type == Group.TP:
+        tp_start = rank // tp_size * tp_size
+        return list(range(tp_start, tp_start + tp_size))
+    raise ValueError(f"Unsupported group: {group_type}")
 
 
 def _test_all_reduce_collective(
@@ -52,7 +60,7 @@ def _test_all_reduce_collective(
 ):
     """Test all_reduce collective operation across all groups"""
     logging.info(f"Rank {rank} testing all_reduce")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.STAGE, Group.WORLD, Group.DP, Group.TP]:
         # Skip if group doesn't make sense for this configuration
         if group_type == Group.DP and dp_size == 1:
             continue
@@ -98,7 +106,7 @@ def _test_broadcast_collective(
 ):
     """Test broadcast collective operation across all groups"""
     logging.info(f"Rank {rank} testing broadcast")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.STAGE, Group.WORLD, Group.DP, Group.TP]:
         # Skip if group doesn't make sense for this configuration
         if group_type == Group.DP and dp_size == 1:
             continue
@@ -146,7 +154,7 @@ def _test_send_recv_collective(
     Simple test: if group has at least 2 ranks, rank 0 sends and rank 1 receives.
     """
     logging.info(f"Rank {rank} testing send/recv")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.STAGE, Group.WORLD, Group.DP, Group.TP]:
         # Skip if group doesn't make sense for this configuration
         if group_type == Group.DP and dp_size == 1:
             continue
@@ -199,13 +207,7 @@ def _test_all_gather_collective(
 ):
     """Test all_gather collective operation across all groups"""
     logging.info(f"Rank {rank} testing all_gather")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
-        # Skip if group doesn't make sense for this configuration
-        if group_type == Group.DP and dp_size == 1:
-            continue
-        if group_type == Group.TP and tp_size == 1:
-            continue
-
+    for group_type in [Group.STAGE, Group.WORLD, Group.DP, Group.TP]:
         process_group, group_ranks = get_process_group_and_ranks(group_type)
 
         # Only test if this rank is in the group
@@ -223,6 +225,7 @@ def _test_all_gather_collective(
                 for r in group_ranks
             ]
             expected = torch.cat(expected_list, dim=0)
+            assert result.shape == expected.shape
             assert torch.allclose(
                 result, expected
             ), f"Rank {rank} all_gather {group_type}: Expected {expected.cpu()}, got {result.cpu()}"
@@ -241,7 +244,7 @@ def _test_reduce_scatter_collective(
 ):
     """Test reduce_scatter collective operation across all groups"""
     logging.info(f"Rank {rank} testing reduce_scatter")
-    for group_type in [Group.DP_AND_TP, Group.DP, Group.TP]:
+    for group_type in [Group.STAGE, Group.WORLD, Group.DP, Group.TP]:
         if group_type == Group.DP and dp_size == 1:
             continue
         if group_type == Group.TP and tp_size == 1:
@@ -259,12 +262,13 @@ def _test_reduce_scatter_collective(
             # mis-scatter (e.g. wrong offset) cannot be hidden by uniform
             # inputs. Chunk c on rank r holds the value (r+1) * (c+1).
             input_tensor = torch.empty(
-                group_size * chunk_size, hidden_dim,
+                group_size * chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
             for c in range(group_size):
-                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (
-                    (rank + 1) * (c + 1)
+                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (rank + 1) * (
+                    c + 1
                 )
 
             result = reduce_scatter(input_tensor, group=group_type)
@@ -277,10 +281,14 @@ def _test_reduce_scatter_collective(
             # If reduce_scatter mis-aligned chunks, expected != observed.
             expected_sum = sum(r + 1 for r in group_ranks)
             expected_chunk_value = expected_sum * (local_idx + 1)
-            expected = torch.ones(
-                chunk_size, hidden_dim,
-                device=f"cuda:{parallelism_config.local_rank}",
-            ) * expected_chunk_value
+            expected = (
+                torch.ones(
+                    chunk_size,
+                    hidden_dim,
+                    device=f"cuda:{parallelism_config.local_rank}",
+                )
+                * expected_chunk_value
+            )
 
             assert result.shape == (chunk_size, hidden_dim), (
                 f"Rank {rank} reduce_scatter {group_type}: "
@@ -308,7 +316,7 @@ def _test_allgather_reduce_scatter_roundtrip(
     scattered -> all_gather -> (compute partial results) -> reduce_scatter -> scattered
     """
     logging.info(f"Rank {rank} testing allgather+reduce_scatter roundtrip")
-    for group_type in [Group.DP_AND_TP, Group.TP]:
+    for group_type in [Group.STAGE, Group.TP]:
         if group_type == Group.TP and tp_size == 1:
             continue
 
@@ -322,7 +330,8 @@ def _test_allgather_reduce_scatter_roundtrip(
 
             # Each rank starts with its own scattered chunk
             original = torch.randn(
-                chunk_size, hidden_dim,
+                chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
 
@@ -379,6 +388,7 @@ def _test_all_collectives_worker(
         )
         parallelism_config.tp_size = tp_size
         parallelism_config.dp_size = dp_size
+        parallelism_config.pp_size = world_size // (tp_size * dp_size)
 
         torch.cuda.set_device(parallelism_config.local_rank)
         torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
@@ -390,17 +400,21 @@ def _test_all_collectives_worker(
             timeout=60,
         )
 
+        if parallelism_config.pp_size == 1:
+            assert _get_group(Group.STAGE) is _get_group(Group.WORLD)
+        else:
+            assert _get_group(Group.STAGE) is not _get_group(Group.WORLD)
+
         # Helper function to get process group and group ranks
         def _get_process_group_and_ranks(group_type: Group):
             """Get process group and ranks for a given group type"""
-            if group_type == Group.DP_AND_TP:
-                process_group = torch.distributed.group.WORLD
-            elif group_type == Group.DP:
-                process_group = _get_group(Group.DP)
-            else:  # Group.TP
-                process_group = _get_group(Group.TP)
-
-            group_ranks = _calculate_group_ranks(rank, world_size, tp_size, group_type)
+            process_group = _get_group(group_type)
+            group_ranks = _calculate_group_ranks(
+                rank, world_size, tp_size, dp_size, group_type
+            )
+            assert (
+                torch.distributed.get_process_group_ranks(process_group) == group_ranks
+            )
             return process_group, group_ranks
 
         # Test all collective operations
@@ -465,6 +479,47 @@ def _test_all_collectives_worker(
         raise
 
 
+def _test_pp_singleton_groups_worker(
+    rank: int, world_size: int, tp_size: int, dp_size: int, nccl_port: int
+):
+    config = ParallelismConfig()
+    config.world_rank = config.local_rank = rank
+    config.world_size = config.local_world_size = world_size
+    config.pp_size = 2
+    config.tp_size = tp_size
+    config.dp_size = dp_size
+    torch.cuda.set_device(rank)
+    init_distributed_environment(
+        config,
+        nccl_comm_config=NcclCommConfig(nccl_ip="127.0.0.1"),
+        nccl_init_port=nccl_port,
+        backend="nccl",
+    )
+    try:
+        tensor = torch.tensor(
+            [[rank, rank + 10]], dtype=torch.float32, device=f"cuda:{rank}"
+        )
+        for group in (Group.TP, Group.DP, Group.STAGE):
+            pg = _get_group(group)
+            assert torch.distributed.get_process_group_ranks(pg) == [rank]
+            gathered = all_gather(tensor, group)
+            assert gathered.shape == tensor.shape
+            torch.testing.assert_close(gathered, tensor)
+            assert gathered.data_ptr() != tensor.data_ptr()
+        assert _get_group(Group.STAGE) is _get_group(Group.TP)
+
+        pp_group = _get_group(Group.PP)
+        pp_cpu_group = _get_group(Group.PP, cpu_backend=True)
+        assert pp_group is not pp_cpu_group
+        for pg, backend in ((pp_group, "nccl"), (pp_cpu_group, "gloo")):
+            assert pg is not torch.distributed.group.WORLD
+            assert torch.distributed.get_process_group_ranks(pg) == [0, 1]
+            assert torch.distributed.get_backend(pg) == backend
+        torch.cuda.synchronize()
+    finally:
+        destroy_distributed_environment()
+
+
 class TestCollectiveOperations(unittest.TestCase):
     """Test collective operations with real multiprocessing"""
 
@@ -511,6 +566,11 @@ class TestCollectiveOperations(unittest.TestCase):
                         f"Process {p.name} exited with code {p.exitcode}"
                     )
         finally:
+            for p in processes:
+                if p.is_alive():
+                    p.terminate()
+            for p in processes:
+                p.join()
             # Release port locks
             for lock in locks:
                 lock.__exit__(None, None, None)
@@ -546,6 +606,24 @@ class TestCollectiveOperations(unittest.TestCase):
             tp_size=1,
             dp_size=4,
             test_name="all_collectives_tp1_dp4",
+        )
+
+    def test_pp2_tp1_dp1_singleton_groups(self):
+        self._run_test(
+            _test_pp_singleton_groups_worker,
+            world_size=2,
+            tp_size=1,
+            dp_size=1,
+            test_name="pp2_tp1_dp1_singleton_groups",
+        )
+
+    def test_all_collectives_pp2_tp1_dp2(self):
+        self._run_test(
+            _test_all_collectives_worker,
+            world_size=4,
+            tp_size=1,
+            dp_size=2,
+            test_name="all_collectives_pp2_tp1_dp2",
         )
 
 

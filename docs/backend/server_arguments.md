@@ -10,7 +10,9 @@ This page lists server arguments used to configure the behavior and performance 
 | `--tp-size` | Specifies the tensor parallelism degree. | None |
 | `--ep-size` | Defines the number of model instances for expert parallelism. | None |
 | `--dp-size` | Sets the number of replicas or group size for data parallelism. | None |
-| `--world-size` | Total number of GPUs used in distributed setup (WORLD_SIZE = TP_SIZE * DP_SIZE). | None |
+| `--pp_size` | Number of pipeline stages (`PP_SIZE`). | 1 |
+| `--pp_stage_layer_counts` | Per-stage layer counts as a JSON array (`PP_STAGE_LAYER_COUNTS`). Empty means an even split. | `[]` |
+| `--world-size` | Total number of GPUs used in distributed setup (usually `WORLD_SIZE = PP_SIZE * TP_SIZE * DP_SIZE`). | None |
 | `--world-rank` | Global unique ID of the current process/GPU in the distributed system. | None |
 | `--local-world-size` | Number of GPU devices used on the current node. | None |
 | `--enable_ffn_disaggregate` | Enables FFN disaggregation feature to separate attention and feed-forward network computations for performance optimization. | None |

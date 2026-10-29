@@ -346,10 +346,8 @@ bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(compile_inflight_metric, "rtp_llm_grammar_compile_inflight");
     REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_bytes_metric, "rtp_llm_grammar_verdict_cache_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(total_cache_budget_bytes_metric, "rtp_llm_grammar_total_cache_budget_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric,
-                                  "rtp_llm_grammar_compiler_cache_budget_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric,
-                                  "rtp_llm_grammar_verdict_cache_budget_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric, "rtp_llm_grammar_compiler_cache_budget_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric, "rtp_llm_grammar_verdict_cache_budget_bytes");
     return true;
 }
 
@@ -471,10 +469,24 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
     REGISTER_GAUGE_MUTABLE_METRIC(eplb_step_latency_us_metric, "rtp_llm_eplb_step_latency_us");
 
+    REGISTER_GAUGE_MUTABLE_METRIC(plan_wait_us_metric, "rtp_llm_plan_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(activation_wait_us_metric, "rtp_llm_activation_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(slot_reuse_wait_us_metric, "rtp_llm_slot_reuse_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(last_run_wait_us_metric, "rtp_llm_last_run_wait_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(send_activation_us_metric, "rtp_llm_send_activation_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(send_result_us_metric, "rtp_llm_send_result_us");
+
     return true;
 }
 
 void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExecutorMetricsCollector* collector) {
+    /* PP stage-local report: tag each stage's series with pp_rank. Non-PP (pp_rank < 0)
+       keeps the legacy untagged series so existing dashboards are unaffected. */
+    kmonitor::MetricsTags pp_tags = tags ? kmonitor::MetricsTags(*tags) : kmonitor::MetricsTags();
+    if (collector->pp_rank >= 0) {
+        pp_tags.AddTag("pp_rank", std::to_string(collector->pp_rank));
+        tags = &pp_tags;
+    }
     REPORT_GAUGE(context_batch_size);
     REPORT_GAUGE(generate_batch_size);
     if (collector->context_batch_size != 0) {
@@ -492,6 +504,14 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
     REPORT_GAUGE(sample_input_us);
     REPORT_GAUGE(dispatch_output_us);
     REPORT_GAUGE(eplb_step_latency_us);
+    if (collector->pp_rank >= 0) {
+        REPORT_GAUGE(plan_wait_us);
+        REPORT_GAUGE(activation_wait_us);
+        REPORT_GAUGE(slot_reuse_wait_us);
+        REPORT_GAUGE(last_run_wait_us);
+        REPORT_GAUGE(send_activation_us);
+        REPORT_GAUGE(send_result_us);
+    }
 }
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -969,7 +989,7 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
     auto ep_tag    = kmonitor::MetricsTags("ep_rank", std::to_string(collector->ep_rank));
     tags->MergeTags(&ep_tag);
     for (int i = 0; i < num_layer; ++i) {
-        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(i));
+        auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->layer_begin + i));
         ep_tag.MergeTags(&layer_tag);
         if (gpu_loads_metric) {
             gpu_loads_metric->Report(&layer_tag, collector->gpu_loads[i]);

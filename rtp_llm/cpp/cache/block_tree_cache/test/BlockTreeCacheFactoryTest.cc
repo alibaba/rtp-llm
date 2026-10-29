@@ -654,6 +654,27 @@ TEST(BlockTreeCacheFactoryUtilityTest, UsableBlockCountReservesBlockZeroWithinBu
     EXPECT_EQ(computeHostUsableBlockCount(4096, 0), 0u);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesPreplannedCapacityStride) {
+    const auto    config = makeSingleConfig();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto layout                          = planBlockTreeCacheLayout(config, kv_cache_config);
+    ASSERT_NE(layout, nullptr);
+    ASSERT_GT(layout->local_combined_stride_bytes, 0u);
+    layout->capacity_stride_bytes = layout->local_combined_stride_bytes * 2;
+
+    auto allocator = initAllocator<CoordinatorCacheManager>(config);
+    auto cache     = createBlockTreeCache(
+        config, kv_cache_config, allocator, ParallelismConfig{}, nullptr, nullptr, nullptr, layout);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    ASSERT_NE(cache->groupSets().front()->hostPool(), nullptr);
+    const size_t capacity_bytes = 1024UL * 1024UL;
+    EXPECT_EQ(cache->groupSets().front()->hostPool()->totalBlocksNum(),
+              computeHostUsableBlockCount(capacity_bytes, layout->capacity_stride_bytes));
+}
+
 TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejectsInvalidShape) {
     EXPECT_EQ(resolveDiskMountPath("/mnt/d0,/mnt/d1,/mnt/d2", 3, 0), "/mnt/d0");
     EXPECT_EQ(resolveDiskMountPath(" /mnt/d0 , /mnt/d1 ", 2, 1), "/mnt/d1");

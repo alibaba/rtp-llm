@@ -93,6 +93,7 @@ class MoeConfigPropagationTest(unittest.TestCase):
                         use_batch_decode_scheduler=False,
                     ),
                     pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
+                    parallelism_config=ParallelismConfig(),
                 )
 
                 ModelFactory.update_engine_config_from_model_config(
@@ -253,7 +254,9 @@ class MoeConfigPropagationTest(unittest.TestCase):
             database = CkptDatabase(checkpoint_path)
             source = DatabaseTensorSource(database)
             load_config = weight_builder.create_load_config(
-                torch.float32, database, exported_device=exported_device
+                torch.float32,
+                database,
+                exported_device=exported_device,
             )
             loaded = {}
             for weight in layer_weights:
