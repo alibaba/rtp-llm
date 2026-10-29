@@ -37,7 +37,8 @@ snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags, 
         ADD_FAILURE() << "metric is null";
         return -1;
     }
-    kmonitor::Metric* qps_metric = metric->DeclareMetric(&tags);
+    const auto        serving_tags = kmonTagsWithServiceStatus(&tags);
+    kmonitor::Metric* qps_metric   = metric->DeclareMetric(&serving_tags);
     if (qps_metric == nullptr) {
         ADD_FAILURE() << "metric series is missing for tags=" << tags.ToString();
         return -1;
@@ -56,8 +57,9 @@ snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags, 
 }
 
 void expectCountSamples(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags, size_t count) {
-    auto* series = metric->DeclareMetric(&tags);
-    auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
+    const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+    auto*      series       = metric->DeclareMetric(&serving_tags);
+    auto*      gauge        = dynamic_cast<kmonitor::GaugeMetric*>(series);
     EXPECT_NE(gauge, nullptr);
     if (gauge != nullptr) {
         EXPECT_EQ(gauge->calculator_.Count(), count);
@@ -192,7 +194,7 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
         groups.push_back(block_transfer_engine_test::makeTestGroupBase(
             policy, {static_cast<int>(group_set_id)}, logical_layer_bytes, 0, 128, seq_size_per_block));
     }
-    auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
+    auto   topology     = block_transfer_engine_test::makeTestTopology(std::move(groups));
     size_t group_set_id = 0;
     for (const auto& tag : topology->groupTags()) {
         group_sets[group_set_id]->initialize(group_set_id, topology, {tag});
@@ -414,7 +416,8 @@ TEST_F(BlockTreeCacheTest, ReuseTimeMetricsUseEachSourceTierEntryTime) {
 }
 
 TEST_F(BlockTreeCacheTest, ReportReuseTimeMetricsAggregatesPerTierAndGroupType) {
-    const kmonitor::MetricsTags   base_tags("role", "prefill");
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    const kmonitor::MetricsTags                 base_tags("role", "prefill");
     auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", base_tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
     auto*                         metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
@@ -449,8 +452,9 @@ TEST_F(BlockTreeCacheTest, ReportReuseTimeMetricsAggregatesPerTierAndGroupType) 
                 tags.AddTag("group_type", metricCacheGroupTypeName(group_type));
                 for (auto* metric :
                      {metrics->reuse_block_first_hit_idletime_ms_metric, metrics->reuse_block_hit_idletime_ms_metric}) {
-                    auto* series = metric->DeclareMetric(&tags);
-                    auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
+                    const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+                    auto*      series       = metric->DeclareMetric(&serving_tags);
+                    auto*      gauge        = dynamic_cast<kmonitor::GaugeMetric*>(series);
                     ASSERT_NE(gauge, nullptr);
                     const double mean = offset + (metric == metrics->reuse_block_hit_idletime_ms_metric ? 7 : 6);
                     EXPECT_EQ(gauge->calculator_.Count(), batch);
@@ -465,6 +469,7 @@ TEST_F(BlockTreeCacheTest, ReportReuseTimeMetricsAggregatesPerTierAndGroupType) 
 }
 
 TEST_F(BlockTreeCacheTest, ReportReuseTimeMetricsPreservesMissingFirstHitAndFractionalMean) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
     auto*                         metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
@@ -504,8 +509,9 @@ TEST_F(BlockTreeCacheTest, AccumulateTransferBytesAggregatesDescriptors) {
 }
 
 TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
-    const std::vector<GroupSetPtr>&       group_sets = cache_->groupSets();
-    const std::vector<TransferDescriptor> descs      = {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    const std::vector<GroupSetPtr>&             group_sets = cache_->groupSets();
+    const std::vector<TransferDescriptor>       descs      = {
         TransferDescriptor::deviceToHost(0, {1}, 10),
         TransferDescriptor::deviceToHost(0, {2}, 11),
     };
@@ -626,6 +632,7 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyPopulateDiskWithIndependentPool
 }
 
 TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         RtpLLMCachePoolMetricsCollector collector;
@@ -668,8 +675,9 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyReportPopulatedValues) {
 }
 
 TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
@@ -693,8 +701,9 @@ TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPo
 }
 
 TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsLatencyAndDirection) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
@@ -715,8 +724,9 @@ TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsLatencyAndDirection) {
 }
 
 TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundAndCompletion) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
@@ -753,8 +763,9 @@ TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundAndCompletion) 
 }
 
 TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranularity) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
@@ -769,8 +780,9 @@ TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranulari
 }
 
 TEST(BlockTreeCacheMetricsTest, FailureMetricsPublishExpectedValues) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
 
     RtpLLMCacheOperationMetricsCollector malloc_collector;
@@ -865,7 +877,8 @@ TEST(BlockTreeCacheMetricsTest, FailureMetricsPublishExpectedValues) {
 }
 
 TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagnosticCategories) {
-    kmonitor::MetricsTags common_tags("dp_rank", "7");
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       common_tags("dp_rank", "7");
     common_tags.AddTag("model", "crc-test-model");
     common_tags.AddTag("biz", "crc-test-biz");
     common_tags.AddTag("host_ip", "192.0.2.1");
@@ -907,6 +920,7 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
 }
 
 TEST(BlockTreeCacheMetricsTest, CopyErrorsAreReportedOnlyForFailedLogicalCopiesWithReporter) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto  metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
     BlockTreeCacheMetricsReporter worker(nullptr);
@@ -927,6 +941,7 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorsAreReportedOnlyForFailedLogicalCopiesW
 }
 
 TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnce) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     for (bool mismatch : {false, true}) {
         auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
         BlockTreeCacheMetricsReporter reporter(metrics_reporter);
@@ -944,7 +959,8 @@ TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnc
 }
 
 TEST(BlockTreeCacheMetricsTest, EvictionReferenceMetricKeepsLegacyAlias) {
-    kmonitor::MetricsTags tags("pool", "host");
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags("pool", "host");
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     RtpLLMCachePoolMetricsCollector collector;
     collector.eviction_target_ref_blocks        = 7;
@@ -960,6 +976,7 @@ TEST(BlockTreeCacheMetricsTest, EvictionReferenceMetricKeepsLegacyAlias) {
 }
 
 TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
@@ -988,6 +1005,7 @@ TEST_F(BlockTreeCacheTest, EvictionLifetimeStopsAtSelectionForEachSourceTier) {
 }
 
 TEST_F(BlockTreeCacheTest, DropLifetimeAndIdletimeCoverDiskAndPrunedResources) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
@@ -1003,14 +1021,14 @@ TEST_F(BlockTreeCacheTest, DropLifetimeAndIdletimeCoverDiskAndPrunedResources) {
     dependent_desc.source_tier        = Tier::HOST;
     task.dependent_prune_descs.push_back(dependent_desc);
     task.dependent_prune_timings.push_back(task.primary_timing);
-    task.dependent_prune_timings.back().tier_enter_time_us = 110000;
+    task.dependent_prune_timings.back().tier_enter_time_us  = 110000;
     task.dependent_prune_timings.back().last_access_time_us = 135000;
 
     TransferDescriptor cascade_desc = task.primary_desc;
     cascade_desc.source_tier        = Tier::DEVICE;
     task.cascade_descs.push_back(cascade_desc);
     task.cascade_timings.push_back(task.primary_timing);
-    task.cascade_timings.back().tier_enter_time_us = 130000;
+    task.cascade_timings.back().tier_enter_time_us  = 130000;
     task.cascade_timings.back().last_access_time_us = 145000;
 
     for (const char* trigger_type : {"watermark", "force_drop"}) {
@@ -1035,8 +1053,9 @@ TEST_F(BlockTreeCacheTest, DropLifetimeAndIdletimeCoverDiskAndPrunedResources) {
 }
 
 TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     BlockTreeCacheMetricsReporter reporter(metrics_reporter);
 
@@ -1086,8 +1105,9 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
 }
 
 TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     resetCache(metrics_reporter);
 
@@ -1114,8 +1134,9 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    kmonitor::MetricsTags                       tags;
+    std::shared_ptr<kmonitor::MetricsReporter>  metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     resetCache(metrics_reporter);
 

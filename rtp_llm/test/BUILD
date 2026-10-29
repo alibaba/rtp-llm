@@ -479,3 +479,9 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "kmonitor_metric_reporter_test",
+    srcs = ["kmonitor_metric_reporter_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

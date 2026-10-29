@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -680,6 +681,27 @@ struct MtpExecutorComponents {
     ResourceContext                         resource_context;
 };
 
+class ScopedMtpMetricsServing {
+public:
+    ScopedMtpMetricsServing() {
+        if (const char* gate = std::getenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE")) {
+            old_gate_ = gate;
+        }
+        ::unsetenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE");
+        startKmonServiceStatus(nullptr);
+        setKmonServiceServing(true);
+    }
+    ~ScopedMtpMetricsServing() {
+        stopKmonServiceStatus();
+        if (old_gate_) {
+            ::setenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE", old_gate_->c_str(), 1);
+        }
+    }
+
+private:
+    std::optional<std::string> old_gate_;
+};
+
 class MtpExecutorTest: public DeviceTestBase {
 public:
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
@@ -904,10 +926,11 @@ public:
                                       bool                       enable_ffn_disaggregate,
                                       bool                       simulate_multi_dp,
                                       bool                       expect_draft_forward,
-                                      bool                       simulate_cp_mutation   = false,
-                                      std::optional<std::string> deferred_capture_error = std::nullopt,
-                                      SpeculativeType            sp_type                = SP_TYPE_MTP,
-                                      bool                       existing_stream_error  = false) {
+                                      bool                       simulate_cp_mutation    = false,
+                                      std::optional<std::string> deferred_capture_error  = std::nullopt,
+                                      SpeculativeType            sp_type                 = SP_TYPE_MTP,
+                                      bool                       existing_stream_error   = false,
+                                      bool                       enable_frontend_metrics = false) {
         MtpExecutorTestConfig test_config;
         test_config.role_type = role_type;
         test_config.sp_type   = sp_type;
@@ -927,6 +950,8 @@ public:
 
         auto target_only_stream = createContextStream(
             components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3}, 0);
+        target_only_stream->generateConfig()->frontend_metric_streaming = enable_frontend_metrics;
+        const bool expect_frontend_samples = enable_frontend_metrics && isKmonMetricReportingEnabled();
         EXPECT_TRUE(target_only_stream->generateConfig()->isPrefillOnly());
         EXPECT_TRUE(target_only_stream->generateConfig()->reuse_cache);
         EXPECT_FALSE(target_only_stream->reuseCache());
@@ -1018,6 +1043,20 @@ public:
             ASSERT_EQ(output.value().generate_outputs.size(), 1);
             EXPECT_TRUE(output.value().generate_outputs[0].finished);
             EXPECT_EQ(output.value().generate_outputs[0].output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+            if (expect_frontend_samples) {
+                EXPECT_EQ(output.value().frontend_context_token_num, 4);
+                EXPECT_EQ(output.value().frontend_context_token_num_with_cache, 4);
+                ASSERT_TRUE(output.value().frontend_context_execute_time_us.has_value());
+                EXPECT_GT(*output.value().frontend_context_execute_time_us, 0);
+                EXPECT_EQ(output.value().frontend_context_execute_time_with_cache_us,
+                          output.value().frontend_context_execute_time_us);
+                EXPECT_EQ(target_only_stream->frontendContextTokenNum(), 4);
+                EXPECT_EQ(target_only_stream->frontendContextExecuteTimeUs(),
+                          *output.value().frontend_context_execute_time_us);
+            } else {
+                EXPECT_FALSE(output.value().frontend_context_token_num.has_value());
+                EXPECT_FALSE(output.value().frontend_context_execute_time_us.has_value());
+            }
             EXPECT_FALSE(target_only_stream->hasOutput());
         }
 
@@ -1377,6 +1416,24 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefillRestoresCpInputBeforeDraftShift) {
 
 TEST_F(MtpExecutorTest, testCpPrefillDoesNotFallBackWithoutHiddenBuffers) {
     runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/true, /*with_cp_hidden_buffers=*/false);
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyFrontendMetricsReachTerminalBeforeEarlyReturn) {
+    ScopedMtpMetricsServing serving;
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false, false, std::nullopt, SP_TYPE_MTP, false, true);
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyFrontendMetricsReachTerminalAfterAlignment) {
+    ScopedMtpMetricsServing serving;
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, false, std::nullopt, SP_TYPE_MTP, false, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, true, false, std::nullopt, SP_TYPE_MTP, false, true);
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyFrontendMetricsAreSuppressedDuringWarmup) {
+    ScopedMtpMetricsServing      serving;
+    ScopedKmonMetricsSuppression warmup;
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false, false, std::nullopt, SP_TYPE_MTP, false, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, false, std::nullopt, SP_TYPE_MTP, false, true);
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsTargetPrefillWithoutDraftOrSampling) {

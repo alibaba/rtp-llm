@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -44,6 +44,7 @@ from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
+    FrontendMetricFrame,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
@@ -79,6 +80,34 @@ def _build_prompt_tokens_details(
             audio_tokens=audio_tokens,
         )
     return None
+
+
+def _make_frontend_metric_observer(
+    observer: Callable[[Any], None],
+    context_batch_size: int = 1,
+) -> Callable[[GenerateOutputs, int], None]:
+    """Build the visitor-local private counter projector used for TPS windows."""
+
+    def observe(output: GenerateOutputs, attempt: int) -> None:
+        observer(
+            FrontendMetricFrame.from_output(
+                output, attempt=attempt, context_batch_size=context_batch_size
+            )
+        )
+
+    return observe
+
+
+def _make_frontend_metric_generate_config(
+    generate_config: GenerateConfig,
+    enabled: bool,
+) -> GenerateConfig:
+    if not enabled:
+        return generate_config
+    return generate_config.model_copy(
+        update={"frontend_metric_streaming": True, "aux_info": True},
+        deep=True,
+    )
 
 
 def _get_think_config(generate_env_config):
@@ -478,10 +507,31 @@ class CustomChatRenderer:
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
         v41_inputs=None,
+        frontend_metric_tags: Optional[Dict[str, str]] = None,
+        frontend_metric_observer: Optional[Callable[[Any], None]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
+        # Ask the backend for private counter progress frames while preserving the
+        # public is_streaming flag, retry behavior, and renderer semantics.
+        backend_generate_config = _make_frontend_metric_generate_config(
+            generate_config,
+            frontend_metric_observer is not None,
+        )
+
+        raw_metric_observer = None
+        if frontend_metric_observer is not None:
+            context_batch_size = (
+                1
+                if generate_config.has_num_beams()
+                else max(generate_config.num_return_sequences, 1)
+            )
+            raw_metric_observer = _make_frontend_metric_observer(
+                frontend_metric_observer,
+                context_batch_size,
+            )
+
         output_generator: AsyncGenerator[GenerateOutputs, None] = (
             await backend_rpc_server_visitor.enqueue(
                 GenerateInput(
@@ -489,41 +539,51 @@ class CustomChatRenderer:
                     token_ids=input_id_tensor,
                     mm_inputs=mm_inputs,
                     v41_inputs=v41_inputs,
-                    generate_config=generate_config,
+                    generate_config=backend_generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
+                    frontend_metric_tags=dict(frontend_metric_tags or {}),
+                    frontend_metric_observer=raw_metric_observer,
                 )
             )
         )
 
-        prompt_logits_data = None
-        if generate_config.return_prompt_logits:
-            output_generator, prompt_logits_data = await self._extract_prompt_logits(
-                output_generator
-            )
+        backend_output_generator = output_generator
+        try:
+            prompt_logits_data = None
+            if generate_config.return_prompt_logits:
+                output_generator, prompt_logits_data = (
+                    await self._extract_prompt_logits(output_generator)
+                )
 
-        # 处理非流式请求的合并逻辑
-        if not generate_config.is_streaming:
-            output_generator = await self._merge_non_streaming_outputs(output_generator)
+            # 处理非流式请求的合并逻辑
+            if not generate_config.is_streaming:
+                output_generator = await self._merge_non_streaming_outputs(
+                    output_generator
+                )
 
-        if generate_config.return_prompt_logits:
-            last_response = None
-            async for response in self.render_response_stream(
-                output_generator, request, generate_config
-            ):
+            if generate_config.return_prompt_logits:
+                last_response = None
+                async for response in self.render_response_stream(
+                    output_generator, request, generate_config
+                ):
+                    if last_response is not None:
+                        yield last_response
+                    last_response = response
                 if last_response is not None:
+                    if prompt_logits_data is not None:
+                        last_response.prompt_logits = prompt_logits_data
                     yield last_response
-                last_response = response
-            if last_response is not None:
-                if prompt_logits_data is not None:
-                    last_response.prompt_logits = prompt_logits_data
-                yield last_response
-        else:
-            async for response in self.render_response_stream(
-                output_generator, request, generate_config
-            ):
-                yield response
+            else:
+                async for response in self.render_response_stream(
+                    output_generator, request, generate_config
+                ):
+                    yield response
+        finally:
+            close = getattr(backend_output_generator, "aclose", None)
+            if callable(close):
+                await close()
 
     async def _extract_prompt_logits(
         self, output_generator: AsyncGenerator[GenerateOutputs, None]

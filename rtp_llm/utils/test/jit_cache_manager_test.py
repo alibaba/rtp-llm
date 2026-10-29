@@ -1345,7 +1345,9 @@ class BackendTest(JitCacheTestBase):
         ) as rank_start, mock.patch.object(jit, "start_from_config") as jit_start:
             result = backend.start_backend_server(controller, configs, pipe_writer)
         self.assertEqual(result, "served")
-        rank_start.assert_called_once_with(controller, configs, 3, pipe_writer)
+        rank_start.assert_called_once_with(
+            controller, configs, 3, pipe_writer, service_draining=None
+        )
         jit_start.assert_not_called()
 
     def test_bootstrap_failure_releases_the_manager(self):
@@ -1405,7 +1407,7 @@ class BackendTest(JitCacheTestBase):
         ), mock.patch.object(
             backend,
             "local_rank_start",
-            side_effect=lambda *_: events.append("rank") or "served",
+            side_effect=lambda *_, **kwargs: events.append("rank") or "served",
         ), mock.patch.object(
             # A hard exit here would truncate the caller's own teardown.
             backend.os,
@@ -1421,7 +1423,7 @@ class BackendTest(JitCacheTestBase):
         class FakeBackendManager:
             instance = None
 
-            def __init__(self, _configs):
+            def __init__(self, _configs, service_draining=None):
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
                 FakeBackendManager.instance = self
@@ -1480,7 +1482,7 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers):
+        def fake(_gc, _cfg, _ctx, processes, readers, service_draining=None):
             processes.append(proc)
             readers.append(mock.Mock())
 

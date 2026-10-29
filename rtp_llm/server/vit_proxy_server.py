@@ -990,6 +990,7 @@ class VitProxyServer:
 
         self.rpc_server.add_insecure_port(f"0.0.0.0:{self.external_grpc_port}")
         self.rpc_server.start()
+        kmonitor.start_serving_when_ready()
 
         logging.info(
             f"VIT Proxy Server started on gRPC port {self.external_grpc_port}, "
@@ -998,6 +999,7 @@ class VitProxyServer:
 
     def stop(self):
         """停止代理服务器"""
+        kmonitor.set_serving(False)
         if self.rpc_server:
             self.rpc_server.stop(grace=None)
             logging.info("VIT Proxy Server stopped")

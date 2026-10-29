@@ -100,6 +100,7 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
+from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import (
@@ -113,6 +114,7 @@ from rtp_llm.telemetry.tracing import (
     select_valid_server_trace_carrier,
 )
 from rtp_llm.utils.base_model_datatypes import (
+    FrontendMetricFrame,
     GenerateInput,
     GenerateOutputs,
     RequestInfo,
@@ -364,7 +366,7 @@ def _parse_valid_qos_level(value: Any) -> Optional[int]:
 
 
 def _request_qos_level(
-    request_controls: DashScRequestControls,
+    request_controls: Optional[DashScRequestControls],
     invocation_metadata: Optional[Any],
 ) -> Optional[int]:
     """Return valid metadata QoS, otherwise valid parsed request-header QoS."""
@@ -374,6 +376,8 @@ def _request_qos_level(
     metadata_qos = _parse_valid_qos_level(metadata_value)
     if metadata_qos is not None:
         return metadata_qos
+    if request_controls is None:
+        return None
     request_headers = {
         str(key).lower(): value
         for key, value in request_controls.request_headers.items()
@@ -823,6 +827,8 @@ def _make_generate_input(
     mm_inputs: Optional[list] = None,
     input_ids_tensor: Optional[torch.Tensor] = None,
     v41_inputs=None,
+    frontend_metric_tags: Optional[dict[str, str]] = None,
+    frontend_metric_observer: Optional[Callable[[Any, int], None]] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -835,13 +841,21 @@ def _make_generate_input(
         if input_ids_tensor is not None
         else torch.tensor(input_ids_list, dtype=torch.int)
     )
+    backend_generate_config = generate_config
+    if frontend_metric_observer is not None:
+        backend_generate_config = generate_config.model_copy(
+            update={"frontend_metric_streaming": True, "aux_info": True},
+            deep=True,
+        )
     return GenerateInput(
         request_id=request_id,
         token_ids=token_ids,
         v41_inputs=v41_inputs,
         mm_inputs=list(mm_inputs) if mm_inputs else [],
-        generate_config=generate_config,
+        generate_config=backend_generate_config,
         headers=headers,
+        frontend_metric_tags=dict(frontend_metric_tags or {}),
+        frontend_metric_observer=frontend_metric_observer,
         request_info=RequestInfo(
             trace_id=trace_id,
             request_id=extract_correlation_request_id(headers) or trace_id,
@@ -850,11 +864,39 @@ def _make_generate_input(
     )
 
 
-async def _close_async_stream_if_possible(stream: object, tag: str) -> None:
-    try:
-        close = stream.aclose
-    except AttributeError:
-        return
+def _make_frontend_metric_observer(
+    metric_state: Any,
+    generate_config: GenerateConfig,
+    unit_id: int,
+    access_record: Optional[GrpcAccessRecord] = None,
+) -> Optional[Callable[[Any, int], None]]:
+    if metric_state is None or not metric_state.enabled:
+        return None
+    context_batch_size = (
+        1
+        if generate_config.has_num_beams()
+        else max(int(generate_config.num_return_sequences), 1)
+    )
+
+    def observe(output: Any, attempt: int) -> None:
+        if access_record is not None:
+            access_record.record_frontend_backend_output(
+                output, phase=f"phase{unit_id + 1}"
+            )
+        metric_state.observe_tps(
+            FrontendMetricFrame.from_output(
+                output,
+                attempt=attempt,
+                context_batch_size=context_batch_size,
+                unit_id=unit_id,
+            )
+        )
+
+    return observe
+
+
+async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
+    close = getattr(stream, "aclose", None)
     if not callable(close):
         return
     try:
@@ -996,6 +1038,7 @@ async def iter_real_model_stream_infer(
     v41_inputs=None,
     v41_processor_config=None,
     max_seq_len: Optional[int] = None,
+    frontend_metric_tags: Optional[dict[str, str]] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -1168,6 +1211,13 @@ async def iter_real_model_stream_infer(
             mm_inputs=mm_inputs,
             input_ids_tensor=input_ids_tensor,
             v41_inputs=v41_inputs,
+            frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=_make_frontend_metric_observer(
+                getattr(access_agg, "frontend_metric_state", None),
+                generate_config,
+                0,
+                access_agg,
+            ),
         )
         is_streaming = bool(generate_config.is_streaming)
         logging.debug(
@@ -1216,7 +1266,12 @@ async def iter_real_model_stream_infer(
                     and generated_ids[0] == generate_config.begin_think_token_ids[0]
                 )
                 adaptive_phase2_pending = False
-            aux_info = out_py.aux_info
+            aux_info = getattr(out_py, "aux_info", None)
+            if access_agg is not None:
+                access_agg.record_frontend_backend_output(
+                    go,
+                    phase="phase1",
+                )
             prompt_token_num = (
                 int(aux_info.input_len) if aux_info is not None else prompt_length
             )
@@ -1498,6 +1553,13 @@ async def iter_real_model_stream_infer(
                 request_headers=request_controls.request_headers,
                 mm_inputs=mm_inputs,
                 v41_inputs=phase2_v41_inputs,
+                frontend_metric_tags=frontend_metric_tags,
+                frontend_metric_observer=_make_frontend_metric_observer(
+                    getattr(access_agg, "frontend_metric_state", None),
+                    phase2_config,
+                    1,
+                    access_agg,
+                ),
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -1547,7 +1609,12 @@ async def iter_real_model_stream_infer(
                         else LLMFinishReason.STREAMING
                     )
                 )
-                aux_info = resp_out.aux_info
+                aux_info = getattr(resp_out, "aux_info", None)
+                if access_agg is not None:
+                    access_agg.record_frontend_backend_output(
+                        resp_go,
+                        phase="phase2",
+                    )
                 prompt_token_num = (
                     int(aux_info.input_len)
                     if aux_info is not None
@@ -1674,6 +1741,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         grammar_validator: Optional[GrammarValidator] = None,
         v41_processor_config=None,
         max_seq_len: Optional[int] = None,
+        monitor_interval_s: Optional[float] = None,
+        request_metrics: Optional[FrontendRequestMetrics] = None,
     ):
         if backend_visitor is None:
             raise ValueError("backend_visitor is required for DashScInferenceServicer")
@@ -1683,6 +1752,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # Raw snowflake string seed for ``generate_request_id`` (request_id
         # generation needs the original string, not the log int below).
         self._snowflake_server_id = server_id
+        self._metric_server_id = str(server_id)
         self._echo_prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
         self._extra_stop_word_ids = (
             [list(w) for w in extra_stop_word_ids] if extra_stop_word_ids else []
@@ -1716,6 +1786,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._grammar_validator = grammar_validator
         self._v41_processor_config = v41_processor_config
         self._max_seq_len = max_seq_len
+        self._request_metrics = request_metrics or FrontendRequestMetrics(
+            concurrency_report_interval_s=monitor_interval_s
+        )
 
     async def _validate_request_grammar(
         self, sampling: SamplingParams, request_id: str
@@ -1769,6 +1842,19 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             DASH_ERROR_BAD_REQUEST,
             f"invalid {field_name}: grammar validation or compilation failed",
         )
+
+    def start_metrics(self) -> None:
+        self._request_metrics.start()
+
+    def _frontend_metric_tags(self, priority: str = "0") -> dict[str, str]:
+        """Tags propagated to cache-key metrics inside the shared backend visitor."""
+        return {
+            "rank_id": str(self._rank_id) if self._rank_id is not None else "",
+            "server_id": self._metric_server_id,
+            "source": "dash_sc",
+            "protocol": "dash_sc_grpc",
+            "priority": priority,
+        }
 
     def _record_and_report_chunk(
         self,
@@ -1824,6 +1910,43 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             is_first=is_first,
             now=now,
         )
+        metric_state = record.frontend_metric_state
+        if metric_state is not None:
+            input_len = (
+                record.backend_input_len
+                if record.backend_input_len is not None
+                else record.input_len
+            )
+            aux_info = {
+                "input_len": input_len,
+                "output_len": record.output_len,
+            }
+            if record.prompt_cached_token_num is not None:
+                aux_info["reuse_len"] = record.prompt_cached_token_num
+            (
+                aux_info["speculative_verify_rounds"],
+                aux_info["speculative_accepted_token_num"],
+                aux_info["speculative_proposed_draft_tokens"],
+                aux_info["context_execute_time_us"],
+                aux_info["context_execute_time_with_cache_us"],
+                aux_info["generate_execute_time_us"],
+                context_tokens_with_cache,
+                context_reuse_tokens,
+                aux_info["generate_token_num"],
+            ) = record.frontend_combined_metric_counters
+            aux_info["context_token_num_with_cache"] = context_tokens_with_cache
+            aux_info["context_token_num"] = max(
+                context_tokens_with_cache - context_reuse_tokens,
+                0,
+            )
+            metric_state.observe(
+                {
+                    # DashSC already decoded the outward token delta. An empty
+                    # frame must not become TTFT or the streaming first payload.
+                    "response": "tokens" if delta_len else "",
+                    "aux_info": aux_info,
+                }
+            )
 
     async def close(self) -> None:
         """Release resources owned by the servicer.
@@ -1831,10 +1954,15 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         The backend visitor remains caller-owned. Clear the validator reference before
         closing it so repeated or concurrent shutdown requests cannot close it twice.
         """
-        validator = getattr(self, "_grammar_validator", None)
-        self._grammar_validator = None
-        if validator is not None:
-            await asyncio.to_thread(validator.close)
+        try:
+            validator = getattr(self, "_grammar_validator", None)
+            self._grammar_validator = None
+            if validator is not None:
+                await asyncio.to_thread(validator.close)
+        finally:
+            request_metrics = getattr(self, "_request_metrics", None)
+            if request_metrics is not None:
+                await asyncio.to_thread(request_metrics.close)
 
     def _next_rtp_llm_request_id(self) -> int:
         sequence = self._seq_counter.increment() % 4096  # 12 bits
@@ -1894,6 +2022,18 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     )
             return trace_state
 
+        record.frontend_metric_state = self._request_metrics.begin(
+            rank_id=str(self._rank_id) if self._rank_id is not None else "",
+            server_id=self._metric_server_id,
+            source="dash_sc",
+            streaming=True,
+            priority=str(
+                _parse_valid_qos_level(
+                    metadata_headers.get("x-dashscope-inner-qos-level")
+                )
+                or 0
+            ),
+        )
         exc: Optional[BaseException] = None
         try:
             emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
@@ -1923,6 +2063,12 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                                 if self._v41_processor_config is not None
                                 else None
                             ),
+                        )
+                    )
+                    record.frontend_metric_state.set_priority(
+                        str(
+                            _request_qos_level(request_controls, invocation_metadata)
+                            or 0
                         )
                     )
                     mm_inputs = (
@@ -2081,6 +2227,18 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     max_seq_len=self._max_seq_len,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,
+                    frontend_metric_tags=(
+                        self._frontend_metric_tags(
+                            str(
+                                _request_qos_level(
+                                    request_controls, invocation_metadata
+                                )
+                                or 0
+                            )
+                        )
+                        if self._request_metrics.enabled
+                        else {}
+                    ),
                 )
                 try:
                     async for resp, stats in response_iter:
@@ -2119,9 +2277,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             record.record_aux_info(getattr(e, "aux_info", None), overwrite=False)
             raise
         finally:
-            _ensure_span()
-            end_ts = record.resolve_status(context, exc)
             try:
+                _ensure_span()
+                end_ts = record.resolve_status(context, exc)
                 # Log first, metrics second — a kmonitor hiccup must never delay or
                 # drop the access record (user-mandated ordering).
                 emit_access_log(
@@ -2137,4 +2295,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     status=record.status,
                 )
             finally:
-                _finish_server_trace(trace_state, record, exc)
+                try:
+                    record.frontend_metric_state.finish()
+                finally:
+                    _finish_server_trace(trace_state, record, exc)
