@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
@@ -938,6 +939,7 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
+    cuda_trace::Scope enqueue_scope("engine.enqueue", cuda_trace::active() ? stream->streamId() : -1);
     stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
     if (!validateStreamForScheduling(stream)) {
         return;
@@ -1043,6 +1045,19 @@ absl::Status NormalEngine::step() try {
         // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
         // has no callbacks yet, so bracket the propose path here on the engine
         // loop thread (Kineto requires enable/disable on the same thread).
+        // This is an engine-thread execution ordinal, not a global request or
+        // NCCL collective sequence. Empty TP batches must receive an ordinal too.
+        static thread_local uint64_t trace_execute_ordinal = 0;
+        const auto                   trace_step            = cuda_trace::active() ? ++trace_execute_ordinal : 0;
+        cuda_trace::Scope            execute_scope(
+            "engine.execute", -1, trace_step, reinterpret_cast<uintptr_t>(this), streams.size());
+        if (cuda_trace::active()) {
+            for (const auto& stream : streams) {
+                if (stream) {
+                    cuda_trace::mark("engine.batch.request", trace_step, 0, stream->streamId());
+                }
+            }
+        }
         if (propose_params_) {
             step_profiler_.startStep();
         }

@@ -9,12 +9,14 @@
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -33,6 +35,35 @@ namespace rtp_llm {
 namespace {
 
 constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
+
+void traceProposalTensor(const torch::Tensor& tensor) noexcept {
+    if (!cuda_trace::active()) {
+        return;
+    }
+    try {
+        if (!tensor.defined()) {
+            cuda_trace::mark("rpc.proposal.tensor.undefined");
+            return;
+        }
+        // TensorImpl is a host identity within this request, not an allocation
+        // lifetime ID. No tensor is retained and no CUDA stream is queried.
+        cuda_trace::mark("rpc.proposal.tensor.impl_bytes",
+                         reinterpret_cast<uintptr_t>(tensor.unsafeGetTensorImpl()),
+                         tensor.nbytes());
+        cuda_trace::mark("rpc.proposal.tensor.dtype_device",
+                         static_cast<uint64_t>(tensor.scalar_type()),
+                         (static_cast<uint64_t>(tensor.device().type()) << 32)
+                             | static_cast<uint32_t>(static_cast<int32_t>(tensor.device().index())));
+        cuda_trace::mark("rpc.proposal.tensor.ndim", static_cast<uint64_t>(tensor.dim()));
+        // These handoff tensors are normally two-dimensional. Bound diagnostic
+        // output even if a future caller supplies a higher-dimensional tensor.
+        for (int64_t dim = 0; dim < std::min<int64_t>(tensor.dim(), 4); ++dim) {
+            cuda_trace::mark("rpc.proposal.tensor.shape", dim, static_cast<uint64_t>(tensor.size(dim)));
+        }
+    } catch (...) {
+        cuda_trace::mark("rpc.proposal.tensor.metadata_unavailable");
+    }
+}
 
 bool envValueIsTrue(const char* value) {
     return value != nullptr
@@ -599,6 +630,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    cuda_trace::Scope request_scope("rpc.prefill.remote_generate", prefill_context.request_id);
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
     RTP_LLM_LOG_DEBUG("remote generate stream[%ld]: %s", stream->streamId(), stream->debugString().c_str());
@@ -625,13 +657,21 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer && !engine_->isDSpark()) {
+        std::optional<cuda_trace::Scope> probs_copy_scope;
+        if (cuda_trace::active()) {
+            probs_copy_scope.emplace("rpc.prefill.probs_to_cpu");
+            traceProposalTensor(sp_output_buffer->all_probs);
+        }
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        probs_copy_scope.reset();
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
             hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
         } else {
+            cuda_trace::Scope hidden_copy_scope("rpc.prefill.hidden_to_cpu");
+            traceProposalTensor(sp_output_buffer->hidden_states);
             hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
                                                                             sp_output_buffer->hidden_states;
         }

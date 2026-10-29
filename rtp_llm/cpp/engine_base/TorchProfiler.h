@@ -31,7 +31,8 @@ class TorchProfile {
 public:
     TorchProfile(const std::string& prefix, std::string output_dir = "");
     ~TorchProfile();
-    void start();
+    // False when another diagnostic collector owns CUPTI; inference continues.
+    bool start();
 
     // Stops profiling and returns the result + filename for async saving.
     // Returns {nullptr, ""} if already stopped.

@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -253,6 +254,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (parallelism_config.tp_size <= 1) {
         return;
     }
+    // A local invocation/phase ordinal is only a comparison aid; it is not a
+    // process-group ID or NCCL sequence number and must not be treated as one.
+    static thread_local uint64_t trace_tp_sync_ordinal = 0;
+    cuda_trace::Scope            tp_scope("tp_sync",
+                               -1,
+                               0,
+                               cuda_trace::active() ? ++trace_tp_sync_ordinal : 0,
+                               static_cast<uint64_t>(parallelism_config.tp_rank));
+    uint64_t                     tp_phase_ordinal = 0;
 
     // Producers and async snapshots already use canonical tag order. Keep
     // the original tensors throughout packing/broadcast; no group-row copies.
@@ -264,9 +274,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
     auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
 
-    // Python initializes intra-node UDS or cross-node Gloo for CPU control data;
-    // execBroadcastCpu retains the synchronized GPU fallback if neither is registered.
-    execBroadcastCpu({{shape_hints_t}, 0});
+    // Python initializes intra-node UDS for CPU control data; cross-node TP
+    // retains the synchronized GPU fallback in execBroadcastCpu.
+    {
+        cuda_trace::Scope phase_scope("tp.shape_hints", -1, 0, cuda_trace::active() ? ++tp_phase_ordinal : 0);
+        if (cuda_trace::active() && parallelism_config.tp_rank == 0) {
+            cuda_trace::mark("tp.shape_hints.root_skip", inputs.skip_run, inputs.skip_lm_head);
+        }
+        execBroadcastCpu({{shape_hints_t}, 0});
+    }
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -328,6 +344,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
         }
         // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
+        cuda_trace::Scope phase_scope("tp.mm_features_shape", -1, 0, cuda_trace::active() ? ++tp_phase_ordinal : 0);
         execBroadcastCpu({{mm_features_shape_t}, 0});
     }
 
@@ -343,6 +360,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                     inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value()[i].numel() : 0;
             }
         }
+        cuda_trace::Scope phase_scope("tp.mm_extra_input_shape", -1, 0, cuda_trace::active() ? ++tp_phase_ordinal : 0);
         execBroadcast({{mm_extra_input_shape_t}, 0});
         execSyncCommunication(false);
         cudaSyncAndCheck();
@@ -708,11 +726,21 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Broadcast at most 2 packed buffers instead of N individual tensors.
     if (cpu_packed.defined()) {
+        cuda_trace::Scope phase_scope("tp.cpu_packed",
+                                      -1,
+                                      0,
+                                      cuda_trace::active() ? ++tp_phase_ordinal : 0,
+                                      static_cast<uint64_t>(cpu_total_bytes));
         execBroadcastCpu({{cpu_packed}, 0});
     }
 
     if (gpu_packed.defined()) {
         // gpu no need to sync communication
+        cuda_trace::Scope phase_scope("tp.gpu_packed",
+                                      -1,
+                                      0,
+                                      cuda_trace::active() ? ++tp_phase_ordinal : 0,
+                                      static_cast<uint64_t>(gpu_total_bytes));
         execBroadcast({{gpu_packed}, 0});
     }
 

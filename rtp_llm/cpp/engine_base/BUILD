@@ -43,6 +43,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils/cuda_call_trace:cuda_call_trace",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
@@ -84,6 +85,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/cpp/utils/cuda_call_trace:cuda_call_trace",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//:rtp_compute_ops",
     ],

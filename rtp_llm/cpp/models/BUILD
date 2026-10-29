@@ -166,6 +166,7 @@ cc_library(
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
+        "//rtp_llm/cpp/utils/cuda_call_trace:cuda_call_trace",
         ":model_inputs_logger",
         ":sample_infos",
         ":logits_processor",

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 #include "autil/EnvUtil.h"
 #include <stdexcept>
 
@@ -28,6 +29,9 @@ void EngineBase::initRuntime(const EngineInitParams& params) {
         params.parallelism_config.dp_rank * params.parallelism_config.tp_size + params.parallelism_config.tp_rank;
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
+    // Opt-in observation starts before engine streams, events, and warmup.
+    // Python/model initialization may already have created CUDA resources.
+    cuda_trace::start(rank);
     size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
     mla_ops_type_    = rtp_llm::initRuntime(device_id,
                                          params.profiling_debug_logging_config.trace_memory,

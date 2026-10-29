@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 #include "autil/TimeUtility.h"
 #include <algorithm>
 #include <cctype>
@@ -59,11 +60,19 @@ TorchProfile::~TorchProfile() {
     }
 }
 
-void TorchProfile::start() {
+bool TorchProfile::start() {
+    // Both collectors use CUPTI. Keep the call recorder authoritative for
+    // hang diagnosis instead of starting a second subscriber mid-request.
+    if (cuda_trace::ownsCupti()) {
+        cuda_trace::mark("kineto.skipped_cuda_call_trace_active");
+        RTP_LLM_LOG_WARNING("Skipping Kineto profiling while CUDA call tracing is active");
+        return false;
+    }
     count_ += 1;
     stopped_ = false;
     tap::prepareProfiler(config_, activities_);
     tap::enableProfiler(config_, activities_);
+    return true;
 }
 
 std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopAndCollect() {
@@ -230,8 +239,13 @@ void StepWindowProfiler::beginStep() {
         }
         prefix += "wr" + std::to_string(world_rank_) + "_";
         profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
+        if (!profiler_->start()) {
+            profiler_.reset();
+            enabled_.store(false);
+            has_profiler_.store(false, std::memory_order_relaxed);
+            return;
+        }
         has_profiler_.store(true, std::memory_order_relaxed);
-        profiler_->start();
         profiled_steps_ = 0;
         RTP_LLM_LOG_INFO("timeline profiler started: prefix=%s start_step=%d num_steps=%d",
                          prefix.c_str(),
@@ -317,8 +331,13 @@ void StepWindowProfiler::startStep() {
     }
     prefix += "wr" + std::to_string(world_rank_) + "_";
     profiler_ = std::make_shared<TorchProfile>(prefix, default_output_dir_);
+    if (!profiler_->start()) {
+        profiler_.reset();
+        enabled_.store(false);
+        has_profiler_.store(false, std::memory_order_relaxed);
+        return;
+    }
     has_profiler_.store(true, std::memory_order_relaxed);
-    profiler_->start();
     profiled_steps_ = 0;
     RTP_LLM_LOG_INFO("timeline profiler started: prefix=%s start_step=%d num_steps=%d",
                      prefix.c_str(),

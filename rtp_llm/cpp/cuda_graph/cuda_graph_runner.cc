@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #if USING_CUDA || USING_ROCM
@@ -2097,6 +2098,13 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
+    // runner_id/key identify the business graph. The CUPTI launch callback
+    // supplies the actual graphExec/stream; no CUDA getter is added here.
+    cuda_trace::Scope replay_scope(
+        "graph.replay", -1, 0, reinterpret_cast<uintptr_t>(this), static_cast<uint64_t>(key));
+    cuda_trace::mark("graph.replay.mode",
+                     static_cast<uint64_t>(is_prefill_cuda_graph_mode_),
+                     static_cast<uint64_t>(is_target_verify_));
     try {
         retryOnceOnTorchCudaOom(
             [&]() { graph_instances_[key].graph_.replay(); },

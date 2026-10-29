@@ -53,12 +53,15 @@ void AsyncRunner::launch(std::function<void()> fn) {
 
 void AsyncRunner::launch(std::string task_name, std::function<void()> fn) {
     RTP_LLM_PROFILE_SCOPE("async_runner.launch");
+    const auto           trace_task_id = cuda_trace::active() ? cuda_trace::newId() : 0;
+    cuda_trace::Scope    launch_scope("async.launch", -1, 0, reinterpret_cast<uintptr_t>(this), trace_task_id);
     at::ThreadLocalState tls_state;
     {
         std::unique_lock<std::mutex> lk(mutex_);
         cv_done_.wait(lk, [this] { return task_done_; });
         rethrowPendingExceptionIfAny(lk);
-        pending_task_ = Task{std::move(fn), std::move(tls_state), std::move(task_name)};
+        pending_task_ =
+            Task{std::move(fn), std::move(tls_state), std::move(task_name), cuda_trace::capture(), trace_task_id};
         task_done_    = false;
     }
     cv_task_.notify_one();
@@ -66,9 +69,12 @@ void AsyncRunner::launch(std::string task_name, std::function<void()> fn) {
 
 void AsyncRunner::sync(const torch::Stream& wait_stream) {
     RTP_LLM_PROFILE_SCOPE("async_runner.sync");
+    cuda_trace::Scope            sync_scope("async.sync", -1, 0, reinterpret_cast<uintptr_t>(this));
     std::unique_lock<std::mutex> lk(mutex_);
     cv_done_.wait(lk, [this] { return task_done_; });
     rethrowPendingExceptionIfAny(lk);
+    cuda_trace::Scope event_scope(
+        "async.event.block", -1, 0, reinterpret_cast<uintptr_t>(&event_), trace_completed_task_id_);
     event_.block(wait_stream);
 }
 
@@ -96,6 +102,8 @@ void AsyncRunner::workerLoop() {
 
         std::exception_ptr exception;
         {
+            cuda_trace::ContextGuard trace_context_guard(task.trace_context);
+            cuda_trace::Scope task_scope("async.task", -1, 0, reinterpret_cast<uintptr_t>(this), task.trace_task_id);
             at::ThreadLocalStateGuard tls_guard(task.tls_state);
             // Do not propagate Torch profiler callbacks into this worker: Kineto
             // callbacks are thread-affine and can crash when the main engine thread
@@ -104,6 +112,8 @@ void AsyncRunner::workerLoop() {
             cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream_));
             try {
                 task.fn();
+                cuda_trace::Scope event_scope(
+                    "async.event.record", -1, 0, reinterpret_cast<uintptr_t>(&event_), task.trace_task_id);
                 event_.record(stream_);
             } catch (...) {
                 exception = std::current_exception();
@@ -117,8 +127,9 @@ void AsyncRunner::workerLoop() {
             if (exception) {
                 logAsyncFailure(task.name.c_str(), exception);
             }
-            pending_exception_ = exception;
-            task_done_         = true;
+            pending_exception_       = exception;
+            trace_completed_task_id_ = task.trace_task_id;
+            task_done_               = true;
         }
         cv_done_.notify_one();
     }

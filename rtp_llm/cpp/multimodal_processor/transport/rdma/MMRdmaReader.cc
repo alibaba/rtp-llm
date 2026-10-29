@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/rdma_transport/RdmaTransport.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 
 namespace rtp_llm {
 
@@ -20,6 +21,7 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
                           const std::vector<MMRdmaSlotPB::Role>& roles,
                           const MultimodalOutputPB*              output_pb,
                           MultimodalOutput*                      mm_output) {
+    cuda_trace::Scope assemble_scope("mm.rdma.assemble", -1, 0, mm_tensors.size());
     try {
         if (mm_output == nullptr || output_pb == nullptr || mm_tensors.size() != roles.size()) {
             return false;
@@ -53,6 +55,7 @@ bool assembleMMRdmaOutput(const std::vector<torch::Tensor>&      mm_tensors,
         if (embedding_chunks.empty()) {
             return false;
         }
+        cuda_trace::mark("mm.rdma.embedding_chunks", embedding_chunks.size());
         auto embedding = embedding_chunks.size() == 1 ? embedding_chunks[0] : torch::cat(embedding_chunks, 0);
         std::vector<int64_t> split_sizes(output_pb->split_size().begin(), output_pb->split_size().end());
         const int64_t        split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
@@ -123,6 +126,9 @@ bool MMRdmaReader::matches(const MultimodalOutputPB& receipt) const {
 }
 
 ConsumeResult MMRdmaReader::consume(const MultimodalOutputPB& receipt, DeliveryContext& context) {
+    // The enclosing MM request scope supplies the RID without changing the
+    // transport contract or adding ownership to DeliveryContext.
+    cuda_trace::Scope fetch_scope("mm.rdma.fetch");
     if (reader_ == nullptr) {
         return ConsumeResult::failure(
             ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "rdma receipt reached an adapter with no RDMA reader"));
@@ -176,6 +182,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                                 std::vector<MMRdmaSlotPB::Role>* roles,
                                 bool*                            deadline_exhausted,
                                 bool*                            release_deferred) {
+    cuda_trace::Scope read_scope("mm.rdma.read_slots");
     *deadline_exhausted                            = false;
     constexpr size_t kMaxDescriptorsPerReceipt     = 1024;
     constexpr size_t kMaxManifestEntriesPerReceipt = 16384;
@@ -315,10 +322,12 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
     }
     const auto read_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(read_timeout_ms);
     std::unique_lock<std::timed_mutex> provider_lock(provider_mutex_, std::defer_lock);
+    cuda_trace::mark("mm.rdma.provider_lock.wait");
     if (!provider_lock.try_lock_until(read_deadline)) {
         *deadline_exhausted = context.budget.exhausted();
         return false;
     }
+    cuda_trace::mark("mm.rdma.provider_lock.acquired");
     remaining = context.budget.remainingMs();
     if (remaining <= 0) {
         *deadline_exhausted = true;
@@ -338,6 +347,7 @@ bool MMRdmaReader::readAllSlots(const MultimodalOutputPB&        receipt,
                 owner->releaseAsync(endpoint, handles);
             }
         };
+        cuda_trace::Scope provider_scope("mm.rdma.provider_read", -1, 0, descriptors.size());
         result = reader_->readWithCleanup(descriptors, read_timeout_ms, std::move(release), release_deferred);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("tensor rdma read threw an exception: %s", e.what());

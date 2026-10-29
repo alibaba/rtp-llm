@@ -9,6 +9,7 @@
 #include <thread>
 #include <ATen/ThreadLocalState.h>
 #include <torch/torch.h>
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 
 namespace rtp_llm {
 
@@ -40,11 +41,16 @@ private:
         std::function<void()> fn;
         at::ThreadLocalState  tls_state;
         std::string           name;
+        cuda_trace::Context   trace_context{};
+        uint64_t              trace_task_id = 0;
     };
     std::optional<Task> pending_task_;
     std::exception_ptr  pending_exception_;
     bool                task_done_ = true;
     bool                shutdown_  = false;
+    // Diagnostic scalar, protected by mutex_ just like task_done_. This does
+    // not own GPU storage or change the existing event's lifetime.
+    uint64_t trace_completed_task_id_ = 0;
 };
 
 }  // namespace rtp_llm

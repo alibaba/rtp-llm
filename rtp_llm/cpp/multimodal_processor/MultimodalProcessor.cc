@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 
 namespace py = pybind11;
 
@@ -18,19 +19,47 @@ namespace rtp_llm {
 
 namespace {
 
+#if USING_CUDA
+// Read host-side tensor metadata only. Tracing must not add CUDA queries, retain
+// tensors, or turn a diagnostic failure into a request failure.
+void traceMultimodalTensor(const torch::Tensor& tensor) noexcept {
+    if (!cuda_trace::active()) {
+        return;
+    }
+    try {
+        cuda_trace::mark("mm.tensor.bytes_dtype", tensor.nbytes(), static_cast<uint64_t>(tensor.scalar_type()));
+        cuda_trace::mark("mm.tensor.address_offset",
+                         reinterpret_cast<uintptr_t>(tensor.data_ptr()),
+                         static_cast<uint64_t>(tensor.storage_offset()));
+        cuda_trace::mark("mm.tensor.ndim", static_cast<uint64_t>(tensor.dim()));
+        for (int64_t dim = 0; dim < tensor.dim(); ++dim) {
+            cuda_trace::mark("mm.tensor.shape", static_cast<uint64_t>(dim), static_cast<uint64_t>(tensor.size(dim)));
+        }
+    } catch (...) {
+        cuda_trace::mark("mm.tensor.metadata_unavailable");
+    }
+}
+#endif
+
 ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
 #if USING_CUDA
+    cuda_trace::Scope prepare_scope(tensor_name);
     try {
-        for (auto& tensor : tensors) {
+        for (size_t index = 0; index < tensors.size(); ++index) {
+            auto& tensor = tensors[index];
             if (!tensor.defined() || tensor.is_pinned()) {
                 continue;
             }
             if (tensor.is_cuda()) {
                 auto options =
                     torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
+                cuda_trace::Scope copy_scope("mm.prepare.d2h", -1, 0, index);
+                traceMultimodalTensor(tensor);
                 // Downstream TP serialization can read the host tensor immediately.
                 tensor = tensor.to(options, /*non_blocking=*/false);
             } else {
+                cuda_trace::Scope pin_scope("mm.prepare.pin_cpu", -1, 0, index);
+                traceMultimodalTensor(tensor);
                 tensor = tensor.pin_memory();
             }
         }
@@ -261,6 +290,7 @@ MultimodalProcessor::useExpandedTokenLayout(const GenerateInput&                
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
                                                         grpc::ServerContext*                     server_context) {
+    cuda_trace::Scope request_scope("mm.prepare.request", input->request_id);
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
@@ -384,6 +414,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
                                                         const std::string&                           vit_role_addr,
                                                         grpc::ServerContext*                         server_context) {
+    cuda_trace::Scope request_scope("mm.prepare.embedding_request", input->request_id);
     CHECK_AND_RETURN_REF(mm_embedding_res,
                          MultimodalEmbedding(mm_inputs, vit_role_addr, input->request_id, server_context));
     MultimodalFeature mm_features;

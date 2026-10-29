@@ -105,6 +105,7 @@ cc_library(
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils/cuda_call_trace:cuda_call_trace",
         "@havenask//aios/autil:scope",
     ],
 )

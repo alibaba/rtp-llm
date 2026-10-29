@@ -7,21 +7,37 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/cuda_call_trace/CudaCallTrace.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #endif
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cstring>
 
 namespace rtp_llm {
 namespace {
+void traceHandoffTensor(const char* name, const torch::Tensor& tensor) noexcept {
+    if (!cuda_trace::active()) {
+        return;
+    }
+    try {
+        cuda_trace::mark(name,
+                         tensor.defined() ? reinterpret_cast<uintptr_t>(tensor.unsafeGetTensorImpl()) : 0,
+                         tensor.defined() ? tensor.nbytes() : 0);
+    } catch (...) {
+        cuda_trace::mark("mtp.pd.tensor_metadata_unavailable");
+    }
+}
+
 int32_t mtpTailTextMask(const GenerateStreamPtr& stream) {
     const auto& mask     = stream->generateInput()->text_tokens_mask;
     const int   boundary = stream->prefixLength() + stream->contextLength();
@@ -806,8 +822,13 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
     // we set propose token in extra loop to avoid cuda sync
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
 
-    // update streams
-    stream_groups.updateStreams(spec_update_infos);
+    // Publish through the existing stream update path. Mark only host-side
+    // assignment/return boundaries; this is not a CUDA completion event.
+    {
+        cuda_trace::Scope publish_scope("mtp.prefill.publish_batch", -1, 0, spec_update_infos.size());
+        stream_groups.updateStreams(spec_update_infos);
+        cuda_trace::mark("mtp.prefill.publish_batch.returned");
+    }
 
     RTP_LLM_LOG_DEBUG("dispatch prefill done");
     return absl::OkStatus();
@@ -1254,8 +1275,10 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
     // needs the legacy int draft_token. Remove after downstream paths consume
     // draft_token_gpu exclusively.
     torch::Tensor propose_token_ids_h;
-    auto          ensure_cpu_mirror = [&]() -> const torch::Tensor& {
+    auto          ensure_cpu_mirror = [&](int64_t request_id) -> const torch::Tensor& {
         if (!propose_token_ids_h.defined()) {
+            cuda_trace::Scope mirror_scope("mtp.proposal.cpu_mirror", request_id);
+            traceHandoffTensor("mtp.proposal.cpu_mirror.source", propose_token_ids);
             propose_token_ids_h = on_gpu ? propose_token_ids.cpu() : propose_token_ids;
         }
         return propose_token_ids_h;
@@ -1287,7 +1310,7 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
         // lazy. DSpARK never reaches this path for commit-only dispatches.
         const bool need_cpu_int = !on_gpu || stream->queryPdSep();
         if (need_cpu_int) {
-            const auto& cpu_ids = ensure_cpu_mirror();
+            const auto& cpu_ids = ensure_cpu_mirror(cuda_trace::active() ? stream->streamId() : -1);
             int         propose_token =
                 (dtype == torch::kLong) ?
                             static_cast<int>(cpu_ids.data_ptr<int64_t>()[batch_idx_out * token_stride + token_stride - 1]) :
@@ -2127,14 +2150,30 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         // speculative decoding info
+        const bool                       trace_pd = cuda_trace::active() && stream->queryPdSep();
+        std::optional<cuda_trace::Scope> handoff_scope;
+        if (trace_pd) {
+            handoff_scope.emplace("mtp.pd.prepare_handoff", stream->streamId(), 0, batch_idx_out, next_batch_size);
+        }
         torch::Tensor propose_all_probs;
         if (draft_sampler_output.all_probs.defined()) {
+            std::optional<cuda_trace::Scope> clone_scope;
+            if (trace_pd) {
+                clone_scope.emplace("mtp.pd.probs_clone");
+            }
             propose_all_probs =
                 draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+            if (trace_pd) {
+                traceHandoffTensor("mtp.pd.probs_clone.output", propose_all_probs);
+            }
         }
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_dspark_) {
+            std::optional<cuda_trace::Scope> clone_scope;
+            if (trace_pd) {
+                clone_scope.emplace("mtp.pd.hidden_clone");
+            }
             if (draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0) {
                 // CP: the draft forward output is rank-local, so the per-request
                 // rows come from the draft model's MTP last-hidden buffer.
@@ -2142,6 +2181,9 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             } else {
                 last_hidden_states =
                     cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + token_size - 1, 1);
+            }
+            if (trace_pd) {
+                traceHandoffTensor("mtp.pd.hidden_clone.output", last_hidden_states);
             }
         }
 

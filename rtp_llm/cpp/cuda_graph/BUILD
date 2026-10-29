@@ -95,6 +95,7 @@ cc_library(
         "cuda_graph_decode.cc",
     ],
     deps = torch_deps() + [
+        "//rtp_llm/cpp/utils/cuda_call_trace:cuda_call_trace",
         ":cuda_graph_base",
         ":mtp_draft_prefill_capacity",
         ":combo_position_ids_validation",
