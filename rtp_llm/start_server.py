@@ -572,6 +572,9 @@ def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+    flag = os.environ.get("DSV4_STARTUP_REAL_WARMUP", "auto").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        return False
     runtime_config = py_env_configs.runtime_config
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
@@ -591,7 +594,9 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+    return flag in ("1", "true", "on", "yes", "force") or getattr(
+        py_env_configs.model_args, "model_type", ""
+    ) in ("deepseek_v4", "glm_5")
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
