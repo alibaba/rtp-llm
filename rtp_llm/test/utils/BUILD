@@ -3,8 +3,22 @@ load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([
     "filelock",
+    "huggingface-hub",
     "torch",
 ])
+
+py_library(
+    name = "hf_checkpoint",
+    srcs = ["hf_checkpoint.py"],
+    deps = [":huggingface-hub"],
+)
+
+py_test(
+    name = "hf_checkpoint_test",
+    srcs = ["hf_checkpoint_test.py"],
+    deps = [":hf_checkpoint"],
+    env = {"GPU_COUNT": "0"},
+)
 
 py_library(
     name = "test_util",

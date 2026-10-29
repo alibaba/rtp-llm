@@ -28,6 +28,7 @@ from smoke.multi_inst_case_runner import (
 from smoke.task_info import TaskInfo
 from smoke.utils import resolve_prompt_refs
 
+from rtp_llm.test.utils.hf_checkpoint import resolve_hf_checkpoint
 from rtp_llm.utils.util import str_to_bool
 
 _ENV_PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -43,7 +44,7 @@ def _expand_required_env(value: str, *, field: str) -> str:
             raise RuntimeError(
                 f"smoke {field} requires non-empty environment variable {name}"
             )
-        return resolved
+        return resolve_hf_checkpoint(resolved)
 
     return _ENV_PLACEHOLDER.sub(_replace, value)
 
