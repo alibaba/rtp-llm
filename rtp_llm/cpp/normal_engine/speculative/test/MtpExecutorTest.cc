@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <memory>
+#include <limits>
 #include <chrono>
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
@@ -24,7 +25,11 @@
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_token_gather.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 
 namespace rtp_llm {
@@ -171,7 +176,8 @@ class FakeFastTopKSampler: public spec::FastTopKSampler {
 public:
     FakeFastTopKSampler(): spec::FastTopKSampler(torch::Tensor()) {}
 
-    spec::FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1) override {
+    spec::FastTopKSamplerOutput
+    forward(const torch::Tensor& logits, int top_k = 1, const spec::MtpDraftSampleContext* = nullptr) override {
         checkInputs(logits);
         return output_holder.get();
     }
@@ -521,6 +527,332 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     EXPECT_EQ(output.token_ids.item<int64_t>(), 2);
     checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
 }
+
+#if USING_CUDA
+TEST_F(MtpExecutorTest, testRejectionSamplingOverwritesPoisonedOutputs) {
+    const auto i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto f32 = i32.dtype(torch::kFloat32);
+    for (int batch : {1, 4, 7}) {
+        for (int steps : {1, 3, 7}) {
+            for (bool sample : {false, true}) {
+                for (int reject : {0, steps / 2, steps}) {
+                    auto draft  = torch::full({batch, steps}, 2, i32);
+                    auto target = torch::full({batch, steps + 1}, 2, i32);
+                    target.select(1, steps).fill_(3);
+                    if (reject < steps)
+                        target.select(1, reject).fill_(3);
+                    auto dp = torch::zeros({batch, steps, 32}, f32);
+                    dp.select(2, 2).fill_(1.f);
+                    auto tp = torch::zeros({batch, steps + 1, 32}, f32);
+                    tp.scatter_(2, target.unsqueeze(2).to(torch::kInt64), 1.f);
+                    auto uniform     = torch::full({batch, steps + 1}, 0.5f, f32);
+                    auto do_sample   = torch::full({batch}, sample, i32.dtype(torch::kBool));
+                    auto old_tokens  = torch::zeros_like(target);
+                    auto old_lengths = torch::zeros({batch}, i32);
+                    auto new_tokens  = torch::full_like(target, -777);
+                    auto new_lengths = torch::full({batch}, -777, i32);
+                    execRejectionSampling({dp,
+                                           draft,
+                                           uniform,
+                                           tp,
+                                           target.reshape({batch * (steps + 1), 1}),
+                                           old_tokens,
+                                           old_lengths,
+                                           do_sample});
+                    execRejectionSampling({dp,
+                                           draft,
+                                           uniform,
+                                           tp,
+                                           target.reshape({batch * (steps + 1), 1}),
+                                           new_tokens,
+                                           new_lengths,
+                                           do_sample});
+                    EXPECT_TRUE(torch::equal(old_tokens, new_tokens));
+                    EXPECT_TRUE(torch::equal(old_lengths, new_lengths));
+                    EXPECT_FALSE(new_tokens.eq(-777).any().item<bool>());
+                    EXPECT_TRUE(new_lengths.eq(reject + 1).all().item<bool>());
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
+    const auto            i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto            f32 = i32.dtype(torch::kFloat32);
+    spec::FastTopKSampler dense(torch::Tensor(), false);
+    spec::FastTopKSampler compact(torch::Tensor(), true);
+    for (int batch : {1, 4, 17}) {
+        for (int width : {7, 2048, 154880}) {
+            for (int pattern : {0, 1, 2}) {
+                auto logits = torch::randn({batch, width}, f32);
+                if (pattern == 1)
+                    logits.zero_();
+                if (pattern == 2)
+                    logits.select(1, width - 1).fill_(std::numeric_limits<float>::quiet_NaN());
+                auto a = dense.forward(logits);
+                auto b = compact.forward(logits);
+                EXPECT_TRUE(torch::equal(a.token_ids, b.token_ids));
+                if (compact.compactPointMassEnabled())
+                    EXPECT_FALSE(b.all_probs.defined());
+                else
+                    EXPECT_TRUE(torch::equal(a.all_probs, b.all_probs));
+            }
+            for (bool sample : {false, true}) {
+                constexpr int steps = 3;
+                for (int reject : {0, 1, steps}) {
+                    auto ids = torch::randint(width, {batch, steps}, i32);
+                    auto dp  = torch::zeros({batch, steps, width}, f32);
+                    dp.scatter_(2, ids.to(torch::kInt64).unsqueeze(2), 1.f);
+                    auto tp     = torch::softmax(torch::randn({batch, steps + 1, width}, f32), -1);
+                    auto target = torch::randint(width, {batch, steps + 1}, i32);
+                    target.narrow(1, 0, reject).copy_(ids.narrow(1, 0, reject));
+                    if (reject < steps)
+                        target.select(1, reject).copy_((ids.select(1, reject) + 1).remainder(width));
+                    auto uniform = torch::full({batch, steps + 1}, 0.5f, f32);
+                    uniform.narrow(1, 0, reject).zero_();
+                    auto do_sample = torch::full({batch}, sample, i32.dtype(torch::kBool));
+                    auto a         = torch::full({batch, steps + 1}, -777, i32);
+                    auto al        = torch::full({batch}, -777, i32);
+                    auto b         = torch::empty_like(a);
+                    auto bl        = torch::empty_like(al);
+                    execRejectionSampling(
+                        {dp, ids, uniform, tp, target.reshape({batch * (steps + 1), 1}), a, al, do_sample});
+                    ASSERT_EQ(invokePointMassRejectionSampling(ids.data_ptr<int32_t>(),
+                                                               uniform.data_ptr<float>(),
+                                                               tp.data_ptr<float>(),
+                                                               target.data_ptr<int32_t>(),
+                                                               1,
+                                                               b.data_ptr<int32_t>(),
+                                                               bl.data_ptr<int32_t>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch,
+                                                               steps,
+                                                               width,
+                                                               at::cuda::getCurrentCUDAStream().stream()),
+                              cudaSuccess);
+                    EXPECT_TRUE(torch::equal(a, b));
+                    EXPECT_TRUE(torch::equal(al, bl));
+                    EXPECT_FALSE(b.eq(-777).any().item<bool>());
+                }
+            }
+        }
+    }
+    // Mapped vocabularies retain the established dense representation.
+    spec::FastTopKSampler mapped(torch::arange(7, i32.dtype(torch::kInt64)), true);
+    EXPECT_FALSE(mapped.compactPointMassEnabled());
+}
+
+TEST_F(MtpExecutorTest, testCompactPointMassPreservesSamplerRngState) {
+    const auto i32                   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto f32                   = i32.dtype(torch::kFloat32);
+    auto       global_generator      = at::cuda::detail::getDefaultCUDAGenerator();
+    auto       original_global_state = global_generator.get_state();
+    for (int width : {7, 2048, 154880}) {
+        ModelConfig model_config;
+        model_config.max_seq_len = 64;
+        model_config.vocab_size  = width;
+        model_config.num_layers  = 1;
+        RuntimeConfig                runtime_config;
+        ResourceContext              resource_context;
+        std::list<GenerateStreamPtr> streams;
+        for (int row = 0; row < 4; ++row) {
+            auto query                    = std::make_shared<GenerateInput>();
+            query->input_ids              = torch::tensor({1}, torch::kInt32);
+            query->generate_config        = std::make_shared<GenerateConfig>();
+            query->generate_config->top_k = row % 2 == 0 ? 1 : 0;
+            if (row >= 2)
+                query->generate_config->random_seed = 1234 + row;
+            streams.push_back(
+                std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
+        }
+        for (int steps : {1, 3, 7}) {
+            spec::SpeculativeSampler sampler(torch::Tensor(), steps);
+            SamplerOutput            dense, compact, target;
+            dense.token_ids = torch::randint(width, {4, steps}, i32);
+            dense.all_probs = torch::zeros({4, steps, width}, f32);
+            dense.all_probs.scatter_(2, dense.token_ids.to(torch::kInt64).unsqueeze(2), 1.f);
+            compact.token_ids        = dense.token_ids;
+            compact.draft_point_mass = true;
+            target.token_ids         = torch::randint(width, {4 * (steps + 1), 1}, i32);
+            target.all_probs         = torch::softmax(torch::randn({4, steps + 1, width}, f32), -1);
+            for (bool force_accept : {false, true}) {
+                streams.back()->generateConfig()->force_sp_accept = force_accept;
+                auto                       before_global          = global_generator.get_state();
+                std::vector<torch::Tensor> before_seeded;
+                for (auto& stream : streams) {
+                    auto generator = stream->getGenerator();
+                    if (generator.defined())
+                        before_seeded.push_back(generator.get_state());
+                }
+                auto                       a            = sampler.forward(streams, dense, target);
+                auto                       after_global = global_generator.get_state();
+                std::vector<torch::Tensor> after_seeded;
+                size_t                     idx = 0;
+                for (auto& stream : streams) {
+                    auto generator = stream->getGenerator();
+                    if (generator.defined()) {
+                        after_seeded.push_back(generator.get_state());
+                        generator.set_state(before_seeded[idx++]);
+                    }
+                }
+                global_generator.set_state(before_global);
+                auto b = sampler.forward(streams, compact, target);
+                EXPECT_TRUE(torch::equal(a.accept_tokens, b.accept_tokens));
+                EXPECT_TRUE(torch::equal(a.accept_len, b.accept_len));
+                EXPECT_TRUE(torch::equal(after_global, global_generator.get_state()));
+                idx = 0;
+                for (auto& stream : streams) {
+                    auto generator = stream->getGenerator();
+                    if (generator.defined()) {
+                        EXPECT_TRUE(torch::equal(after_seeded[idx++], generator.get_state()));
+                    }
+                }
+            }
+        }
+    }
+    global_generator.set_state(original_global_state);
+}
+
+TEST_F(MtpExecutorTest, testMtpGreedyFinalizeBatchAndStride) {
+    const auto cpu = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    const auto gpu = cpu.device(torch::kCUDA);
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
+    for (int batch : {1, 4, 7, 16, 32, 67, 257}) {
+        for (int stride : {1, 3}) {
+            auto draft_cpu = torch::empty({batch, 3}, cpu);
+            auto target_cpu = torch::full({batch * 4, stride}, -9, cpu);
+            auto expected = torch::zeros({batch, 4}, cpu);
+            auto lengths_cpu = torch::empty({batch}, cpu);
+            auto* d = draft_cpu.data_ptr<int32_t>();
+            auto* t = target_cpu.data_ptr<int32_t>();
+            auto* e = expected.data_ptr<int32_t>();
+            for (int b = 0; b < batch; ++b) {
+                const int accepted = b % 4;
+                lengths_cpu.data_ptr<int32_t>()[b] = accepted + 1;
+                for (int j = 0; j < 4; ++j) {
+                    const int token = j < accepted ? b * 4 + j : b * 4 + j + 1;
+                    t[(b * 4 + j) * stride + stride - 1] = token;
+                    if (j < 3)
+                        d[b * 3 + j] = b * 4 + j;
+                    if (j <= accepted)
+                        e[b * 4 + j] = token;
+                }
+            }
+            auto draft = draft_cpu.to(torch::kCUDA);
+            auto target = target_cpu.to(torch::kCUDA);
+            auto tokens = torch::full({batch, 4}, -999, gpu);
+            auto lengths = torch::empty({batch}, gpu);
+            torch::Tensor rows, total;
+            ASSERT_TRUE(tryMtpGreedyFinalize(draft, target, tokens, lengths, rows, total, stream));
+            EXPECT_TRUE(torch::equal(tokens.cpu(), expected));
+            EXPECT_TRUE(torch::equal(lengths.cpu(), lengths_cpu));
+            EXPECT_TRUE(torch::equal(rows.cpu(), lengths_cpu.to(torch::kInt64)));
+            EXPECT_EQ(total.item<int64_t>(), lengths_cpu.sum().item<int64_t>());
+            // Unsupported layouts must return without modifying caller outputs.
+            auto invalid = draft.to(torch::kInt64);
+            tokens.fill_(-99);
+            EXPECT_FALSE(tryMtpGreedyFinalize(invalid, target, tokens, lengths, rows, total, stream));
+            EXPECT_TRUE(torch::equal(tokens, torch::full_like(tokens, -99)));
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testMtpGraphCopyFillOverlapAndFallback) {
+    const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
+    for (int batch : {1, 4, 7, 16, 32, 67}) {
+        auto src = torch::arange(batch, options);
+        auto dst = torch::full({batch + 9}, -99, options);
+        auto expected = torch::full_like(dst, 17);
+        expected.narrow(0, 2, batch).copy_(src);
+        FusedD2DCopyParams copies;
+        copies.add(src.data_ptr(), dst.data_ptr<int32_t>() + 2, batch * sizeof(int32_t));
+        CudaGraphPrepareFillParams fills;
+        fills.region_count = 1;
+        fills.regions[0] = {dst.data_ptr<int32_t>(), dst.numel(), 17};
+        ASSERT_TRUE(tryInvokeMtpGraphCopyFill(copies, fills, stream));
+        EXPECT_TRUE(torch::equal(dst, expected));
+        dst.fill_(-99);
+        // A source inside the fill region needs the original fill-before-copy order.
+        copies.src[0] = dst.data_ptr();
+        EXPECT_FALSE(tryInvokeMtpGraphCopyFill(copies, fills, stream));
+        EXPECT_TRUE(torch::equal(dst, torch::full_like(dst, -99)));
+        copies.src[0] = src.data_ptr();
+        copies.size[0] = 1;  // Partial-word overlap is deliberately unsupported.
+        EXPECT_FALSE(tryInvokeMtpGraphCopyFill(copies, fills, stream));
+        EXPECT_TRUE(torch::equal(dst, torch::full_like(dst, -99)));
+    }
+}
+
+TEST_F(MtpExecutorTest, testMtpBatchRowsPrepareAndPublish) {
+    const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto stream = at::cuda::getCurrentCUDAStream().stream();
+    for (int batch : {1, 4, 7, 16, 32, 67, 129, 257}) {
+        // Two prior batch owners, reversed/subselected rows, duplicate reads.
+        auto first = torch::arange(batch * 2, options) + 10;
+        auto second = torch::arange(batch * 2, options) + 1000;
+        auto tokens = torch::arange(batch * 6, options).reshape({batch * 2, 3});
+        std::vector<MtpNextInputRow> rows;
+        std::vector<const int32_t*> lengths;
+        auto expected_lengths = torch::empty({batch}, options.device(torch::kCPU));
+        auto expected_tokens = torch::empty_like(expected_lengths);
+        for (int i = 0; i < batch; ++i) {
+            const int row = (batch * 2 - 1 - i / 2);
+            const auto& source = i % 2 ? first : second;
+            rows.push_back({tokens.data_ptr<int32_t>() + row * 3 + 2, source.data_ptr<int32_t>() + row});
+            lengths.push_back(source.data_ptr<int32_t>() + row);
+            expected_lengths.data_ptr<int32_t>()[i] = row + (i % 2 ? 10 : 1000);
+            expected_tokens.data_ptr<int32_t>()[i] = row * 3 + 2;
+        }
+        torch::Tensor packed;
+        ASSERT_TRUE(tryMtpPrepareNextInputs(rows, options, packed, stream));
+        EXPECT_TRUE(torch::equal(packed.select(0, 0).cpu(), expected_tokens));
+        EXPECT_TRUE(torch::equal(packed.select(0, 1).cpu(), expected_lengths));
+        EXPECT_TRUE(torch::equal(packed.select(0, 2).cpu(), expected_lengths - 1));
+        EXPECT_TRUE(torch::equal(packed.select(0, 3), torch::arange(batch, options)));
+        auto accepted = torch::arange(batch, options).remainder(4) + 1;
+        auto output_tokens = torch::arange(batch * 4, options).reshape({batch, 4});
+        auto hidden = torch::randn({batch * 4, 17}, options.dtype(torch::kBFloat16));
+        torch::Tensor next_a, selected_a, hidden_a, next_b, selected_b, hidden_b;
+        auto contiguous_previous = expected_lengths.to(torch::kCUDA);
+        ASSERT_TRUE(tryMtpPublishState(accepted, output_tokens, contiguous_previous, hidden, 4,
+                                       next_a, selected_a, hidden_a, stream));
+        ASSERT_TRUE(tryMtpPublishState(accepted, output_tokens, torch::Tensor(), hidden, 4,
+                                       next_b, selected_b, hidden_b, stream, lengths));
+        EXPECT_TRUE(torch::equal(next_a, next_b));
+        EXPECT_TRUE(torch::equal(selected_a, selected_b));
+        EXPECT_TRUE(torch::equal(hidden_a, hidden_b));
+        // Invalid descriptor must return before replacing or writing outputs.
+        auto previous_output = packed;
+        rows.back().token = nullptr;
+        EXPECT_FALSE(tryMtpPrepareNextInputs(rows, options, packed, stream));
+        EXPECT_TRUE(packed.is_same(previous_output));
+    }
+}
+
+TEST_F(MtpExecutorTest, testMtpIntegerCleanupMetricsAndDecodeMetadata) {
+    const auto i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       stream = at::cuda::getCurrentCUDAStream().stream();
+    for (int batch : {0, 1, 7, 257}) {
+        auto          lengths = torch::arange(batch, i32) - 3;
+        torch::Tensor rows, sum, cu, kv, dc, plus;
+        ASSERT_TRUE(tryMtpAcceptMetrics(lengths, rows, sum, stream));
+        EXPECT_TRUE(torch::equal(rows, lengths.to(torch::kInt64)));
+        EXPECT_TRUE(torch::equal(sum, lengths.to(torch::kInt64).sum().reshape({1})));
+        ASSERT_TRUE(tryMtpDecodeAttentionMetadata(lengths, cu, kv, dc, plus, stream));
+        EXPECT_TRUE(torch::equal(cu, torch::zeros({batch + 1}, i32)));
+        EXPECT_TRUE(torch::equal(kv, torch::zeros_like(cu)));
+        EXPECT_TRUE(torch::equal(dc, torch::arange(batch + 1, i32)));
+        EXPECT_TRUE(torch::equal(plus, lengths + 1));
+        auto tokens    = torch::arange(batch * 4, i32).reshape({batch, 4}) - 2;
+        auto reference = tokens.clone();
+        reference.index_put_({reference == -1}, 0);
+        ASSERT_TRUE(tryMtpCleanRejectedTokens(tokens, stream));
+        EXPECT_TRUE(torch::equal(tokens, reference));
+    }
+}
+#endif
 
 TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdCheck) {
     MtpExecutorTestConfig test_config;

@@ -93,6 +93,9 @@ public:
     torch::Tensor success;
     torch::Tensor raw_logprobs_logits;
     torch::Tensor raw_logprobs_row_indices;
+    // MTP top-1 proposals have q(v)=1 only at token_ids. No dense draft
+    // probability tensor is required when this explicit representation is set.
+    bool draft_point_mass = false;
 };
 
 struct MergedOutput {

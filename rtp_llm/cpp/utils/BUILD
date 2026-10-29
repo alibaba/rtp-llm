@@ -249,3 +249,10 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "mtp_fusion",
+    hdrs = ["MtpFusion.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)

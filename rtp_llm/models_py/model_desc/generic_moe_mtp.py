@@ -2,10 +2,11 @@ import os
 from typing import Any
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.kernels.cuda.mtp_frontend import native as mtp_frontend_native
+from rtp_llm.models_py.kernels.cuda.mtp_frontend import try_mtp_frontend
+from rtp_llm.models_py.kernels.cuda.mtp_indexer import try_advance, try_seed
 from rtp_llm.models_py.model_desc.block_map import (
     cpu_layer_group_ids,
     select_block_map_for_layer,
@@ -17,6 +18,7 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 _MTP_INDEXER_ROLE_NORMAL = 0
 _MTP_INDEXER_ROLE_SEED = 1
@@ -81,6 +83,7 @@ class GenericMoeMTPModel(GptModelBase):
             weights.global_weights[W.multi_tokens_predict_hnorm],
             eps=model_config.layernorm_eps,
         )
+        self._mtp_frontend_native = mtp_frontend_native()
         self.fc = LinearFactory.create_linear_from_weights(
             weights.global_weights, W.multi_tokens_predict_eh_proj
         )
@@ -156,6 +159,7 @@ class GenericMoeMTPModel(GptModelBase):
         clone.pre_fc_norm_embedding = self.pre_fc_norm_embedding
         clone.pre_fc_norm_hidden = self.pre_fc_norm_hidden
         clone.fc = self.fc
+        clone._mtp_frontend_native = self._mtp_frontend_native
         # Only the seed-decode clone shares communication state. The default
         # draft-prefill clone keeps its existing, separate communication arena.
         cloned_layers = []
@@ -237,6 +241,8 @@ class GenericMoeMTPModel(GptModelBase):
         # keeps positions generated earlier in the same proposal cycle at the
         # front instead of making them invisible to later draft tokens. Avoid
         # inserting duplicates when the current position is already selected.
+        if try_advance(topk_indices, positions):
+            return topk_indices
         position_column = positions.reshape(-1, 1)
         with_current_position = torch.cat(
             [position_column, topk_indices[:, :-1]], dim=1
@@ -269,6 +275,10 @@ class GenericMoeMTPModel(GptModelBase):
                 f"dtype={getattr(topk_indices, 'dtype', None)}, "
                 f"batch={batch_size}, topk={topk}"
             )
+        if try_seed(
+            topk_indices, seed_rows, self._mtp_shared_topk_indices[:batch_size]
+        ):
+            return
         selected = topk_indices.index_select(0, seed_rows.to(torch.int64))
         self._mtp_shared_topk_indices[:batch_size].copy_(selected)
 
@@ -276,24 +286,38 @@ class GenericMoeMTPModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        inputs_embeds = self.embed_tokens(input_ids)
         fmha_impl.pinned_mla_groups = self.pinned_mla_groups
-        inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
-        last_hidden_states = inputs.input_hiddens
-
-        e_norm = self.pre_fc_norm_embedding(inputs_embeds)
-        h_norm = self.pre_fc_norm_hidden(last_hidden_states)
-        cat_hidden_states = torch.cat([e_norm, h_norm], -1)
+        frontend = try_mtp_frontend(
+            self._mtp_frontend_native,
+            self.embed_tokens,
+            inputs.input_hiddens,
+            self.pre_fc_norm_embedding,
+            self.pre_fc_norm_hidden,
+            input_ids,
+            getattr(fmha_impl.fmha_params, "positions_d", None),
+        )
+        if frontend is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self._mask_position_zero_embeddings(
+                inputs_embeds, fmha_impl
+            )
+            e_norm = self.pre_fc_norm_embedding(inputs_embeds)
+            h_norm = self.pre_fc_norm_hidden(inputs.input_hiddens)
+            cat_hidden_states = torch.cat([e_norm, h_norm], -1)
+            del inputs_embeds, e_norm, h_norm
+            residual = None
+        else:
+            cat_hidden_states, residual = frontend
         hidden_states = self.fc(cat_hidden_states)
+        del cat_hidden_states
 
-        # These front-end activations are not consumed by the decoder layer.
-        # Without an explicit del, Python keeps their independent storages live
-        # until the whole MTP forward returns, overlapping every Indexer/SparseMLA
-        # layer. CUDA allocator stream tracking makes this release asynchronous
-        # and safe; do not synchronize or call empty_cache on the hot path.
-        del inputs_embeds, e_norm, h_norm, cat_hidden_states
-
-        residual = torch.zeros_like(hidden_states)
+        if (
+            residual is None
+            or residual.shape != hidden_states.shape
+            or residual.dtype != hidden_states.dtype
+            or residual.device != hidden_states.device
+        ):
+            residual = torch.zeros_like(hidden_states)
         reuse_topk_indices = (
             self._mtp_indexer_share_enabled
             and self._mtp_indexer_role == _MTP_INDEXER_ROLE_REUSE

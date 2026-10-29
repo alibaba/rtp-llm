@@ -232,6 +232,8 @@ cc_library(
     srcs = ["cuda_graph_prepare.cu"],
     hdrs = ["cuda_graph_prepare.h"],
     deps = [
+        "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
+        "//rtp_llm/cpp/utils:mtp_fusion",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
@@ -350,5 +352,17 @@ cc_library(
     ],
     copts = any_cuda_copts(),
     include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "mtp_token_gather",
+    srcs = ["mtp_token_gather.cu"],
+    hdrs = ["mtp_token_gather.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
     visibility = ["//visibility:public"],
 )

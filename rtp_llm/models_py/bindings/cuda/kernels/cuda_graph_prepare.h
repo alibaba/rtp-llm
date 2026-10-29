@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_util.h"
 #include <cuda_runtime_api.h>
 
 namespace rtp_llm {
@@ -19,6 +20,11 @@ struct CudaGraphPrepareFillParams {
 };
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t stream);
+
+// False means no work was enqueued; caller must issue the original ordered launches.
+bool tryInvokeMtpGraphCopyFill(const FusedD2DCopyParams& copies,
+                               const CudaGraphPrepareFillParams& fills,
+                               cudaStream_t stream);
 
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          const int32_t* block_ids,

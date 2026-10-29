@@ -185,19 +185,22 @@ public:
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          const size_t                                 batch_size,
                                          torch::Tensor&                               hidden_states_d_t,
-                                         TensorHolder&                                host_holder);
+                                         TensorHolder&                                host_holder,
+                                         torch::Tensor*                               selected_tokens = nullptr);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
                                          torch::Tensor&      draft_token_probs_d_t,
-                                         TensorHolder&       host_holder);
+                                         TensorHolder&       host_holder,
+                                         bool                compact_point_mass = false);
 
     void updateMultiStepDraftSamplerOutput(const StreamGroups&         stream_groups,
                                            SamplerOutput&              draft_sampler_output,
                                            torch::Tensor&              draft_token_ids_d_t,
                                            torch::Tensor&              spec_token_ids_d_t,
                                            torch::Tensor&              draft_token_probs_d_t,
-                                           std::vector<torch::Tensor>& draft_token_probs_list);
+                                           std::vector<torch::Tensor>& draft_token_probs_list,
+                                           bool                        compact_point_mass = false);
 
 protected:
     void updateProposeTokens(const StreamGroups&                stream_groups,

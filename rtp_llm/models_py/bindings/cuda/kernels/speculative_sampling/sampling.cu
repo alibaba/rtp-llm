@@ -223,7 +223,8 @@ template<uint32_t             BLOCK_THREADS,
          uint32_t             VEC_SIZE,
          bool                 DETERMINISTIC,
          typename DType,
-         typename IdType>
+         typename IdType,
+         bool POINT_MASS = false>
 __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                           IdType* draft_token_ids,
                                           DType*  uniform_samples,
@@ -261,7 +262,8 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                                 + target_token_stride - 1];
 
             float q = target_probs[(row_idx * (num_speculative_tokens + 1) + i) * target_vocab_size + draft_id],
-                  p = draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
+                  p = POINT_MASS ? DType(1) :
+                                   draft_probs[(row_idx * num_speculative_tokens + i) * target_vocab_size + draft_id];
             DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
 
             bool same_token = target_id == draft_id;
@@ -314,8 +316,16 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                        + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
             if (pos != num_speculative_tokens) {
                 // there is no draft_probs for the bonus token
-                p_vec.load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
-                           + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                if constexpr (POINT_MASS) {
+                    const IdType point = draft_token_ids[row_idx * num_speculative_tokens + pos];
+#pragma unroll
+                    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+                        p_vec[j] = point == (i * BLOCK_THREADS + tx) * VEC_SIZE + j ? DType(1) : DType(0);
+                    }
+                } else {
+                    p_vec.load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
+                               + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                }
             }
         }
 #pragma unroll
@@ -345,8 +355,16 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                        + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
             if (pos != num_speculative_tokens) {
                 // there is no draft_probs for the bonus token
-                p_vec.load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
-                           + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                if constexpr (POINT_MASS) {
+                    const IdType point = draft_token_ids[row_idx * num_speculative_tokens + pos];
+#pragma unroll
+                    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+                        p_vec[j] = point == (i * BLOCK_THREADS + tx) * VEC_SIZE + j ? DType(1) : DType(0);
+                    }
+                } else {
+                    p_vec.load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
+                               + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+                }
             }
         }
 
@@ -424,6 +442,43 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
     });
 
     return cudaSuccess;
+}
+
+cudaError_t invokePointMassRejectionSampling(int32_t*     draft_token_ids,
+                                             float*       uniform_samples,
+                                             float*       target_probs,
+                                             int32_t*     target_token_ids,
+                                             int          target_token_stride,
+                                             int32_t*     output_token_ids,
+                                             int32_t*     output_accepted_token_num,
+                                             bool*        do_sample,
+                                             int          batch_size,
+                                             int          num_speculative_tokens,
+                                             int          target_vocab_size,
+                                             cudaStream_t stream) {
+    if (batch_size == 0)
+        return cudaSuccess;
+    constexpr uint32_t BLOCK_THREADS = 1024;
+    const uint32_t     vec_size      = std::gcd(4, target_vocab_size);
+    const uint32_t     smem_size     = sizeof(SamplingTempStorage<float, BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>);
+    DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+        auto kernel =
+            rejection_sampling_kernel<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, VEC_SIZE, false, float, int32_t, true>;
+        FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        kernel<<<batch_size, BLOCK_THREADS, smem_size, stream>>>(nullptr,
+                                                                 draft_token_ids,
+                                                                 uniform_samples,
+                                                                 target_probs,
+                                                                 target_token_ids,
+                                                                 target_token_stride,
+                                                                 output_token_ids,
+                                                                 output_accepted_token_num,
+                                                                 do_sample,
+                                                                 batch_size,
+                                                                 num_speculative_tokens,
+                                                                 target_vocab_size);
+    });
+    return cudaGetLastError();
 }
 
 #define INSTANTIATE_REJECTION_SAMPLING(DType, IdType)                                                                  \

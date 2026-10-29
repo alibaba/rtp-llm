@@ -1,11 +1,93 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 
+#include "rtp_llm/cpp/utils/MtpFusion.h"
 #include <algorithm>
 #include <c10/util/Exception.h>
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
 namespace rtp_llm {
+// Copies and fills occupy disjoint destination words. A fill skips words
+// covered by a contiguous copy; strided KV-table copies run afterwards.
+__global__ void mtpGraphCopyFillKernel(FusedD2DCopyParams copies, CudaGraphPrepareFillParams fills) {
+    const int task = blockIdx.y;
+    const size_t tid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t step = static_cast<size_t>(gridDim.x) * blockDim.x;
+    if (task < copies.num_copies) {
+        const auto* src = static_cast<const char*>(copies.src[task]);
+        auto* dst = static_cast<char*>(copies.dst[task]);
+        const size_t bytes = copies.size[task];
+        if (reinterpret_cast<uintptr_t>(src) % 16 == 0 && reinterpret_cast<uintptr_t>(dst) % 16 == 0) {
+            for (size_t i = tid; i < bytes / 16; i += step)
+                reinterpret_cast<int4*>(dst)[i] = reinterpret_cast<const int4*>(src)[i];
+            for (size_t i = bytes / 16 * 16 + tid; i < bytes; i += step)
+                dst[i] = src[i];
+        } else {
+            for (size_t i = tid; i < bytes; i += step)
+                dst[i] = src[i];
+        }
+    } else {
+        const auto region = fills.regions[task - copies.num_copies];
+        for (size_t i = tid; i < static_cast<size_t>(region.count); i += step) {
+            const auto address = reinterpret_cast<uintptr_t>(region.ptr + i);
+            bool copied = false;
+            for (int j = 0; j < copies.num_copies; ++j) {
+                const auto begin = reinterpret_cast<uintptr_t>(copies.dst[j]);
+                copied |= address >= begin && address - begin < copies.size[j];
+            }
+            if (!copied)
+                region.ptr[i] = region.value;
+        }
+    }
+}
+
+bool tryInvokeMtpGraphCopyFill(const FusedD2DCopyParams& copies,
+                               const CudaGraphPrepareFillParams& fills,
+                               cudaStream_t stream) {
+    if (copies.num_copies <= 0 || copies.num_copies > MAX_FUSED_D2D_COPIES
+        || fills.region_count <= 0 || fills.region_count > kMaxCudaGraphPrepareFillRegions)
+        return false;
+    auto overlaps = [](uintptr_t a, size_t an, uintptr_t b, size_t bn) {
+        return an && bn && (a <= b ? b - a < an : a - b < bn);
+    };
+    for (int i = 0; i < fills.region_count; ++i) {
+        const auto& f = fills.regions[i];
+        if (f.count < 0 || !f.ptr || reinterpret_cast<uintptr_t>(f.ptr) % sizeof(int32_t)
+            || static_cast<uint64_t>(f.count) > SIZE_MAX / sizeof(int32_t))
+            return false;
+        const auto address = reinterpret_cast<uintptr_t>(f.ptr);
+        const auto bytes = static_cast<size_t>(f.count) * sizeof(int32_t);
+        for (int j = 0; j < i; ++j)
+            if (overlaps(address, bytes, reinterpret_cast<uintptr_t>(fills.regions[j].ptr),
+                         static_cast<size_t>(fills.regions[j].count) * sizeof(int32_t)))
+                return false;
+        for (int j = 0; j < copies.num_copies; ++j) {
+            // Source/fill dependencies need the original ordered launches.
+            if (overlaps(address, bytes, reinterpret_cast<uintptr_t>(copies.src[j]), copies.size[j]))
+                return false;
+            if (overlaps(address, bytes, reinterpret_cast<uintptr_t>(copies.dst[j]), copies.size[j])
+                && (reinterpret_cast<uintptr_t>(copies.dst[j]) % sizeof(int32_t)
+                    || copies.size[j] % sizeof(int32_t)))
+                return false;
+        }
+    }
+    for (int i = 0; i < copies.num_copies; ++i) {
+        if (copies.size[i] && (!copies.src[i] || !copies.dst[i]))
+            return false;
+        for (int j = 0; j < copies.num_copies; ++j) {
+            if (overlaps(reinterpret_cast<uintptr_t>(copies.src[i]), copies.size[i],
+                         reinterpret_cast<uintptr_t>(copies.dst[j]), copies.size[j]))
+                return false;
+            if (j < i && overlaps(reinterpret_cast<uintptr_t>(copies.dst[i]), copies.size[i],
+                                  reinterpret_cast<uintptr_t>(copies.dst[j]), copies.size[j]))
+                return false;
+        }
+    }
+    mtpGraphCopyFillKernel<<<dim3(8, copies.num_copies + fills.region_count), 256, 0, stream>>>(copies, fills);
+    return true;
+}
+
+
 
 namespace {
 
@@ -325,17 +407,17 @@ __device__ __forceinline__ int32_t warpInclusiveScan(int32_t v) {
     return v;
 }
 
-__global__ void prepareTargetVerifyCumsumKernel(const int32_t* __restrict__ input_lengths,
-                                                const int32_t* __restrict__ prefix_lengths,
-                                                int32_t* __restrict__ decode_page_indptr,
-                                                int32_t* __restrict__ paged_kv_last_page_len,
-                                                int32_t* __restrict__ qo_indptr,
-                                                int32_t* __restrict__ prefill_ragged_kv_len_indptr,
-                                                int32_t* __restrict__ kvlen,
-                                                int32_t batch_size,
-                                                int32_t safe_page_sz,
-                                                int32_t max_blocks_per_batch,
-                                                int32_t captured_batch_capacity) {
+__device__ __forceinline__ void prepareTargetVerifyCumsumKernelImpl(const int32_t* __restrict__ input_lengths,
+                                                                    const int32_t* __restrict__ prefix_lengths,
+                                                                    int32_t* __restrict__ decode_page_indptr,
+                                                                    int32_t* __restrict__ paged_kv_last_page_len,
+                                                                    int32_t* __restrict__ qo_indptr,
+                                                                    int32_t* __restrict__ prefill_ragged_kv_len_indptr,
+                                                                    int32_t* __restrict__ kvlen,
+                                                                    int32_t batch_size,
+                                                                    int32_t safe_page_sz,
+                                                                    int32_t max_blocks_per_batch,
+                                                                    int32_t captured_batch_capacity) {
     if (blockIdx.x != 0 || threadIdx.x >= kV3CumsumWarpSize) {
         return;
     }
@@ -402,24 +484,25 @@ __global__ void prepareTargetVerifyCumsumKernel(const int32_t* __restrict__ inpu
     }
 }
 
-__global__ void prepareTargetVerifyWriteKernel(const int32_t* __restrict__ input_lengths,
-                                               const int32_t* __restrict__ prefix_lengths,
-                                               const int32_t* __restrict__ block_ids,
-                                               const int32_t* __restrict__ decode_page_indptr,
-                                               const int32_t* __restrict__ qo_indptr,
-                                               const int32_t* __restrict__ prefill_ragged_kv_len_indptr,
-                                               int32_t* __restrict__ batch_indice,
-                                               int32_t* __restrict__ page_indice,
-                                               int32_t* __restrict__ positions,
-                                               int64_t* __restrict__ slot_mapping,
-                                               int32_t* __restrict__ expanded_seq_lens,
-                                               int32_t* __restrict__ topk_indices_offset,
-                                               int32_t* __restrict__ ks,
-                                               int32_t* __restrict__ ke,
-                                               int32_t batch_size,
-                                               int32_t max_blocks_per_batch,
-                                               int32_t safe_page_sz,
-                                               int32_t captured_total_tokens) {
+__device__ __forceinline__ void
+prepareTargetVerifyWriteKernelImpl(const int32_t* __restrict__ input_lengths,
+                                   const int32_t* __restrict__ prefix_lengths,
+                                   const int32_t* __restrict__ block_ids,
+                                   const int32_t* __restrict__ decode_page_indptr,
+                                   const int32_t* __restrict__ qo_indptr,
+                                   const int32_t* __restrict__ prefill_ragged_kv_len_indptr,
+                                   int32_t* __restrict__ batch_indice,
+                                   int32_t* __restrict__ page_indice,
+                                   int32_t* __restrict__ positions,
+                                   int64_t* __restrict__ slot_mapping,
+                                   int32_t* __restrict__ expanded_seq_lens,
+                                   int32_t* __restrict__ topk_indices_offset,
+                                   int32_t* __restrict__ ks,
+                                   int32_t* __restrict__ ke,
+                                   int32_t batch_size,
+                                   int32_t max_blocks_per_batch,
+                                   int32_t safe_page_sz,
+                                   int32_t captured_total_tokens) {
     const int32_t warp_id_in_block = static_cast<int32_t>(threadIdx.x) / kV3WarpSize;
     const int32_t lane             = static_cast<int32_t>(threadIdx.x) % kV3WarpSize;
     const int32_t global_warp_id   = static_cast<int32_t>(blockIdx.x) * kV3WarpsPerBlock + warp_id_in_block;
@@ -483,6 +566,123 @@ __global__ void prepareTargetVerifyWriteKernel(const int32_t* __restrict__ input
             ke[t]                  = 0;
         }
     }
+}
+
+__global__ void prepareTargetVerifyWriteKernel(const int32_t* __restrict__ input_lengths,
+                                               const int32_t* __restrict__ prefix_lengths,
+                                               const int32_t* __restrict__ block_ids,
+                                               const int32_t* __restrict__ decode_page_indptr,
+                                               const int32_t* __restrict__ qo_indptr,
+                                               const int32_t* __restrict__ prefill_ragged_kv_len_indptr,
+                                               int32_t* __restrict__ batch_indice,
+                                               int32_t* __restrict__ page_indice,
+                                               int32_t* __restrict__ positions,
+                                               int64_t* __restrict__ slot_mapping,
+                                               int32_t* __restrict__ expanded_seq_lens,
+                                               int32_t* __restrict__ topk_indices_offset,
+                                               int32_t* __restrict__ ks,
+                                               int32_t* __restrict__ ke,
+                                               int32_t batch_size,
+                                               int32_t max_blocks_per_batch,
+                                               int32_t safe_page_sz,
+                                               int32_t captured_total_tokens) {
+    prepareTargetVerifyWriteKernelImpl(input_lengths,
+                                       prefix_lengths,
+                                       block_ids,
+                                       decode_page_indptr,
+                                       qo_indptr,
+                                       prefill_ragged_kv_len_indptr,
+                                       batch_indice,
+                                       page_indice,
+                                       positions,
+                                       slot_mapping,
+                                       expanded_seq_lens,
+                                       topk_indices_offset,
+                                       ks,
+                                       ke,
+                                       batch_size,
+                                       max_blocks_per_batch,
+                                       safe_page_sz,
+                                       captured_total_tokens);
+}
+__global__ void prepareTargetVerifyCumsumKernel(const int32_t* __restrict__ input_lengths,
+                                                const int32_t* __restrict__ prefix_lengths,
+                                                int32_t* __restrict__ decode_page_indptr,
+                                                int32_t* __restrict__ paged_kv_last_page_len,
+                                                int32_t* __restrict__ qo_indptr,
+                                                int32_t* __restrict__ prefill_ragged_kv_len_indptr,
+                                                int32_t* __restrict__ kvlen,
+                                                int32_t batch_size,
+                                                int32_t safe_page_sz,
+                                                int32_t max_blocks_per_batch,
+                                                int32_t captured_batch_capacity) {
+    prepareTargetVerifyCumsumKernelImpl(input_lengths,
+                                        prefix_lengths,
+                                        decode_page_indptr,
+                                        paged_kv_last_page_len,
+                                        qo_indptr,
+                                        prefill_ragged_kv_len_indptr,
+                                        kvlen,
+                                        batch_size,
+                                        safe_page_sz,
+                                        max_blocks_per_batch,
+                                        captured_batch_capacity);
+}
+
+__global__ void mtpVerifyPrepareFusedKernel(const int32_t* input_lengths,
+                                            const int32_t* prefix_lengths,
+                                            const int32_t* block_ids,
+                                            int32_t*       batch_indice,
+                                            int32_t*       page_indice,
+                                            int32_t*       decode_page_indptr,
+                                            int32_t*       paged_kv_last_page_len,
+                                            int32_t*       qo_indptr,
+                                            int32_t*       prefill_ragged_kv_len_indptr,
+                                            int32_t*       kvlen,
+                                            int32_t*       positions,
+                                            int64_t*       slot_mapping,
+                                            int32_t*       expanded_seq_lens,
+                                            int32_t*       topk_indices_offset,
+                                            int32_t*       ks,
+                                            int32_t*       ke,
+                                            int32_t        batch_size,
+                                            int32_t        max_blocks_per_batch,
+                                            int32_t        seq_size_per_block,
+                                            int32_t        captured_batch_capacity,
+                                            int32_t        captured_total_tokens) {
+    int32_t safe_page_sz = seq_size_per_block > 0 ? seq_size_per_block : 1;
+    if (threadIdx.x < 32) {
+        prepareTargetVerifyCumsumKernelImpl(input_lengths,
+                                            prefix_lengths,
+                                            decode_page_indptr,
+                                            paged_kv_last_page_len,
+                                            qo_indptr,
+                                            prefill_ragged_kv_len_indptr,
+                                            kvlen,
+                                            batch_size,
+                                            safe_page_sz,
+                                            max_blocks_per_batch,
+                                            captured_batch_capacity);
+    }
+    __syncthreads();
+    prepareTargetVerifyWriteKernelImpl(input_lengths,
+                                       prefix_lengths,
+                                       block_ids,
+                                       decode_page_indptr,
+                                       qo_indptr,
+                                       prefill_ragged_kv_len_indptr,
+                                       batch_indice,
+                                       page_indice,
+                                       positions,
+                                       slot_mapping,
+                                       expanded_seq_lens,
+                                       topk_indices_offset,
+                                       ks,
+                                       ke,
+                                       batch_size,
+                                       max_blocks_per_batch,
+                                       safe_page_sz,
+                                       captured_total_tokens);
 }
 
 }  // namespace
@@ -659,6 +859,35 @@ void invokePrepareSparseMlaTargetVerifyParams(const int32_t* input_lengths,
         return;
     }
     const int32_t safe_page_sz = seq_size_per_block > 0 ? seq_size_per_block : 1;
+    // The existing write launch already uses one CTA for batches up to 8.
+    // Merge its scan without reducing write parallelism; retain the multi-CTA
+    // path for larger batches, where a single CTA regresses bandwidth.
+    if (mtpFusionEnabled() && batch_size <= kV3WarpsPerBlock) {
+        mtpVerifyPrepareFusedKernel<<<1, kV3BlockThreads, 0, stream>>>(input_lengths,
+                                                                       prefix_lengths,
+                                                                       block_ids,
+                                                                       batch_indice,
+                                                                       page_indice,
+                                                                       decode_page_indptr,
+                                                                       paged_kv_last_page_len,
+                                                                       qo_indptr,
+                                                                       prefill_ragged_kv_len_indptr,
+                                                                       kvlen,
+                                                                       positions,
+                                                                       slot_mapping,
+                                                                       expanded_seq_lens,
+                                                                       topk_indices_offset,
+                                                                       ks,
+                                                                       ke,
+                                                                       batch_size,
+                                                                       max_blocks_per_batch,
+                                                                       safe_page_sz,
+                                                                       captured_batch_capacity,
+                                                                       captured_total_tokens);
+        const auto result = cudaGetLastError();
+        TORCH_CHECK(result == cudaSuccess, "MTP target verify fused prepare failed: ", cudaGetErrorString(result));
+        return;
+    }
     prepareTargetVerifyCumsumKernel<<<1, kV3CumsumWarpSize, 0, stream>>>(input_lengths,
                                                                          prefix_lengths,
                                                                          decode_page_indptr,

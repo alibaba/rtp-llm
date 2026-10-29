@@ -27,4 +27,16 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
                                     cudaStream_t stream);
+cudaError_t invokePointMassRejectionSampling(int32_t*     draft_token_ids,
+                                             float*       uniform_samples,
+                                             float*       target_probs,
+                                             int32_t*     target_token_ids,
+                                             int          target_token_stride,
+                                             int32_t*     output_token_ids,
+                                             int32_t*     output_accepted_token_num,
+                                             bool*        do_sample,
+                                             int          batch_size,
+                                             int          num_speculative_tokens,
+                                             int          target_vocab_size,
+                                             cudaStream_t stream);
 }  // namespace rtp_llm

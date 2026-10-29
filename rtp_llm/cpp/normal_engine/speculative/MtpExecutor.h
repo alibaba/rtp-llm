@@ -122,7 +122,9 @@ protected:
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
-    void            broadcastPostRejectionInputs(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    void            broadcastPostRejectionInputs(GptModelInputs&      model_input,
+                                                 const StreamGroups&  stream_groups,
+                                                 const torch::Tensor& selected_tokens = {});
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -163,7 +165,9 @@ protected:
     void                     stageAcceptLenMetrics(const torch::Tensor& accept_len,
                                                    torch::Event&        accept_len_ready_event,
                                                    size_t               stream_count,
-                                                   std::vector<int32_t> row_priorities);
+                                                   std::vector<int32_t> row_priorities,
+                                                   const torch::Tensor& prepared_rows = {},
+                                                   const torch::Tensor& prepared_total = {});
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,

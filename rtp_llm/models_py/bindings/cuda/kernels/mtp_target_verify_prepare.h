@@ -1,10 +1,77 @@
 #pragma once
+#include <vector>
 
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <vector>
 
 namespace rtp_llm {
+
+// Publish MTP next sequence length, selected token and BF16 hidden row without
+// materializing int64 gather indices. Undefined previous_lengths keeps an
+// already prepared next_lengths tensor unchanged.
+bool tryMtpPublishState(const torch::Tensor& accept_lengths,
+                        const torch::Tensor& accepted_tokens,
+                        const torch::Tensor& previous_lengths,
+                        const torch::Tensor& hidden_states,
+                        int32_t              tokens_per_batch,
+                        torch::Tensor&       next_lengths,
+                        torch::Tensor&       selected_tokens,
+                        torch::Tensor&       selected_hidden,
+                        cudaStream_t         stream,
+                        const std::vector<const int32_t*>& previous_rows = {});
+
+// Keep asynchronous metric snapshots independent of mutable acceptance storage.
+// Greedy point-mass MTP only. Returns false without launching for unsupported layouts.
+bool tryMtpGreedyFinalize(const torch::Tensor& draft,
+                          const torch::Tensor& target,
+                          torch::Tensor& tokens,
+                          torch::Tensor& lengths,
+                          torch::Tensor& rows,
+                          torch::Tensor& total,
+                          cudaStream_t stream);
+
+bool tryMtpAcceptMetrics(const torch::Tensor& lengths, torch::Tensor& rows, torch::Tensor& total, cudaStream_t stream);
+
+// Rejection sampling uses -1 for unused positions; the MTP public output uses 0.
+bool tryMtpCleanRejectedTokens(torch::Tensor& tokens, cudaStream_t stream);
+
+// Preserve argmax of the rounded probabilities (including first-index ties
+// and NaNs), generate the point-mass distribution and map the token ID.
+bool tryMtpGreedyPack(const torch::Tensor& probabilities,
+                      const torch::Tensor& mapping,
+                      torch::Tensor&       output_probabilities,
+                      torch::Tensor&       output_tokens,
+                      torch::Tensor&       output_tokens_int32,
+                      const torch::Tensor& sequence_lengths,
+                      const torch::Tensor& hidden_to_zero,
+                      bool                 zero_tokens,
+                      torch::Tensor&       next_sequence_lengths,
+                      cudaStream_t         stream,
+                      bool                 compact_point_mass = false);
+
+// Initialize newly allocated MTP token mirrors and an optional fake-stream
+// indexer seed. Undefined outputs are skipped.
+void invokeMtpStreamInit(torch::Tensor& seed,
+                         torch::Tensor& target_token,
+                         torch::Tensor& propose_token,
+                         int64_t        sequence_length,
+                         cudaStream_t   stream);
+
+// Generate post-rejection output indices and, optionally, the last accepted
+// token in one pass. An undefined selected_tokens skips token selection.
+void invokeMtpPostRejectionPrepare(const torch::Tensor& accept_len,
+                                   const torch::Tensor& tokens,
+                                   torch::Tensor&       indices,
+                                   torch::Tensor&       selected_tokens,
+                                   int32_t              tokens_per_batch,
+                                   cudaStream_t         stream,
+                                   bool                 initialize_fake = false);
+
+void invokeMtpSelectedTokens(const torch::Tensor& tokens,
+                             const torch::Tensor& indices,
+                             torch::Tensor&       output,
+                             cudaStream_t         stream);
 
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       input_lengths,

@@ -24,6 +24,8 @@
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_token_gather.h"
+#include "rtp_llm/cpp/utils/MtpFusion.h"
 #endif
 
 using namespace std;
@@ -343,14 +345,28 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 #endif
     } else {
         py_attn_inputs.total_tokens        = 0;
-        py_attn_inputs.cu_seqlens          = torch::zeros({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens       = torch::zeros({batch_size + 1}, cuda_i32);
-        py_attn_inputs.padding_offset      = torch::empty({0}, cuda_i32);
-        py_attn_inputs.decode_cu_seqlens_d = torch::arange(0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, cuda_i32);
+        bool prepared                      = false;
+#if USING_CUDA
+        prepared = mtp_indexer_role_ != MtpIndexerRole::NORMAL && mtpFusionEnabled() && !inputs.is_target_verify
+                   && !inputs.is_draft_extend
+                   && tryMtpDecodeAttentionMetadata(sequence_lengths,
+                                                    py_attn_inputs.cu_seqlens,
+                                                    py_attn_inputs.cu_kv_seqlens,
+                                                    py_attn_inputs.decode_cu_seqlens_d,
+                                                    py_attn_inputs.sequence_lengths_plus_1_d,
+                                                    c10::cuda::getCurrentCUDAStream().stream());
+#endif
+        if (!prepared) {
+            py_attn_inputs.cu_seqlens    = torch::zeros({batch_size + 1}, cuda_i32);
+            py_attn_inputs.cu_kv_seqlens = torch::zeros({batch_size + 1}, cuda_i32);
+            py_attn_inputs.decode_cu_seqlens_d =
+                torch::arange(0, py_attn_inputs.sequence_lengths.size(0) + 1, 1, cuda_i32);
+        }
+        py_attn_inputs.padding_offset = torch::empty({0}, cuda_i32);
     }
 
     // In qwen3-next target verify mode, sequence_lengths_plus_1_d uses prefix_lengths
-    {
+    if (!py_attn_inputs.sequence_lengths_plus_1_d.defined()) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(sequence_lengths_plus_1)");
         const bool is_multi_token_decode = py_attn_inputs.is_target_verify || py_attn_inputs.is_draft_extend;
         if (is_multi_token_decode && inputs.sequence_lengths_plus_1.defined()) {
@@ -1161,16 +1177,36 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                 "device=%s",
                                 static_cast<int>(lm_output_indexes.defined()),
                                 lm_output_indexes.defined() ? lm_output_indexes.device().str().c_str() : "undefined");
+        bool mtp_prepare = false;
+#if USING_CUDA
+        // Fixed SEED/REUSE roles belong to the MTP draft instances; target
+        // models and other Python model paths retain their existing preparation.
+        mtp_prepare = mtp_indexer_role_ != MtpIndexerRole::NORMAL && mtpFusionEnabled();
+#endif
         torch::Tensor lm_output_indexes_device;
-        {
+        if (mtp_prepare && lm_output_indexes.scalar_type() == torch::kInt32 && lm_output_indexes.is_contiguous()) {
+            lm_output_indexes_device = lm_output_indexes;
+        } else {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_output_indexes_to_long)");
             lm_output_indexes_device = lm_output_indexes.to(torch::kLong).contiguous();
         }
 
-        torch::Tensor last_hidden;
+        torch::Tensor last_hidden, prepared_head_input;
         if (has_context_request && !need_all_logits) {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
-            last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device);
+#if USING_CUDA
+            if (mtp_prepare && lm_head->kernel.scalar_type() == torch::kFloat32) {
+                RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(mtp_gather_cast)");
+                tryMtpHeadInputs(hidden,
+                                 lm_output_indexes_device,
+                                 last_hidden,
+                                 prepared_head_input,
+                                 cuda_graph::graphGetCurrentStream().stream());
+            }
+#endif
+            if (!last_hidden.defined()) {
+                RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
+                last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device);
+            }
         } else {
             last_hidden = hidden;
         }
@@ -1187,7 +1223,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             } else
 #endif
             {
-                logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+                auto head_input =
+                    prepared_head_input.defined() ? prepared_head_input : last_hidden.to(lm_head->kernel.dtype());
+                logits = torch::mm(head_input, lm_head->kernel.t()).to(torch::kFloat32);
             }
         }
 

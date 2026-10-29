@@ -7,6 +7,7 @@
 #include <c10/core/DeviceGuard.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/MtpFusion.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #if USING_CUDA
@@ -387,9 +388,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // Clear stale device ranges before strided D2D copies. All device-side fills
     // are fused into one kernel to avoid a train of tiny aten::fill_ launches.
 #if USING_CUDA
+    const bool defer_mtp_fill = mtpFusionEnabled()
+                                && (inputs.attention_inputs.is_target_verify
+                                    || inputs.attention_inputs.is_draft_extend);
+    CudaGraphPrepareFillParams fill_params;
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
-        CudaGraphPrepareFillParams fill_params;
         addCudaGraphPrepareFillRegion(fill_params,
                                       py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
                                       0,
@@ -475,7 +479,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           captured_batch_capacity,
                                           0);
         }
-        invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
+        if (!defer_mtp_fill)
+            invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
 #else
     py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
@@ -556,6 +561,15 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // Launch ALL D2D copies (contiguous + strided) in two fused kernels
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
+#if USING_CUDA
+        if (defer_mtp_fill) {
+            if (tryInvokeMtpGraphCopyFill(d2d_copies, fill_params, cuda_graph::graphGetCurrentStream().stream())) {
+                d2d_copies.clear();
+            } else {
+                invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
+            }
+        }
+#endif
         launchFusedD2DCopies(d2d_copies, strided_d2d_copies);
     }
 
@@ -826,8 +840,10 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     if (!enable_cuda_graph_) {
         return false;
     }
-    const bool target_verify_decode = is_target_verify_ || inputs.attention_inputs.is_target_verify;
-    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_ && !target_verify_decode) {
+    // The fixed target role also serves ordinary prompt prefill. Only the
+    // current input flag identifies a decode-time multi-token verify request.
+    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_
+        && !inputs.attention_inputs.is_target_verify) {
         return false;
     }
 
