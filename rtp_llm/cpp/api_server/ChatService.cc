@@ -194,6 +194,12 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
     ChatCompletionRequest chat_request;
     FromJsonString(chat_request, body);
 
+    if (chat_request.extra_configs
+        && (chat_request.extra_configs->return_logprobs || chat_request.extra_configs->top_logprobs > 0)) {
+        throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
+                                     "compact logprobs are not supported by the C++ frontend");
+    }
+
     AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
 
     auto       chat_render    = openai_endpoint_->getChatRender();
