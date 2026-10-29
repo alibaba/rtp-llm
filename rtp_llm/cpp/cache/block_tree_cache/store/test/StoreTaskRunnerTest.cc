@@ -221,7 +221,7 @@ TEST(StoreTaskRunnerTest, SplitHostAndDiskBatchesReportOneCrcErrorAfterAllComple
             FAIL() << "expected three batches, got " << engine->contexts.size();
         }
         auto* metric =
-            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->memory_cache_copy_error_qps_metric;
+            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
         engine->contexts[1]->complete(
             {ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC compute failed"), CacheCopyError::CRC_COMPUTE_FAILED});
         engine->contexts[0]->complete(
