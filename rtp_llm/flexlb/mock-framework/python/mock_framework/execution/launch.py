@@ -60,3 +60,45 @@ def prepare_launch(raw, case, base):
         if any('prometheus' in value.get('config', {}) for value in case.environment.values()):
             raise ExecutionError('Managed Prometheus cannot be combined with component prometheus configuration')
     return result
+
+
+def local_launch(case, java, prometheus, *, framework, engine_mode='shared'):
+    """Bind a Case to locally built RTP, Client, Master and ZooKeeper artifacts."""
+    import os
+    framework, java = Path(framework).resolve(), Path(java).resolve()
+    if not java.is_file() or not os.access(java, os.X_OK):
+        raise ExecutionError('java must be an executable Java 21 binary')
+    unsupported = set(case.environment) - {'master', 'prefill', 'decode', 'client'}
+    if unsupported:
+        raise ExecutionError(f'Local launch does not implement roles: {sorted(unsupported)}')
+
+    def artifact(relative):
+        path = framework / relative
+        if not path.is_file():
+            raise ExecutionError(f'Missing build artifact: {path}; run scripts/build.sh first')
+        return path
+
+    prefix = [str(java), '-XX:ActiveProcessorCount=2']
+    commands = {}
+    raw = {'engine_mode': engine_mode, 'prometheus': {'binary': str(Path(prometheus).resolve())}}
+    if 'master' in case.environment:
+        config = case.environment['master']['config']
+        if not {'FLEXLB_CONFIG', 'MODEL_SERVICE_CONFIG'} <= config.keys():
+            raise ExecutionError('Local Master requires FLEXLB_CONFIG and MODEL_SERVICE_CONFIG')
+        artifact('java/master/target/classes/org/flexlb/MasterNode.class')
+        artifact('java/master/target/classes/org/flexlb/mock/master/ZookeeperNode.class')
+        dependencies = artifact('java/master/target/dependencies.txt').read_text(encoding='utf-8').strip()
+        if not dependencies or any(not Path(entry).is_absolute() or not Path(entry).exists()
+                                   for entry in dependencies.split(os.pathsep)):
+            raise ExecutionError('Master classpath has missing or nonabsolute entries; run scripts/build.sh first')
+        classpath = os.pathsep.join([str(framework / 'java/master/target/classes'), dependencies])
+        master_prefix = prefix + ['-cp', classpath]
+        commands['master'] = master_prefix + ['org.flexlb.MasterNode']
+        raw['zookeeper'] = {'command': master_prefix + ['org.flexlb.mock.master.ZookeeperNode'], 'startup_timeout': '60s'}
+    if {'prefill', 'decode'} & case.environment.keys():
+        engine = prefix + ['-jar', str(artifact('java/engine/rtp/target/mock-rtp-1.0-SNAPSHOT-all.jar'))]
+        commands.update(prefill=engine, decode=engine)
+    if 'client' in case.environment:
+        commands['client'] = prefix + ['-jar', str(artifact('java/client/target/mock-client-1.0-SNAPSHOT-all.jar'))]
+    raw['components'] = {role: {'command': list(commands[role]), 'startup_timeout': '60s'} for role in case.environment}
+    return prepare_launch(raw, case, framework)

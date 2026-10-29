@@ -354,6 +354,28 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 
 构建复用生产 `flexlb-common`、`flexlb-grpc` 的公式与协议。Master 还使用生产 cache/sync/api，Spring 只进入 Master 运行时。框架构建跳过 Boot 重打包和 Whale 分发归档，不改变生产模块独立构建的默认行为。
 
+## 第一个可运行 Case
+
+`cases/basic/case.yaml` 使用真实 Master、RTP Prefill/Decode 和一个 Client。20 条请求保存在同目录的 requests.jsonl，总 QPS 为 2、总并发为 2。Case 检查唯一主 Master，在播放中段的 4 秒窗口检查 QPS，然后收尾并检查 20 条请求全部成功。QPS 门禁范围为 1.5–2.5，用于小流量接线检查，不是压力或容量验收。
+
+在本目录完成 Java 构建后，指定 Java 21 和 Prometheus 的可执行文件，生成本机启动配方，再运行同一份 Case：
+
+```sh
+uv run --locked mock-case launch cases/basic/case.yaml \
+  --java "$JAVA_HOME/bin/java" \
+  --prometheus "$PROMETHEUS_BIN" \
+  --engine-mode shared \
+  --output /tmp/basic-launch.yaml
+
+uv run --locked mock-case run cases/basic/case.yaml \
+  --launch /tmp/basic-launch.yaml \
+  --output /tmp/basic-result
+```
+
+配方文件和结果目录都要使用新路径。`launch` 不启动组件、不下载工具；它检查本地构建产物及 Master classpath，并复用 `prepare_launch` 的配置校验，输出当前 `run --launch` 接受的 YAML。配方中的路径为本机绝对路径，不提交到仓库；需要调整 JVM 参数时编辑生成的配方。默认设置 `-XX:ActiveProcessorCount=2`，只限制本地 JVM 看到的处理器数，不代表 CPU 配额保证。
+
+`shared` 把 P/D 放进一个 Engine JVM；改为 `--engine-mode isolated` 可生成每实例独立 JVM 的配方，Case 不变。Master 与 ZK 始终独立 JVM。Client 按当前拓扑自行发现主 Master。输出包括 result.json、gates.jsonl、组件日志、Client 请求证据及 Prometheus 数据；异常会中断并执行统一清理。
+
 ## Case 配置和编译
 
 ```sh
@@ -362,7 +384,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
   --output <输出目录>/compiled.json
 ```
 
-每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。数据集格式读取尚待实现；目前 Client 只接受 start 参数中的显式文本请求列表，不提供旧格式兼容、转换器或生成器。
+每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。Client 接受 start 参数中的显式请求列表或规范化 requests.jsonl 文件，不提供旧数据集格式兼容、转换器或生成器。
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect`、`within` 和 `wait_after`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 

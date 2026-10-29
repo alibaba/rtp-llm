@@ -1,0 +1,72 @@
+id: basic
+name: RTP 基本收发
+describe: 真实 Master 和 RTP P/D 完成有限请求播放，检查发送速率及全部请求成功。
+environment:
+  master:
+    config:
+      FLEXLB_CONFIG: >-
+        {"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":4},"requestLifecycle":{"request":{"timeoutMs":5000}},"grpcServer":{"executorCoreSize":2,"executorMaxSize":4,"executorQueueSize":64,"shutdownQuietPeriodMs":10}}
+      MODEL_SERVICE_CONFIG: >-
+        {"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"}}]}
+  prefill:
+    engine: rtp
+    config:
+      seq_size_per_block: 16
+      test_block_num: 4096
+      reserve_block_ratio: 0
+      max_seq_len: 4096
+      compute.expression: 1 + batchSize
+  decode:
+    engine: rtp
+    config:
+      seq_size_per_block: 16
+      test_block_num: 4096
+      reserve_block_ratio: 0
+      max_seq_len: 4096
+      compute.expression: 1 + batchSize
+  client:
+    config: {}
+phases:
+  - id: ready
+    describe: 检查选举结果并等待 Engine 发现传播。
+    timeout: 10s
+    steps:
+      - id: leader
+        describe: 只有一个主 Master。
+        interface: master/leadership/get
+        expect: {count: 1}
+        wait_after: 2s
+  - id: traffic
+    describe: 20 条请求按总 QPS=2 播放，收尾后检查完整结果。
+    timeout: 35s
+    steps:
+      - id: start
+        describe: Client 自行发现主 Master，开始单轮播放。
+        interface: client/start
+        args:
+          requests_file: requests.jsonl
+          qps: 2
+          concurrency: 2
+          queue_capacity: 4
+          request_timeout: 3s
+          drain_timeout: 5s
+        wait_after: 6s
+      - id: qps
+        describe: 在持续播放中检查已发请求速率，容许采样误差。
+        interface: client/qps
+        args: {range: [-4s, 0s]}
+        expect: {gte: 1.5, lte: 2.5}
+        wait_after: 6s
+      - id: stop
+        describe: 收集 Client 结果并验证请求证据完整。
+        interface: client/stop
+      - id: requests
+        describe: 所有 20 条请求成功，没有错误、超时或取消。
+        interface: client/requests
+        args: {limit: 0}
+        expect:
+          eq:
+            matched: 20
+            outcomes: {success: 20, error: 0, timeout: 0, cancelled: 0}
+            records: []
+            truncated: true
