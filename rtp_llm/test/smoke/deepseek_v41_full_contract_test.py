@@ -16,6 +16,7 @@ class DeepSeekV41FullContractTest(
 ):
     prefill_cp_size = 2
     decode_dp_size = 2
+    jit_cache_root = "/tmp/rtp-llm/.jit_cache_deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm"
     short_prompt = (
         "Write the numbers from one to twenty, separated by commas: one, two,"
     )
@@ -25,14 +26,7 @@ class DeepSeekV41FullContractTest(
     compare_generation_logits = False
 
     def start_servers(self):
-        # Both P/D servers and their ranks share this case's persistent JIT scope.
-        # Clear the path set by gpu_lock so the JIT manager can own DeepGEMM.
-        with patch.dict(
-            os.environ,
-            {
-                "TEST_JIT_LOCAL_DIR": "/tmp/rtp-llm/.jit_cache_deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
-            },
-        ):
+        with patch.dict(os.environ):
             os.environ.pop("DG_JIT_CACHE_DIR", None)
             super().start_servers()
 
