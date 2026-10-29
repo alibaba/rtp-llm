@@ -7,7 +7,8 @@
     "Namespace isolated under Qwen4; no global dependency replacement",
     "Use cached host architecture queries and original FlashInfer scratch allocator for the CP kernel; bypass only the stale high-level checkpoint rejection, retaining kernel checkpoint arguments",
     "Remove the unused non-CP kernel; retain its geometry predicate in geometry.py for CP validation",
-    "Remove unused SM90 helpers and non-CP dispatch/work-descriptor helpers"
+    "Remove unused SM90 helpers and non-CP dispatch/work-descriptor helpers",
+    "Use the CUTLASS DSL 4.4.2 CopyUniversalOp for the existing 64-bit synchronous register-to-global stores"
   ],
   "files": [
     {
@@ -63,7 +64,7 @@
       "name": "delta_rule_cp_sm120.py",
       "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_cp_sm120.py",
       "source_sha256": "b02c8ef1ba98177d3695a2cbece5dfd8c208d8339265ab3dbda6e7e23fec5ba1",
-      "adapted_sha256": "e6a2046c5898a8aa6b9573fcb7f9780f84e9a81bfead55cfe60d0ebd03397e9c"
+      "adapted_sha256": "0671cc2f65fa0851ec43fcc07ba9fa098da5c178e1ee4c0145cf5fdf085c9e8e"
     }
   ]
 }
