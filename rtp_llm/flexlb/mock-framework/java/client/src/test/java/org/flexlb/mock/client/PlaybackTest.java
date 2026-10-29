@@ -15,7 +15,7 @@ class PlaybackTest {
     Shard shard(String master, int count, double qps, int slots, int queue) throws Exception {
         var start = InputFixture.plan(directory, List.of(master), count, qps, slots, queue, 3000, 1000);
         var part = RequestFiles.split(start, directory.resolve(UUID.randomUUID().toString()), 1, () -> false).getFirst();
-        return new Shard(1, start.masters(), part.path(), part.count(), 0, 1, 1, part.sha256(), qps, slots, queue, 3000, 1000);
+        return new Shard(1, start.masters(), part.path(), part.count(), 0, 1, 1, part.sha256(), qps, null, slots, queue, 3000, 1000);
     }
     Path topology(NativeClientTest.Harness h) throws Exception {
         var path = directory.resolve(UUID.randomUUID() + ".json");
@@ -58,7 +58,7 @@ class PlaybackTest {
         try (var h = new NativeClientTest.Harness()) {
             h.tokenDelay = 5000;
             var plan = shard(master(h), 10, 20, 1, 10);
-            plan = new Shard(1, plan.masters(), plan.requests_file(), plan.count(), 0, 1, 1, plan.sha256(), plan.qps(), 1, 10, 10000, 80);
+            plan = new Shard(1, plan.masters(), plan.requests_file(), plan.count(), 0, 1, 1, plan.sha256(), plan.qps(), plan.replay_speed(), 1, 10, 10000, 80);
             try (var load = new LoadClient(plan, new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".binpb.zst"), "client-0")) {
                 load.begin(System.currentTimeMillis() + 30);
                 assertTrue(h.scheduleEntered.await(2, TimeUnit.SECONDS));
@@ -105,6 +105,28 @@ class PlaybackTest {
             assertTrue(Files.exists(directory.resolve("zero/coordinator/2/result.json")));
         }
     }
+    @Test void replayCoordinatesWorkersAndEarlyStopInterruptsLongArrivalWaits() throws Exception {
+        for (boolean early : List.of(false, true)) {
+            Path topology = directory.resolve("replay-" + early + ".json");
+            Path source = InputFixture.write(directory.resolve("replay-" + early + ".binpb.zst"),
+                java.util.stream.IntStream.range(0, 6).mapToObj(i -> input().toBuilder()
+                    .setArrivalOffsetMs(i * (early ? 30000L : 100L)).build()).toList());
+            try (var h = new NativeClientTest.Harness();
+                 var zero = new ClientNode("client-0", topology, directory.resolve("zero-" + early));
+                 var one = new ClientNode("client-1", topology, directory.resolve("one-" + early))) {
+                new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
+                    Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
+                zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000));
+                assertTrue(h.scheduleEntered.await(3, TimeUnit.SECONDS));
+                if (!early) eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
+                var result = zero.stop(new Empty());
+                assertTrue(result.errors().isEmpty(), result.toString());
+                assertEquals(early ? 1 : 6, result.clients().values().stream().mapToLong(State::issued).sum());
+                assertEquals(early ? 5 : 0, result.clients().values().stream().mapToLong(State::unsent).sum());
+                assertTrue(result.clients().values().stream().allMatch(State::done));
+            }
+        }
+    }
     @Test void oneWorkerOverflowStopsWholeGroupAndCannotBecomeSuccessfulSummary() throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var h = new NativeClientTest.Harness();
@@ -141,7 +163,7 @@ class PlaybackTest {
         Files.writeString(input, "{\"token_ids\":[1],\"max_new_tokens\":2}\nnot-json\n");
         try (var h = new NativeClientTest.Harness(); var zero = new ClientNode("client-0", topology, directory.resolve("zero"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(), Map.of("role", "client", "control", zero.url())));
-            assertThrows(java.io.IOException.class, () -> zero.start(new Start(null, input.toString(), 10, 1, 4, 3000, 1000)));
+            assertThrows(java.io.IOException.class, () -> zero.start(new Start(null, input.toString(), 10.0, null, 1, 4, 3000, 1000)));
             assertFalse(zero.stop(new Empty()).errors().isEmpty());
             assertEquals(0, h.schedules.get());
             assertFalse(Files.exists(directory.resolve("zero/playback/1/plan.json")));
@@ -156,7 +178,7 @@ class PlaybackTest {
              var one = new ClientNode("client-1", topology, directory.resolve("one"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-            zero.start(new Start(null, input.toString(), 2, 2, 4, 3000, 1000));
+            zero.start(new Start(null, input.toString(), 2.0, null, 2, 4, 3000, 1000));
             // Each shard spans multiple batches, so truncation fails before all requests are issued.
             Files.writeString(directory.resolve("zero/coordinator/1/shards/1.binpb.zst"), "");
             eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
@@ -167,8 +189,8 @@ class PlaybackTest {
         }
     }
     @Test void impossiblePlansAreRejectedBeforeThreadsStart() {
-        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), "/input.binpb.zst", Double.NaN, 1, 1, 100, 100));
-        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), "/input.binpb.zst", 0, 1, 1, 100, 100));
-        assertThrows(IllegalArgumentException.class, () -> new Start(null, null, 1, 1, 1, 100, 100));
+        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), "/input.binpb.zst", Double.NaN, null, 1, 1, 100, 100));
+        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), "/input.binpb.zst", 0.0, null, 1, 1, 100, 100));
+        assertThrows(IllegalArgumentException.class, () -> new Start(null, null, 1.0, null, 1, 1, 100, 100));
     }
 }

@@ -26,7 +26,8 @@ def _validate(request):
         raise TypeError('Expected client_input_pb2.Request')
     _known(request)
     if (not request.token_ids or any(token < 0 for token in request.token_ids)
-            or request.max_new_tokens < 1 or request.HasField('priority') and request.priority < 0
+            or request.max_new_tokens < 1 or request.HasField('arrival_offset_ms') and request.arrival_offset_ms < 0
+            or request.HasField('priority') and request.priority < 0
             or request.ByteSize() > MAX_REQUEST):
         raise ValueError('Invalid or unsupported playback request')
 

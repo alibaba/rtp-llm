@@ -275,3 +275,23 @@ def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
     with pytest.raises(ExecutionError, match='regular file'):
         asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
     assert not ctx.runtime.clients.pending
+
+
+def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion(monkeypatch):
+    ctx = context()
+    calls = []
+    async def start(body, query_time, timeout):
+        calls.append(body)
+        return True
+    monkeypatch.setattr(ctx.runtime.clients, 'start', start)
+    values = args(); values.pop('qps'); values['replay_speed'] = 5
+    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
+    assert calls[0]['replay_speed'] == 5 and 'qps' not in calls[0]
+
+
+@pytest.mark.parametrize('rate', [{}, {'qps': 1, 'replay_speed': 5}, {'replay_speed': 0},
+    {'replay_speed': float('inf')}, {'replay_speed': float('nan')}])
+def test_playback_requires_exactly_one_finite_positive_rate(rate):
+    values = args(); values.pop('qps'); values.update(rate)
+    with pytest.raises(ConfigError):
+        Registry.standard().get('client/start').arguments(values)

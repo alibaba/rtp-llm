@@ -30,7 +30,32 @@ def test_ha_case_keeps_one_playback_and_full_rolling_order_without_progress_or_s
     assert all(step.args == {'range': ['-20s', '0s']} and step.expect.comparisons == {'gte': .95} for step in rates)
     assert 'min_samples' not in SOURCE.read_text()
     assert case.environment['client']['deployment']['replicas'] == 2
-    assert len(list(read_inputs(SOURCE.parent / 'requests.binpb.zst'))) == 960
+    import hashlib
+    manifest = json.loads((SOURCE.parent / 'deepseek.manifest.json').read_text())
+    assert manifest['requests'] == 844864 and manifest['source_span_ms'] == 959995
+    with (SOURCE.parent / 'deepseek.binpb.zst').open('rb') as stream:
+        assert hashlib.file_digest(stream, 'sha256').hexdigest() == manifest['sha256']
+    source = ROOT.parent / 'tools/online_eval/data/performance'
+    preset = json.loads((source / 'deepseek_v4_flash_l20c.json').read_text())
+    calibration = json.loads((source / 'dsv4_l20_mock_calibration.json').read_text())
+    p, d = case.environment['prefill'], case.environment['decode']
+    assert (p['deployment']['replicas'], d['deployment']['replicas']) == (48, 192)
+    assert (p['config']['seq_size_per_block'], d['config']['seq_size_per_block']) == (512, 128)
+    assert (p['config']['test_block_num'], d['config']['test_block_num']) == (21554, 221485)
+    assert p['config']['compute']['expression'] == calibration['prefill_expression']
+    assert p['config']['compute']['noise']['scale'] == preset['prefill']['scale']
+    assert d['config']['decode']['tokens_per_step'] == preset['decode']['tokens_per_step']
+    assert p['config']['enable_memory_cache'] is True
+    traffic, = [step for step in steps if step.interface == 'client/start']
+    assert traffic.args['replay_speed'] == 5 and 'qps' not in traffic.args
+    assert traffic.args['concurrency'] == 4096
+    from contextlib import closing
+    from itertools import islice
+    with closing(read_inputs(SOURCE.parent / 'deepseek.binpb.zst')) as inputs:
+        sample = list(islice(inputs, 8))
+    assert sample[0].arrival_offset_ms == 0
+    assert all(row.HasField('arrival_offset_ms') for row in sample)
+    assert any(len(row.token_ids) != 3 for row in sample)
     for phase in raw['phases']:
         for step in phase['steps']:
             if step['id'] in ('kill_a', 'kill_b', 'restore_a', 'restore_b'):

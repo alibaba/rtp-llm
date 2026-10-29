@@ -78,6 +78,15 @@ class RtpConfigTest {
         config.put("seq_size_per_block", 16); config.remove("compute");
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
+    @Test void fractionalDecodeModelLoadsAndItsEffectiveConfigurationCanBeReadBack() throws Exception {
+        var root = root(); root.put("component_role", "decode");
+        var config = (ObjectNode) root.path("component").path("config");
+        config.putObject("decode").put("tokens_per_step", 2.6);
+        var model = load(root);
+        assertEquals(3, model.decodeModel().sample("r", 4, 10).committedTokens());
+        config.set("decode", model.effective().get("decode"));
+        assertEquals(2.6, load(root).decodeModel().configuration().tokens_per_step());
+    }
     @Test void nativeEvictionOrderingUsesOnlyTreeAndRejectsUnimplementedTiers() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         assertEquals("lru", load(root).effective().path("device_eviction_policy").asText());

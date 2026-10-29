@@ -10,7 +10,7 @@ public final class InputProbe {
         Path path = Path.of(args[1]);
         if (args[0].equals("write")) {
             InputFixture.write(path, IntStream.range(0, 2050).mapToObj(i -> {
-                var request = Request.newBuilder().addTokenIds(i).setMaxNewTokens(3);
+                var request = Request.newBuilder().addTokenIds(i).setMaxNewTokens(3).setArrivalOffsetMs(i * 7L);
                 if (i % 2 == 0) request.setPriority(i % 100);
                 return request.build();
             }).toList());
@@ -19,7 +19,8 @@ public final class InputProbe {
             try (var reader = new InputFile.Reader(path)) {
                 Request request;
                 while ((request = reader.next()) != null) {
-                    if (request.getTokenIds(0) != count || request.getMaxNewTokens() != 3
+                    if (!request.hasArrivalOffsetMs() || request.getArrivalOffsetMs() != count * 7L
+                            || request.getTokenIds(0) != count || request.getMaxNewTokens() != 3
                             || request.hasPriority() != (count % 2 == 0) || request.hasPriority() && request.getPriority() != count % 100)
                         throw new AssertionError("Fields differ at request " + count);
                     count++;

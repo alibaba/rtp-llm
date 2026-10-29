@@ -5,7 +5,7 @@ import org.flexlb.mock.api.model.*;
 import org.junit.jupiter.api.Test;
 
 class DecodeModelsTest {
-    private DecodeStepModel step(int k, double alpha, long seed) { return new DecodeStepModel(new DecodeSpec(k, alpha, seed)); }
+    private DecodeStepModel step(int k, double alpha, long seed) { return new DecodeStepModel(new DecodeSpec(k, alpha, seed, null)); }
     private StoppingModel stopping(double p, long seed) { return new StoppingModel(new StoppingSpec(p, seed)); }
 
     @Test void ordinaryAllRejectedAllAcceptedAndBudgetTail() {
@@ -42,10 +42,25 @@ class DecodeModelsTest {
         assertEquals(original, model.sample("r", 7, 80));
         assertEquals(expected, stop.length("r", 1, 100, false));
     }
+    @Test void fractionalTokenBudgetPreservesMeanAndClampsTheFinalRound() {
+        var model = new DecodeStepModel(new DecodeSpec(null, null, null, 2.6));
+        int committed = 0;
+        for (int round = 0; round < 100; round++) {
+            var step = model.sample("r", round, 1000);
+            assertTrue(step.committedTokens() == 2 || step.committedTokens() == 3);
+            assertEquals(step.committedTokens() - 1, step.proposedTokens());
+            committed += step.committedTokens();
+        }
+        assertEquals(260, committed);
+        assertEquals(1, model.sample("r", 4, 1).committedTokens());
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(1, 1.0, null, 2.6));
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(null, null, null, Double.NaN));
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(null, null, null, .5));
+    }
     @Test void invalidProbabilitiesMissingSeedsAndLimitsAreRejected() {
-        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, .8, null));
-        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, null, 1L));
-        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, 1.1, 1L));
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, .8, null, null));
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, null, 1L, null));
+        assertThrows(IllegalArgumentException.class, () -> new DecodeSpec(3, 1.1, 1L, null));
         assertThrows(IllegalArgumentException.class, () -> new StoppingSpec(.1, null));
         assertThrows(IllegalArgumentException.class, () -> new StoppingSpec(Double.NaN, 1L));
         assertThrows(IllegalArgumentException.class, () -> step(1, .5, 1).sample("r", 0, 0));

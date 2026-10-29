@@ -16,6 +16,6 @@ final class InputFixture {
     }
     static Start plan(Path directory, List<String> masters, int count, double qps, int slots, int queue, long timeout, long drain) throws Exception {
         var path = write(directory.resolve(UUID.randomUUID() + ".binpb.zst"), Collections.nCopies(count, request()));
-        return new Start(masters, path.toString(), qps, slots, queue, timeout, drain);
+        return new Start(masters, path.toString(), qps, null, slots, queue, timeout, drain);
     }
 }

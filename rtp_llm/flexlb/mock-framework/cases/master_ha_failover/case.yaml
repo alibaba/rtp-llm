@@ -1,149 +1,298 @@
 id: master_ha_failover
 name: Master 滚动重启
-describe: 一轮持续流量贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
+describe: DeepSeek 原始前缀流量按 5 倍速回放，贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
 environment:
   master:
     config:
-      FLEXLB_CONFIG: >-
-        {"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":4},"requestLifecycle":{"request":{"timeoutMs":5000}},"grpcServer":{"executorCoreSize":2,"executorMaxSize":4,"executorQueueSize":64,"shutdownQuietPeriodMs":10}}
-      MODEL_SERVICE_CONFIG: >-
-        {"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"}}]}
+      FLEXLB_CONFIG: '{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"queueTimeoutMs":60000},"dispatcher":{"type":"BATCH","maxInflightPerPrefillWorker":2},"requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2.0}},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA","expression":"max(196,
+        -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307 * sum(hitCacheTokens
+        / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens / 1024. * computeTokens
+        / 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens
+        / 1024. * hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514
+        * max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) + 2.15779213792494
+        * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492
+        * max(sum(hitCacheTokens / 1024.) - 64, 0) - 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455
+        * max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, 0) + 2.30134977837751
+        * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - 11.3438560779984 * max(batchSize - 24, 0) +
+        0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + 0.636364578079591 * sum(max(computeTokens / 1024. - 4,
+        0)) - 0.0513345988517118 * sum(max(computeTokens / 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024.
+        - 2, 0)) + 0.305819761192588 * sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens
+        / 1024. - 8, 0)) + 0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize
+        - 8, 0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / 1024.)
+        - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize -
+        8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * sum(computeTokens / 1024.) + 0.0542737877321807
+        * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))"},"cacheAffinity":{"maxExtraTtftMs":20,"minPrefixHitPercent":20}},"decode":{"availability":{"maxEngineRequests":132,"maxKvUsagePercent":90}}}},"workerRegistry":{"health":{"statusPollIntervalMs":20,"statusRpcTimeoutMs":1000,"statusStaleAfterMs":10000,"cleanupIntervalMs":3000}}}'
+      MODEL_SERVICE_CONFIG: '{"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"}}]}'
   prefill:
     engine: rtp
+    deployment:
+      replicas: 48
     config:
-      seq_size_per_block: 16
-      test_block_num: 4096
-      reserve_block_ratio: 0
-      max_seq_len: 4096
-      compute.expression: 1 + batchSize
+      max_seq_len: 1048576
+      cp_size: 4
+      cp_enabled: true
+      tp_size: 4
+      dp_size: 1
+      seq_size_per_block: 512
+      reuse_cache: false
+      enable_device_cache: true
+      # 保留原 preset；host cache 尚未接通，当前启动会明确拒绝，不能按此配置宣称已跑通。
+      enable_memory_cache: true
+      enable_disk_cache: false
+      reserve_block_ratio: 1
+      enable_remote_cache: false
+      device_eviction_policy: lru
+      memory_eviction_policy: lru
+      block_tree_transfer_worker_count: 4
+      block_tree_business_queue_max_size: 10000
+      block_tree_transfer_queue_max_size: 10000
+      memory_cache_max_descriptors_per_transfer_batch: 8
+      memory_cache_sync_timeout_ms: 10000
+      block_tree_device_evict_low_watermark_ratio: 0.82
+      block_tree_device_evict_high_watermark_ratio: 0.9
+      block_tree_memory_evict_low_watermark_ratio: 0.9
+      block_tree_memory_evict_high_watermark_ratio: 0.94
+      max_generate_batch_size: 64
+      max_batch_tokens_size: 512000
+      max_batch_tokens_without_cache: 50000
+      max_inited_kv_cache_streams: 128
+      cp_force_single_prefill: false
+      prefill_retry_times: 0
+      prefill_retry_timeout_ms: 20
+      prefill_max_wait_timeout_ms: 600000
+      decode_retry_interval_ms: 1
+      load_cache_timeout_ms: 5000
+      max_rpc_timeout_ms: 7200000
+      prefill_prepare_resource_pool_size: 128
+      prefill_stop_stream_wait_timeout_ms: 2000
+      decode_retry_times: 100
+      decode_retry_timeout_ms: 100
+      test_block_num: 21554
+      max_context_batch_size: 64
+      # 原 preset 的显式 Host 块容量；Host 组件接线留待后续实现。
+      memory_cache_blocks: 52295
+      # 原 DSv4 legacy_unverified 校准公式；DeepSeek preset 通过 noise.scale 乘以 1.23。
+      compute:
+        expression: max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307
+          * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens
+          / 1024. * computeTokens / 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015
+          * sum(hitCacheTokens / 1024. * hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16,
+          0) + 2.82077211814514 * max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.)
+          - 64, 0) + 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * max(sum(hitCacheTokens
+          / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) - 0.427317020061895 * max(sum(hitCacheTokens
+          / 1024.) - 128, 0) + 0.347029077528455 * max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens
+          / 1024.) - 384, 0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - 11.3438560779984
+          * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + 0.636364578079591 * sum(max(computeTokens
+          / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens / 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens
+          / 1024. - 2, 0)) + 0.305819761192588 * sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens
+          / 1024. - 8, 0)) + 0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize
+          - 8, 0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / 1024.)
+          - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize
+          - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * sum(computeTokens / 1024.)
+          + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))
+        noise:
+          scale: 1.23
+      generation:
+        eos_probability: 0.0025
+        seed: 20260922
   decode:
     engine: rtp
+    deployment:
+      replicas: 192
     config:
-      seq_size_per_block: 16
-      test_block_num: 4096
-      reserve_block_ratio: 0
-      max_seq_len: 4096
-      compute.expression: 1 + batchSize
+      max_seq_len: 1048576
+      cp_size: 1
+      cp_enabled: false
+      tp_size: 1
+      dp_size: 1
+      seq_size_per_block: 128
+      reuse_cache: false
+      enable_device_cache: true
+      enable_memory_cache: false
+      enable_disk_cache: false
+      reserve_block_ratio: 8
+      enable_remote_cache: false
+      device_eviction_policy: lru
+      memory_eviction_policy: lru
+      block_tree_transfer_worker_count: 4
+      block_tree_business_queue_max_size: 10000
+      block_tree_transfer_queue_max_size: 10000
+      memory_cache_max_descriptors_per_transfer_batch: 8
+      memory_cache_sync_timeout_ms: 10000
+      block_tree_device_evict_low_watermark_ratio: 0.82
+      block_tree_device_evict_high_watermark_ratio: 0.9
+      block_tree_memory_evict_low_watermark_ratio: 0.9
+      block_tree_memory_evict_high_watermark_ratio: 0.94
+      max_generate_batch_size: 128
+      max_batch_tokens_size: 1048576
+      max_batch_tokens_without_cache: 0
+      max_inited_kv_cache_streams: 0
+      cp_force_single_prefill: true
+      prefill_retry_times: 0
+      prefill_retry_timeout_ms: 20
+      prefill_max_wait_timeout_ms: 600000
+      decode_retry_interval_ms: 1
+      load_cache_timeout_ms: 5000
+      max_rpc_timeout_ms: 7200000
+      prefill_prepare_resource_pool_size: 128
+      prefill_stop_stream_wait_timeout_ms: 2000
+      decode_retry_times: 100
+      decode_retry_timeout_ms: 100
+      test_block_num: 221485
+      max_context_batch_size: 1
+      compute:
+        expression: 19.5 + 0.175 * batchSize
+      decode:
+        tokens_per_step: 2.6
   client:
     config: {}
     deployment:
       replicas: 2
 phases:
-  - id: ready
-    describe: 先取得 A 的实际地址，再新增 B；两个 Master 始终为独立 JVM。
-    timeout: 120s
-    steps:
-      - id: a
-        describe: 记录首个 Master 的实际地址列表作为 A。
-        interface: master/leadership/get
-        expect: {count: 1}
-      - id: b
-        describe: 新增第二个 Master 并保存其地址列表作为 B。
-        interface: master/start
-        expect: {count: 1}
-        wait_after: 10s
-      - id: initial_leader
-        describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/leadership/get
-        expect: {eq: {ref: steps.a}}
-  - id: rolling
-    describe: 持续流量中先杀 A、恢复 A，再杀 B、恢复 B；不重启 Client。
-    timeout: 600s
-    steps:
-      - id: traffic
-        describe: client0 分配一轮固定 QPS 播放，先等待 30 秒建立基线。
-        interface: client/start
-        args:
-          requests_file: requests.binpb.zst
-          qps: 4
-          concurrency: 32
-          queue_capacity: 64
-          request_timeout: 120s
-          drain_timeout: 150s
-        wait_after: 30s
-      - id: baseline
-        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
-        args:
-          range:
-            - -20s
-            - 0s
-        expect: {gte: 0.95}
-      - id: kill_a
-        describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
-        interface: master/stop
-        args:
-          targets: {ref: steps.a}
-          mode: kill
-        expect: {eq: {ref: steps.a}}
-        within: 45s
-        wait_after: 30s
-      - id: b_leader
-        describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/leadership/get
-        expect: {eq: {ref: steps.b}}
-      - id: b_success
-        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
-        args:
-          range:
-            - -20s
-            - 0s
-        expect: {gte: 0.95}
-      - id: restore_a
-        describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
-        interface: master/restart
-        args:
-          targets: {ref: steps.a}
-        expect: {eq: {ref: steps.a}}
-        within: 120s
-        wait_after: 30s
-      - id: a_rejoined_without_preemption
-        describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/leadership/get
-        expect: {eq: {ref: steps.b}}
-      - id: kill_b
-        describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
-        interface: master/stop
-        args:
-          targets: {ref: steps.b}
-          mode: kill
-        expect: {eq: {ref: steps.b}}
-        within: 45s
-        wait_after: 30s
-      - id: a_leader
-        describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/leadership/get
-        expect: {eq: {ref: steps.a}}
-      - id: a_success
-        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
-        args:
-          range:
-            - -20s
-            - 0s
-        expect: {gte: 0.95}
-      - id: restore_b
-        describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
-        interface: master/restart
-        args:
-          targets: {ref: steps.b}
-        expect: {eq: {ref: steps.b}}
-        within: 120s
-        wait_after: 30s
-      - id: b_rejoined_without_preemption
-        describe: 检查所有存活 Master 中唯一的主节点。
-        interface: master/leadership/get
-        expect: {eq: {ref: steps.a}}
-      - id: both_success
-        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
-        interface: client/success_rate
-        args:
-          range:
-            - -20s
-            - 0s
-        expect: {gte: 0.95}
-      - id: collected
-        describe: 停止发送并收齐所有 Client 已发请求的终态。
-        interface: client/stop
-        within: 180s
+- id: ready
+  describe: 先取得 A 的实际地址，再新增 B；两个 Master 始终为独立 JVM。
+  timeout: 120s
+  steps:
+  - id: a
+    describe: 记录首个 Master 的实际地址列表作为 A。
+    interface: master/leadership/get
+    expect:
+      count: 1
+  - id: b
+    describe: 新增第二个 Master 并保存其地址列表作为 B。
+    interface: master/start
+    expect:
+      count: 1
+    wait_after: 10s
+  - id: initial_leader
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.a
+- id: rolling
+  describe: 持续流量中先杀 A、恢复 A，再杀 B、恢复 B；不重启 Client。
+  timeout: 600s
+  steps:
+  - id: traffic
+    describe: 按原 Case 的 5 倍速回放完整 DeepSeek trace，先等待 30 秒建立基线。
+    interface: client/start
+    args:
+      requests_file: deepseek.binpb.zst
+      concurrency: 4096
+      queue_capacity: 4096
+      request_timeout: 120s
+      drain_timeout: 150s
+      replay_speed: 5
+    wait_after: 30s
+    within: 300s
+  - id: baseline
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: kill_a
+    describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
+    interface: master/stop
+    args:
+      targets:
+        ref: steps.a
+      mode: kill
+    expect:
+      eq:
+        ref: steps.a
+    within: 45s
+    wait_after: 30s
+  - id: b_leader
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.b
+  - id: b_success
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: restore_a
+    describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
+    interface: master/restart
+    args:
+      targets:
+        ref: steps.a
+    expect:
+      eq:
+        ref: steps.a
+    within: 120s
+    wait_after: 30s
+  - id: a_rejoined_without_preemption
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.b
+  - id: kill_b
+    describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
+    interface: master/stop
+    args:
+      targets:
+        ref: steps.b
+      mode: kill
+    expect:
+      eq:
+        ref: steps.b
+    within: 45s
+    wait_after: 30s
+  - id: a_leader
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.a
+  - id: a_success
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: restore_b
+    describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
+    interface: master/restart
+    args:
+      targets:
+        ref: steps.b
+    expect:
+      eq:
+        ref: steps.b
+    within: 120s
+    wait_after: 30s
+  - id: b_rejoined_without_preemption
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.a
+  - id: both_success
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: collected
+    describe: 提前停止 trace 回放并收齐所有 Client 已发请求的终态。
+    interface: client/stop
+    within: 180s

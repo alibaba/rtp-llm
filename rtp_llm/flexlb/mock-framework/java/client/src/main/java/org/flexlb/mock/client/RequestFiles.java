@@ -14,7 +14,7 @@ final class RequestFiles {
         Files.createDirectory(directory);
         var outputs = new ArrayList<InputFile.Writer>();
         var digests = new ArrayList<MessageDigest>();
-        long count = 0;
+        long count = 0, previousArrival = -1;
         Throwable primary = null;
         try {
             for (int i = 0; i < clients; i++) {
@@ -30,7 +30,12 @@ final class RequestFiles {
                     InputFile.checkInterrupted();
                     if (cancelled.getAsBoolean()) throw new InterruptedIOException("Request preparation stopped");
                     long next = Math.addExact(count, 1);
-                    if (next / plan.qps() > 86400) throw new IOException("Playback exceeds 24 hours");
+                    if (plan.qps() != null && next / plan.qps() > 86400) throw new IOException("Playback exceeds 24 hours");
+                    Player.delayNanos(count, input, plan.qps(), plan.replay_speed());
+                    if (plan.replay_speed() != null) {
+                        if (input.getArrivalOffsetMs() < previousArrival) throw new IOException("Replay arrival offsets must be nondecreasing");
+                        previousArrival = input.getArrivalOffsetMs();
+                    }
                     outputs.get((int) (count % clients)).write(input);
                     count = next;
                 }

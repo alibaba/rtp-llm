@@ -15,7 +15,7 @@ import org.junit.jupiter.api.io.TempDir;
 class RequestJournalTest {
     @TempDir Path directory;
     static ClientProtocol.Shard plan() {
-        return new ClientProtocol.Shard(1, null, "/unused", 1, 0, 1, 100, "0".repeat(64), 1, 1, 1, 3000, 1000);
+        return new ClientProtocol.Shard(1, null, "/unused", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
     }
     static List<EventBatch> read(Path path) throws Exception {
         var frames = new ArrayList<EventBatch>();

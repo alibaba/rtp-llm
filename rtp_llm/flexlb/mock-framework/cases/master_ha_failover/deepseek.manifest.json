@@ -1,0 +1,23 @@
+{
+  "format": "MCKINP01/Protobuf+Zstd",
+  "source": "deepseek_v4_flash_20260923_0920_16m.xz",
+  "source_sha256": "29d0fbee8986d465b672977154ebb9aef27353d445b383fd9135656de9e911ca",
+  "sha256": "231fc6ec119af0df460dee6bc070aca38a54ae22769cbab2bd57721b8154ffc8",
+  "requests": 844864,
+  "input_tokens": 2484052417,
+  "source_span_ms": 959995,
+  "arrival": "source_relative_ms_before_replay_speed",
+  "priority": 50,
+  "output_tokens": 8192,
+  "output_distribution": {
+    "kind": "geometric",
+    "mean_tokens": 420.0,
+    "seed": 20260913
+  },
+  "limitations": [
+    "Input lengths are exact; original text and tokens are absent.",
+    "Output lengths and outcomes are not retained in this codec.",
+    "Prefix sharing is theoretical structure, not measured cache reuse.",
+    "The copied traffic includes multiple user populations and was not source-filtered to 0-32k; the source spectrum selector remains unverified."
+  ]
+}

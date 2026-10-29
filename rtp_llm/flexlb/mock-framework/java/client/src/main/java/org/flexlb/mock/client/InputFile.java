@@ -16,7 +16,8 @@ final class InputFile {
 
     static void validate(Request request) throws IOException {
         if (request.getTokenIdsCount() == 0 || request.getTokenIdsList().stream().anyMatch(v -> v < 0)
-                || request.getMaxNewTokens() < 1 || request.hasPriority() && request.getPriority() < 0
+                || request.getMaxNewTokens() < 1 || request.hasArrivalOffsetMs() && request.getArrivalOffsetMs() < 0
+                || request.hasPriority() && request.getPriority() < 0
                 || request.getSerializedSize() > MAX_REQUEST || !request.getUnknownFields().asMap().isEmpty())
             throw new IOException("Invalid or unsupported playback request");
     }

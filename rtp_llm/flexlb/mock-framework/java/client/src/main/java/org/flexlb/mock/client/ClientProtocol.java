@@ -10,7 +10,9 @@ import static org.flexlb.mock.api.Endpoint.Kind.*;
 public interface ClientProtocol {
     record Empty() {}
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record Start(@Argument(optional=true) List<String> masters, String requests_file, double qps, int concurrency, int queue_capacity,
+    record Start(@Argument(optional=true) List<String> masters, String requests_file,
+                 @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
+                 int concurrency, int queue_capacity,
                  long request_timeout_ms, long drain_timeout_ms) {
         public Start {
             if (requests_file == null || requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute())
@@ -20,7 +22,8 @@ public interface ClientProtocol {
                 if (masters.isEmpty() || new HashSet<>(masters).size() != masters.size() || masters.stream().anyMatch(String::isBlank))
                     throw new IllegalArgumentException("masters must be nonempty and unique when supplied");
             }
-            if (!Double.isFinite(qps) || qps <= 0 || concurrency < 1 || queue_capacity < 1 || queue_capacity > 100000
+            if ((qps == null) == (replay_speed == null)
+                    || !Double.isFinite(qps != null ? qps : replay_speed) || (qps != null ? qps : replay_speed) <= 0 || concurrency < 1 || queue_capacity < 1 || queue_capacity > 100000
                     || request_timeout_ms < 1 || request_timeout_ms > 3600000 || drain_timeout_ms < 1 || drain_timeout_ms > 3600000)
                 throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
         }
@@ -31,16 +34,17 @@ public interface ClientProtocol {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     record Shard(long sequence, @Argument(optional=true) List<String> masters, String requests_file,
                  long count, long first_index, int stride, long first_request_id, String sha256,
-                 double qps, int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
+                 @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
+                 int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
         public Shard {
-            new Start(masters, requests_file, qps, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms);
+            new Start(masters, requests_file, qps, replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms);
             masters = masters == null ? null : List.copyOf(masters);
             if (sequence < 1 || count < 1 || first_index < 0 || stride < 1 || first_index >= stride || first_request_id < 1
                     || sha256 == null || !sha256.matches("[0-9a-f]{64}"))
                 throw new IllegalArgumentException("Invalid shard");
             long last = Math.addExact(first_index, Math.multiplyExact(count - 1, stride));
             Math.addExact(first_request_id, last);
-            if (last / qps > 86400) throw new IllegalArgumentException("Playback exceeds 24 hours");
+            if (qps != null && last / qps > 86400) throw new IllegalArgumentException("Playback exceeds 24 hours");
         }
     }
     record Begin(long sequence, long start_epoch_ms) {}

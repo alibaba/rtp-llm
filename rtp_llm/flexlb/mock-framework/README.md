@@ -193,7 +193,7 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 `client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
 
-唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。当前 Request 仅实现文本请求：非空、非负 int32 token_ids，正 int32 max_new_tokens，可选非负 int32 priority（缺省为 50，显式 0 保留）。多模态、完整生成参数、真实观测及旧数据集转换尚未接通；不能把二进制格式接通等同于这些能力已实现。未知字段、非法请求及不支持的版本均拒绝。
+唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。当前 Request 仅实现文本请求：非空、非负 int32 token_ids，正 int32 max_new_tokens，可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。多模态、完整生成参数及真实观测尚未接通；不能把二进制格式接通等同于这些能力已实现。未知字段、非法请求及不支持的版本均拒绝。
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf Batch。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。Batch.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
 
@@ -201,9 +201,9 @@ client0 在 start 的步骤预算内流式校验整个输入，按全局序号 `
 
 每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点、SHA-256 和发流参数。Player 使用同一 InputFile.Reader 按批次解压，交给原有小队列；不把完整输入放进堆，也不把请求/响应经 client0 转发。请求 ID 在多轮 start 之间单调分配，主动停止留下的未发请求不会重新分配给后续轮次。播放读失败、条数或完整读取后的 SHA-256 不符使整组失败；主动 stop 不扫描未消费的后缀，剩余请求计入 unsent。
 
-masters 可省略，Client 默认持续发现本实验的全部 Master；显式填写时固定为该 step 的地址集合，播放期间只在其中选主备。qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h；每个 Client 至少分到一个请求和并发槽。准备时间计入 start 的 within/phase timeout，大文件需明确足够的预算。
+masters 可省略，Client 默认持续发现本实验的全部 Master；显式填写时固定为该 step 的地址集合，播放期间只在其中选主备。qps 和 replay_speed 必须且只能提供一个正有限值。qps 模式按全局请求序号控制均匀发送；replay_speed 模式要求每条请求有 arrival_offset_ms，准备时检查时间非递减，Player 按 offset/replay_speed 发送。所有分片保留同一个源起点，不按各自首条请求重新归零；相同时间允许突发，不再叠加 QPS 限速。concurrency 是全局预算。queue_capacity 默认每 Client 16，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h；每个 Client 至少分到一个请求和并发槽。准备时间计入 start 的 within/phase timeout，大文件需明确足够的预算。
 
-参与发压的 Client 在本轮固定；单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。只支持本机多 JVM，未承诺跨机器时钟同步。准备后 30s 未收到 begin 的 Client 报错退出本轮。请求循环、多轮对话、trace、ramp、动态参与者和旧数据转换不在当前范围。
+参与发压的 Client 在本轮固定；单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。只支持本机多 JVM，未承诺跨机器时钟同步。准备后 30s 未收到 begin 的 Client 报错退出本轮。请求循环、多轮对话、ramp、动态参与者和运行时旧格式转换不在当前范围。
 
 ```yaml
 - id: load
@@ -230,7 +230,7 @@ write_inputs("traffic.binpb.zst", (
 ))
 ```
 
-写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。基本 Case 直接携带标准二进制输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
+写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。基本 Case 直接携带标准二进制输入。离线转换示例：`python scripts/convert_lineage.py <source.xz> <output.binpb.zst> --output-cap <tokens> --output-mean <tokens> --seed <seed>`；输出文件和 manifest 均拒绝覆盖。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
 
 `RequestFilesTest` 在独立 48 MiB 堆的 JVM 中分片并完整播放解压后超过 64 MiB 的输入，覆盖非法输入、截断、校验和、内容变化和准备取消。跨语言测试验证 Python 写→Java 读、Java 写→Python 读；真实 Master 接线测试在 1/2 个 Client JVM 中播放并校验分片总量、全局请求 ID 和发压窗口内的合计 QPS。这些是有界读取和功能接线验证，不测量最大可达 QPS。
 
@@ -389,7 +389,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
   --output <输出目录>/compiled.json
 ```
 
-每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。Client 只接受 start 参数 requests_file 指向的标准 Protobuf＋Zstd 文件，不提供旧数据集格式兼容、转换器或数据合成工具。
+每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。Client 只接受 start 参数 requests_file 指向的标准 Protobuf＋Zstd 文件，不提供运行时旧格式兼容。`scripts/convert_lineage.py` 仅用于离线转换，复用仓库的 lineage 解码和输出采样规则，将完整 token 序列、精确长度、前缀关系和原始相对到达时间写成当前 Protobuf＋Zstd 格式，并生成来源、摘要和转换参数 manifest；运行时不加载旧 codec。
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect`、`within` 和 `wait_after`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 
@@ -650,7 +650,7 @@ environment:
 
 `plan()` 只算耗时，`SimulatedCompute.submit()` 才等待；Execution 可取消，唯一终态为 COMPLETED/CANCELLED。关闭取消未完成项并拒绝新任务，回调在独立虚拟线程执行。共享 Compute 不提交缓存、不释放 Engine 资源，也不把计时完成当请求成功。
 
-DecodeStepModel 默认每轮 1 token。推测配置用 draft_tokens、acceptance_rate、seed：按首次拒绝得到接受前缀 A，再提交纠正/奖励 token，即 C=A+1；固定独立接受率 α、草稿长 k 时是封顶几何模型，E[C]=1+α+…+α^k，见[经典推测解码论文](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)。这不宣称复现所有 MTP/EAGLE。计算按验证数收费，指标按实际提交数累计，KV 覆盖验证上下文，接近输出上限缩短草稿预算。
+DecodeStepModel 默认每轮 1 token。显式 tokens_per_step（至少 1）表示确定性的平均 token 预算：第 n 轮提交 floor((n+1)*v)−floor(n*v)，最后一轮截断到剩余长度。它不能与非零推测参数组合，是 Mock 性能建模，不表示真实 MTP 的接受分布。推测配置用 draft_tokens、acceptance_rate、seed：按首次拒绝得到接受前缀 A，再提交纠正/奖励 token，即 C=A+1；固定独立接受率 α、草稿长 k 时是封顶几何模型，E[C]=1+α+…+α^k，见[经典推测解码论文](https://proceedings.mlr.press/v202/leviathan23a/leviathan23a.pdf)。这不宣称复现所有 MTP/EAGLE。计算按验证数收费，指标按实际提交数累计，KV 覆盖验证上下文，接近输出上限缩短草稿预算。
 
 StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概率要求 seed。固定 EOS hazard 是 Mock 的封顶几何近似，不是线上长度规律；遵守 min/max_new_tokens，ignore_eos 强制上限。P 按稳定请求身份只抽样一次，经 LOAD 传 stop_after，D 不重复抽样；跨过停止位置只提交允许部分，仍计验证成本。首 token 即结束时使用 PREFILL_COMPLETE 释放 D，不再执行 Decode。真实 observed 长度或输出覆盖由 Client 指定目标并 ignore_eos。
 
@@ -699,7 +699,7 @@ EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册�
 
 `client/success_rate` 的 range 是必填的 `[start, end]`（start < end <= 0），按固定查询时刻定位窗口，使用 Counter 的 increase，按完成时间统计，分母包含 success/error/timeout/cancelled。它没有最小请求数门槛；窗口无终态时分母为零，或任一 Client 的终态序列采集不完整时均报错。至少两次抓取是计数器增量的计算条件，不是请求数要求。近期完成请求可能在更早时发出；此口径不表示同一发送阶段的成功率。
 
-`cases/master_ha_failover/case.yaml` 用同一轮固定 QPS 播放贯穿杀 A、恢复 A、杀 B、恢复 B。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集 Client 终态，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 验证当前固定 QPS 播放下的滚动恢复，不声称覆盖旧 trace 到达节奏或原负载均衡实验。
+`cases/master_ha_failover/case.yaml` 使用已转换的 DeepSeek trace，以原 Case 的 5 倍速回放贯穿杀 A、恢复 A、杀 B、恢复 B，检查结束后提前停止。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集 Client 终态，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 保留原 DeepSeek preset 的 Host 缓存开关；Host 缓存尚未接通时启动明确失败，不以关闭缓存替代原配置。参数来自 legacy_unverified preset，配置和数据迁移不代表端到端验收通过。
 
 原始 PromQL 不自动加过滤。matrix/string/native histogram、非有限值、查询 warning 或后端失败都不作为有效门禁；普通指标恰好一个有限值。原始查询返回结构化结果，不隐式聚合或对各样本套用数值门禁。查询不重试，HTTP 和求值均受步骤剩余预算限制。
 

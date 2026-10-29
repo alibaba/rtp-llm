@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def requests(count=2050):
     for i in range(count):
-        request = pb.Request(token_ids=[i], max_new_tokens=3)
+        request = pb.Request(token_ids=[i], max_new_tokens=3, arrival_offset_ms=i * 7)
         if i % 2 == 0:
             request.priority = i % 100
         yield request
@@ -100,3 +100,10 @@ def test_python_and_java_use_one_proto_and_the_same_framing(tmp_path):
     write = subprocess.run(prefix + ['write', str(java_file)], capture_output=True, text=True, timeout=15)
     assert write.returncode == 0, write.stderr
     assert list(read_inputs(java_file)) == list(requests())
+
+
+def test_negative_arrival_offset_is_rejected_and_failed_file_removed(tmp_path):
+    target = tmp_path / 'bad.binpb.zst'
+    with pytest.raises(ValueError):
+        write_inputs(target, [pb.Request(token_ids=[1], max_new_tokens=1, arrival_offset_ms=-1)])
+    assert not target.exists()

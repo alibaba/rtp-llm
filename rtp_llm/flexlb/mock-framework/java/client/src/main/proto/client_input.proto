@@ -3,11 +3,12 @@ package flexlb.mock.input;
 option java_package = "org.flexlb.mock.client.input";
 option java_outer_classname = "ClientInput";
 
-// Playback data only; request identity and timing are assigned by the coordinator/Player.
+// Playback data only; request identities and send pacing belong to the coordinator/Player.
 message Request {
   repeated int32 token_ids = 1;
   int32 max_new_tokens = 2;
   optional int32 priority = 3; // Absent means 50.
+  optional int64 arrival_offset_ms = 4; // Relative to the source start, before replay_speed.
 }
 message Batch {
   uint64 sequence = 1;
