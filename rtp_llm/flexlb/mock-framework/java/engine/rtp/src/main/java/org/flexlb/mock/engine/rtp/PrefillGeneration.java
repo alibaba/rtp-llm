@@ -18,9 +18,11 @@ final class PrefillGeneration implements AutoCloseable {
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-pd-deadline").factory());
     private final Map<Long, Call> active = new HashMap<>();
+    private final Map<Long, BufferedOutput> outputs = new LinkedHashMap<>();
     private record Fence(long expires, boolean preempted) {}
     private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
+    private long nextOutputSweep;
     private String address;
     private boolean closed;
 
@@ -51,7 +53,19 @@ final class PrefillGeneration implements AutoCloseable {
             if (active.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Active Prefill request id").asRuntimeException();
             if (active.size() >= TaskHistory.LIMIT)
                 throw Status.RESOURCE_EXHAUSTED.withDescription("Mock P/D request registry full").asRuntimeException();
+            long now = System.nanoTime();
+            if (now >= nextOutputSweep) {
+                outputs.entrySet().removeIf(e -> e.getValue().expired() || e.getValue().discardable());
+                nextOutputSweep = now + TimeUnit.SECONDS.toNanos(1);
+            }
+            if (outputs.size() >= 65536) {
+                var oldest = outputs.entrySet().stream().filter(e -> e.getValue().finished()).findFirst();
+                if (oldest.isEmpty()) throw Status.RESOURCE_EXHAUSTED.withDescription("Mock output registry full").asRuntimeException();
+                outputs.remove(oldest.get().getKey());
+            }
+            if (outputs.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Retained output request id").asRuntimeException();
             call = new Call(input, response, host + ":" + target.getGrpcPort(), attachMillis);
+            if (call.deferred) outputs.put(input.getRequestId(), call.output);
             active.put(input.getRequestId(), call);
             if (call.deferred) remember(input.getRequestId(), false);
         }
@@ -76,24 +90,15 @@ final class PrefillGeneration implements AutoCloseable {
 
     void fetch(long id, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
-        Call call; Fence fence;
-        synchronized (this) { call = active.get(id); fence = fences.get(id); }
-        if (call == null || !call.deferred) {
-            response.onError(fence != null && fence.preempted() && fence.expires() > System.nanoTime() ? preempted()
-                : Status.NOT_FOUND.withDescription("No fetchable request").asRuntimeException());
-            return;
+        BufferedOutput output; Fence fence;
+        synchronized (this) { output = outputs.get(id); fence = fences.get(id); }
+        if (fence != null && fence.preempted() && fence.expires() > System.nanoTime()) {
+            response.onError(preempted()); return;
         }
-        synchronized (call) {
-            if (call.terminal || !call.admitted.isDone() || call.admitted.isCompletedExceptionally()) {
-                response.onError(call.priorityPreempted ? preempted() : Status.NOT_FOUND.withDescription("No fetchable request").asRuntimeException()); return;
-            }
-            if (call.response != null) { response.onError(Status.ALREADY_EXISTS.withDescription("Fetch already attached").asRuntimeException()); return; }
-            if (System.nanoTime() >= call.deadline || call.attachmentDeadline != null && call.attachmentDeadline.isExpired()) {
-                call.finish(RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("Fetch attachment expired"), 603));
-                response.onError(Status.NOT_FOUND.withDescription("Fetch request expired").asRuntimeException()); return;
-            }
-            call.attach(response);
+        if (output == null || output.expired()) {
+            response.onError(Status.NOT_FOUND.withDescription("No fetchable request").asRuntimeException()); return;
         }
+        output.attach(response, () -> {});
     }
 
     CancelStatusPB cancel(long id) {
@@ -139,33 +144,25 @@ final class PrefillGeneration implements AutoCloseable {
 
     private final class Call {
         final GenerateInputPB input;
-        ServerCallStreamObserver<GenerateOutputsPB> response;
+        final BufferedOutput output;
         final boolean deferred;
-        final long attachMillis;
         final CompletableFuture<Void> admitted = new CompletableFuture<>();
         final String target;
         final long started = System.nanoTime(), deadline;
         final Context.CancellableContext context;
         PrefillTransfer.Source source;
         Future<?> worker;
-        ScheduledFuture<?> timeout, attachment;
-        Deadline attachmentDeadline;
+        ScheduledFuture<?> timeout;
         boolean terminal, priorityPreempted;
         Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis) {
             this.input = input; this.target = target; this.deferred = response == null;
-            this.attachMillis = attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10);
+            output = new BufferedOutput(workers, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10));
             context = (deferred ? Context.ROOT : Context.current()).withCancellation();
             deadline = Math.min(deferred ? Long.MAX_VALUE : PrefillTransfer.deadline(Context.current()), input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
                 : started + TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
         }
-        synchronized void attach(ServerCallStreamObserver<GenerateOutputsPB> response) {
-            this.response = response;
-            if (attachment != null) attachment.cancel(false);
-            attachmentDeadline = null;
-            response.setOnCancelHandler(() -> finish(Status.CANCELLED.asRuntimeException()));
-            response.setOnReadyHandler(() -> { synchronized (this) { notifyAll(); } });
-            notifyAll();
-            if (response.isCancelled()) finish(Status.CANCELLED.asRuntimeException());
+        void attach(ServerCallStreamObserver<GenerateOutputsPB> response) {
+            output.attach(response, () -> finish(Status.CANCELLED.asRuntimeException()));
         }
         void run() { context.run(this::exchange); }
         void exchange() {
@@ -186,17 +183,7 @@ final class PrefillGeneration implements AutoCloseable {
                 synchronized (this) {
                     if (terminal) return;
                     source = transfer.start(TransferRequest.newBuilder().setClientId(config.id()).setInput(input).build(), deadline);
-                    if (deferred) {
-                        attachmentDeadline = Deadline.after(attachMillis, TimeUnit.MILLISECONDS);
-                        attachment = deadlines.schedule(() -> {
-                            synchronized (this) {
-                                if (response == null) finish(RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("Fetch attachment expired"), 603));
-                            }
-                        }, attachMillis, TimeUnit.MILLISECONDS);
-                    }
                     admitted.complete(null);
-                    while (!terminal && response == null) wait();
-                    if (terminal) return;
                 }
                 stream.onNext(frame(RemoteStage.LOAD));
                 var first = source.ready().toCompletableFuture().get();
@@ -231,21 +218,11 @@ final class PrefillGeneration implements AutoCloseable {
             catch (RuntimeException error) { finish(error); }
         }
         GenerateRequestPB frame(RemoteStage stage) { return GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id()).build(); }
-        synchronized void send(GenerateOutputsPB output) throws InterruptedException {
-            while (!terminal && !response.isCancelled() && !response.isReady()) {
-                long remaining = deadline == Long.MAX_VALUE ? Long.MAX_VALUE : deadline - System.nanoTime();
-                if (remaining <= 0) throw RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("P/D request budget expired"), 603);
-                TimeUnit.NANOSECONDS.timedWait(this, remaining);
-            }
-            if (terminal || response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-            if (System.nanoTime() >= deadline) throw RtpErrors.failure(Status.DEADLINE_EXCEEDED.withDescription("P/D request budget expired"), 603);
-            response.onNext(output);
-        }
+        void send(GenerateOutputsPB value) { output.add(value); }
         synchronized void finish(Throwable error) {
             if (terminal) return;
-            terminal = true; notifyAll();
+            terminal = true;
             if (timeout != null) timeout.cancel(false);
-            if (attachment != null) attachment.cancel(false);
             if (!admitted.isDone()) admitted.completeExceptionally(error == null ? Status.CANCELLED.asRuntimeException() : error);
             context.cancel(null);
             if (source != null) {
@@ -260,10 +237,7 @@ final class PrefillGeneration implements AutoCloseable {
                     remember(input.getRequestId(), old != null && old.preempted());
                 }
             }
-            if (response != null && !response.isCancelled()) {
-                if (error == null) response.onCompleted();
-                else response.onError(error);
-            }
+            output.finish(error);
         }
     }
     private static final class Inbox implements ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB> {
@@ -284,6 +258,7 @@ final class PrefillGeneration implements AutoCloseable {
         List<Call> owned;
         synchronized (this) { closed = true; owned = List.copyOf(active.values()); }
         for (var call : owned) call.finish(Status.UNAVAILABLE.withDescription("Prefill node closed").asRuntimeException());
+        synchronized (this) { outputs.clear(); }
         workers.shutdownNow(); deadlines.shutdownNow(); channels.close();
     }
 }

@@ -46,6 +46,19 @@ class EngineLoopTest {
         return new EngineLoop(lock, policy, new org.flexlb.mock.cache.DeviceCache(1, 0, org.flexlb.mock.cache.DeviceCache.EvictionPolicy.LRU), new ComputeModel(new ComputeSpec(expression, null)), Role.prefill, "test");
     }
 
+    @Test void idleLoopsCannotExhaustVirtualThreadCarriers() throws Exception {
+        var loops = new ArrayList<EngineLoop>();
+        var policies = new ArrayList<Policy>();
+        try {
+            for (int i = 0; i < 300; i++) {
+                var policy = new Policy(false); policies.add(policy);
+                policy.queue.add(work("progress"));
+                var loop = engine(policy, policy, "1"); loops.add(loop); loop.wake();
+            }
+            for (var policy : policies) assertEquals("progress", policy.finished.poll(5, TimeUnit.SECONDS));
+        } finally { loops.forEach(EngineLoop::close); }
+    }
+
     @Test void replacingQueuePolicyDoesNotChangeComputeOrLoop() throws Exception {
         for (boolean newest : List.of(false, true)) {
             var policy = new Policy(newest);

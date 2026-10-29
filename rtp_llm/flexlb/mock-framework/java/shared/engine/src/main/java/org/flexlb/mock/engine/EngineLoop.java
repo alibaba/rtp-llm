@@ -11,7 +11,8 @@ import org.flexlb.mock.compute.*;
 /** Event/deadline driven execution. Only short state transitions hold the scheduling lock. */
 public final class EngineLoop implements AutoCloseable {
     private final Object lock;
-    private final Object signal = new Object();
+    private final java.util.concurrent.locks.ReentrantLock signal = new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.concurrent.locks.Condition changed = signal.newCondition();
     private final Scheduler scheduler;
     private final DeviceCache cache;
     private final ComputeModel model;
@@ -73,24 +74,26 @@ public final class EngineLoop implements AutoCloseable {
 
     /** A signal is retained even if it arrives before the worker starts waiting. */
     public void wake() {
-        synchronized (signal) { dirty = true; signal.notifyAll(); }
+        signal.lock();
+        try { dirty = true; changed.signal(); } finally { signal.unlock(); }
     }
 
     private void run() {
         long deadline = Long.MAX_VALUE;
         try {
             while (true) {
-                synchronized (signal) {
+                signal.lock();
+                try {
                     while (!dirty && !closed) {
-                        if (deadline == Long.MAX_VALUE) signal.wait();
+                        if (deadline == Long.MAX_VALUE) changed.await();
                         else {
                             long remaining = deadline - System.nanoTime();
                             if (remaining <= 0) break;
-                            TimeUnit.NANOSECONDS.timedWait(signal, remaining);
+                            changed.awaitNanos(remaining);
                         }
                     }
                     dirty = false;
-                }
+                } finally { signal.unlock(); }
                 synchronized (lock) {
                     if (!closed) {
                         try { advance(); }

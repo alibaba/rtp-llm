@@ -92,7 +92,7 @@ ForwardBatch 是本轮执行输入，不是 running 容器本身。它固定请�
 
 Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络发送。公共 EngineLoop 使用一个虚拟线程等待事件和最近 deadline，入队、控制/执行完成、容量释放和关闭都会唤醒；没有固定周期轮询，容量版本未变化时不反复尝试初始分配。没有可执行 batch 也必须处理取消、期限和传输结果，不能依赖下一次 Forward 才收尾。
 
-通知按请求顺序、锁外执行。每个请求最多一个尚未处理完的输出；慢消费者只暂停自己的下一轮，不堵住其他请求的计算。接纳上限同时覆盖等待通知完成的请求，不能把它们搬到另一条无界队列。通知失败进入该请求的失败清理；终态通知等基础设施异常使 Engine 的后续状态读取明确报错。
+通知按请求顺序、锁外执行。每个请求最多一个尚未处理完的调度通知；RTP 输出通知只交给协议容器，不等待 Fetch 或网络可写，不暂停后续计算。计算接纳上限覆盖等待调度通知完成的请求；协议结果按独立保留上限清理。通知失败进入该请求的失败清理；终态通知等基础设施异常使 Engine 的后续状态读取明确报错。
 
 批次取消按成员处理：取消成员不再提交结果，但资源引用保留到该 Forward 结束。只有全部成员终止或 Engine 关闭时才取消整个模拟执行。旧回调按执行对象和请求句柄核验，不能用复用的请求 ID 找到新请求继续推进。一次完成的 Forward 只记录一次耗时，计算量包含这轮实际执行的全部成员，输出量只计有效提交。
 
@@ -105,7 +105,7 @@ Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络�
 按请求计数，不能直接使用 group/batch 容器的 size：
 
 - `waiting`：等待计算准入或初始 KV 容量的请求。
-- `running`：已进入持续计算集合的请求，包含轮次之间等待本请求输出完成的 D；不等于此刻 Forward 的成员数。
+- `running`：已进入持续计算集合的请求，包含轮次之间等待输出交给协议容器的 D；不等于此刻 Forward 的成员数。
 - `loading`：资源已预留，等待 KV 加载或生成许可的请求。
 - `ready`：P 计算阶段已完成，仍持有传输数据的请求。
 
@@ -779,3 +779,16 @@ async def queue_size(ctx, args: QueueArgs) -> int:
 装饰器生成参数/返回结构，不要求接口基类，也不允许只登记名称而没有实现。边界使用 Annotated/Bounds、duration/range 标记，跨字段规则写在参数 dataclass 的 __post_init__。新增接口不改编译器或 Runner 分发逻辑；非平凡行为必须有测试。运行产物 interfaces.json 保存本次 Python 注册定义，构建不再产生 Java Case catalog。
 
 Java 内部端点仍可使用 ApiServer 和 Endpoint 的序列化/校验机制；它只约束实例请求与响应，不承担 Case 目标选择、扩缩容计数、指标聚合或 Python ref 语法。当前 MasterStateApi 使用这条内部协议；未接通的 Java Case 声明及 PrometheusQueries 已删除。
+
+### Fetch 与计算解耦
+
+RTP 的 Enqueue ACK 后持续推进 LOAD、Prefill 和 Decode，不等待 Fetch。Scheduler 仍统一管理
+RECEIVED、KV_ALLOCATED、RUNNING、KV 资源和按版本查询的 finished 记录；P 在 LOAD ACK 后结束
+本地阶段，D 在最终输出交给协议容器后结束计算阶段。Fetch 接入、网络可写和输出消费不参与这些状态转换。
+
+协议层缓冲输出并异步发送，Fetch 断开只丢弃该连接的待发输出，不取消计算；显式 Cancel 和请求 deadline
+仍终止计算。输出注册表最多保留 65536 个请求，未接入结果按 fetch_attach_timeout_ms（默认十分钟）
+过期，满时先回收已完成项，不覆盖活跃项。正常性能 Case 应在 Prefill 完成前接入 Fetch；晚接入可读取
+保留输出，但补发间隔不代表真实 TPOT。不模拟输出消费者背压。
+
+公共 EngineLoop 使用 Condition 等待事件，避免 Java 21 Object.wait 占用共享虚拟线程承载线程。

@@ -119,16 +119,18 @@ class PdGenerationTest {
             .cancel(CancelRequestPB.newBuilder().setRequestId(id).build()).getStatus();
     }
 
-    @Test void batchAckOwnsDecodeAndPrefillBeforeFetchWithoutStartingDecodeForward() throws Exception {
+    @Test void batchCompletesBothSchedulersWithoutFetchAndRetainsOutput() throws Exception {
         try (var p = node("prefill", 8, 100); var d = node("decode", 8, 1)) {
             var request = input(d, 101, 5, 4, 3000, true);
             var ack = enqueue(p, 2000, request); assertEquals(81, ack.getBatchId()); assertEquals(1, ack.getSuccessesCount());
             assertEquals(1, d.status().getRunningTaskInfoCount());
             await(() -> p.status().getRunningTaskInfoCount() == 1);
             assertEquals(81, p.status().getRunningTaskInfo(0).getBatchId());
-            Thread.sleep(120);
-            assertEquals(0, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
-            assertTrue(p.status().getAvailableKvCache() < 16);
+            await(() -> d.status().getRunningTaskInfoCount() == 0 && p.status().getRunningTaskInfoCount() == 0);
+            assertTrue(metric(d, "mock_engine_forward_seconds_count", "role=\"decode\"") > 0);
+            assertTrue(p.status().getFinishedTaskListList().stream().anyMatch(t -> t.getRequestId() == 101));
+            assertTrue(d.status().getFinishedTaskListList().stream().anyMatch(t -> t.getRequestId() == 101));
+            assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
             try (var fetch = new Call(p, request, true)) {
                 for (int n = 1; n <= 4; n++) fetch.output(n, n == 4, 1);
                 assertEquals("completed", fetch.next());
@@ -151,22 +153,33 @@ class PdGenerationTest {
         }
     }
 
-    @Test void missingFetchExpiresBothOwnersAndCannotBeAttachedLate() throws Exception {
+    @Test void unattachedOutputExpiresWithoutHoldingSchedulerResources() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
             var request = input(d, 103, 5, 4, 0, true);
             assertEquals(1, enqueue(p, 80, request).getSuccessesCount());
             await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
             assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
+            Thread.sleep(100);
             try (var fetch = new Call(p, request, true)) { fetch.error(Status.Code.NOT_FOUND); }
         }
     }
 
-    @Test void requestBudgetIncludesTheTimeBeforeFetchAndOverridesLongAttachmentLease() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1)) {
+    @Test void requestTimeoutCompletesSchedulersAndRetainsErrorForFetch() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 500)) {
             var request = input(d, 104, 5, 4, 100, true);
             assertEquals(1, enqueue(p, 3000, request).getSuccessesCount());
             await(() -> d.status().getRunningTaskInfoCount() == 0 && p.status().getRunningTaskInfoCount() == 0);
-            try (var fetch = new Call(p, request, true)) { fetch.error(Status.Code.NOT_FOUND); }
+            try (var fetch = new Call(p, request, true)) { fetch.error(Status.Code.DEADLINE_EXCEEDED); }
+        }
+    }
+
+    @Test void disconnectingFetchDoesNotCancelDecodeOrHoldResources() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 30)) {
+            var request = input(d, 110, 5, 4, 2000, true); enqueue(p, 1500, request);
+            try (var fetch = new Call(p, request, true)) { fetch.output(1, false, 1); }
+            await(() -> d.status().getRunningTaskInfoCount() == 0 && p.status().getRunningTaskInfoCount() == 0);
+            assertTrue(d.status().getFinishedTaskListList().stream().anyMatch(t -> t.getRequestId() == 110 && !t.hasErrorInfo()));
+            assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
         }
     }
 
@@ -490,10 +503,10 @@ class PdGenerationTest {
         }
     }
 
-    @Test void slowConsumerDoesNotBypassRequestDeadlineOrBufferTheEntireGeneration() throws Exception {
+    @Test void slowConsumerDoesNotHoldDecodeCompletionOrKv() throws Exception {
         try (var p = node("prefill", 8, 0); var d = node("decode", 2048, 0); var context = Context.current().withCancellation()) {
             var replies = new LinkedBlockingQueue<Object>();
-            context.run(() -> RpcServiceGrpc.newStub(p.channel).generateStreamCall(input(d, 1, 3, 3000, 500, false),
+            context.run(() -> RpcServiceGrpc.newStub(p.channel).generateStreamCall(input(d, 1, 3, 3000, 5000, false),
                 new io.grpc.stub.ClientResponseObserver<GenerateInputPB, GenerateOutputsPB>() {
                     @Override public void beforeStart(io.grpc.stub.ClientCallStreamObserver<GenerateInputPB> request) { request.disableAutoRequestWithInitial(1); }
                     @Override public void onNext(GenerateOutputsPB value) { replies.add(value); }
@@ -502,8 +515,8 @@ class PdGenerationTest {
                 }));
             assertInstanceOf(GenerateOutputsPB.class, replies.poll(3, TimeUnit.SECONDS));
             await(() -> d.status().getFinishedTaskListCount() == 1 && p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 4096);
-            assertTrue(d.status().getFinishedTaskList(0).hasErrorInfo());
-            assertTrue(metric(d, "mock_engine_forward_seconds_count", "role=\"decode\"") < 2999);
+            assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo());
+            assertEquals(2999, metric(d, "mock_engine_forward_seconds_count", "role=\"decode\""));
         }
     }
 
