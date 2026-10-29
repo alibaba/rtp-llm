@@ -295,6 +295,43 @@ class ModelLoader:
             / max(self._load_config.ep_size, self._load_config.tp_size)
             / (1024.0**2)
         )
+        if self._is_online_ptpc():
+            # Online PTPC with inline FP8: MoE expert weights are quantized
+            # per-expert during loading (no BF16 peak for MoE), but dense
+            # weights (attention, embedding, shared experts) still load as
+            # BF16 then quantize to FP8, requiring ~2x peak for that portion.
+            moe_params = self._weights_info.model_config.moe_weight_param_count()
+            total_layer_params = (
+                self._weights_info.model_config.layer_weight_param_count()
+            )
+            if total_layer_params > 0 and moe_params > 0:
+                # dense_ratio: fraction of layer weights that are NOT inline-quantized MoE
+                dense_ratio = 1.0 - (moe_params / total_layer_params)
+                # Dense weights need 2x (BF16 loaded + FP8 quantized simultaneously),
+                # MoE weights only need 1x (quantized inline per-expert).
+                # Overall multiplier: dense_ratio * 2 + moe_ratio * 1
+                mem_multiplier = dense_ratio * 2.0 + (1.0 - dense_ratio) * 1.0
+                model_mem *= mem_multiplier
+                logging.info(
+                    f"online PTPC with inline FP8: MoE ratio={1.0 - dense_ratio:.2%}, "
+                    f"dense ratio={dense_ratio:.2%}, "
+                    f"memory multiplier={mem_multiplier:.2f}x (dense needs BF16 peak)"
+                )
+            else:
+                # No MoE weights detected, treat as full online quant
+                model_mem *= 2
+                logging.info(
+                    f"online PTPC but no MoE weights detected, "
+                    f"doubling model_mem estimate conservatively"
+                )
+        elif self._is_online_quant_without_inline():
+            # Non-inline online quantization: BF16 checkpoint loaded then
+            # quantized to FP8, so peak memory is roughly 2x FP8 model size.
+            model_mem *= 2
+            logging.info(
+                f"online quantization detected (BF16 checkpoint -> FP8), "
+                f"doubling model_mem estimate for fastsafetensor memory check"
+            )
         max_file_mem = max_file_size / (1024.0**2)
         # Empirical reserve for RTP TensorCollector inputs overlapping final
         # weight materialization. Revisit after model-level peak measurements.
