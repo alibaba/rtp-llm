@@ -854,6 +854,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                            attention_inputs_by_tag_,
                                                            bert_embedding_inputs});
         py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
+        py_model_inputs.prefill_kv_only = has_context_request && !inputs.is_target_verify
+                                          && input_hiddens.defined() && input_hiddens.numel() > 0
+                                          && inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.numel() == 0;
         // PP: stage-boundary tensors populated by forwardPP.
         py_model_inputs.pp_intermediates = inputs.pp_intermediates;
         PyModelOutputs py_model_outputs;
@@ -1127,6 +1130,14 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     const auto&       lm_head = weights_.lm_head;
     if (!lm_head) {
         return {torch::Tensor(), torch::Tensor(), hidden};
+    }
+    if (hidden.size(0) == 0) {
+        // Intermediate MTP chunks populated KV/hidden buffers but selected no
+        // LM rows. Skip the vocabulary projection and TP logit all-gather.
+        const auto vocab = description_.output_vocab_size > 0 ?
+                               static_cast<int64_t>(description_.output_vocab_size) :
+                               lm_head->kernel.size(0) * static_cast<int64_t>(device_props_.tp_size);
+        return {torch::empty({0, vocab}, hidden.options().dtype(torch::kFloat32)), hidden, hidden};
     }
     printTorchTensorData(hidden, "last_hidden");
 

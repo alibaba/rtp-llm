@@ -314,7 +314,11 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
     const bool has_single_axis_position_ids =
         has_explicit_position_ids && model_input.combo_position_ids.numel() == global_token_num;
-    if (!has_multimodal_input && has_prefix_reuse && has_single_axis_position_ids) {
+    // MTP draft positions are intentionally shifted by one relative to target
+    // cache slots. A hidden-state input identifies that explicit side-input
+    // contract; do not replace its valid positions with prefix + token index.
+    const bool has_explicit_hidden_input = total_hidden_states.defined() && total_hidden_states.numel() > 0;
+    if (!has_multimodal_input && has_prefix_reuse && has_single_axis_position_ids && !has_explicit_hidden_input) {
         model_input.combo_position_ids = torch::Tensor();
         has_explicit_position_ids      = false;
     }

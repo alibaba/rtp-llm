@@ -316,6 +316,42 @@ class RealHookGates(unittest.TestCase):
                 )
         self.assertIsNone(handle)
 
+    def test_side_stream_waits_for_creator_before_touching_buffers(self):
+        events = []
+        caller = object()
+
+        class Tensor:
+            def fill_(self, value): events.append("fill")
+            def view(self, *shape): return self
+            def copy_(self, source, non_blocking): events.append("copy")
+
+        class Stream:
+            def wait_stream(self, other):
+                self_test.assertIs(other, caller)
+                events.append("wait")
+
+        class Event:
+            def record(self, stream): events.append("event")
+
+        self_test = self
+        device = torch.device("cuda", 0)
+        group = object()
+        strategy = types.SimpleNamespace(_eager_counts_state=None, _stage=lambda: (group, 4, 0))
+        with patch.dict(os.environ, {"DSV4_MOE_EAGER_COUNT_GATHER": "1"}), patch.object(
+            torch.cuda, "current_stream", lambda device: caller
+        ), patch.object(torch.cuda, "stream", lambda stream: nullcontext()), patch.object(
+            torch.cuda, "Stream", lambda **kwargs: Stream()
+        ), patch.object(torch.cuda, "Event", lambda: Event()), patch.object(
+            torch, "empty", lambda *args, **kwargs: Tensor()
+        ), patch.object(
+            torch.distributed, "all_gather_into_tensor", lambda *args, **kwargs: events.append("gather")
+        ), patch.dict(_strategy_env, {"_EAGER_GATHER_LOGGED": True}):
+            strategy_methods["start_authoritative_counts_gather"](strategy, 1024, device)
+            self.assertEqual(events, ["wait", "fill", "gather", "copy", "event"])
+            events.clear()
+            strategy_methods["start_authoritative_counts_gather"](strategy, 1024, device)
+            self.assertEqual(events, ["fill", "gather", "copy", "event"])
+
     def test_finish_reads_back_pinned_values(self):
         class _Event:
             def __init__(self):
@@ -385,6 +421,7 @@ class SourceInvariants(unittest.TestCase):
         self.assertNotIn("self._count_tensor", src)
         # The gather input stays a host-known scalar fill.
         self.assertIn('state["dev_in"].fill_(int(local_rows))', src)
+        self.assertLess(src.index("stream.wait_stream("), src.index('state["dev_in"].fill_'))
 
     def test_scope_branches_prefer_scope_eager_gather(self):
         for name in ("synchronized_chunk_extent", "_counts_for_forward"):

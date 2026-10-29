@@ -24,6 +24,49 @@
 
 namespace rtp_llm {
 
+PPSamplingPlan selectPPSamplingRows(const PPSamplingPlan& plan, const torch::Tensor& rows) {
+    const auto count = plan.request_ids.numel();
+    RTP_LLM_CHECK_WITH_INFO(rows.device().is_cpu() && rows.scalar_type() == torch::kInt64 && rows.dim() == 1,
+                            "PP sampling row selection requires CPU int64 indexes");
+    RTP_LLM_CHECK_WITH_INFO(plan.token_ids.size(0) == count,
+                            "mixed speculative chunks require one sequence per request");
+    const auto indexes = rows.contiguous();
+    const auto* ids = indexes.data_ptr<int64_t>();
+    for (int64_t i = 0; i < indexes.numel(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(ids[i] >= 0 && ids[i] < count, "PP sampling row is out of range");
+    }
+    auto select_vector = [&](const auto& values) {
+        auto selected = values;
+        selected.clear();
+        if (!values.empty()) {
+            RTP_LLM_CHECK_WITH_INFO(values.size() == static_cast<size_t>(count),
+                                    "PP sampling vector does not match request count");
+            selected.reserve(indexes.numel());
+            for (int64_t i = 0; i < indexes.numel(); ++i) {
+                selected.push_back(values[ids[i]]);
+            }
+        }
+        return selected;
+    };
+    PPSamplingPlan selected = plan;
+    selected.random_seeds = select_vector(plan.random_seeds);
+    selected.logits_processor_configs = select_vector(plan.logits_processor_configs);
+    selected.num_return_sequences = select_vector(plan.num_return_sequences);
+    for (auto* tensor : {&selected.request_ids, &selected.token_ids, &selected.input_lengths,
+                         &selected.sequence_lengths, &selected.max_tokens, &selected.top_k,
+                         &selected.top_p, &selected.temperature, &selected.repetition_penalty,
+                         &selected.presence_penalty, &selected.frequency_penalty, &selected.no_repeat_ngram_size,
+                         &selected.do_sample, &selected.finished_mask, &selected.spec_do_sample,
+                         &selected.force_sp_accept}) {
+        if (tensor->defined()) {
+            RTP_LLM_CHECK_WITH_INFO(tensor->dim() > 0 && tensor->size(0) == count,
+                                    "PP sampling tensor does not match request count");
+            *tensor = tensor->index_select(0, indexes.to(tensor->device())).contiguous();
+        }
+    }
+    return selected;
+}
+
 static int64_t getProcessorEosTokenId(const ModelConfig& model_config) {
     const auto  eos_token_id     = model_config.special_tokens.eos_token_id;
     const auto& output_vocab_ids = model_config.output_vocab_ids;
@@ -743,6 +786,26 @@ void PPBatchStreamProcessor::dispatchNormalSingleStream(const GenerateStreamPtr&
                           intermediate_chunk});
 }
 
+torch::Tensor PPBatchStreamProcessor::gatherDraftNextTokenIds(const StreamGroups& stream_groups) const {
+    const auto streams = stream_groups.allStreams();
+    auto next_tokens = torch::full({static_cast<int64_t>(streams.size()), 1},
+                                   -1,
+                                   torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    int64_t row = 0;
+    for (const auto& stream : streams) {
+        if (stream->isChunkStream()) {
+            const auto end = stream->prefixLength() + stream->contextLength();
+            RTP_LLM_CHECK_WITH_INFO(stream->isContextStream() && stream->currentBatchSize() == 1
+                                        && end >= 0 && end < stream->inputLength(),
+                                    "MTP chunk lookahead must address the next prompt token");
+            const auto tokens = stream->completeTokenIds();
+            next_tokens.data_ptr<int32_t>()[row] = tokens.data_ptr<int32_t>()[end];
+        }
+        ++row;
+    }
+    return next_tokens;
+}
+
 torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGroups&   stream_groups,
                                                                  const GptModelInputs& model_input) const {
     if (!sp_enabled_ || model_input.is_target_verify || !model_input.combo_position_ids.defined()) {
@@ -755,7 +818,21 @@ torch::Tensor PPBatchStreamProcessor::gatherDraftNextPositionIds(const StreamGro
                                      torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
     size_t     row             = 0;
     for (const auto& stream : streams) {
-        stream->generateNextPositionId(position_ids.data_ptr<int32_t>() + row * position_factor);
+        auto* destination = position_ids.data_ptr<int32_t>() + row * position_factor;
+        if (stream->isContextStream() && stream->isChunkStream()) {
+            // generateNextPositionId addresses the end of the entire prompt.
+            // Intermediate drafts instead consume the next chunk's first token.
+            const auto end = stream->prefixLength() + stream->contextLength();
+            const auto context_positions = stream->generateContextPositionIds();
+            RTP_LLM_CHECK_WITH_INFO(end >= 0 && end < stream->inputLength()
+                                        && context_positions.numel() >= (end + 1) * position_factor,
+                                    "MTP chunk lookahead position is outside the prompt");
+            std::memcpy(destination,
+                        context_positions.data_ptr<int32_t>() + end * position_factor,
+                        position_factor * sizeof(int32_t));
+        } else {
+            stream->generateNextPositionId(destination);
+        }
         ++row;
     }
     return position_ids;

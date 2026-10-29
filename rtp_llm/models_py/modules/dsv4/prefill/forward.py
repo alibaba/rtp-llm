@@ -215,11 +215,19 @@ def _prefill_fast_path_enabled(
     layer_calls: Optional[Tuple[_PrefillFastLayerCall, ...]] = None,
 ) -> bool:
     # Default-on production fast path. The normal path remains the source of
-    # truth for debug/recording, BF16, custom-hidden, and unsupported modules.
+    # truth for debug/recording, BF16, unapproved custom-hidden, and unsupported modules.
     if not _env_flag("DSV4_PREFILL_FAST_PATH", "1"):
         return False
     if prepare_hidden_fn is not None:
-        return False
+        owner = getattr(prepare_hidden_fn, "__self__", None)
+        if getattr(owner, "_prefill_fast_hidden_compatible", False):
+            if not _env_flag("DSV4_MTP_PREFILL_FAST_PATH", "1"):
+                return False
+        elif getattr(prepare_hidden_fn, "_dsv4_pp_resume", False):
+            if not _env_flag("DSV4_PP_RESUME_PREFILL_FAST_PATH", "1"):
+                return False
+        else:
+            return False
     if _rt.ENABLED or _fwd_dbg.enabled():
         return False
     if layer_calls is None:
@@ -290,7 +298,7 @@ def _maybe_kick_async_head(
     from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
 
     _head_prebuild.maybe_kick_async_head(
-        v4, kv_cache, block_tables_by_type, cp_ctx, input_ids.device
+        v4, kv_cache, block_tables_by_type, cp_ctx, input_ids.device, owner=v4
     )
 
 
@@ -391,6 +399,7 @@ def forward_layers(
         cp_size,
         cp_rank,
         int(input_ids.size(0)),
+        owner=v4,
     )
     if _async_head_bundle is not None:
         cp_ctx = _async_head_bundle.cp_ctx
@@ -672,10 +681,13 @@ def forward_layers(
     if _fs_marks is not None:
         _fs_marks["meta"] = time.perf_counter()
 
+    kv_only = bool(getattr(v4, "_mtp_prefill_kv_only", False))
+    if kv_only and (len(v4.layers) != 1 or capture_aux or v4.norm is None):
+        raise RuntimeError("KV-only prefill is limited to the single MTP draft layer")
     try:
         with (
             record_range_ctx(),
-            prefill_forward_scope(v4, cp_ctx, int(input_ids.numel()), input_ids.device),
+            nullcontext() if kv_only else prefill_forward_scope(v4, cp_ctx, int(input_ids.numel()), input_ids.device),
         ):
             # Two callable chains intentionally coexist:
             #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
@@ -688,14 +700,20 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
-                h = layer_call(
-                    h,  # [T, hc, dim]
-                    input_ids,  # [T]
-                    positions,  # [T]
-                    cu_seqlens,  # [B+1]
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )  # [T, hc, dim]
+                if kv_only:
+                    h = v4.layers[layer_idx].forward_prefill_kv_only(
+                        h, input_ids, positions, cu_seqlens, kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type, use_fast_path=use_prefill_fast_path,
+                    )
+                else:
+                    h = layer_call(
+                        h,  # [T, hc, dim]
+                        input_ids,  # [T]
+                        positions,  # [T]
+                        cu_seqlens,  # [B+1]
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )  # [T, hc, dim]
                 # ``capture_ids`` are GLOBAL layer ids while ``layer_idx`` is
                 # this stage's local position, so translate before matching.
                 if capture_aux:
@@ -771,6 +789,14 @@ def forward_layers(
 
     if _fs_marks is not None:
         _fs_marks["loop"] = time.perf_counter()
+
+    if kv_only:
+        # No consumer may read a draft output for this pass. Keep stale output
+        # buffers invalid and return a harmless shape for the empty CP LM exit.
+        v4._mtp_hidden_valid_tokens = 0
+        v4._mtp_last_hidden_valid_tokens = 0
+        _maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, input_ids)
+        return h.new_zeros((h.size(0), h.size(-1)))
 
     if v4._mtp_hidden_buffer is not None:
         if capture_aux:
@@ -995,6 +1021,9 @@ def forward_prefill(
         def _resume_upstream_hidden(input_ids, positions):
             return upstream_hidden
 
+        # This is an identity source for the same [T, hc, dim] Block input,
+        # not an arbitrary custom-hidden implementation.
+        _resume_upstream_hidden._dsv4_pp_resume = True
         prepare_hidden_fn = _resume_upstream_hidden
 
     hidden = forward_layers(

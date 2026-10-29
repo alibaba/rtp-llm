@@ -56,6 +56,8 @@ public:
                                          const PPExecutionResult&                  result,
                                          const std::vector<PPStreamRoundSnapshot>& round_snapshot) const;
 
+    torch::Tensor gatherDraftNextTokenIds(const StreamGroups& stream_groups) const;
+
     torch::Tensor gatherDraftNextPositionIds(const StreamGroups&   stream_groups,
                                              const GptModelInputs& model_input) const;
 

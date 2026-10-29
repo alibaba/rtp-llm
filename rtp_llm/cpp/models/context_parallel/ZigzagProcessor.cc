@@ -183,6 +183,12 @@ void ZigZagProcessor::handleOutputsLastHidden(torch::Tensor&                    
 #if !USING_CUDA
     RTP_LLM_FAIL("Context parallel not supported on ROCm");
 #else
+    if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.numel() == 0) {
+        // All peers received the same empty selection: a KV-only prefill pass
+        // has no output rows to merge and must not launch an empty collective.
+        hidden_states = torch::empty({0, hidden_states.size(1)}, hidden_states.options());
+        return;
+    }
     // Each requested last-token row is owned by exactly one CP rank (zigzag is a
     // bijection on valid positions), so every other rank contributes an all-zero
     // row — an all-reduce-sum reconstructs the gathered rows exactly (no bf16

@@ -153,7 +153,8 @@ private:
                                const torch::Tensor&  new_token_ids,
                                const torch::Tensor&  new_token_lengths,
                                bool                  is_decode,
-                               torch::Tensor*        out_draft_last_hidden = nullptr);
+                               torch::Tensor*        out_draft_last_hidden = nullptr,
+                               const torch::Tensor&  intermediate_chunk_mask = {});
 
     void fillFailedDraftRows(PPExecutionResult& result);
 

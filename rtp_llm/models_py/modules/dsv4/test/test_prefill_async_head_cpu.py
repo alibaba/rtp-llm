@@ -1479,5 +1479,39 @@ def setUpModule():
     setattr(_FP8_PKG, "indexer", _indexer_stub_mod)
 
 
+class ModelOwnedBuilders(unittest.TestCase):
+    def test_identical_geometry_does_not_cross_target_and_draft(self):
+        target, draft = types.SimpleNamespace(), types.SimpleNamespace()
+        target_builder = head_prebuild._builder(target)
+        draft_builder = head_prebuild._builder(draft)
+        self.assertIsNot(target_builder, draft_builder)
+        self.assertIs(target_builder, head_prebuild._builder(target))
+        key = (4, 0, 1024, 4096, (1024,), (4096,), 4096, "cpu")
+        target_bundle = types.SimpleNamespace(event=None)
+        draft_bundle = types.SimpleNamespace(event=None)
+        target_builder.kick(key, lambda: target_bundle)
+        draft_builder.kick(key, lambda: draft_bundle)
+        with patch.dict(os.environ, {"DSV4_PREFILL_ASYNC_HEAD": "1"}), patch.object(
+            head_prebuild, "key_from_forward_inputs", return_value=key
+        ), patch.object(head_prebuild, "_content_matches_recipe", return_value=True):
+            got_draft = head_prebuild.consume_async_head(
+                object(), torch.tensor([4096]), torch.device("cpu"), 4, 0, 1024, owner=draft
+            )
+            got_target = head_prebuild.consume_async_head(
+                object(), torch.tensor([4096]), torch.device("cpu"), 4, 0, 1024, owner=target
+            )
+        self.assertIs(got_draft, draft_bundle)
+        self.assertIs(got_target, target_bundle)
+
+    def test_foreign_same_ratio_bundle_falls_back_before_patch(self):
+        own = types.SimpleNamespace(compress_ratio=0)
+        foreign = types.SimpleNamespace(compress_ratio=0)
+        v4 = types.SimpleNamespace(layers=[types.SimpleNamespace(attn=own)])
+        bundle = types.SimpleNamespace(rep_attns={0: foreign}, meta_by_ratio={0: object()})
+        with patch.object(head_prebuild, "patch_prebuilt_metas") as patch_metas:
+            self.assertFalse(prefill_meta.propagate_prebuilt_prefill_meta_fp8(v4, bundle, None, None, None))
+        patch_metas.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

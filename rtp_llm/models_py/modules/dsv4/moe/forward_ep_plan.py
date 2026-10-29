@@ -161,7 +161,7 @@ class ForwardEpScope:
             if len(counts) != world or any(type(n) is not int or n < 0 for n in counts):
                 raise RuntimeError("invalid authoritative stage row counts")
             if counts[strategy.cfg.ep_rank] != self.local_rows:
-                raise RuntimeError("gathered local count disagrees with this forward")
+                raise RuntimeError(f"gathered local count disagrees with this forward: counts={counts}, rank={strategy.cfg.ep_rank}, expected={self.local_rows}")
             self.plan = ForwardEpPlan(
                 self.epoch,
                 self.model_id,

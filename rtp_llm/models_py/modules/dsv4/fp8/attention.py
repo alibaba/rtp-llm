@@ -5980,6 +5980,8 @@ class AttentionFP8(nn.Module):
         x: torch.Tensor,
         common: PrefillMeta,
         shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        *,
+        kv_only: bool = False,
     ) -> PrefillQKV:
         """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
 
@@ -6025,7 +6027,7 @@ class AttentionFP8(nn.Module):
                     kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
                 )
 
-        qr = compute_qr()
+        qr = x_3d.new_empty((1, 0, self.q_lora_rank)) if kv_only else compute_qr()
         kv = compute_kv()
         kv_full_handle = None
         kv_full_packed = None
@@ -6084,6 +6086,22 @@ class AttentionFP8(nn.Module):
             kv_full_handle=kv_full_handle,
             kv_full_packed=kv_full_packed,
         )
+
+    def forward_prefill_kv_only(
+        self, x: torch.Tensor, positions: torch.Tensor, *, kv_cache=None, block_tables_by_type=None
+    ) -> None:
+        """Populate the single-layer MTP SWA cache without evaluating a query.
+
+        Reuse the normal projection/quantization and CP gather/write path, so
+        skipping Q, attention and the later MoE cannot change persistent KV.
+        """
+        if self.compress_ratio != 0:
+            raise RuntimeError("MTP KV-only prefill requires an SWA-only layer")
+        with bind_attn_cache(self, kv_cache, block_tables_by_type):
+            common = self._prefill_common_setup(x, positions)
+            qkv = self._prefill_compute_qkv(x, common, kv_only=True)
+            qkv = self._ensure_prefill_kv_full(qkv, common)
+            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
     def _materialize_prefill_q(
         self, qkv: PrefillQKV, common: PrefillMeta

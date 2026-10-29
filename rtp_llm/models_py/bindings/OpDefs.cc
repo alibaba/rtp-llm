@@ -242,6 +242,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("dspark_call_phase")     = rtp_llm::DSparkCallPhase::NONE)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
+        .def_readwrite("prefill_kv_only", &PyModelInputs::prefill_kv_only, "Prefill has no requested output rows")
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
         .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
         .def_readwrite("multimodal_inputs", &PyModelInputs::multimodal_inputs, "Multimodal inputs structure")

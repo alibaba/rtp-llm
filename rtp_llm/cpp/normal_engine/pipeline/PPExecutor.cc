@@ -60,6 +60,29 @@ std::string head8Hex(const void* data, int64_t numel) {
     return out;
 }
 
+int64_t intermediateCount(const torch::Tensor& mask) {
+    if (!mask.defined() || mask.numel() == 0) {
+        return 0;
+    }
+    RTP_LLM_CHECK_WITH_INFO(mask.device().is_cpu() && mask.scalar_type() == torch::kBool
+                                && mask.dim() == 1 && mask.is_contiguous(),
+                            "PP intermediate mask must be contiguous CPU bool [requests]");
+    const auto* values = mask.data_ptr<bool>();
+    return std::count(values, values + mask.numel(), true);
+}
+
+torch::Tensor finalPrefillRows(const torch::Tensor& mask) {
+    intermediateCount(mask);  // Validate before host access.
+    std::vector<int64_t> rows;
+    const auto* values = mask.data_ptr<bool>();
+    for (int64_t i = 0; i < mask.numel(); ++i) {
+        if (!values[i]) {
+            rows.push_back(i);
+        }
+    }
+    return torch::tensor(rows, torch::kInt64);
+}
+
 }  // namespace
 
 GenerateStreamPtr PPExecutor::createMinFakePrefillStream(const ModelConfig&                model_config,
@@ -445,7 +468,15 @@ absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
         RTP_LLM_LOG_DEBUG("PP fake batch completed: dp_rank=%ld", parallelism_config_.dp_rank);
         return absl::OkStatus();
     }
-    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result, batch.round_snapshot);
+    const auto dispatch_begin_us = pp_step_log_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+    auto status = batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result, batch.round_snapshot);
+    if (pp_step_log_) {
+        RTP_LLM_LOG_INFO("[PPHANDOFF] rank=%lld streams=%ld dispatch_us=%ld",
+                         static_cast<long long>(parallelism_config_.world_rank),
+                         static_cast<long>(batch.stream_groups.allStreams().size()),
+                         static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() - dispatch_begin_us));
+    }
+    return status;
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
@@ -841,12 +872,25 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
 
     if ((is_dspark_ || (sp_enabled_ && role_type_ == RoleType::PREFILL)) && chunked_prefill_enabled_
         && !plan.is_decode && !stream_groups.empty() && !plan.model_input.is_fake_stream) {
-        RTP_LLM_CHECK_WITH_INFO(streams.size() == 1, "speculative chunked prefill requires one request per CP batch");
-        plan.dspark_intermediate_chunk = streams.front()->isChunkStream();
-        if (plan.dspark_intermediate_chunk) {
-            // Ring/state slots can be overwritten by later chunks. Register the
-            // full target and draft cache only in the final chunk's forward.
-            plan.model_input.request_pd_separation = torch::zeros_like(plan.model_input.request_pd_separation);
+        RTP_LLM_CHECK_WITH_INFO(!is_dspark_ || streams.size() == 1,
+                                "DSpARK chunked prefill requires one request per CP batch");
+        RTP_LLM_CHECK_WITH_INFO(stream_groups.totalModelBatchSize() == streams.size(),
+                                "speculative chunked prefill requires one sequence per request");
+        plan.intermediate_chunk_mask = torch::empty({static_cast<int64_t>(streams.size())},
+                                                    torch::TensorOptions(torch::kBool).pinned_memory(true));
+        int64_t row = 0;
+        for (const auto& stream : streams) {
+            plan.intermediate_chunk_mask.data_ptr<bool>()[row++] = stream->isChunkStream();
+        }
+        // Only final rows may register persistent target/draft state for PD.
+        plan.model_input.request_pd_separation.masked_fill_(plan.intermediate_chunk_mask, false);
+        if (!is_dspark_ && intermediateCount(plan.intermediate_chunk_mask) > 0) {
+            RTP_LLM_CHECK_WITH_INFO(!plan.model_input.need_all_logits,
+                                    "MTP chunked prefill does not support full prompt logits/loss");
+            auto rows = finalPrefillRows(plan.intermediate_chunk_mask);
+            auto indexes = plan.model_input.lm_output_indexes.index_select(
+                0, rows.to(plan.model_input.lm_output_indexes.device()));
+            plan.model_input.lm_output_indexes = indexes.is_cuda() ? indexes : indexes.pin_memory();
         }
     }
 
@@ -869,6 +913,9 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
         plan.output_config = batch_stream_processor_->gatherOutputConfig(stream_groups);
         plan.draft_next_position_ids =
             batch_stream_processor_->gatherDraftNextPositionIds(stream_groups, plan.model_input);
+        if (intermediateCount(plan.intermediate_chunk_mask) > 0 && !is_dspark_) {
+            plan.draft_next_token_ids = batch_stream_processor_->gatherDraftNextTokenIds(stream_groups);
+        }
     }
 
     return plan;
@@ -885,7 +932,9 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan, PPEx
     for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
         const int64_t stream_batch_size = std::max<int32_t>(sampling_plan.num_return_sequences[stream_idx], 1);
 
-        if (result.request_errors[stream_idx].hasError()) {
+        if (result.request_errors[stream_idx].hasError()
+            || (result.new_token_lengths.defined()
+                && result.new_token_lengths.data_ptr<int32_t>()[batch_idx] == 0)) {
             batch_idx += stream_batch_size;
             continue;
         }
@@ -1089,11 +1138,69 @@ void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
     result.request_ids      = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
     result.request_errors.assign(stream_count, ErrorInfo::OkStatus());
     result.prompt_logits.resize(stream_count);
-    if (plan.dspark_intermediate_chunk) {
-        RTP_LLM_CHECK_WITH_INFO(chunked_prefill_enabled_ && !plan.is_decode,
-                                "intermediate commit requires speculative chunked prefill");
-        result.new_token_ids     = torch::empty({stream_count, 0}, torch::kInt32);
+    const auto intermediate_count = intermediateCount(plan.intermediate_chunk_mask);
+    if (intermediate_count > 0) {
+        RTP_LLM_CHECK_WITH_INFO(chunked_prefill_enabled_ && !plan.is_decode
+                                    && plan.intermediate_chunk_mask.numel() == stream_count,
+                                "intermediate rows require a per-request speculative prefill mask");
+        RTP_LLM_CHECK_WITH_INFO(!is_dspark_ || intermediate_count == stream_count,
+                                "DSpARK does not support mixed chunk phases");
+        result.new_token_ids = is_dspark_ ? torch::empty({stream_count, 0}, torch::kInt32) :
+                                           torch::zeros({stream_count, 1}, torch::kInt32);
         result.new_token_lengths = torch::zeros({stream_count}, torch::kInt32);
+        if (intermediate_count == stream_count) {
+            return;
+        }
+        RTP_LLM_CHECK_WITH_INFO(!plan.model_input.need_all_logits,
+                                "mixed MTP chunks do not support full prompt logits/loss");
+        const auto rows = finalPrefillRows(plan.intermediate_chunk_mask);
+        PPExecutionPlan final_plan = plan;
+        final_plan.intermediate_chunk_mask = torch::Tensor();
+        final_plan.sampling_plan = selectPPSamplingRows(plan.sampling_plan, rows);
+        final_plan.output_config.prompt_logits_requests.clear();
+        if (!plan.output_config.prompt_logits_requests.empty()) {
+            for (int64_t i = 0; i < rows.numel(); ++i) {
+                final_plan.output_config.prompt_logits_requests.push_back(
+                    plan.output_config.prompt_logits_requests.at(rows.data_ptr<int64_t>()[i]));
+            }
+        }
+        GptModelOutputs final_output = model_output;
+        if (model_output.logits.size(0) == stream_count) {
+            final_output.logits = model_output.logits.index_select(0, rows.to(model_output.logits.device()));
+            if (model_output.hidden_states.defined()) {
+                final_output.hidden_states = model_output.hidden_states.index_select(
+                    0, rows.to(model_output.hidden_states.device()));
+            }
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(model_output.logits.size(0) == rows.numel(),
+                                    "MTP target logits must contain all rows or only final rows");
+        }
+        PPExecutionResult final_result;
+        sampleTokens(final_plan, final_output, final_result);
+        auto scatter = [&](const torch::Tensor& source) -> torch::Tensor {
+            if (!source.defined()) {
+                return {};
+            }
+            RTP_LLM_CHECK_WITH_INFO(source.dim() > 0 && source.size(0) == rows.numel(),
+                                    "mixed MTP output must have one leading row per final request");
+            auto sizes = source.sizes().vec();
+            sizes[0] = stream_count;
+            auto destination = torch::zeros(sizes, source.options().device(torch::kCPU));
+            destination.index_copy_(0, rows, source.to(torch::kCPU));
+            return destination;
+        };
+        result.new_token_ids = scatter(final_result.new_token_ids);
+        result.new_token_lengths = scatter(final_result.new_token_lengths);
+        result.logits = scatter(final_result.logits);
+        result.softmax_probs = scatter(final_result.softmax_probs);
+        result.cum_log_probs = scatter(final_result.cum_log_probs);
+        result.all_probs = scatter(final_result.all_probs);
+        result.hidden_states = scatter(final_result.hidden_states);
+        for (int64_t i = 0; i < rows.numel(); ++i) {
+            const auto row = rows.data_ptr<int64_t>()[i];
+            result.request_errors[row] = std::move(final_result.request_errors[i]);
+            result.prompt_logits[row] = std::move(final_result.prompt_logits[i]);
+        }
         return;
     }
     if (plan.model_input.is_fake_stream) {
@@ -1178,15 +1285,46 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
                                        const torch::Tensor&  new_token_ids,
                                        const torch::Tensor&  new_token_lengths,
                                        bool                  is_decode,
-                                       torch::Tensor*        out_draft_last_hidden) {
+                                       torch::Tensor*        out_draft_last_hidden,
+                                       const torch::Tensor&  intermediate_chunk_mask) {
     const bool cp_enabled = parallelism_config_.local_cp_enabled();
 
     GptModelInputs draft_input = target_input;
     torch::Tensor  proposed_token_ids;
 
+    /** CP target inputs are already identical on TP peers. Only the tail
+     * token/position changes for MTP, so do not rebroadcast all cache tables. */
+    const bool compact_cp_prefill = cp_enabled && !is_dspark_ && !is_decode;
     /** 1. Prefill draft KV and prepare the first decode input when needed. */
     RTP_LLM_PROFILE_SCOPE("executor.pp.draft_prefill");
-    if (is_dspark_) {
+    if (compact_cp_prefill) {
+        const auto batch_size = target_input.input_lengths.numel();
+        const auto position_count = target_input.combo_position_ids.defined() && target_input.combo_position_ids.numel() > 0 ?
+                                        batch_size * static_cast<int64_t>(position_id_len_factor_) : 0;
+        if (position_count == 0) {
+            draft_input.combo_position_ids = torch::Tensor();
+        }
+        auto tails = torch::empty({batch_size + position_count},
+                                   torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        if (isStageRoot()) {
+            RTP_LLM_CHECK_WITH_INFO(new_token_ids.defined() && new_token_ids.dim() == 2
+                                        && new_token_ids.size(0) == batch_size && new_token_ids.size(1) > 0,
+                                    "CP MTP needs one tail token per request");
+            tails.narrow(0, 0, batch_size).copy_(new_token_ids.select(1, new_token_ids.size(1) - 1));
+            if (position_count > 0) {
+                RTP_LLM_CHECK_WITH_INFO(draft_next_position_ids.defined()
+                                            && draft_next_position_ids.numel() == position_count,
+                                        "CP MTP tail positions do not match request count");
+                tails.narrow(0, batch_size, position_count).copy_(draft_next_position_ids.reshape({-1}));
+            }
+        }
+        if (parallelism_config_.tp_size > 1) {
+            execBroadcastCpu({{tails}, 0});
+        }
+        prepareDraftPrefillAfterTargetPrefill(
+            draft_input, target_hidden_states, tails.narrow(0, 0, batch_size).reshape({batch_size, 1}),
+            position_count > 0 ? tails.narrow(0, batch_size, position_count) : torch::Tensor());
+    } else if (is_dspark_) {
         prepareDSparkCommitInput(draft_input, target_hidden_states);
     } else if (isStageRoot()) {
         if (is_decode) {
@@ -1197,7 +1335,7 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
         }
     }
 
-    if (!is_decode) {
+    if (!is_decode && !compact_cp_prefill) {
         /** CP and DSpARK hidden is rank-local; rebind it after syncing the global inputs. */
         if (cp_enabled || is_dspark_) {
             draft_input.last_hidden_states = torch::Tensor();
@@ -1206,12 +1344,23 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
         if (cp_enabled || is_dspark_) {
             draft_input.last_hidden_states = target_hidden_states;
         }
-    } else if (!is_dspark_) {
+    } else if (is_decode && !is_dspark_) {
         broadcastPostRejectionInputs(draft_input);
     }
 
     /** 2. Draft Prefill. */
     auto draft_prefill_output = forwardDraftModel(draft_input);
+    const auto intermediate_count = intermediateCount(intermediate_chunk_mask);
+    if (intermediate_count > 0) {
+        RTP_LLM_CHECK_WITH_INFO(!is_dspark_ && !is_decode && role_type_ == RoleType::PREFILL
+                                    && intermediate_chunk_mask.numel() == target_input.input_lengths.numel(),
+                                "MTP chunk mask requires one entry per prefill request");
+    }
+    if (intermediate_count > 0 && intermediate_count == intermediate_chunk_mask.numel()) {
+        // KV is now written. Intermediate chunks have no sampled/proposed output.
+        cudaSyncAndCheck();
+        return {};
+    }
     if (!is_dspark_) {
         if (cp_enabled) {
             /** CP returns per-request final hidden; P has no following draft decode. */
@@ -1219,30 +1368,58 @@ torch::Tensor PPExecutor::runDraftStep(const GptModelInputs& target_input,
             // sam/mtp-pp2-20261023: surface the draft's final hidden rows so the
             // PD handoff can ship propose_hidden to the decode peer (its first
             // draft step consumes them; see gate#5 in the cold-start analysis).
-            if (out_draft_last_hidden != nullptr && draft_last_hidden.defined()) {
-                *out_draft_last_hidden = draft_last_hidden;
+            if (isStageRoot() && out_draft_last_hidden != nullptr && draft_last_hidden.defined()) {
+                *out_draft_last_hidden = intermediate_count > 0 ?
+                    draft_last_hidden.masked_fill(intermediate_chunk_mask.to(draft_last_hidden.device()).unsqueeze(1), 0) :
+                    draft_last_hidden;
             }
         } else {
             mtp::maybeOverrideLastHiddenWithMtpBuffer(
                 draft_prefill_output, *draft_model_, draft_input.combo_tokens.numel());
             // sam/mtp-pp2-20261023: non-CP path keeps the draft model output
             // tail rows as the handoff hidden (same content as the MTP buffer).
-            if (out_draft_last_hidden != nullptr && draft_prefill_output.all_hidden_states.defined()
+            if (isStageRoot() && out_draft_last_hidden != nullptr && draft_prefill_output.all_hidden_states.defined()
                 && draft_prefill_output.all_hidden_states.dim() == 2
                 && draft_prefill_output.all_hidden_states.size(0) > 0) {
-                *out_draft_last_hidden = draft_prefill_output.all_hidden_states.narrow(
-                    0, draft_prefill_output.all_hidden_states.size(0) - new_token_ids.numel(),
-                    new_token_ids.numel());
+                torch::Tensor last_hidden;
+                if (role_type_ == RoleType::PREFILL) {
+                    const auto last_rows = draft_input.input_lengths.to(draft_prefill_output.all_hidden_states.device(),
+                                                                        torch::kInt64).cumsum(0) - 1;
+                    last_hidden = draft_prefill_output.all_hidden_states.index_select(0, last_rows);
+                } else {
+                    last_hidden = draft_prefill_output.all_hidden_states.narrow(
+                        0, draft_prefill_output.all_hidden_states.size(0) - new_token_ids.numel(),
+                        new_token_ids.numel());
+                }
+                *out_draft_last_hidden = intermediate_count > 0 ?
+                    last_hidden.masked_fill(intermediate_chunk_mask.to(last_hidden.device()).unsqueeze(1), 0) :
+                    last_hidden;
             }
         }
 
         if (isStageRoot()) {
             /** The PP verifier consumes deterministic proposals without a probability tensor. */
-            auto draft_tokens = fast_topk_sampler_->forward(draft_prefill_output.logits, 1).token_ids.to(torch::kInt32);
+            auto proposal_logits = draft_prefill_output.logits;
+            torch::Tensor final_rows;
+            if (intermediate_count > 0) {
+                final_rows = finalPrefillRows(intermediate_chunk_mask).to(proposal_logits.device());
+                if (proposal_logits.size(0) == intermediate_chunk_mask.numel()) {
+                    proposal_logits = proposal_logits.index_select(0, final_rows);
+                } else {
+                    RTP_LLM_CHECK_WITH_INFO(proposal_logits.size(0) == final_rows.numel(),
+                                            "MTP draft logits must contain all rows or only final rows");
+                }
+            }
+            auto draft_tokens = fast_topk_sampler_->forward(proposal_logits, 1).token_ids.to(torch::kInt32);
 
             if (role_type_ == RoleType::PREFILL) {
                 /** No decode follows, so the sampled tensor already holds the complete proposal. */
-                proposed_token_ids = draft_tokens;
+                if (intermediate_count > 0) {
+                    proposed_token_ids = torch::full({intermediate_chunk_mask.numel(), 1}, -1, draft_tokens.options());
+                    proposed_token_ids.index_copy_(0, final_rows, draft_tokens.reshape({final_rows.numel(), 1}));
+                } else {
+                    proposed_token_ids = draft_tokens;
+                }
             } else {
                 const auto batch_size = new_token_ids.size(0);
                 proposed_token_ids    = torch::empty({batch_size, static_cast<int64_t>(propose_step_)},
@@ -1333,6 +1510,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     RTP_LLM_PROFILE_FUNCTION();
 
     const auto step = step_count_++;
+    const auto process_begin_us = pp_step_log_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     if (pp_step_log_) {
         RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld first=%d last=%d root=%d streams=%ld",
                          static_cast<long long>(parallelism_config_.world_rank),
@@ -1377,11 +1555,25 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         // Non-root PP peers receive an empty plan. Model-input sync alone does
         // not carry these control flags: all TP ranks must agree whether to
         // enter the draft collectives or advance to the next target chunk.
-        auto control = torch::tensor({int64_t(plan.is_decode), int64_t(plan.dspark_intermediate_chunk)},
-                                     torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        const auto phase_rows = sp_enabled_ && chunked_prefill_enabled_ && plan.model_input.input_lengths.defined() ?
+                                    plan.model_input.input_lengths.numel() : 0;
+        auto control = torch::zeros({phase_rows + 2}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        auto* data = control.data_ptr<int64_t>();
+        if (isStageRoot()) {
+            data[0] = plan.is_decode;
+            data[1] = plan.intermediate_chunk_mask.defined() && plan.intermediate_chunk_mask.numel() > 0;
+            if (data[1]) {
+                intermediateCount(plan.intermediate_chunk_mask);
+                RTP_LLM_CHECK_WITH_INFO(plan.intermediate_chunk_mask.numel() == phase_rows,
+                                        "PP chunk mask does not match synchronized request rows");
+                for (int64_t row = 0; row < phase_rows; ++row) {
+                    data[row + 2] = plan.intermediate_chunk_mask.data_ptr<bool>()[row];
+                }
+            }
+        }
         execBroadcastCpu({{control}, 0});
-        plan.is_decode                 = control.data_ptr<int64_t>()[0] != 0;
-        plan.dspark_intermediate_chunk = control.data_ptr<int64_t>()[1] != 0;
+        plan.is_decode = data[0] != 0;
+        plan.intermediate_chunk_mask = data[1] ? control.narrow(0, 2, phase_rows).to(torch::kBool) : torch::Tensor();
     }
 
     releaseAllModelBuffers();
@@ -1402,6 +1594,13 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                          static_cast<long>(step),
                          inflight.skip_run ? 1 : 0,
                          static_cast<long>(current_slot_));
+        if (plan.intermediate_chunk_mask.defined() && !inflight.skip_run) {
+            const auto mid = intermediateCount(plan.intermediate_chunk_mask);
+            RTP_LLM_LOG_INFO("[PPPHASE] rank=%lld step=%ld rows=%ld intermediate=%ld final=%ld",
+                             static_cast<long long>(parallelism_config_.world_rank), static_cast<long>(step),
+                             static_cast<long>(plan.intermediate_chunk_mask.numel()), static_cast<long>(mid),
+                             static_cast<long>(plan.intermediate_chunk_mask.numel() - mid));
+        }
     }
     if (isFirstStage() && isStageRoot()) {
         inflight.stream_groups    = std::move(scheduled_stream_groups);
@@ -1455,6 +1654,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             profile_step_start_();
         }
 
+        // Host-wall intervals only: retain the production stream/sync behavior.
+        // Exclude the incoming plan/activation wait from stage service time.
+        const auto pass_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
+        int64_t target_us = 0, draft_us = 0, sampling_us = 0, pd_publish_us = 0, handoff_us = 0;
         GptModelInputs& local_model_input = plan.model_input;
         if (cache_manager_) {
             cache_manager_->zeroBlocks(local_model_input.kv_cache_blocks_to_zero);
@@ -1476,8 +1679,9 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         const bool    cp_enabled = parallelism_config_.local_cp_enabled();
         torch::Tensor saved_input_lengths;
-        if (cp_enabled && !plan.is_decode && isLastStage() && isStageRoot()) {
-            /** CP mutates CPU lengths; preserve the last stage root's global input. */
+        if (cp_enabled && !plan.is_decode && isLastStage()) {
+            /** CP mutates CPU lengths. Preserve global rows on every peer so
+             * the following MTP prefill can reuse the synchronized inputs. */
             saved_input_lengths = torch::empty(local_model_input.input_lengths.sizes(),
                                                torch::TensorOptions(torch::kInt32).pinned_memory(true));
             saved_input_lengths.copy_(local_model_input.input_lengths);
@@ -1489,6 +1693,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             && local_model_input.input_lengths.defined()) {
             pd_global_input_lengths = local_model_input.input_lengths.to(torch::kCPU).to(torch::kInt32).clone();
         }
+        const auto target_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
         auto model_output = model_->forwardPP(
             local_model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
         if (saved_input_lengths.defined()) {
@@ -1501,7 +1706,11 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             // only runs on the first-stage root. Publish this rank's stage-local blocks
             // from the plan data (identical on every rank), so the decode side can load
             // every stage's layers.
+            const auto publish_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             publishPdPlanRequests(plan.model_input, pd_global_input_lengths);
+            if (obj_log_active_) {
+                pd_publish_us = autil::TimeUtility::currentTimeInMicroSeconds() - publish_begin_us;
+            }
         }
 
         if (expert_balancer_) {
@@ -1522,8 +1731,23 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             cudaDeviceSynchronize();
         }
 
+        if (obj_log_active_) {
+            // Publication was historically included in PPTARGET. Account for
+            // it separately here without moving it relative to GPU execution.
+            target_us = autil::TimeUtility::currentTimeInMicroSeconds() - target_begin_us - pd_publish_us;
+        }
+        if (obj_log_active_ && isStageRoot()) {
+            RTP_LLM_LOG_INFO("[PPTARGET] rank=%lld step=%ld rows=%ld elapsed_us=%ld",
+                             static_cast<long long>(parallelism_config_.world_rank), static_cast<long>(step),
+                             static_cast<long>(local_model_input.input_lengths.numel()),
+                             static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() - target_begin_us));
+        }
         if (!isLastStage()) {
+            const auto handoff_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             asyncSendTensors(output_tensors, inflight.activation_sends);
+            if (obj_log_active_) {
+                handoff_us += autil::TimeUtility::currentTimeInMicroSeconds() - handoff_begin_us;
+            }
             // Chunked prefill: release fastgen context streams as soon as the chunk
             // has left stage 0 so the pipeline fills. Re-scheduling is gated by
             // pp_outstanding_results_ in PPScheduler (the final chunk must not
@@ -1538,17 +1762,24 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             }
         } else {
             PPExecutionResult execution_result;
+            const auto sampling_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             if (isStageRoot()) {
                 sampleTokens(plan, model_output, execution_result);
-                if (sp_enabled_ && !plan.dspark_intermediate_chunk) {
+                if (sp_enabled_ && (!is_dspark_ || intermediateCount(plan.intermediate_chunk_mask) == 0)) {
                     if (!plan.model_input.is_fake_stream) {
                         clipNewTokenLengths(plan.sampling_plan, execution_result);
                     }
                     fillFailedDraftRows(execution_result);
+                    if (plan.intermediate_chunk_mask.defined()) {
+                        execution_result.new_token_lengths.masked_fill_(plan.intermediate_chunk_mask, 0);
+                    }
                 }
             }
 
-            if (sp_enabled_ && (is_dspark_ || !plan.dspark_intermediate_chunk)) {
+            if (obj_log_active_) {
+                sampling_us = autil::TimeUtility::currentTimeInMicroSeconds() - sampling_begin_us;
+            }
+            if (sp_enabled_) {
                 mtp::maybeOverrideLastHiddenWithMtpBuffer(
                     model_output, *model_, cp_enabled ? -1 : plan.model_input.combo_tokens.numel());
 
@@ -1556,26 +1787,63 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 // sam/mtp-pp2-20261023: also capture the draft's final hidden
                 // into the PP result so the handoff can ship propose_hidden.
                 torch::Tensor draft_last_hidden;
+                const auto draft_mask = !is_dspark_ ? plan.intermediate_chunk_mask : torch::Tensor();
+                auto draft_tail_tokens = execution_result.new_token_ids;
+                if (isStageRoot() && intermediateCount(draft_mask) > 0) {
+                    RTP_LLM_CHECK_WITH_INFO(plan.draft_next_token_ids.defined()
+                                                && plan.draft_next_token_ids.sizes() == execution_result.new_token_ids.sizes(),
+                                            "MTP lookahead and sampled tails must have one row per request");
+                    draft_tail_tokens = torch::where(draft_mask.unsqueeze(1), plan.draft_next_token_ids,
+                                                      execution_result.new_token_ids);
+                }
+                const auto draft_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
                 execution_result.propose_token_ids = runDraftStep(plan.model_input,
                                                                   plan.draft_next_position_ids,
                                                                   model_output.all_hidden_states,
-                                                                  execution_result.new_token_ids,
+                                                                  draft_tail_tokens,
                                                                   execution_result.new_token_lengths,
                                                                   plan.model_input.is_target_verify,
-                                                                  &draft_last_hidden);
+                                                                  &draft_last_hidden,
+                                                                  draft_mask);
+                if (obj_log_active_) {
+                    draft_us = autil::TimeUtility::currentTimeInMicroSeconds() - draft_begin_us;
+                }
+                if (obj_log_active_ && isStageRoot()) {
+                    RTP_LLM_LOG_INFO("[PPDRAFT] rank=%lld step=%ld rows=%ld elapsed_us=%ld",
+                                     static_cast<long long>(parallelism_config_.world_rank), static_cast<long>(step),
+                                     static_cast<long>(plan.model_input.input_lengths.numel()),
+                                     static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() - draft_begin_us));
+                }
                 if (draft_last_hidden.defined() && !plan.output_config.return_hidden_states) {
                     execution_result.hidden_states = draft_last_hidden.to(torch::kCPU).contiguous();
                 }
             }
 
+            const auto handoff_begin_us = obj_log_active_ ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
             if (isStageRoot()) {
-                if (!plan.model_input.is_fake_stream && !plan.dspark_intermediate_chunk) {
+                if (!plan.model_input.is_fake_stream
+                    && (!is_dspark_ || intermediateCount(plan.intermediate_chunk_mask) == 0)) {
                     advanceSamplingStates(plan.sampling_plan, execution_result);
                 }
                 asyncSendExecutionResult(execution_result, inflight.execution_result_sends);
             }
+            if (obj_log_active_) {
+                handoff_us += autil::TimeUtility::currentTimeInMicroSeconds() - handoff_begin_us;
+            }
         }
 
+        if (obj_log_active_ && isStageRoot()) {
+            const auto done_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld streams=%ld phase=done begin_us=%ld done_us=%ld "
+                             "wall_us=%ld process_us=%ld target_us=%ld draft_us=%ld sampling_us=%ld "
+                             "pd_publish_us=%ld handoff_us=%ld",
+                             static_cast<long long>(parallelism_config_.world_rank), static_cast<long>(step),
+                             static_cast<long>(plan.model_input.input_lengths.numel()),
+                             static_cast<long>(pass_begin_us), static_cast<long>(done_us),
+                             static_cast<long>(done_us - pass_begin_us), static_cast<long>(done_us - process_begin_us),
+                             static_cast<long>(target_us), static_cast<long>(draft_us), static_cast<long>(sampling_us),
+                             static_cast<long>(pd_publish_us), static_cast<long>(handoff_us));
+        }
         if (profile_step_finish_) {
             profile_step_finish_();
         }

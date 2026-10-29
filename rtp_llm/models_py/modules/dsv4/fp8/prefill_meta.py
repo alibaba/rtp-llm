@@ -160,6 +160,15 @@ def propagate_prebuilt_prefill_meta_fp8(
     """
     from rtp_llm.models_py.modules.dsv4.fp8 import _head_prebuild
 
+    expected_reps = {}
+    for layer in v4.layers:
+        attn = getattr(layer, "attn", None)
+        if attn is not None:
+            expected_reps.setdefault(int(attn.compress_ratio), attn)
+    if any(bundle.rep_attns.get(ratio) is not attn for ratio, attn in expected_reps.items()):
+        # A geometrically identical target/draft chunk is not the same model.
+        # Reject foreign/incomplete bundles before mutating their cache fields.
+        return False
     try:
         _head_prebuild.patch_prebuilt_metas(bundle, kv_cache, block_tables_by_type)
     except Exception:

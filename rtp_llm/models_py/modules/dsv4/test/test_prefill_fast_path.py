@@ -266,6 +266,39 @@ class PrefillFastPathTest(unittest.TestCase):
                 )
             )
 
+    def test_approved_mtp_hidden_fusion_uses_native_fast_stack(self):
+        class Owner:
+            _prefill_fast_hidden_compatible = True
+
+            def prepare(self, **kwargs):
+                return None
+
+        v4 = _FakeV4()
+        prepare = Owner().prepare
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(prefill_forward._fwd_dbg, "enabled", lambda: False):
+            self.assertTrue(prefill_forward._prefill_fast_path_enabled(v4, prepare))
+        with patch.dict(prefill_forward.os.environ, {"DSV4_MTP_PREFILL_FAST_PATH": "0"}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(prefill_forward._fwd_dbg, "enabled", lambda: False):
+            self.assertFalse(prefill_forward._prefill_fast_path_enabled(v4, prepare))
+
+    def test_known_pp_resume_is_fast_eligible_and_can_be_disabled(self):
+        def resume(**kwargs):
+            return None
+
+        resume._dsv4_pp_resume = True
+        v4 = _FakeV4()
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(prefill_forward._fwd_dbg, "enabled", lambda: False):
+            self.assertTrue(prefill_forward._prefill_fast_path_enabled(v4, resume))
+        with patch.dict(prefill_forward.os.environ, {"DSV4_PP_RESUME_PREFILL_FAST_PATH": "0"}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(prefill_forward._fwd_dbg, "enabled", lambda: False):
+            self.assertFalse(prefill_forward._prefill_fast_path_enabled(v4, resume))
+
     def test_fast_path_fails_closed_for_unsupported_contexts(self):
         class FakeBlock(Block):
             pass
