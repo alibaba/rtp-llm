@@ -5,9 +5,12 @@ from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.kernels.cuda.sm120_ipc_allreduce import get_communicator
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
     get_primary_attention_inputs,
@@ -69,7 +72,6 @@ from rtp_llm.utils.swizzle_utils import (
     should_swizzle_linear_attn_ba,
 )
 from rtp_llm.utils.util import to_torch_dtype
-from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -854,9 +856,17 @@ class Qwen3NextAttention(CausalAttention):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         qkv, gate = self._project_qkv_gate(hidden_states)
-        return super().forward(hidden_states, fmha_impl, kv_cache, gate=gate, qkv=qkv)
+        return super().forward(
+            hidden_states,
+            fmha_impl,
+            kv_cache,
+            gate=gate,
+            qkv=qkv,
+            skip_allreduce=skip_allreduce,
+        )
 
 
 class Qwen3NextGatedDeltaNet(nn.Module):
@@ -1215,6 +1225,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
+        skip_allreduce: bool = False,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
@@ -1300,7 +1311,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
             projected = self.out_proj(attn_output.reshape(-1, width))
         attn_output = projected
-        if self.parallelism_config.get_attn_tp_size() > 1:
+        if not skip_allreduce and self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output
 
@@ -1370,6 +1381,16 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
+        self._fused_ar_norm = (
+            os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+            and config.moe_style == 0
+            and self.mlp.is_gated
+            and parallelism_config.get_attn_tp_size() == 2
+            and getattr(self.mlp.up_proj, "forward_with_residual_norm", None)
+            is not None
+            and (self.mlp.up_proj.hidden_size, self.mlp.up_proj.output_size)
+            == (5120, 17408)
+        )
 
     def forward(
         self,
@@ -1382,17 +1403,39 @@ class Qwen3NextDecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        communicator = get_communicator() if self._fused_ar_norm else None
+        defer_allreduce = (
+            communicator is not None
+            and communicator.is_supported(hidden_states)
+            and (hidden_states.shape[0] == 5 or 17 <= hidden_states.shape[0] <= 512)
+            and not attn_meta.is_cp_linear_attn
+        )
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
+            skip_allreduce=defer_allreduce,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-
-        hidden_states = self.mlp(hidden_states)
+        fused_mlp = getattr(self.mlp, "forward_with_residual_norm", None)
+        fused = (
+            fused_mlp(
+                hidden_states, residual, self.post_attention_layernorm, communicator
+            )
+            if defer_allreduce and fused_mlp is not None
+            else None
+        )
+        if fused is None:
+            if defer_allreduce:
+                hidden_states = all_reduce(hidden_states, group=Group.TP)
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+            hidden_states = self.mlp(hidden_states)
+        else:
+            hidden_states, residual = fused
 
         return hidden_states, residual
 

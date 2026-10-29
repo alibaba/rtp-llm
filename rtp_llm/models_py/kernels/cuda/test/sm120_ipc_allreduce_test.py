@@ -9,9 +9,81 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
+
+
+def _check_fused_norm(comm, rank, cycle):
+    from flashinfer import fp4_quantize
+
+    from rtp_llm.models_py.kernels.cuda import modelopt_fp4_quant as quant
+    from rtp_llm.models_py.modules.base import RMSResNorm
+
+    torch.manual_seed(1548)
+    gamma = (torch.randn(5120, device="cuda") * 0.1 + 1).bfloat16()
+    norm = RMSResNorm(gamma)
+    rows = []
+    with patch.object(quant, "_FUSED_PRODUCER_ENABLED", True):
+        for m in [5, 17, 20, 40, 71, 257, 512]:
+            torch.manual_seed(1548 + rank + m)
+            partials = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)
+            residual = torch.randn_like(partials)
+            if cycle and m == 5:
+                partials.zero_()
+                residual.mul_(1.0e-20)
+            x, r = partials.clone(), residual.clone()
+            scale = torch.tensor([32.0], device="cuda")
+            i = torch.arange(m, device="cuda")[:, None]
+            j = torch.arange(320, device="cuda")[None, :]
+            offsets = (
+                (i // 128) * (80 * 512)
+                + (j // 4) * 512
+                + (i % 32) * 16
+                + ((i % 128) // 32) * 4
+                + j % 4
+            )
+
+            def reference():
+                expected_x, expected_r = partials.clone(), residual.clone()
+                dist.all_reduce(expected_x)
+                norm(expected_x, expected_r)
+                q, sf = fp4_quantize(expected_x, scale)
+                return expected_x, expected_r, q, sf
+
+            def call():
+                x.copy_(partials)
+                r.copy_(residual)
+                return quant.residual_norm_fp4_quant(x, r, gamma, scale, 1e-6, comm)
+
+            def check(actual, expected):
+                ex, er, eq, es = expected
+                aq, ass = actual
+                assert torch.equal(x.view(torch.uint16), ex.view(torch.uint16))
+                assert torch.equal(r.view(torch.uint16), er.view(torch.uint16))
+                assert torch.equal(aq, eq)
+                assert torch.equal(ass.flatten()[offsets], es.flatten()[offsets])
+
+            expected = reference()
+            check(call(), expected)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = call()
+            for _ in range(10):
+                graph.replay()
+            torch.cuda.synchronize()
+            check(actual, expected)
+            partials.normal_()
+            residual.normal_()
+            scale.fill_(3.7)
+            expected = reference()
+            graph.replay()
+            torch.cuda.synchronize()
+            check(actual, expected)
+            graph.reset()
+            rows.append(dict(cycle=cycle, m=m, bit_exact=True, graph_update=True))
+    return rows
 
 
 def _worker(rank, port, result_directory):
@@ -32,6 +104,7 @@ def _worker(rank, port, result_directory):
     ct._parallelism_config = SimpleNamespace(tp_size=2, dp_size=1, world_size=2)
     ct._initialized = True
     rows = []
+    fused_norm_rows = []
     try:
         for cycle in range(2):
             comm = ipc.Sm120IpcAllReduce(dist.group.WORLD)
@@ -71,6 +144,7 @@ def _worker(rank, port, result_directory):
                         "graph_update": True,
                     }
                 )
+            fused_norm_rows.extend(_check_fused_norm(comm, rank, cycle))
             # Every finite BF16 bit pattern participates in TP2 sums, including subnormals.
             bits = (
                 torch.arange(65536, device="cuda", dtype=torch.int32)
@@ -100,6 +174,7 @@ def _worker(rank, port, result_directory):
             "finite_bf16_patterns": len(finite),
             "lifecycle_cycles": 2,
             "fallbacks": True,
+            "fused_norm_rows": fused_norm_rows,
         }
     except Exception as error:
         traceback.print_exc()
@@ -163,6 +238,7 @@ class Sm120IpcAllReduceTest(unittest.TestCase):
                     )
                     self.assertTrue(result["passed"], result)
                     self.assertEqual(len(result["rows"]), 24)
+                    self.assertEqual(len(result["fused_norm_rows"]), 14)
             finally:
                 for process in processes:
                     if process.is_alive():

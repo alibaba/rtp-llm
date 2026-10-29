@@ -145,7 +145,7 @@ py_library(
         "kernels/*.py",
         "kernels/**/*.py",
     ]),
-    data = ["kernels/cuda/sm120_ipc_allreduce.cu"],
+    data = ["kernels/cuda/sm120_ipc_allreduce.cu", "kernels/cuda/modelopt_norm_fp4_quant.cu"],
     visibility = ["//rtp_llm/models_py/distributed:__pkg__"],
 )
 

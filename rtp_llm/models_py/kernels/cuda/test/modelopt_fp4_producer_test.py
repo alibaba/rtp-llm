@@ -1,10 +1,12 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
-import rtp_llm.models_py.kernels.cuda.modelopt_fp4_quant as quant
 import torch
 from flashinfer import fp4_quantize
+
+import rtp_llm.models_py.kernels.cuda.modelopt_fp4_quant as quant
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
@@ -121,6 +123,28 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
         x = torch.empty(rows, width, device="cuda", dtype=torch.bfloat16)
         scale = torch.ones(1, device="cuda", dtype=torch.float32)
         self.assertIsNone(quant.silu_fp4_quant(x, scale, self.mask))
+
+    def test_ar_norm_unsupported_inputs_preserve_tensors(self):
+        x = torch.randn(5, 5120, device="cuda", dtype=torch.bfloat16)
+        r = torch.randn_like(x)
+        gamma = torch.ones(5120, device="cuda", dtype=torch.bfloat16)
+        scale = torch.ones(1, device="cuda")
+        proxy = SimpleNamespace(is_supported=lambda tensor: True)
+        before_x, before_r = x.clone(), r.clone()
+        self.assertIsNone(quant.residual_norm_fp4_quant(x, r, gamma, scale, 1e-6))
+        for bad in (x.float(), x[:0], x[:1], x[:3], x[:, ::2]):
+            self.assertIsNone(
+                quant.residual_norm_fp4_quant(bad, r, gamma, scale, 1e-6, proxy)
+            )
+        self.assertIsNone(
+            quant.residual_norm_fp4_quant(x, x, gamma, scale, 1e-6, proxy)
+        )
+        with patch.object(quant, "_FUSED_PRODUCER_ENABLED", False):
+            self.assertIsNone(
+                quant.residual_norm_fp4_quant(x, r, gamma, scale, 1e-6, proxy)
+            )
+        self.assertTrue(torch.equal(x, before_x))
+        self.assertTrue(torch.equal(r, before_r))
 
     def test_up_projection_matches_cutlass(self):
         k, n = 5120, 17408

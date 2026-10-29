@@ -5,13 +5,18 @@ import os
 from typing import Optional
 
 import torch
+
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
 
 from flashinfer import fp4_quantize, mm_fp4
+
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
-from rtp_llm.models_py.kernels.cuda.modelopt_fp4_quant import silu_fp4_quant
+from rtp_llm.models_py.kernels.cuda.modelopt_fp4_quant import (
+    residual_norm_fp4_quant,
+    silu_fp4_quant,
+)
 from rtp_llm.models_py.utils.arch import get_sm
 from rtp_llm.ops import HWKernelConfig
 
@@ -138,6 +143,21 @@ class CudaFp4GEMMLinear(LinearBase):
         if quantized is None:
             return None
         return self._forward_quantized(*quantized, gate_up.shape[0], gate_up.dtype)
+
+    def forward_with_residual_norm(self, input, residual, norm, communicator=None):
+        if (self.hidden_size, self.output_size) != (5120, 17408):
+            return None
+        quantized = residual_norm_fp4_quant(
+            input,
+            residual,
+            norm.weight,
+            self.input_scale_inv,
+            norm.variance_epsilon,
+            communicator,
+        )
+        if quantized is None:
+            return None
+        return self._forward_quantized(*quantized, input.shape[0], input.dtype)
 
     def _forward_quantized(
         self, input_fp4, input_scale_interleaved, input_m, output_dtype
