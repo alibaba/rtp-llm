@@ -38,6 +38,11 @@ D→P writeback：
 正向传输关系到当前请求取得 KV、开始 Decode；writeback 在 Decode 结束后触发，主要服务后续请求。
 因此，“写回成功”和“下一轮真的命中”是两个不同结论，必须分别观察。
 
+Decode 本地缓存复用与 writeback 是独立开关：`reuse_cache=0` 或关闭本地 DEVICE 缓存入库，
+不应阻止启用 `p2p_writeback_enable` 的 Decode 写回。写回仍要求请求成功结束、非假请求、非 beam search，
+并通过路由、完整 KV 块和资源预留等校验；异步发送完成前单独保留源 KV 引用，不需要先将其放入本地复用缓存。
+Prefill 端能否在后续请求中命中，仍取决于 Prefill 自己的缓存配置和请求前缀。
+
 ## 2. P→D 正向是怎么做的
 
 正向不是只有一条“传输耗时”，而是使用 **scheduler 汇总 + 调度阶段 + worker 执行阶段 + 底层传输**。

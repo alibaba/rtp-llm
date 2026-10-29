@@ -376,7 +376,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+        const bool finished_successfully =
+            !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED;
+        if (reuseCache() && finished_successfully) {
             const Tier target_tier = storeTarget();
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),
@@ -386,18 +388,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};
                 insert_info.account_for_prefill = resource_context_.role_type == RoleType::PREFILL;
-                size_t resident_prefix_length = 0;
+                size_t resident_prefix_length   = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
-                if (target_tier == Tier::DEVICE && resource_context_.cache_manager->writebackEnabled()
-                    && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
-                    MetaImpl meta(false, false, "");
-                    meta.fillRoutingContext(stream_);
-                    resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
-                                                                     stream_->completeTokenIdsPtr(),
-                                                                     stream_->inputLength(),
-                                                                     stream_->writebackKVReadyTokenCount(),
-                                                                     meta);
-                }
             }
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
@@ -405,6 +397,17 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               reuseCache(),
                               stream_->hasErrorWithoutLock(),
                               StreamStateToString(stream_->getStatus()).c_str());
+        }
+
+        if (finished_successfully && resource_context_.cache_manager->writebackEnabled() && !stream_->isFakeStream()
+            && !stream_->hasNumBeams()) {
+            MetaImpl meta(false, false, "");
+            meta.fillRoutingContext(stream_);
+            resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
+                                                            stream_->completeTokenIdsPtr(),
+                                                            stream_->inputLength(),
+                                                            stream_->writebackKVReadyTokenCount(),
+                                                            meta);
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};

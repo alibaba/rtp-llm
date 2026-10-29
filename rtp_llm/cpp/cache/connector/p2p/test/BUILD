@@ -136,6 +136,7 @@ cc_test(
 cc_test(
     name = "decode_writeback_integration_test",
     srcs = ["DecodeWritebackIntegrationTest.cc", "main.cc"],
+    linkstatic = True,
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
@@ -144,7 +145,10 @@ cc_test(
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
     ] + device_impl_target(),
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
