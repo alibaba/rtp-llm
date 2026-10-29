@@ -58,6 +58,21 @@ class _GenerationOnlyAttentionImpl(_SafeAttentionImpl):
 
 
 class AttentionFactoryGenerationPrefillCudaGraphTest(unittest.TestCase):
+    def test_model_backend_registration_is_explicit_and_cannot_replace_an_owner(self):
+        factory = attn_factory.AttnImplFactory
+        with patch.object(
+            factory, "FMHA_IMPL_REGISTRY", dict(factory.FMHA_IMPL_REGISTRY)
+        ):
+            backend = lambda *args, **kwargs: None
+            factory.register_fmha_impl("test_model_backend", backend)
+            factory.register_fmha_impl("test_model_backend", backend)
+            self.assertIs(factory.get_fmha_impl_method("test_model_backend"), backend)
+            with self.assertRaisesRegex(ValueError, "already registered"):
+                factory.register_fmha_impl("test_model_backend", lambda: None)
+            factory.FMHA_IMPL_REGISTRY.pop("sparse_gqa", None)
+            with self.assertRaisesRegex(ValueError, "Unsupported attention type"):
+                factory.get_fmha_impl_method("sparse_gqa")
+
     def setUp(self):
         self.attn_configs = types.SimpleNamespace(
             rope_config=types.SimpleNamespace(style=None),

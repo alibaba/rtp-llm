@@ -77,20 +77,25 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         self.tp_size = pc.get_ffn_tp_size() if pc is not None else 1
         self.tp_rank = pc.get_ffn_tp_rank() if pc is not None else 0
         self.sm120_prefill = None
-        library = os.getenv("QWEN4_MOE_SM120_LIBRARY")
+        backend_config = getattr(config.model_config, "quant_config", None)
+        library = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY") or getattr(
+            backend_config, "prefill_library", None
+        )
+        library_sha256 = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY_SHA256") or getattr(
+            backend_config, "prefill_library_sha256", None
+        )
         if (
             library
-            and getattr(config.model_config, "enable_qwen4_qsa", False)
             and self.w1.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(self.w1.device) == (12, 0)
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.moe.sm120_prefill import (
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_nvfp4_prefill import (
                 Sm120PrefillMoE,
             )
 
             self.sm120_prefill = Sm120PrefillMoE(
-                library, os.environ["QWEN4_MOE_SM120_LIBRARY_SHA256"], self.w1.device
+                library, library_sha256, self.w1.device
             )
 
     @property

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/model_rpc/LinearTpCacheLayout.h"
+#include "rtp_llm/cpp/cache/LinearTpCacheLayout.h"
 
 namespace rtp_llm {
 
@@ -20,7 +20,7 @@ mhaTpCacheSlices(size_t k_bytes, size_t v_bytes, size_t destination_heads, size_
     return {{0, head_id * source_k, source_k}, {source_k, k_bytes + head_id * source_v, source_v}};
 }
 
-// Qwen's GQA weight split assigns one logical KV head to each contiguous
+// Contiguous GQA weight splits assign one logical KV head to each contiguous
 // producer-rank group. Select its first rank, leaving replicas untouched.
 inline bool mhaTpPeerOwnsHead(size_t peers, size_t heads, size_t peer) {
     if (peers == 0 || heads == 0 || peers % heads || peer >= peers) {

@@ -9,12 +9,10 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quan
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
-from rtp_llm.models_py.modules.qwen4_exp.prefill_silu_quant_triton import (
-    try_silu_mul_quant,
-)
+from rtp_llm.models_py.triton_kernels.common.silu_fp8_quant import try_silu_mul_quant
 from rtp_llm.ops import ActivationType
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.prefill_silu_quant_triton"
+MODULE = "rtp_llm.models_py.triton_kernels.common.silu_fp8_quant"
 
 
 class PrefillSiluQuantTest(unittest.TestCase):

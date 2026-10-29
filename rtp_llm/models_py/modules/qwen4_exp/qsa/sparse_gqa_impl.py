@@ -23,12 +23,19 @@ target verification and bounded draft prefill support CUDA Graph. Layout and
 publication preflights complete before either side or main-cache writes.
 """
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
+
+from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
+from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    AttentionImpl,
+    AttnImplFactory,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.ops.fused_rope_kvcache_op import (
     FusedRopeKVCacheDecodeOp,
@@ -786,3 +793,44 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 request_output.transpose(1, 2).reshape(query_len, self.q_width)
             )
         return torch.cat(outputs, dim=0)
+
+
+def create_sparse_gqa_impl(
+    attn_configs: AttentionConfigs,
+    weight: ModelWeights,
+    attn_inputs: PyAttentionInputs,
+    fmha_config: Optional[FMHAConfig] = None,
+    quant_config: Optional[object] = None,
+    is_cuda_graph: bool = False,
+    max_seq_len: int = 0,
+    parallelism_config: Optional[ParallelismConfig] = None,
+    cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
+) -> AttentionImpl:
+    """Factory entry for the sparse GQA family (qwen4 prefill and decode).
+
+    The model-owned backend is registered only when its implementation loads.
+    """
+    selection_mode = (
+        CudaGraphSelectionMode(cuda_graph_selection_mode)
+        if cuda_graph_selection_mode is not None
+        else (
+            CudaGraphSelectionMode.DECODE_GRAPH
+            if is_cuda_graph
+            else CudaGraphSelectionMode.EAGER
+        )
+    )
+    if (
+        selection_mode != CudaGraphSelectionMode.EAGER
+        and selection_mode != CudaGraphSelectionMode.DECODE_GRAPH
+    ):
+        raise RuntimeError(
+            "qwen4_exp sparse GQA requires decode/target or opted-in draft CUDA Graph "
+            f"(selection mode: {selection_mode.value}, "
+            f"prefill={attn_inputs.is_prefill}, "
+            f"target_verify={attn_inputs.is_target_verify})"
+        )
+    attn_inputs.is_cuda_graph = is_cuda_graph
+    return SparseGqaFmhaImpl(attn_configs, attn_inputs, parallelism_config)
+
+
+AttnImplFactory.register_fmha_impl("sparse_gqa", create_sparse_gqa_impl)

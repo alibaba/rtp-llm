@@ -1039,6 +1039,12 @@ class OpaqueBlockEntryCountMode:
     KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]
     STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]
 
+class TpCacheTransferMode:
+    LEGACY: typing.ClassVar[TpCacheTransferMode]
+    REPLICATED: typing.ClassVar[TpCacheTransferMode]
+    MHA_HEADS: typing.ClassVar[TpCacheTransferMode]
+    LINEAR_QKV: typing.ClassVar[TpCacheTransferMode]
+
 class CpPrefillSliceLayout:
     NONE: typing.ClassVar[CpPrefillSliceLayout]
     PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
@@ -1072,6 +1078,7 @@ class CacheCpPolicyDesc:
     def __init__(self) -> None: ...
 
 class KVCacheSpecDesc:
+    tp_transfer_mode: TpCacheTransferMode
     tag: str
     cache_type: KVCacheSpecType
     dtype: DataType

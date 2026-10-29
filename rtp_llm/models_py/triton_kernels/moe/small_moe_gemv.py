@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental BF16 small-token MoE for Qwen4 on SM120.
+"""BF16 small-token MoE for E512/K2560/inter80/top10 on SM120.
 
 The up GEMV preserves the intermediate BF16 rounding before SiLU.
 Down GEMV applies router weights before BF16 rounding; top-k reduction

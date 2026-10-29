@@ -19,6 +19,7 @@ from rtp_llm.ops import (
     HybridAttentionType,
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
+    TpCacheTransferMode,
 )
 
 _HC = 4
@@ -46,6 +47,35 @@ def _config(num_layers=8, interval=4):
 
 
 class FixedLinearCapacityTest(unittest.TestCase):
+    def test_transfer_layouts_and_pickle_follow_region_format(self):
+        layers = build_qwen4_exp_kv_cache_spec_descs(
+            _config(), [1], _PLE_KERNEL, _NGRAM, 128, 4
+        )
+        expected = {
+            KVCacheSpecType.LINEAR: TpCacheTransferMode.LINEAR_QKV,
+            KVCacheSpecType.MHA: TpCacheTransferMode.MHA_HEADS,
+            KVCacheSpecType.OPAQUE_KV: TpCacheTransferMode.REPLICATED,
+            KVCacheSpecType.OPAQUE_STATE: TpCacheTransferMode.REPLICATED,
+        }
+        for layer in layers:
+            for desc in layer:
+                desc.tag = "renamed_" + desc.tag
+                restored = pickle.loads(pickle.dumps(desc))
+                self.assertEqual(restored.tp_transfer_mode, expected[desc.cache_type])
+                self.assertEqual(restored.tag, desc.tag)
+
+    def test_legacy_descriptor_pickle_defaults_to_legacy_transfer(self):
+        layers = build_qwen4_exp_kv_cache_spec_descs(
+            _config(), [1], _PLE_KERNEL, _NGRAM, 128, 4
+        )
+        desc = layers[0][0]
+        state = desc.__getstate__()
+        self.assertEqual(len(state), 21)
+        restored = type(desc).__new__(type(desc))
+        restored.__setstate__(state[:20])
+        self.assertEqual(restored.tag, desc.tag)
+        self.assertEqual(restored.tp_transfer_mode, TpCacheTransferMode.LEGACY)
+
     def test_common_planner_owns_linear_capacity_and_native_pickle_preserves_budget(
         self,
     ):

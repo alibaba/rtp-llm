@@ -317,7 +317,7 @@ def _select_attention_impl_key(
     """Route to the attention implementation family.
 
     * ``mla`` -- MLA models (DSv4, GLM5.3, ...).
-    * ``sparse_gqa`` -- isolated sparse GQA bridge for qwen4.
+    * ``sparse_gqa`` -- model-registered sparse GQA backend.
       Opt-in via ``attn_configs.use_sparse_gqa_fmha``: the sparse impl needs
       the indexer's ``selected_indices``, which the production attention ABI
       does not carry yet. The same implementation owns prefill and paged
@@ -332,43 +332,6 @@ def _select_attention_impl_key(
     return "mha"
 
 
-def get_sparse_gqa_impl(
-    attn_configs: AttentionConfigs,
-    weight: ModelWeights,
-    attn_inputs: PyAttentionInputs,
-    fmha_config: Optional[FMHAConfig] = None,
-    quant_config: Optional[object] = None,
-    is_cuda_graph: bool = False,
-    max_seq_len: int = 0,
-    parallelism_config: Optional[ParallelismConfig] = None,
-    cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
-) -> AttentionImpl:
-    """Factory entry for the sparse GQA family (qwen4 prefill and decode).
-
-    Imported lazily: the impl pulls in the qwen4 Triton scoring kernels, which
-    should not be imported for models that never route here.
-    """
-    selection_mode = _normalize_cuda_graph_selection_mode(
-        is_cuda_graph, cuda_graph_selection_mode
-    )
-    if (
-        selection_mode != CudaGraphSelectionMode.EAGER
-        and selection_mode != CudaGraphSelectionMode.DECODE_GRAPH
-    ):
-        raise RuntimeError(
-            "qwen4_exp sparse GQA requires decode/target or opted-in draft CUDA Graph "
-            f"(selection mode: {selection_mode.value}, "
-            f"prefill={attn_inputs.is_prefill}, "
-            f"target_verify={attn_inputs.is_target_verify})"
-        )
-    attn_inputs.is_cuda_graph = is_cuda_graph
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
-        SparseGqaFmhaImpl,
-    )
-
-    return SparseGqaFmhaImpl(attn_configs, attn_inputs, parallelism_config)
-
-
 class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 
@@ -376,7 +339,6 @@ class AttnImplFactory(object):
     FMHA_IMPL_REGISTRY: Dict[str, AttentionImplFactory] = {
         "mha": get_fmha_impl,
         "mla": get_mla_impl,
-        "sparse_gqa": get_sparse_gqa_impl,
     }
 
     @classmethod
@@ -396,7 +358,7 @@ class AttnImplFactory(object):
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = _select_attention_impl_key(attn_configs, attn_inputs)
-        fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
+        fmha_impl_method = cls.get_fmha_impl_method(key_str)
         instance = fmha_impl_method(
             attn_configs,
             weight,
@@ -410,6 +372,17 @@ class AttnImplFactory(object):
         )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance
+
+    @classmethod
+    def register_fmha_impl(
+        cls, attention_type: str, factory: AttentionImplFactory
+    ) -> None:
+        existing = cls.FMHA_IMPL_REGISTRY.get(attention_type)
+        if existing is not None and existing is not factory:
+            raise ValueError(
+                f"Attention backend {attention_type!r} is already registered"
+            )
+        cls.FMHA_IMPL_REGISTRY[attention_type] = factory
 
     @classmethod
     def get_fmha_impl_method(cls, attention_type: str) -> AttentionImplFactory:

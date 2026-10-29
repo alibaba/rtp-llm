@@ -202,7 +202,9 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             torch.testing.assert_close(got, combined(), atol=0, rtol=0)
             torch.testing.assert_close(got, run(full).float(), atol=0.0005, rtol=0.02)
 
-    def test_tensor_parallel_selection_is_gated_and_rejects_sp_and_world_mismatch(self):
+    def test_tensor_parallel_selection_uses_format_and_rejects_sp_and_world_mismatch(
+        self,
+    ):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.config.quant_config import ModelOptFp4Config
         from rtp_llm.config.server_config_setup import set_parallelism_config
@@ -225,7 +227,12 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         model.n_shared_experts = 1
         model._qwen4_full_fp8_nvfp4 = True
         model.quant_config = ModelOptFp4Config(
-            bits=4, group_size=16, is_quanted=False, activation_amax=32.0
+            bits=4,
+            group_size=16,
+            is_quanted=False,
+            activation_amax=32.0,
+            source_fp8_block_size=128,
+            require_contiguous_experts=True,
         )
         pc = ParallelismConfig()
         pc.tp_size = 2
@@ -242,8 +249,10 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         strategy = CudaNvfp4CutlassStrategy()
         self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         model._qwen4_full_fp8_nvfp4 = False
+        self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        model.quant_config.require_contiguous_experts = False
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
-        model._qwen4_full_fp8_nvfp4 = True
+        model.quant_config.require_contiguous_experts = True
         pc.world_size = 4
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         pc.world_size = 2
@@ -277,7 +286,12 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         model.hidden_size = 2560
         model.n_shared_experts = 1
         model.quant_config = ModelOptFp4Config(
-            bits=4, group_size=16, is_quanted=False, activation_amax=32.0
+            bits=4,
+            group_size=16,
+            is_quanted=False,
+            activation_amax=32.0,
+            source_fp8_block_size=128,
+            require_contiguous_experts=True,
         )
         pc = ParallelismConfig()
         pc.tp_size = 2

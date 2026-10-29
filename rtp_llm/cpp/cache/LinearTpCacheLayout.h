@@ -3,17 +3,9 @@
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
-#include <string_view>
 #include <vector>
 
 namespace rtp_llm {
-
-// Typed hybrid transfer is required by Qwen4 whenever TP partitioning changes
-// the byte layout. Other models retain their existing transport layout.
-inline bool useTypedTpCacheLayout(std::string_view model_type, bool opaque_store, size_t peers, size_t partitions) {
-    return (model_type == "qwen4_exp" || model_type == "qwen4_exp_mtp") && opaque_store
-           && (peers > 1 || partitions > 1);
-}
 
 struct LinearTpCacheSlice {
     size_t source_offset;

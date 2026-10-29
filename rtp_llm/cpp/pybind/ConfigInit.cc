@@ -168,6 +168,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("KERNEL_BLOCK_COMPRESSED", OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED)
         .value("STATE_RING", OpaqueBlockEntryCountMode::STATE_RING);
 
+    py::enum_<TpCacheTransferMode>(m, "TpCacheTransferMode")
+        .value("LEGACY", TpCacheTransferMode::LEGACY)
+        .value("REPLICATED", TpCacheTransferMode::REPLICATED)
+        .value("MHA_HEADS", TpCacheTransferMode::MHA_HEADS)
+        .value("LINEAR_QKV", TpCacheTransferMode::LINEAR_QKV);
+
     py::enum_<CpPrefillSliceLayout>(m, "CpPrefillSliceLayout")
         .value("NONE", CpPrefillSliceLayout::NONE)
         .value("PAYLOAD", CpPrefillSliceLayout::PAYLOAD)
@@ -2013,6 +2019,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
+        .def_readwrite("tp_transfer_mode", &KVCacheSpecDesc::tp_transfer_mode)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
@@ -2050,11 +2057,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.tp_transfer_mode);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2076,6 +2084,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() == 21) {
+                    c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
+                }
                 return c;
             }));
 
