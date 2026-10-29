@@ -1,6 +1,6 @@
-#include "rtp_llm/cpp/model_rpc/LinearTpCacheLayout.h"
-#include "rtp_llm/cpp/model_rpc/MhaTpCacheLayout.h"
-#include "rtp_llm/cpp/model_rpc/TpCacheTransferPlan.h"
+#include "rtp_llm/cpp/cache/LinearTpCacheLayout.h"
+#include "rtp_llm/cpp/cache/MhaTpCacheLayout.h"
+#include "rtp_llm/cpp/cache/TpCacheTransferPlan.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -27,10 +27,11 @@ TEST(LinearTpCacheLayoutTest, ReplicatedAndTwoHeadOwnersPreserveTheSupportedTopo
     for (size_t peers : {2u, 4u, 8u}) {
         TpCacheTransferTopology topology{1, peers, 1, 1};
         for (size_t peer = 0; peer < peers; ++peer) {
-            EXPECT_EQ(replicatedTpCachePeerOwnsTag("full", true, 2, topology, peer), peer == 0 || peer == peers / 2);
-            EXPECT_EQ(replicatedTpCachePeerOwnsTag("indexer_state", false, 0, topology, peer), peer == 0);
+            EXPECT_EQ(tpCachePeerOwnsPayload(TpCacheTransferMode::MHA_HEADS, 2, topology, peer),
+                      peer == 0 || peer == peers / 2);
+            EXPECT_EQ(tpCachePeerOwnsPayload(TpCacheTransferMode::REPLICATED, 0, topology, peer), peer == 0);
         }
-        EXPECT_THROW(replicatedTpCachePeerOwnsTag("unknown", false, 0, topology, 0), std::invalid_argument);
+        EXPECT_THROW(tpCachePeerOwnsPayload(TpCacheTransferMode::LEGACY, 0, topology, 0), std::invalid_argument);
     }
     TpCacheTransferTopology cp{1, 8, 2, 1};
     EXPECT_FALSE(cp.supportsTypedTransfer());
@@ -46,17 +47,34 @@ TEST(LinearTpCacheLayoutTest, RegistrationRoundingRejectsOverflow) {
     EXPECT_THROW(registeredCacheBytes(std::numeric_limits<size_t>::max()), std::overflow_error);
 }
 
-TEST(LinearTpCacheLayoutTest, SelectsOnlyQwen4OpaqueAsymmetricTransfers) {
-    for (const auto model : {"qwen4_exp", "qwen4_exp_mtp"}) {
-        EXPECT_TRUE(useTypedTpCacheLayout(model, true, 8, 1));
-        EXPECT_TRUE(useTypedTpCacheLayout(model, true, 1, 4));
-        EXPECT_FALSE(useTypedTpCacheLayout(model, true, 1, 1));
-        EXPECT_FALSE(useTypedTpCacheLayout(model, false, 8, 1));
-    }
-    for (const auto model : {"qwen3_next", "qwen3_moe", "deepseek_v3", ""}) {
-        EXPECT_FALSE(useTypedTpCacheLayout(model, true, 8, 1));
-        EXPECT_FALSE(useTypedTpCacheLayout(model, true, 1, 4));
-    }
+TEST(LinearTpCacheLayoutTest, UndeclaredLayoutsKeepLegacyTransport) {
+    EXPECT_TRUE(useTypedTpCacheLayout(true, true, 8, 1));
+    EXPECT_TRUE(useTypedTpCacheLayout(true, true, 1, 4));
+    EXPECT_FALSE(useTypedTpCacheLayout(true, true, 1, 1));
+    EXPECT_FALSE(useTypedTpCacheLayout(true, false, 8, 1));
+    EXPECT_FALSE(useTypedTpCacheLayout(false, true, 8, 1));
+}
+
+TEST(LinearTpCacheLayoutTest, DeclaredGeometryBuildsPlansWithoutModelOrTag) {
+    TpCacheTransferLayout layout;
+    layout.mode        = TpCacheTransferMode::LINEAR_QKV;
+    layout.q_row_bytes = layout.k_row_bytes = 8;
+    layout.v_row_bytes                      = 16;
+    layout.history_rows                     = 3;
+    layout.key_heads                        = 2;
+    layout.value_heads                      = 4;
+    TpCacheTransferTopology topology{1, 2, 1, 1};
+    auto                    first  = layout.plan(32, 96, 4, topology, 0);
+    auto                    second = layout.plan(32, 96, 4, topology, 1);
+    EXPECT_EQ(first.destination_bytes, 128u);
+    EXPECT_NO_THROW(validateCompleteTransfer({first, second}));
+    EXPECT_THROW(layout.plan(32, 95, 4, topology, 0), std::invalid_argument);
+    layout.key_heads = 1;
+    EXPECT_THROW(layout.plan(32, 96, 4, topology, 0), std::invalid_argument);
+    layout.mode = TpCacheTransferMode::MHA_HEADS;
+    EXPECT_THROW(layout.plan(32, 32, 2, TpCacheTransferTopology{1, 4, 1, 1}, 1), std::invalid_argument);
+    EXPECT_THROW(layout.plan(32, 32, 4, topology, 0), std::invalid_argument);
+    EXPECT_THROW(layout.plan(32, 32, 2, TpCacheTransferTopology{1, 2, 2, 1}, 0), std::invalid_argument);
 }
 
 TEST(LinearTpCacheLayoutTest, ReassemblesStateAndEveryQkvHistoryRow) {

@@ -3,6 +3,8 @@ from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.qwen4_exp_config import IndexerGeometry
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -55,6 +57,9 @@ from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa import (
+    sparse_gqa_impl as _sparse_gqa_backend,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory,
@@ -75,7 +80,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 
 class Qwen4ExpAttention(Qwen3NextAttention):
@@ -414,17 +418,13 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         qsa_runtime,
                         projected=self.qsa_indexer.split_projected(projected_qk),
                     )
-                from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
-                    SparseGqaFmhaImpl,
-                )
-
                 trusted_setter = getattr(
                     fmha_impl, "set_trusted_selected_indices", None
                 )
                 if (
                     type(self) is Qwen4ExpAttention
                     and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
-                    and type(fmha_impl) is SparseGqaFmhaImpl
+                    and type(fmha_impl) is _sparse_gqa_backend.SparseGqaFmhaImpl
                     and bool(qsa_runtime.main_inputs.is_prefill)
                     and not bool(qsa_runtime.main_inputs.is_target_verify)
                     and not bool(qsa_runtime.main_inputs.is_cuda_graph)

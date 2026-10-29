@@ -3,7 +3,7 @@ import unittest
 import torch
 import triton.language as tl
 
-from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
+from rtp_llm.models_py.triton_kernels.moe.decode_alignment import (
     moe_align_decode,
     sm120_decode_gemm_configs,
 )

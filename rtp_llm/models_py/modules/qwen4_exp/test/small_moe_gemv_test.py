@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
     TritonFusedMoeExecutor,
 )
-from rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv import (
+from rtp_llm.models_py.triton_kernels.moe.small_moe_gemv import (
     is_supported,
     small_moe_gemv,
 )
@@ -128,13 +128,13 @@ class SmallMoeGemvTest(unittest.TestCase):
         p = self.payload(1)
         expected = self.ref(p)
         with patch.object(self.module, "_small_moe_gemv", True):
-            from rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv import (
+            from rtp_llm.models_py.triton_kernels.moe.small_moe_gemv import (
                 small_moe_gemv as candidate,
             )
 
             for activation in ("silu", "SiGLU"):
                 with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv.small_moe_gemv",
+                    "rtp_llm.models_py.triton_kernels.moe.small_moe_gemv.small_moe_gemv",
                     wraps=candidate,
                 ) as mock:
                     self.module.execute(p, activation, None, None, False, None)
@@ -149,7 +149,7 @@ class SmallMoeGemvTest(unittest.TestCase):
                 ("silu", None, None, False, {"custom": True}),
             ):
                 with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv.small_moe_gemv"
+                    "rtp_llm.models_py.triton_kernels.moe.small_moe_gemv.small_moe_gemv"
                 ) as mock:
                     self.module.execute(p, activation, expert_map, scale, apply, extra)
                     mock.assert_not_called()

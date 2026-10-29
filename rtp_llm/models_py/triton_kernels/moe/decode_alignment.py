@@ -1,4 +1,4 @@
-"""Stable, fixed-capacity route alignment for small Qwen4 decode batches."""
+"""Stable, fixed-capacity route alignment for small decode batches."""
 
 import torch
 import triton
@@ -95,7 +95,7 @@ def moe_align_decode(topk_ids, block_size, num_experts):
         and num_experts & (num_experts - 1) == 0
         and block_size in (8, 16, 32, 64)
     ):
-        raise ValueError("unsupported Qwen4 decode alignment geometry")
+        raise ValueError("unsupported decode alignment geometry")
     routes = topk_ids.numel()
     active = min(routes, num_experts)
     max_blocks = active + (routes - active) // block_size

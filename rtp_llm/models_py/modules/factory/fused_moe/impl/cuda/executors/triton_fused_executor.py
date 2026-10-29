@@ -96,7 +96,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             and not apply_router_weight_on_input
             and not extra_expert_args
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.moe.small_moe_gemv import (
+            from rtp_llm.models_py.triton_kernels.moe.small_moe_gemv import (
                 small_moe_gemv,
             )
 
@@ -122,7 +122,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         config1 = get_default_config(M, self.E, self.N, K, top_k)
         config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
         if self._decode_tiles:
-            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
+            from rtp_llm.models_py.triton_kernels.moe.decode_alignment import (
                 sm120_decode_gemm_configs,
             )
 
@@ -137,7 +137,7 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         block_m2 = config2["BLOCK_SIZE_M"]
         align = moe_align_block_size_torch
         if self._decode_alignment and 0 < M <= 32:
-            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
+            from rtp_llm.models_py.triton_kernels.moe.decode_alignment import (
                 moe_align_decode,
             )
 

@@ -89,7 +89,7 @@ class Fp8Linear(nn.Module):
             and gate_up.is_cuda
             and torch.version.hip is None
         ):
-            from rtp_llm.models_py.modules.qwen4_exp.prefill_silu_quant_triton import (
+            from rtp_llm.models_py.triton_kernels.common.silu_fp8_quant import (
                 try_silu_mul_quant,
             )
 

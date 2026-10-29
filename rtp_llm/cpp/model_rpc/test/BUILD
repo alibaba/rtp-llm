@@ -269,7 +269,7 @@ cc_test(
     srcs = ["LinearTpCacheLayoutTest.cc"],
     copts = copts(),
     deps = [
-        "//rtp_llm/cpp/model_rpc:linear_tp_cache_layout",
+        "//rtp_llm/cpp/cache:tp_cache_transfer_layout",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

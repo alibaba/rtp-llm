@@ -34,6 +34,7 @@ from rtp_llm.ops import (
     KVCacheSpecDesc,
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
+    TpCacheTransferMode,
 )
 
 PLE_STATE_TAG = "ple_conv_state"
@@ -245,4 +246,15 @@ def build_qwen4_exp_kv_cache_spec_descs(
                 indexer_kv_desc(indexer_head_dim, indexer_compress_ratio),
                 indexer_state_desc(indexer_head_dim, indexer_compress_ratio),
             ]
+    for layer in layer_descs:
+        for desc in layer:
+            desc.tp_transfer_mode = (
+                TpCacheTransferMode.LINEAR_QKV
+                if desc.cache_type == KVCacheSpecType.LINEAR
+                else (
+                    TpCacheTransferMode.MHA_HEADS
+                    if desc.cache_type == KVCacheSpecType.MHA
+                    else TpCacheTransferMode.REPLICATED
+                )
+            )
     return layer_descs

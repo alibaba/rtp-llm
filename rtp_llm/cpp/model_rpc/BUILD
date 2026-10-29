@@ -72,12 +72,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "linear_tp_cache_layout",
-    hdrs = ["LinearTpCacheLayout.h", "MhaTpCacheLayout.h", "TpCacheTransferPlan.h"],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
 
 cc_library(
     name = "registered_cache_staging",
@@ -85,7 +79,7 @@ cc_library(
     hdrs = ["RegisteredCacheStaging.h"],
     copts = copts(),
     deps = [
-        ":linear_tp_cache_layout",
+        "//rtp_llm/cpp/cache:tp_cache_transfer_layout",
         "//rtp_llm/cpp/cache:cache_types",
         # MemoryUtil.h lives in the interface target; the full cache_store
         # umbrella drags libcache_store_base.so (whose execNoBlockCopy /

@@ -2,7 +2,7 @@
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "rtp_llm/cpp/model_rpc/TpCacheTransferPlan.h"
+#include "rtp_llm/cpp/cache/TpCacheTransferPlan.h"
 #include <torch/all.h>
 #include <memory>
 

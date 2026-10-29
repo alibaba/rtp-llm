@@ -4,6 +4,7 @@ The snapshot is built after common overrides and the effective topology are
 known. Target and draft build independent snapshots; pickle preserves them.
 """
 
+import os
 from dataclasses import dataclass
 
 from rtp_llm.config.quant_config import (
@@ -152,6 +153,10 @@ def build_qwen4_quant_config(quantization, source_fp8):
             is_quanted=False,
             activation_amax=32.0,
             online_cache_dir=getattr(requested, "online_cache_dir", None),
+            prefill_library=getattr(requested, "prefill_library", None)
+            or os.getenv("QWEN4_MOE_SM120_LIBRARY"),
+            prefill_library_sha256=getattr(requested, "prefill_library_sha256", None)
+            or os.getenv("QWEN4_MOE_SM120_LIBRARY_SHA256"),
             source_fp8_block_size=128,
             require_contiguous_experts=True,
             model_recipe=QWEN4_FP8_NVFP4_RECIPE,
