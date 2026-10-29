@@ -492,3 +492,18 @@ py_library(
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm:torch", "//rtp_llm:triton", "//rtp_llm/models_py/triton_kernels:common"],
 )
+
+# Real sparse-attention modules without the full native engine test closure.
+py_library(
+    name = "qsa_sparse_prefill_testlib",
+    testonly = True,
+    srcs = [
+        "kernels/cuda/qsa/sparse_fmha.py",
+        "kernels/cuda/qsa/sparse_prefill_bitmap.py",
+        "kernels/cuda/qsa/sparse_prefill_sm90.py",
+        "kernels/cuda/qsa/qsa_topk_triton.py",
+    ],
+    data = ["//rtp_llm:__init__.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:torch", "//rtp_llm:triton"],
+)

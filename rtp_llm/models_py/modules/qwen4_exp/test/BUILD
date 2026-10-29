@@ -682,3 +682,13 @@ py_test(
     tags = ["H20_CU13", "manual"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "sparse_prefill_sm90_test",
+    srcs = ["sparse_prefill_sm90_test.py", "sparse_prefill_sm90_test_utils.py"],
+    main = "sparse_prefill_sm90_test.py",
+    deps = ["//rtp_llm/models_py:qsa_sparse_prefill_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)

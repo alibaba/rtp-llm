@@ -643,6 +643,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             try_causal_qsa_prefill,
             try_ragged_causal_qsa_prefill,
         )
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_prefill_sm90 import (
+            supports_sm90_sparse_prefill,
+        )
 
         tokens = int(qkv.shape[0])
         q, k, v = torch.split(qkv, [self.q_width, self.kv_width, self.kv_width], dim=-1)
@@ -708,10 +711,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             if trusted_selected and self.attn_configs.indexer_topk == 512:
                 seq_out = try_causal_qsa_prefill(seq_q, seq_k, seq_v, seq_selected)
             if seq_out is None:
+                if not supports_sm90_sparse_prefill(seq_q, seq_k, seq_v, seq_selected):
+                    seq_q, seq_k, seq_v = (
+                        tensor.contiguous() for tensor in (seq_q, seq_k, seq_v)
+                    )
                 seq_out = sparse_prefill_attn(
-                    seq_q.contiguous(),
-                    seq_k.contiguous(),
-                    seq_v.contiguous(),
+                    seq_q,
+                    seq_k,
+                    seq_v,
                     seq_selected,
                     **validation_kwargs,
                 )
