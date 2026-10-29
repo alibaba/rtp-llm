@@ -158,3 +158,13 @@ py_test(
     exec_properties = {"gpu_count": "4"},
     env = {"GPU_COUNT": "4"},
 )
+
+py_test(
+    name = "test_glm53_prefill_router_precision",
+    srcs = ["test_glm53_prefill_router_precision.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)

@@ -5,7 +5,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
-from rtp_llm.models_py.modules.dsv4.forward_metadata import tokenwise_router_enabled
+from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    metadata_cache,
+    tokenwise_router_enabled,
+)
+
+_PREFILL_PROJECTION_ROWS = 256
 
 
 class Glm53FP32Router(nn.Module):
@@ -23,6 +28,8 @@ class Glm53FP32Router(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if torch.backends.cuda.matmul.allow_tf32:
             raise RuntimeError("GLM-5.3 FP32 router requires matmul.allow_tf32=False")
+        if metadata_cache() is not None and not tokenwise_router_enabled():
+            return self._fixed_projection(hidden_states, _PREFILL_PROJECTION_ROWS)
         # Match the one-token Decode projection throughout Decode and target
         # verification, including batches of multiple requests. cuBLAS may
         # otherwise change its FP32 reduction with M; the last-bit differences
@@ -45,15 +52,39 @@ class Glm53FP32Router(nn.Module):
             dim=0,
         )
 
-    def forward_fixed_rows(self, hidden_states: torch.Tensor, rows: int):
-        from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
+    def _fixed_projection(self, hidden_states: torch.Tensor, rows: int) -> torch.Tensor:
+        # The final cuBLAS chunk otherwise changes M with the request batch.
+        # Fixed 256-row GEMMs preserve the FP32 reduction at every token,
+        # including shard boundaries, and avoid the less accurate large-M path.
         from rtp_llm.models_py.modules.glm53_fixed_projection_graph import (
             fixed_projection_graph,
         )
 
+        projected = fixed_projection_graph(hidden_states, self.weight, rows)
+        if projected is not None:
+            return projected
+        tokens = hidden_states.shape[0]
+        output = hidden_states.new_empty(
+            (tokens, self.weight.shape[0]), dtype=torch.float32
+        )
+        for begin in range(0, tokens, rows):
+            count = min(rows, tokens - begin)
+            chunk = hidden_states.narrow(0, begin, count)
+            if count < rows:
+                padded = hidden_states.new_zeros((rows, hidden_states.shape[1]))
+                padded[:count].copy_(chunk)
+                chunk = padded
+            output[begin : begin + count].copy_(
+                F.linear(chunk.float(), self.weight)[:count]
+            )
+        return output
+
+    def forward_fixed_rows(self, hidden_states: torch.Tensor, rows: int):
         if rows > self.chunk_rows or metadata_cache() is None:
             return None
-        return fixed_projection_graph(hidden_states, self.weight, rows)
+        # Preserve explicit fixed-M overrides independently of the native
+        # Prefill policy, including when projection graph replay is disabled.
+        return self._fixed_projection(hidden_states, rows)
 
     def forward_shard(
         self, hidden_states: torch.Tensor, layout: TokenShardLayout
@@ -79,6 +110,12 @@ class Glm53FP32Router(nn.Module):
             or (valid and end > layout.logical_tokens)
         ):
             raise ValueError("invalid router token layout")
+        if metadata_cache() is not None and not tokenwise_router_enabled():
+            # Fixed-M Prefill projections can consume local rows directly;
+            # no padding to the global router's variable final chunk is needed.
+            output = self._fixed_projection(hidden_states, _PREFILL_PROJECTION_ROWS)
+            output[valid:].zero_()
+            return output
         if (
             valid == layout.local_tokens
             and begin % self.chunk_rows == 0

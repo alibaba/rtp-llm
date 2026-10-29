@@ -144,7 +144,10 @@ class Glm53LocalRouterTest(unittest.TestCase):
         model = _RouterModel(gate)
         x = torch.randn(48, 4096, device="cuda", dtype=torch.bfloat16)
         prefill = _router_inputs(prefill=True)
-        expected = functional.linear(x.float(), gate.weight)
+        # Prefill keeps a fixed FP32 reduction even for a partial final tile.
+        padded = x.new_zeros((256, x.shape[1]))
+        padded[: x.shape[0]].copy_(x)
+        expected = functional.linear(padded.float(), gate.weight)[: x.shape[0]]
         torch.testing.assert_close(model(prefill, x), expected, rtol=0, atol=0)
         with self.assertRaisesRegex(RuntimeError, "router scope failure"):
             model(_router_inputs(), x, fail=True)
