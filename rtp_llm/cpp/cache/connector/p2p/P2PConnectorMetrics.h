@@ -141,7 +141,8 @@ public:
     void report(const kmonitor::MetricsTags* tags, WritebackStageMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* writeback_qps_metric                    = nullptr;
+    kmonitor::MutableMetric* writeback_success_qps_metric            = nullptr;
+    kmonitor::MutableMetric* writeback_rejected_qps_metric           = nullptr;
     kmonitor::MutableMetric* writeback_skipped_qps_metric            = nullptr;
     kmonitor::MutableMetric* writeback_failed_qps_metric             = nullptr;
     kmonitor::MutableMetric* writeback_no_transfer_qps_metric        = nullptr;

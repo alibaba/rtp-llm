@@ -109,16 +109,20 @@ Writeback 当前是完整缓存块范围的写回，不具备与正向逐层流�
 
 | 指标后缀 | 类型 | 上报时机和含义 |
 | --- | --- | --- |
-| `qps` | QPS | 单侧处理最终结束；Decode 在源资源实际释放后上报，Prefill 正常接纳的请求在目的资源清理后上报；参数等前置拒绝直接上报 |
-| `failed_qps` | QPS | 已结束处理中的错误子集；成功结束量可由同侧 `qps - failed_qps` 得到 |
-| `skipped_qps` | QPS | 写回入口校验判定不执行，例如不满足启用、路由或完整块范围等条件；不是所有业务请求的跳过统计 |
+| `success_qps` | QPS | 单侧处理成功结束，包含无需跨端传输的成功请求；Decode 在源资源实际释放后上报，Prefill 在目的资源清理后上报 |
+| `rejected_qps` | QPS | 缓存策略或容量拒绝：所需前缀不满足 DEVICE 驻留条件（`prefix_evicted_or_demoted`），或 KV 分配/预留空间不足（`kv_capacity`）；包括准入及发布前检查，不计入 `failed_qps` |
+| `failed_qps` | QPS | 其他执行错误，例如超时、RPC/传输失败、本地加载失败、参数或布局不匹配、队列不可用、发布不完整 |
+| `skipped_qps` | QPS | Decode 在发起后台回写前跳过，例如 `no_complete_suffix`、`kv_reserve`、`invalid_routing`、`invalid_snapshot`；不计入成功、拒绝或失败，也不是所有业务请求的跳过统计 |
 | `no_transfer_qps` | QPS | 成功结束、但不需要跨端传输的子集，例如目的端已经缓存；不代表一定没有本地缓存加载 |
+
+原 `rtp_llm_p2p_writeback_qps`（成功与错误合计）停止上报，面板应迁移到以上明确结果的指标。
+`success_qps`、`rejected_qps`、`failed_qps`、`skipped_qps` 对每次上报互斥；`no_transfer_qps` 仍是成功子集。
 
 这组指标携带 `side=prefill|decode`、`submitted=true|false`、`reason`：
 
 - Decode 的 `submitted` 表示已进入对端调用阶段；Prefill 的 `submitted` 表示接收 worker 广播已成功提交到控制队列，不表示所有 worker 已完成注册。
-- `reason` 是跳过原因、错误码，或特定的 `prefix_evicted_or_demoted` 原因；请求 ID 和错误详情放日志，不放标签。
-- 统计完成失败率时，固定同一 `side`，对 `reason`、`submitted` 聚合后计算 `failed_qps / qps`。跳过不放进完成失败率分母。
+- `reason` 是跳过原因、错误码、`prefix_evicted_or_demoted` 或 `kv_capacity`；Decode 收到带 RPC 上下文的错误也归一到同一拒绝原因。请求 ID 和错误详情放日志，不放标签。
+- 固定同一 `side`，按相同时间窗口、对实例及 `reason`、`submitted` 汇总后，完成总量为 `success_qps + rejected_qps + failed_qps`。技术失败率为 `failed_qps / 完成总量`，策略拒绝率为 `rejected_qps / 完成总量`；跳过不放进这两个分母。
 - 入口异常还有第 4 节的 `stage=submission` 样本；阶段只采样耗时和结果标签，不单独统计阶段 QPS。不要把入口跳过、两端完成数强行拼成严格一一对应的业务请求漏斗。
 
 ### 3.3 传输量、发布量与命中量分开看
@@ -238,7 +242,7 @@ Writeback 失败仍通过传输任务结果传递到上层，由 `rtp_llm_p2p_wr
 
 建议按下面四组展示，避免把不同层的时间、次数和数据量混在一个面板里：
 
-1. **整体结果**：业务请求耗时、`actual_reuse_len` / `reuse_len`；Decode 侧 writeback 完成、失败、跳过；Prefill 侧成功传输量和缓存提交量。
+1. **整体结果**：业务请求耗时、`actual_reuse_len` / `reuse_len`；Decode 侧 writeback 成功、拒绝、失败、跳过；Prefill 侧成功传输量和缓存提交量。
 2. **Scheduler**：按 `side`、`stage`、`success` 看各结果下的阶段耗时；同时看总耗时、资源持有、清理耗时、在途年龄和保留 KV。
 3. **Worker**：正向看发送排队、提交/完成、接收准备/任务完成；writeback 对应面板标为待补，不拿 scheduler 的 `transfer` 顶替。
 4. **TCP/RDMA**：结合部署协议、已有底层样本和日志排查数据面问题；没有方向标签，不据此区分正向/回写。当前 P2P 路径不依赖 `rtp_llm.transfer.rdma.*` 上报来判断 writeback 失败。

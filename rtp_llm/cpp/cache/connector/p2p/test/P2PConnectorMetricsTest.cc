@@ -83,7 +83,7 @@ TEST_F(P2PWritebackMetricsTest, DecodeCompletionDoesNotReportDuplicateHoldTime) 
     metrics.total_cost_time_us = 100;
     reportWritebackMetrics(reporter_, metrics);
     snapshot();
-    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_qps"));
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
     expectGauge("rtp_llm_p2p_writeback_cost_time_us", {100});
     EXPECT_EQ(samples_.count("rtp_llm_p2p_writeback_hold_time_us"), 0);
 }
@@ -104,7 +104,10 @@ TEST_F(P2PWritebackMetricsTest, SkipPreservesReasonWithoutCompletingAnAttempt) {
     reportWritebackMetrics(reporter_, metrics);
     snapshot();
     ASSERT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_skipped_qps"));
-    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_rejected_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_failed_qps"));
+    EXPECT_EQ(samples_.count("rtp_llm_p2p_writeback_cost_time_us"), 0);
     const auto& sample = samples_.at("rtp_llm_p2p_writeback_skipped_qps").front();
     EXPECT_EQ(sample.reason, "kv_reserve");
     EXPECT_EQ(sample.side, "decode");
@@ -121,13 +124,85 @@ TEST_F(P2PWritebackMetricsTest, CompletionReportsPublishedVolumeAndDistinctDurat
     metrics.committed_token_count = 8;
     reportWritebackMetrics(reporter_, metrics);
     snapshot();
-    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_qps"));
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_rejected_qps"));
     EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_failed_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_skipped_qps"));
+    EXPECT_EQ(samples_.count("rtp_llm_p2p_writeback_qps"), 0);
     expectGauge("rtp_llm_p2p_writeback_cost_time_us", {100});
     expectGauge("rtp_llm_p2p_writeback_hold_time_us", {60});
     expectGauge("rtp_llm_p2p_writeback_drain_time_us", {10});
     expectGauge("rtp_llm_p2p_writeback_committed_token_count", {8});
     EXPECT_EQ(samples_.at("rtp_llm_p2p_writeback_committed_token_count").front().side, "prefill");
+}
+
+TEST_F(P2PWritebackMetricsTest, PolicyRejectionsPreserveReasonAcrossStartWriteBackRpc) {
+    for (const bool prefill : {true, false}) {
+        for (const auto& error :
+             {ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted"),
+              ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback would leave too few available KV blocks")}) {
+            WriteSchedulerMetricsCollector metrics;
+            metrics.prefill            = prefill;
+            metrics.submitted          = !prefill;
+            metrics.total_cost_time_us = 100;
+            metrics.error =
+                prefill ? error :
+                          ErrorInfo(error.code(), "StartWriteBack peer=127.0.0.1:1234 key=test: " + error.ToString());
+            reportWritebackMetrics(reporter_, metrics);
+        }
+    }
+    snapshot();
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_rejected_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_failed_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_skipped_qps"));
+    const auto& rejected_samples = samples_.at("rtp_llm_p2p_writeback_rejected_qps");
+    ASSERT_EQ(rejected_samples.size(), 4);
+    for (const auto& sample : rejected_samples) {
+        EXPECT_GT(std::stod(sample.value), 0);
+        EXPECT_TRUE(sample.side == "prefill" || sample.side == "decode");
+        EXPECT_TRUE(sample.reason == "prefix_evicted_or_demoted" || sample.reason == "kv_capacity");
+    }
+    EXPECT_EQ(samples_.at("rtp_llm_p2p_writeback_cost_time_us").size(), 4);
+}
+
+TEST_F(P2PWritebackMetricsTest, ExecutionErrorsAreFailuresNotPolicyRejections) {
+    for (const auto& error :
+         {ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "writeback transfer deadline exceeded"),
+          ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "StartWriteBack RPC failed"),
+          ErrorInfo(ErrorCode::INVALID_PARAMS, "writeback source workers or plan mismatch"),
+          ErrorInfo(ErrorCode::OUTPUT_QUEUE_FULL, "writeback receive submission queue unavailable"),
+          ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "writeback local load failed"),
+          ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED,
+                    "writeback publication incomplete: final reuse endpoint unavailable"),
+          ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted: unexpected failure"),
+          ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "prefix_evicted_or_demoted")}) {
+        WriteSchedulerMetricsCollector metrics;
+        metrics.error = error;
+        reportWritebackMetrics(reporter_, metrics);
+    }
+    snapshot();
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_failed_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_rejected_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_skipped_qps"));
+}
+
+TEST_F(P2PWritebackMetricsTest, NoTransferIsASubsetOfSuccessOnly) {
+    WriteSchedulerMetricsCollector metrics;
+    metrics.no_transfer = true;
+    reportWritebackMetrics(reporter_, metrics);
+    snapshot();
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_no_transfer_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_rejected_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_failed_qps"));
+    metrics.error = ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted");
+    reportWritebackMetrics(reporter_, metrics);
+    snapshot();
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_rejected_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_no_transfer_qps"));
 }
 
 TEST_F(P2PWritebackMetricsTest, FailedStageDoesNotReportSuccessfulTransferredBytes) {
@@ -218,14 +293,14 @@ TEST_F(P2PWritebackMetricsTest, ResourceReleaseFailureDoesNotPrematurelyComplete
     context->finishWithoutTransfer();
     EXPECT_TRUE(context->resourceHoldPending());
     snapshot();
-    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
     context->checkDone();
     EXPECT_FALSE(context->resourceHoldPending());
     snapshot();
-    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_qps"));
+    EXPECT_TRUE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
     context->checkDone();
     snapshot();
-    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_qps"));
+    EXPECT_FALSE(hasPositiveQps("rtp_llm_p2p_writeback_success_qps"));
 }
 
 TEST_F(P2PWritebackMetricsTest, CheckerReportsCancelledHoldsAndClearsAfterPhysicalStop) {

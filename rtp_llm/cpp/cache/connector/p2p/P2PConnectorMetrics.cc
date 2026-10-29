@@ -11,7 +11,8 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_p2p_connector_decode_scheduler_retained_context_count");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_oldest_kv_hold_ms_metric,
                                   "rtp_llm_p2p_connector_decode_scheduler_oldest_kv_hold_ms");
-    REGISTER_QPS_MUTABLE_METRIC(writeback_qps_metric, "rtp_llm_p2p_writeback_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_success_qps_metric, "rtp_llm_p2p_writeback_success_qps");
+    REGISTER_QPS_MUTABLE_METRIC(writeback_rejected_qps_metric, "rtp_llm_p2p_writeback_rejected_qps");
     REGISTER_QPS_MUTABLE_METRIC(writeback_skipped_qps_metric, "rtp_llm_p2p_writeback_skipped_qps");
     REGISTER_QPS_MUTABLE_METRIC(writeback_failed_qps_metric, "rtp_llm_p2p_writeback_failed_qps");
     REGISTER_QPS_MUTABLE_METRIC(writeback_no_transfer_qps_metric, "rtp_llm_p2p_writeback_no_transfer_qps");
@@ -157,16 +158,31 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, WriteSchedul
     kmonitor::MetricsTags write_tags = tags ? *tags : kmonitor::MetricsTags{};
     write_tags.AddTag("side", collector->prefill ? "prefill" : "decode");
     write_tags.AddTag("submitted", collector->submitted ? "true" : "false");
-    const auto& message = collector->error.ToString();
-    const auto  reason  = message == "prefix_evicted_or_demoted" ? message : ErrorCodeToString(collector->error.code());
+    const auto&       message                  = collector->error.ToString();
+    const std::string prefix_rejection         = "prefix_evicted_or_demoted";
+    const std::string wrapped_prefix_rejection = ": " + prefix_rejection;
+    const bool        prefix_rejected          = collector->error.code() == ErrorCode::CACHE_STORE_STORE_FAILED
+                                 && (message == prefix_rejection
+                                     || (message.size() >= wrapped_prefix_rejection.size()
+                                         && message.compare(message.size() - wrapped_prefix_rejection.size(),
+                                                            wrapped_prefix_rejection.size(),
+                                                            wrapped_prefix_rejection)
+                                                == 0));
+    const bool capacity_rejected = collector->error.code() == ErrorCode::MALLOC_FAILED;
+    const auto reason            = prefix_rejected   ? prefix_rejection :
+                                   capacity_rejected ? std::string("kv_capacity") :
+                                                       ErrorCodeToString(collector->error.code());
     write_tags.AddTag("reason", collector->skip_reason ? collector->skip_reason : reason);
     tags = &write_tags;
     if (collector->skip_reason) {
         REPORT_MUTABLE_QPS(writeback_skipped_qps_metric);
         return;
     }
-    REPORT_MUTABLE_QPS(writeback_qps_metric);
-    if (collector->error.hasError()) {
+    if (collector->error.ok()) {
+        REPORT_MUTABLE_QPS(writeback_success_qps_metric);
+    } else if (prefix_rejected || capacity_rejected) {
+        REPORT_MUTABLE_QPS(writeback_rejected_qps_metric);
+    } else {
         REPORT_MUTABLE_QPS(writeback_failed_qps_metric);
     }
     if (collector->no_transfer && collector->error.ok()) {
