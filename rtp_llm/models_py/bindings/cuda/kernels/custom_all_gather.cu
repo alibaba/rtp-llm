@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License. The full license is in the repository LICENSE.
 //
-// BF16 staging and multicast/PDL protocols adapted from
+// BF16 staging/direct and multicast semaphore/PDL protocols adapted from
 // SGLang revision efa7be2091282e96318f0d9d22d9f78dde099848:
 // python/sglang/kernels/jit/csrc/kimi_k3/comm/sp_collective.cuh and
 // python/sglang/kernels/jit/include/sgl_kernel/distributed/{communicator,ptx}.cuh.
@@ -54,6 +54,14 @@ struct alignas(16) Vector {
     uint32_t words[4];
 };
 
+// Match the upstream flag/counter layout. Only the first two words are used;
+// neighboring blocks own separate cache lines.
+struct alignas(128) Semaphore {
+    uint32_t flag;
+    uint32_t counter;
+};
+static_assert(sizeof(Semaphore) == 128);
+
 struct Params {
     const uint8_t*  input;
     const uint32_t* scales;
@@ -62,6 +70,10 @@ struct Params {
     uint8_t*        workspace;
     uint8_t*        workspace_mc;
     uint32_t*       counters;
+    Semaphore*      sem_local;
+    Semaphore*      sem_mc;
+    uint8_t*        output_mc;
+    uint32_t*       output_scales_mc;
     int64_t         slot_bytes;
     uint32_t        num_counters;
     uint32_t        rank;
@@ -69,6 +81,7 @@ struct Params {
     uint32_t        scale_stride;
     uint32_t        rows;
     uint32_t        padded_rows;
+    uint32_t        output_rows;
     uint32_t        groups;
     uint32_t        value_vecs;
     uint32_t        total_vecs;
@@ -142,6 +155,43 @@ __device__ __forceinline__ void trigger_dependents() {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
 }
+
+// Thread 0 alone owns the reservation and arrival count. The reservation must
+// precede the PDL wait, but signalling must follow it: signalling promises
+// that this rank's preceding producer grid flushed.
+template<uint32_t WorldSize>
+struct MulticastBarrier {
+    Semaphore* local;
+    Semaphore* mc;
+    uint32_t   window;
+
+    __device__ __forceinline__ MulticastBarrier(Semaphore* local_base, Semaphore* mc_base):
+        local(local_base + blockIdx.x), mc(mc_base + blockIdx.x), window(0) {
+        if (threadIdx.x == 0)
+            window = atomicAdd(&local->counter, 2 * WorldSize);
+    }
+
+    template<bool ReleaseAcquire>
+    __device__ __forceinline__ void arrive(uint32_t n) const {
+        if (threadIdx.x != 0)
+            return;
+#if __CUDA_ARCH__ >= 900
+        if constexpr (ReleaseAcquire) {
+            asm volatile("multimem.red.release.sys.global.add.u32 [%0], %1;" ::"l"(&mc->flag), "r"(1u) : "memory");
+        } else {
+            asm volatile("multimem.red.relaxed.sys.global.add.u32 [%0], %1;" ::"l"(&mc->flag), "r"(1u) : "memory");
+        }
+        const uint32_t current = window + n * WorldSize;
+        uint64_t poll_start = 0;
+        uint32_t polls = 0;
+        while (load_word<ReleaseAcquire>(&local->flag) - current < WorldSize) {
+            check_collective_poll_timeout(poll_start, polls);
+        }
+#else
+        asm volatile("trap;");
+#endif
+    }
+};
 
 __device__ __forceinline__ bool bump_inactive_counters(const Params& p, uint32_t phase) {
     if (blockIdx.x + 1 != gridDim.x)
@@ -280,6 +330,48 @@ __global__ void all_gather_fp8_staging_kernel(const __grid_constant__ Params p) 
         p.counters[blockIdx.x] = phase ^ 1;
 }
 
+template<uint32_t WorldSize, bool FP8, bool AlignedScales = true>
+__global__ void all_gather_direct_kernel(const __grid_constant__ Params p) {
+    const MulticastBarrier<WorldSize> barrier(p.sem_local, p.sem_mc);
+    wait_primary();
+    barrier.template arrive<false>(0);
+    __syncthreads();
+    const uint32_t tid      = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t step     = gridDim.x * blockDim.x;
+    const uint32_t dst_bias = p.rank * p.value_vecs;
+    for (uint32_t vid = tid; vid < p.value_vecs; vid += step) {
+        Vector value;
+        load_vector<false>(value, p.input, vid);
+        multicast_vector(p.output_mc, dst_bias + vid, value);
+    }
+    if constexpr (FP8) {
+        if constexpr (AlignedScales) {
+            const uint32_t rows4 = p.rows / 4;
+            const uint32_t count = p.groups * rows4;
+            for (uint32_t vid = tid; vid < count; vid += step) {
+                const uint32_t group = vid / rows4;
+                const uint32_t row4  = vid - group * rows4;
+                const uint32_t dst   = group * (p.scale_stride / 4) + p.rank * rows4 + row4;
+                Vector         value;
+                load_vector<false>(value, p.scales, vid);
+                multicast_vector(p.output_scales_mc, dst, value);
+            }
+        } else {
+            const uint32_t count = p.groups * p.rows;
+            for (uint32_t i = tid; i < count; i += step) {
+                const uint32_t group = i / p.rows;
+                const uint32_t row   = i - group * p.rows;
+                const uint32_t dst   = group * p.scale_stride + p.rank * p.rows + row;
+                multicast_word(p.output_scales_mc + dst, p.scales[group * p.padded_rows + row]);
+            }
+        }
+    }
+    // Values and scales share one entry/exit protocol.
+    trigger_dependents();
+    __syncthreads();
+    barrier.template arrive<true>(1);
+}
+
 void check_tensor(const torch::Tensor& tensor, const torch::Tensor& input, at::ScalarType type, const char* name) {
     TORCH_CHECK(tensor.device() == input.device() && tensor.scalar_type() == type && tensor.is_contiguous(),
                 "Custom all-gather ",
@@ -330,6 +422,7 @@ Params make_params(const torch::Tensor& input, torch::Tensor& output, int64_t ra
     p.world_size   = world_size;
     p.scale_stride = (output.size(0) + 3) / 4 * 4;
     p.rows         = input.size(0);
+    p.output_rows  = output.size(0);
     p.value_vecs   = input.nbytes() / 16;
     p.total_vecs   = p.value_vecs;
     return p;
@@ -356,15 +449,15 @@ void bind_scales(Params& p, const torch::Tensor& input, const torch::Tensor& sca
     p.total_vecs    = int64_t(p.value_vecs) + scales.numel() / 4;
 }
 
-int check_launch(const Params& p, int64_t blocks, int64_t threads, bool fp8) {
+int check_launch(const Params& p, int64_t blocks, int64_t threads, bool staging, bool fp8) {
     const auto* properties = at::cuda::getCurrentDeviceProperties();
     TORCH_CHECK(properties->major == 10 && (properties->minor == 0 || properties->minor == 3),
                 "Custom all-gather is enabled only on SM100/SM103");
     const int sms = properties->multiProcessorCount;
-    TORCH_CHECK(blocks > 0 && blocks <= sms - 1,
+    TORCH_CHECK(blocks > 0 && blocks <= sms - int64_t(staging),
                 "Custom all-gather grid must fit concurrently on the GPU");
-    const int64_t minimum_threads = fp8 ? 128 : 32;
-    const int64_t maximum_threads = 512;
+    const int64_t minimum_threads = staging && fp8 ? 128 : 32;
+    const int64_t maximum_threads = staging ? 512 : 1024;
     TORCH_CHECK(threads >= minimum_threads && threads <= maximum_threads && threads % minimum_threads == 0,
                 "Invalid custom all-gather block size");
     const int64_t step = blocks * threads;
@@ -405,6 +498,24 @@ void bind_staging(Params&              p,
     p.num_counters = sms;
 }
 
+void bind_direct(Params&              p,
+                 const torch::Tensor& input,
+                 torch::Tensor&       output,
+                 torch::Tensor&       semaphores,
+                 int64_t              output_mc_ptr,
+                 int64_t              semaphore_mc_ptr,
+                 int                  sms) {
+    check_tensor(semaphores, input, at::kByte, "semaphores");
+    TORCH_CHECK(semaphores.dim() == 2 && semaphores.size(0) == sms && semaphores.size(1) == sizeof(Semaphore)
+                    && reinterpret_cast<uintptr_t>(semaphores.data_ptr()) % alignof(Semaphore) == 0,
+                "Custom all-gather semaphores must be uint8[SM_count,128] with a 128-byte aligned address");
+    check_mc(output_mc_ptr, output.nbytes(), 16, "output address");
+    check_mc(semaphore_mc_ptr, semaphores.nbytes(), 128, "semaphore address");
+    p.output_mc = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(output_mc_ptr));
+    p.sem_local = reinterpret_cast<Semaphore*>(semaphores.data_ptr<uint8_t>());
+    p.sem_mc    = reinterpret_cast<Semaphore*>(static_cast<uintptr_t>(semaphore_mc_ptr));
+}
+
 template<typename Kernel>
 void launch(Kernel kernel, const Params& p, int64_t blocks, int64_t threads) {
     cudaLaunchAttribute attribute{};
@@ -431,10 +542,27 @@ void custom_all_gather_staging(const torch::Tensor& input,
                                int64_t              threads) {
     auto                       p = make_params(input, output, rank, false);
     const c10::cuda::CUDAGuard guard(input.device());
-    const int                  sms = check_launch(p, blocks, threads, false);
+    const int                  sms = check_launch(p, blocks, threads, true, false);
     bind_staging(p, input, workspace, counters, workspace_mc_ptr, sms, false);
     dispatch_world_size(p.world_size, [&](auto size) {
         launch(all_gather_staging_kernel<decltype(size)::value>, p, blocks + 1, threads);
+    });
+}
+
+void custom_all_gather_direct(const torch::Tensor& input,
+                              torch::Tensor&       output,
+                              torch::Tensor&       semaphores,
+                              int64_t              output_mc_ptr,
+                              int64_t              semaphore_mc_ptr,
+                              int64_t              rank,
+                              int64_t              blocks,
+                              int64_t              threads) {
+    auto                       p = make_params(input, output, rank, false);
+    const c10::cuda::CUDAGuard guard(input.device());
+    const int                  sms = check_launch(p, blocks, threads, false, false);
+    bind_direct(p, input, output, semaphores, output_mc_ptr, semaphore_mc_ptr, sms);
+    dispatch_world_size(p.world_size, [&](auto size) {
+        launch(all_gather_direct_kernel<decltype(size)::value, false>, p, blocks, threads);
     });
 }
 
@@ -451,13 +579,39 @@ void custom_all_gather_fp8_staging(const torch::Tensor& values,
     auto p = make_params(values, output_values, rank, true);
     bind_scales(p, values, scales, output_scales);
     const c10::cuda::CUDAGuard guard(values.device());
-    const int                  sms = check_launch(p, blocks, threads, true);
+    const int                  sms = check_launch(p, blocks, threads, true, true);
     bind_staging(p, values, workspace, counters, workspace_mc_ptr, sms, true);
     dispatch_world_size(p.world_size, [&](auto size) {
         if (p.rows % 4 == 0)
             launch(all_gather_fp8_staging_kernel<decltype(size)::value, true>, p, blocks + 1, threads);
         else
             launch(all_gather_fp8_staging_kernel<decltype(size)::value, false>, p, blocks + 1, threads);
+    });
+}
+
+void custom_all_gather_fp8_direct(const torch::Tensor& values,
+                                  const torch::Tensor& scales,
+                                  torch::Tensor&       output_values,
+                                  torch::Tensor&       output_scales,
+                                  torch::Tensor&       semaphores,
+                                  int64_t              output_values_mc_ptr,
+                                  int64_t              output_scales_mc_ptr,
+                                  int64_t              semaphore_mc_ptr,
+                                  int64_t              rank,
+                                  int64_t              blocks,
+                                  int64_t              threads) {
+    auto p = make_params(values, output_values, rank, true);
+    bind_scales(p, values, scales, output_scales);
+    const c10::cuda::CUDAGuard guard(values.device());
+    const int                  sms = check_launch(p, blocks, threads, false, true);
+    bind_direct(p, values, output_values, semaphores, output_values_mc_ptr, semaphore_mc_ptr, sms);
+    check_mc(output_scales_mc_ptr, output_scales.nbytes(), 16, "output scales address");
+    p.output_scales_mc = reinterpret_cast<uint32_t*>(static_cast<uintptr_t>(output_scales_mc_ptr));
+    dispatch_world_size(p.world_size, [&](auto size) {
+        if (p.rows % 4 == 0)
+            launch(all_gather_direct_kernel<decltype(size)::value, true, true>, p, blocks, threads);
+        else
+            launch(all_gather_direct_kernel<decltype(size)::value, true, false>, p, blocks, threads);
     });
 }
 

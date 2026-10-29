@@ -1242,6 +1242,7 @@ class PushReduceScatter:
 # BF16 / FP8 AllGather workspaces
 # FP8 values and packed UE8M0 scales move together without requantization.
 
+STAGING_MAX_LOCAL_M = 128  # Prefill only; exclusive per-rank input rows.
 # Kernel launch tuning uses the gathered (global) row count.
 _STAGING_ROWS = (8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024)
 _BF16_STAGING = (
@@ -1276,21 +1277,26 @@ _FP8_STAGING = (
     (128, 512),
     (128, 512),
 )
+_DIRECT_ROWS = (1024, 2048, 4096, 8192, 16384, 32768)
+_BF16_DIRECT = ((2, 1024), (8, 256), (2, 1024), (8, 512), (8, 1024), (4, 1024))
+_FP8_DIRECT = ((2, 1024), (2, 1024), (8, 512), (2, 1024), (64, 1024), (4, 1024))
 
 
-def _load_custom_ag_kernel(fp8):
+def _load_custom_ag_kernels(fp8):
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
-    name = "custom_all_gather_fp8_staging" if fp8 else "custom_all_gather_staging"
-    return getattr(rtp_llm_ops, name)
+    prefix = "custom_all_gather_fp8" if fp8 else "custom_all_gather"
+    return (
+        getattr(rtp_llm_ops, prefix + "_staging"),
+        getattr(rtp_llm_ops, prefix + "_direct"),
+    )
 
 
 def create_custom_all_gather(
-    group, device, *, max_m: int, k: int, fp8: bool
+    group, device, *, max_m: int, k: int, fp8: bool, staging_only: bool = True
 ):
     """Return a workspace or collectively retain the existing AG backend.
 
-    Cross-host groups require one usable fabric domain and FABRIC allocations.
     All capability, allocation and multicast mapping checks finish here. Forward
     must never rendezvous or make a rank-local choice to fall back to NCCL.
     max_m is the gathered output capacity (TP times the per-rank input rows).
@@ -1306,7 +1312,7 @@ def create_custom_all_gather(
     try:
         import torch.distributed._symmetric_memory as symm
 
-        kernel = _load_custom_ag_kernel(fp8)
+        kernels = _load_custom_ag_kernels(fp8)
         props = torch.cuda.get_device_properties(device)
         if (props.major, props.minor) not in ((10, 0), (10, 3)):
             raise RuntimeError("requires SM100/SM103")
@@ -1318,6 +1324,7 @@ def create_custom_all_gather(
             max_m,
             k,
             fp8,
+            staging_only,
             props.multi_processor_count,
             _nvlink_fabric(str(props.uuid)),
         )
@@ -1356,8 +1363,11 @@ def create_custom_all_gather(
         )
         return None
 
-    # Reserve staging for the configured Decode/MTP token capacity.
+    # Decode has no row-dependent dispatch: reserve staging for its configured
+    # token capacity. Prefill switches to direct at STAGING_MAX_LOCAL_M input rows.
     local_staging_m = max_m // world_size
+    if not staging_only:
+        local_staging_m = min(local_staging_m, STAGING_MAX_LOCAL_M - 1)
     groups = (k + 511) // 512
     if fp8:
         # Four payload vectors plus one vector containing their original sign
@@ -1370,6 +1380,9 @@ def create_custom_all_gather(
     try:
         storage["staging"] = symm.empty(
             2 * world_size * slot_bytes, dtype=torch.uint8, device=device
+        )
+        storage["semaphores"] = symm.empty(
+            (props.multi_processor_count, 128), dtype=torch.uint8, device=device
         )
         storage["values"] = symm.empty(
             (max_m, k), dtype=torch.uint8 if fp8 else torch.bfloat16, device=device
@@ -1408,18 +1421,18 @@ def create_custom_all_gather(
             )
             return None
     storage["staging"].zero_()
+    storage["semaphores"].zero_()
     torch.cuda.synchronize(device)
     dist.barrier(group=group)
     workspace = CustomAllGather(
-        kernel, storage, handles, counters, group.rank(), fp8, world_size
+        kernels, storage, handles, counters, group.rank(), fp8, world_size
     )
     logging.info(
-        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s cross_host=%s workspace=%.3f MiB",
+        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s workspace=%.3f MiB",
         world_size,
         max_m,
         k,
         fp8,
-        cross_host,
         sum(t.numel() * t.element_size() for t in storage.values()) / (1 << 20),
     )
     return workspace
@@ -1433,8 +1446,8 @@ class CustomAllGather:
     Own the symmetric allocations and handles for the entire model/graph lifetime.
     """
 
-    def __init__(self, kernel, storage, handles, counters, rank, fp8, world_size):
-        self.staging_kernel = kernel
+    def __init__(self, kernels, storage, handles, counters, rank, fp8, world_size):
+        self.staging_kernel, self.direct_kernel = kernels
         self.storage = storage
         self.handles = handles
         self.counters = counters
@@ -1445,9 +1458,14 @@ class CustomAllGather:
             name: int(handle.multicast_ptr) for name, handle in handles.items()
         }
 
-    def _launch(self, m):
-        configs = _FP8_STAGING if self.fp8 else _BF16_STAGING
-        blocks, threads = configs[min(bisect_left(_STAGING_ROWS, m), len(_STAGING_ROWS) - 1)]
+    def _launch(self, m, staging):
+        rows = _STAGING_ROWS if staging else _DIRECT_ROWS
+        configs = (
+            (_FP8_STAGING if self.fp8 else _BF16_STAGING)
+            if staging
+            else (_FP8_DIRECT if self.fp8 else _BF16_DIRECT)
+        )
+        blocks, threads = configs[min(bisect_left(rows, m), len(rows) - 1)]
         return min(blocks, self.counters.numel() - 1), threads
 
     @staticmethod
@@ -1456,7 +1474,7 @@ class CustomAllGather:
         # Copy it without changing the group's selected communication backend.
         return tensor if tensor.data_ptr() % 16 == 0 else tensor.clone()
 
-    def all_gather(self, local_input):
+    def all_gather(self, local_input, *, staging=True):
         if self.fp8:
             raise TypeError("BF16 AG requires a BF16 workspace")
         m = local_input.shape[0] * self.world_size
@@ -1464,20 +1482,32 @@ class CustomAllGather:
             raise ValueError("BF16 AG exceeds configured capacity")
         local_input = self._aligned(local_input)
         output = self.storage["values"][:m]
-        blocks, threads = self._launch(m)
-        self.staging_kernel(
-            local_input,
-            output,
-            self.storage["staging"],
-            self.counters,
-            self.pointers["staging"],
-            self.rank,
-            blocks,
-            threads,
-        )
+        blocks, threads = self._launch(m, staging)
+        if staging:
+            self.staging_kernel(
+                local_input,
+                output,
+                self.storage["staging"],
+                self.counters,
+                self.pointers["staging"],
+                self.rank,
+                blocks,
+                threads,
+            )
+        else:
+            self.direct_kernel(
+                local_input,
+                output,
+                self.storage["semaphores"],
+                self.pointers["values"],
+                self.pointers["semaphores"],
+                self.rank,
+                blocks,
+                threads,
+            )
         return output
 
-    def all_gather_fp8(self, values, wire):
+    def all_gather_fp8(self, values, wire, *, staging=True):
         if not self.fp8:
             raise TypeError("FP8 AG requires an FP8 workspace")
         m, k = values.shape
@@ -1491,25 +1521,38 @@ class CustomAllGather:
         scales = self.storage["scales"][: ((k + 511) // 512) * scale_rows].view(
             -1, scale_rows
         )
-        blocks, threads = self._launch(m)
-        self.staging_kernel(
-            values,
-            wire,
-            output,
-            scales,
-            self.storage["staging"],
-            self.counters,
-            self.pointers["staging"],
-            self.rank,
-            blocks,
-            threads,
-        )
+        blocks, threads = self._launch(m, staging)
+        if staging:
+            self.staging_kernel(
+                values,
+                wire,
+                output,
+                scales,
+                self.storage["staging"],
+                self.counters,
+                self.pointers["staging"],
+                self.rank,
+                blocks,
+                threads,
+            )
+        else:
+            self.direct_kernel(
+                values,
+                wire,
+                output,
+                scales,
+                self.storage["semaphores"],
+                self.pointers["values"],
+                self.pointers["scales"],
+                self.pointers["semaphores"],
+                self.rank,
+                blocks,
+                threads,
+            )
         return output.view(torch.float8_e4m3fn), scales[:, :m].T
 
 
-# FP8 activation wire format
-
-@dataclass(frozen=True)
+@dataclass
 class Fp8Activation:
     """Group128 E4M3 rows with TMA-aligned packed UE8M0 scale storage."""
 
