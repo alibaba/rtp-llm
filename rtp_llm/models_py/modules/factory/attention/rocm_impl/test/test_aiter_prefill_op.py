@@ -3110,5 +3110,15 @@ class TestVLayoutContract(unittest.TestCase):
                     attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
 
 
+class TestAiterFullPrefillCudaGraphAlgrNumerics(TestAiterFullPrefillCudaGraphNumerics):
+    """Exercise ALGR geometry and mostly empty fixed-capacity request slots."""
+
+    BUCKET = 3072
+    MAX_REQUESTS = 32
+    HEAD_NUM = 16
+    HEAD_NUM_KV = 16
+    REAL_LENGTH_CASES = ([909], [909, 909], [909, 909, 909], [3072], [33, 77, 909])
+
+
 if __name__ == "__main__":
     unittest.main()

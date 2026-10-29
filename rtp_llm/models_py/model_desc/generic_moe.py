@@ -413,6 +413,35 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def supports_full_prefill_rocm_moe(self) -> bool:
+        """Attest the selected gfx942 PTPC implementation, not a strategy name.
+
+        Capture/replay tests cover changing routing and sentinel token counts.
+        Other model adapters and executor implementations stay fail-closed.
+        """
+        if not torch.version.hip:
+            return False
+        arch = torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName
+        if arch.split(":")[0] != "gfx942":
+            return False
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
+            RocmExpertsFp8PerChannel,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router import (
+            PureTpRouterFusedQuant,
+        )
+
+        moe_layers = [
+            layer.mlp for layer in self.layers if isinstance(layer.mlp, GenericMoeLayer)
+        ]
+        if len(moe_layers) != len(self.config.moe_layer_index) or not moe_layers:
+            return False
+        return all(
+            type(layer.fused_moe.router) is PureTpRouterFusedQuant
+            and type(layer.fused_moe.fused_experts) is RocmExpertsFp8PerChannel
+            for layer in moe_layers
+        )
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.get_inputs_embeds(input_ids, inputs)
