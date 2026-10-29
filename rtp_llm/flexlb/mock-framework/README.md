@@ -509,8 +509,6 @@ Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退�
 
 `master/restart(targets)` 恢复本次实验中已停止的 Master，省略 targets 时恢复全部已停止 Master；活动、未知、重复或显式空目标拒绝执行。恢复保留原服务地址、逻辑身份和选举组，启动新进程，当前拓扑与采集重新注册。每次启动使用独立进程监督身份和 `components/<实例>/restart-<序号>/` 目录；原配置、endpoints 和日志不覆盖。管理器只在内存保留可恢复实例的配置与当前启动信息，不增加实例历史文件。`master/start` 仍表示新建实例，旧地址引用不会自动指向它。
 
-`master/idle(targets)` 在 Python 直接读取各选定 Master 的原生 GET `/rtp_llm/inflight_status`，检查 scheduler inflight、P inflight、D queued 和 D running 全部为零。所有 Master 均须提供有效非负整数 ledger；缺失字段、接口不可达或格式错误均报错，不补零。这个读数不代替流量期间的选举或就绪判断。
-
 滚动替换直接组合查询、stop、start。下面使用固定观察等待，实际 Case 应按需要配置等待时间及门禁；新主产生不保证在途请求无损：
 
 ```yaml

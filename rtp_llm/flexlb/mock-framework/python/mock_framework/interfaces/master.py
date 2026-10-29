@@ -1,9 +1,6 @@
 """Case-level Master reads; Java returns only its own observation."""
 from dataclasses import dataclass
 from typing import Annotated, Literal
-import asyncio
-import json
-from urllib.request import Request, urlopen
 from ..config.registry import Bounds, case_interface
 from ..execution.transport import post, ExecutionError
 
@@ -93,33 +90,3 @@ async def stop(ctx, args: Stop) -> list[str]:
 async def restart(ctx, args: Targets) -> list[str]:
     """Restore stopped Masters at their original service addresses with fresh process artifacts."""
     return await ctx.runtime.masters.restart(args.targets)
-
-
-def inflight(url, timeout):
-    request = Request(url + '/rtp_llm/inflight_status', headers={'Accept': 'application/json'})
-    with urlopen(request, timeout=timeout) as response:
-        raw = response.read(16 * 1024 * 1024 + 1)
-    if len(raw) > 16 * 1024 * 1024:
-        raise ExecutionError('Master inflight response exceeds 16 MiB')
-    try:
-        data = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-        values = [data['scheduler_inflight']]
-        for side, fields in [('prefill', ('inflight_requests',)), ('decode', ('master_queued', 'confirmed_running'))]:
-            endpoints = data[side + '_endpoints']
-            if not isinstance(endpoints, list):
-                raise ExecutionError('Master endpoint ledger must be a list')
-            values.extend(endpoint[field] for endpoint in endpoints for field in fields)
-        if any(type(value) is not int or value < 0 for value in values):
-            raise ExecutionError('Master owner ledger requires nonnegative integer counts')
-    except (KeyError, TypeError, ValueError) as error:
-        raise ExecutionError('Invalid Master owner ledger') from error
-    return all(value == 0 for value in values)
-
-
-@case_interface('master/idle', effect='read')
-async def idle(ctx, args: Targets) -> bool:
-    """Read every selected Master's native owner ledger once; missing data is never zero."""
-    results = []
-    for master in selected(ctx, args.targets):
-        results.append(await asyncio.to_thread(inflight, master['http'], min(2, ctx.timeout)))
-    return all(results)

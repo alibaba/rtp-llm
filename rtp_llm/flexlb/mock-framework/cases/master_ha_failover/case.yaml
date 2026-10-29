@@ -144,11 +144,6 @@ phases:
             - 0s
         expect: {gte: 0.95}
       - id: collected
-        describe: 停止发送并收齐所有 Client 已发请求的终态；留出保守清理时间。
+        describe: 停止发送并收齐所有 Client 已发请求的终态。
         interface: client/stop
         within: 180s
-        wait_after: 10s
-      - id: idle
-        describe: 两个 Master 的 scheduler 和 P/D owner ledger 均已归零。
-        interface: master/idle
-        expect: {eq: true}

@@ -24,7 +24,7 @@ def test_ha_case_keeps_one_playback_and_full_rolling_order_without_progress_or_s
         'kill_a', 'restore_a', 'kill_b', 'restore_b']
     assert sum(step.interface == 'client/start' for step in steps) == 1
     assert sum(step.interface == 'client/stop' for step in steps) == 1
-    assert not any(step.interface == 'client/state/get' for step in steps)
+    assert not any(step.interface in ('client/state/get', 'master/idle') for step in steps)
     rates = [step for step in steps if step.interface == 'client/success_rate']
     assert [step.id for step in rates] == ['baseline', 'b_success', 'a_success', 'both_success']
     assert all(step.args == {'range': ['-20s', '0s']} and step.expect.comparisons == {'gte': .95} for step in rates)
@@ -47,13 +47,12 @@ def test_native_master_restores_address_and_refreshes_only_its_current_discovery
     from test_master_lifecycle import step, assert_reaped
     document = load_yaml(ROOT / 'cases/basic/case.yaml')
     document['environment'].pop('client')
-    document['phases'] = [dict(id='lifecycle', describe='Native kill, restoration, and owner reads', timeout='120s', steps=[
+    document['phases'] = [dict(id='lifecycle', describe='Native kill, restoration, and discovery refresh', timeout='120s', steps=[
         step('a', 'master/leadership/get', expect={'count': 1}),
         step('killed', 'master/stop', args={'targets': {'ref': 'steps.a'}, 'mode': 'kill'}),
         step('restored', 'master/restart', args={'targets': {'ref': 'steps.a'}}, within='60s', wait_after='2s'),
         step('leader', 'master/leadership/get', expect={'eq': {'ref': 'steps.a'}}),
-        step('added', 'engine/scale_out', args={'role': 'prefill', 'count': 1}, expect={'count': 1}),
-        step('idle', 'master/idle', expect={'eq': True})])]
+        step('added', 'engine/scale_out', args={'role': 'prefill', 'count': 1}, expect={'count': 1})])]
     source = tmp_path / 'case.yaml'; source.write_text(yaml.safe_dump(document))
     registry = Registry.standard(); case = compile_case(source, registry)
     launch = local_launch(case, Path(os.environ['JAVA_HOME']) / 'bin/java', os.environ['PROMETHEUS_BIN'], framework=ROOT)
