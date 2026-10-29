@@ -2362,12 +2362,28 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailKeepsEntireActiv
         EXPECT_TRUE(std::equal(full.begin(), full.begin() + 3, seed_res->blocks(0, "full1").begin()));
         EXPECT_TRUE(isNullBlockIdx(linear[0]));
         EXPECT_TRUE(isNullBlockIdx(linear[1]));
-        // The Full prefix hit does not provide Linear state. A generic two-state
-        // handoff must materialize both active slots, including the one inside
-        // the reused Full prefix; it is not a retired Fusion checkpoint.
-        EXPECT_FALSE(isNullBlockIdx(linear[2]));
+        // Since #1574 the first (prefill-shaped) allocation materializes only
+        // slots beyond the matched prefix, so the active-tail slot inside the
+        // reused Full prefix stays a logical NULL until an increment needs it.
+        EXPECT_TRUE(isNullBlockIdx(linear[2]));
         EXPECT_FALSE(isNullBlockIdx(linear[3]));
-        EXPECT_NE(linear[2], linear[3]);
+
+        // Grow beyond the matched prefix: with active_tail_blocks=2 the entire
+        // active tail (both trailing slots) stays materialized while retired
+        // history slots keep their logical NULLs.
+        decode_tokens->setSeqLength(20);
+        MallocInfo incr_info{decode_res, decode_tokens};
+        incr_info.enable_cache_lookup        = false;
+        incr_info.reuse_cache                = true;
+        incr_info.pd_decode_linear_tail_only = true;
+        ASSERT_TRUE(allocator->malloc(incr_info).success);
+        const auto& grown = decode_res->blocks(0, "linear");
+        ASSERT_EQ(grown.size(), 5u);
+        EXPECT_TRUE(isNullBlockIdx(grown[0]));
+        EXPECT_TRUE(isNullBlockIdx(grown[1]));
+        EXPECT_TRUE(isNullBlockIdx(grown[2]));
+        EXPECT_FALSE(isNullBlockIdx(grown[3]));
+        EXPECT_FALSE(isNullBlockIdx(grown[4]));
     }
 }
 
@@ -2406,14 +2422,18 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyAdmissionIgn
         int expected_full_blocks;
     };
 
-    for (const AdmissionCase test_case : {AdmissionCase{0, 4, 1, 16}, AdmissionCase{8, 9, 8, 18}}) {
+    for (const AdmissionCase test_case : {AdmissionCase{0, 4, 1, 16}, AdmissionCase{8, 9, 1, 18}}) {
         SCOPED_TRACE(test_case.reserve_step);
-        auto config = makeTinyHybridConfig();
-        setGroupBlockCounts(config, test_case.linear_pool_blocks, /*full_count=*/20);
+        // Keep-history baseline: a full-checkpoint reuse window must reserve the
+        // whole 16-slot LINEAR history, which the small pool cannot hold.
+        auto legacy_config                     = makeTinyHybridConfig();
+        legacy_config.reuse_cache_tail_blocks  = 16;
+        setGroupBlockCounts(legacy_config, test_case.linear_pool_blocks, /*full_count=*/20);
 
-        auto legacy_allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        auto legacy_allocator =
+            std::make_shared<TestHybridTypeCoordinatorCacheManager>(legacy_config, AllocationType::DEVICE);
         ASSERT_TRUE(legacy_allocator->init());
-        auto legacy_resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
+        auto legacy_resource = makeBatchResource(/*batch_size=*/1, legacy_config, CacheKeysType{});
         auto legacy_tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/64, /*seq_size_per_block=*/4);
         legacy_tokens->setReserveStep(test_case.reserve_step);
         MallocInfo legacy_info{legacy_resource, legacy_tokens};
@@ -2421,6 +2441,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyAdmissionIgn
         legacy_info.reuse_cache         = true;
         EXPECT_FALSE(legacy_allocator->malloc(legacy_info).success);
 
+        auto config = makeTinyHybridConfig();
+        setGroupBlockCounts(config, test_case.linear_pool_blocks, /*full_count=*/20);
         auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
         ASSERT_TRUE(allocator->init());
         auto resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});
@@ -2451,7 +2473,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyAdmissionIgn
         EXPECT_EQ(linear_used, test_case.expected_linear_blocks);
         EXPECT_EQ(full_used, test_case.expected_full_blocks);
         EXPECT_EQ(linear_used + full_used, estimate);
-        const int expected_linear_slots = 16 + (test_case.reserve_step > 0 ? test_case.reserve_step - 1 : 0);
+        // The prefill-shaped LINEAR malloc ignores the reserve step, so the row
+        // stays at sequence slots; the scratch materializes on decode increments.
+        const int expected_linear_slots = 16;
         EXPECT_EQ(resource->blocksNum(0, "linear"), expected_linear_slots);
         EXPECT_EQ(resource->blocksNum(0, "full1"), test_case.expected_full_blocks);
     }
@@ -2488,9 +2512,23 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyRetainsReser
         const size_t free_after =
             allocator->groupBlockPools()[0]->freeBlocksNum() + allocator->groupBlockPools()[1]->freeBlocksNum();
         EXPECT_EQ(static_cast<int>(free_before - free_after), expected_blocks);
+        // Since #1574 the first (prefill-shaped) allocation is lazy: it
+        // materializes one active-tail LINEAR slot and appends no scratch.
         const auto& linear_blocks = resource->blocks(0, "linear");
-        ASSERT_EQ(linear_blocks.size(), static_cast<size_t>(reserve_step));
-        for (const auto block : linear_blocks) {
+        ASSERT_EQ(linear_blocks.size(), 1u);
+        EXPECT_FALSE(isNullBlockIdx(linear_blocks[0]));
+
+        // The first decode-path increment materializes the reserve scratch.
+        token_ids->setSeqLength(5);  // Crosses from one logical block to two.
+        MallocInfo incr_info{resource, token_ids};
+        incr_info.enable_cache_lookup          = false;
+        incr_info.reuse_cache                  = true;
+        incr_info.pd_decode_linear_tail_only   = true;
+        incr_info.enable_remove_skipped_blocks = true;
+        ASSERT_TRUE(allocator->malloc(incr_info).success);
+        const auto& grown = resource->blocks(0, "linear");
+        ASSERT_EQ(grown.size(), static_cast<size_t>(1 + reserve_step));
+        for (const auto block : grown) {
             EXPECT_FALSE(isNullBlockIdx(block));
         }
     }
@@ -2944,7 +2982,10 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastDoesNotCreditSh
         estimateBatchPeakForSingleSequence(*allocator, resource, 24, 40, 0, true, LinearCachePolicy::RECLAIM_COMMITTED);
     // Ten future FULL blocks and at least one future LINEAR allocation cannot use any current-block release credit.
     EXPECT_GE(forecast, 11);
-    EXPECT_LT(
+    // Pinned current blocks (a concurrent request plus an in-flight load) cannot
+    // be released, so the reclaim forecast stays above the keep-history estimate
+    // instead of dropping below it in this pinned scenario.
+    EXPECT_GT(
         forecast,
         estimateBatchPeakForSingleSequence(*allocator, resource, 24, 40, 0, true, LinearCachePolicy::KEEP_HISTORY));
     EXPECT_EQ(allocator->availableBlocksNum(), available_before);

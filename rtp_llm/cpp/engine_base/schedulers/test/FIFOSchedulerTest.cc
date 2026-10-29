@@ -1068,10 +1068,12 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionAllowsLongGenerationWithinPhysic
         ASSERT_FALSE(running->hasError());
         ASSERT_TRUE(scheduler.enqueue(candidate).ok());
         // Two completed streams need 42 full-attention blocks (48 available)
-        // and at most a short rolling linear tail (13 available). Keeping all
-        // historical linear checkpoints would incorrectly reject the second.
-        verifyOnlyScheduledStream(scheduler, reclaim ? candidate : running);
-        EXPECT_EQ(scheduler.waiting_streams_.size(), reclaim ? 0u : 1u);
+        // and only short rolling linear tails (13 available). Since #1574 the
+        // admission peak bills the rolling decode tail instead of the full
+        // history, so the second stream is admitted with or without reclaim;
+        // physical history retirement is exercised below with reclaim on.
+        verifyOnlyScheduledStream(scheduler, candidate);
+        EXPECT_EQ(scheduler.waiting_streams_.size(), 0u);
         if (reclaim) {
             commit_token(candidate);
             // Exercise the real stream state machine and allocator to the
@@ -1119,7 +1121,9 @@ TEST_F(FIFOSchedulerTest, PDLinearTailSwitchCombinationsFinishLongRequestsWithin
             config.pool_block_weights          = {{"full1", 10}, {"linear", 1}};
             // Each MTP stream retains 23 blocks; incremental allocation needs
             // one shared spare before removing the old tail (24 + 23 = 47).
-            config.finalizeBlockNums(reserve_step == 0 ? 7 : 48, RuntimeConfig{});
+            // Without tail-only reuse D must hold the whole prompt history, so
+            // the rejection pool only has to sit below the 32 prompt blocks.
+            config.finalizeBlockNums(reserve_step == 0 ? 7 : (tail_only ? 48 : 31), RuntimeConfig{});
             auto resources = makeSchedulerResources(config, 2);
             ASSERT_TRUE(resources.cache_manager->init());
             resources.resource_context.role_type                                 = RoleType::DECODE;
@@ -1170,8 +1174,9 @@ TEST_F(FIFOSchedulerTest, PDLinearTailSwitchCombinationsFinishLongRequestsWithin
                 }
                 const auto status = resource.initKVBlock();
                 if (!tail_only) {
-                    // Fusion reclamation cannot help D materialize the entire
-                    // prompt plus speculative reserve in the smaller Linear pool.
+                    // Since #1574 the first (prefill-shaped) allocation bills no
+                    // speculative reserve, but it still materializes the entire
+                    // prompt history, which the smaller Linear pool cannot hold.
                     EXPECT_FALSE(status.ok());
                     stream->releaseResource();
                     break;
@@ -1291,19 +1296,21 @@ TEST_F(FIFOSchedulerTest, WeightedPoolsWaitForExhaustedPoolAndReadmitAfterCancel
 }
 
 TEST_F(FIFOSchedulerTest, WeightedPoolLifecycleAdmissionCannotBorrowAnotherPoolsFutureCapacity) {
-    // The two asymmetric cases have 8 blocks in one pool and 26 in the other.
-    // Each request needs six blocks per pool at its last forward: aggregate
-    // capacity fits, but both requests cannot coexist in the smaller pool.
-    // The balanced control proves that the test does not just forbid overlap.
+    // The two asymmetric cases have 4 blocks available in one pool and 19 in
+    // the other. Under the #1574 slot-cost peak the two streams need 11
+    // full-attention blocks (5 + 6) but only 5 rolling linear tail blocks
+    // (2 + 3): aggregate capacity fits, yet both streams cannot coexist in the
+    // smaller pool. The balanced control proves that the test does not just
+    // forbid overlap.
     for (const std::string limiting_tag : {"full1", "linear", ""}) {
         SCOPED_TRACE(limiting_tag.empty() ? "balanced" : limiting_tag);
-        auto config               = test::makeSimpleHybridMhaCacheConfig(4, 9, 1, DataType::TYPE_FP16);
+        auto config               = test::makeSimpleHybridMhaCacheConfig(4, 5, 1, DataType::TYPE_FP16);
         config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-        config.pool_block_weights = {{"full1", 3}, {"linear", 3}};
+        config.pool_block_weights = {{"full1", 4}, {"linear", 4}};
         if (!limiting_tag.empty()) {
             config.pool_block_weights[limiting_tag] = 1;
         }
-        config.finalizeBlockNums(9, RuntimeConfig{});
+        config.finalizeBlockNums(5, RuntimeConfig{});
         auto resources = makeSchedulerResources(config, 1);
         ASSERT_TRUE(resources.cache_manager->init());
         resources.resource_context.reuse_cache                               = true;
@@ -1323,8 +1330,10 @@ TEST_F(FIFOSchedulerTest, WeightedPoolLifecycleAdmissionCannotBorrowAnotherPools
         waiting->generateConfig()->reuse_cache = true;
         ASSERT_TRUE(scheduler.enqueue(running).ok());
         verifyOnlyScheduledStream(scheduler, running);
-        ASSERT_EQ(running->estimatePeakNeedBlocks(5) + waiting->estimatePeakNeedBlocks(5), 22);
-        ASSERT_LE(22u, resources.cache_manager->availableBlocksNum());
+        // Slot-cost peak: 5 full-attention blocks held by the running stream
+        // plus 6 for the fresh one, and rolling linear tails of 2 plus 3.
+        ASSERT_EQ(running->estimatePeakNeedBlocks(5) + waiting->estimatePeakNeedBlocks(5), 16);
+        ASSERT_LE(16u, resources.cache_manager->availableBlocksNum());
         ASSERT_TRUE(scheduler.enqueue(waiting).ok());
         const bool fits = limiting_tag.empty();
         verifyOnlyScheduledStream(scheduler, fits ? waiting : running);
