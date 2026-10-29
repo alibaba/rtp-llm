@@ -402,6 +402,49 @@ class BatchedTerminalOutputTest(TestCase):
         asyncio.run(exercise(True))
 
 
+class CompactLogprobsTransportTest(TestCase):
+    def setUp(self):
+        self.input = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(return_logprobs=True, top_logprobs=0),
+        )
+        self.response = GenerateOutputsPB()
+        flat = self.response.flatten_output
+        flat.finished.append(False)
+        flat.output_ids.data_type = TensorPB.INT32
+        flat.output_ids.shape.extend([1, 1, 3])
+        flat.output_ids.int32_data = struct.pack("<3i", 7, 8, 9)
+        flat.logprobs_offsets.append(1)
+        flat.logprobs_counts.append(2)
+        flat.token_logprobs.data_type = TensorPB.FP32
+        flat.token_logprobs.shape.extend([1, 2])
+        flat.token_logprobs.fp32_data = struct.pack("<2f", -1.0, -2.0)
+        flat.top_logprob_token_ids.data_type = TensorPB.INT32
+        flat.top_logprob_token_ids.shape.extend([1, 2, 0])
+        flat.top_logprobs.data_type = TensorPB.FP32
+        flat.top_logprobs.shape.extend([1, 2, 0])
+
+    def test_zero_topk_preserves_compact_placement_and_empty_tensor_shapes(self):
+        request_pb = trans_input(self.input)
+        self.assertTrue(request_pb.generate_config.return_logprobs)
+        self.assertEqual(request_pb.generate_config.top_logprobs, 0)
+        output = trans_output(
+            self.input, self.response, StreamState()
+        ).generate_outputs[0]
+        self.assertEqual(output.output_ids.tolist(), [[7, 8, 9]])
+        self.assertEqual((output.logprobs_offset, output.logprobs_count), (1, 2))
+        self.assertEqual(output.token_logprobs.tolist(), [-1.0, -2.0])
+        self.assertEqual(tuple(output.top_logprob_token_ids.shape), (2, 0))
+        self.assertEqual(tuple(output.top_logprobs.shape), (2, 0))
+
+    def test_incomplete_compact_placement_is_rejected(self):
+        del self.response.flatten_output.logprobs_counts[:]
+        with self.assertRaisesRegex(ValueError, "one value per output"):
+            trans_output(self.input, self.response, StreamState())
+
+
 class ModelRpcClientTest(TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)

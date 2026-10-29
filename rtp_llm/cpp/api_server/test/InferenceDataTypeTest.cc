@@ -44,6 +44,17 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_TopK) {
     ASSERT_EQ(req.generate_config.value().top_k, 1);
 }
 
+TEST(InferenceDataTypeTest, DisabledCompactLogprobsPreservesGenerateConfig) {
+    RawRequest req;
+    FromJsonString(req,
+                   R"({"generate_config":{"max_new_tokens":16,"is_streaming":true,"return_logprobs":false,"top_logprobs":0}})");
+    ASSERT_TRUE(req.generate_config.has_value());
+    EXPECT_EQ(req.generate_config->max_new_tokens, 16);
+    EXPECT_TRUE(req.generate_config->is_streaming);
+    EXPECT_FALSE(req.generate_config->return_logprobs);
+    EXPECT_EQ(req.generate_config->top_logprobs, 0);
+}
+
 TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_MemoryCacheField) {
     RawRequest req;
     FromJsonString(req, R"({"request_id":1,"generate_config":{"enable_memory_cache":false}})");
