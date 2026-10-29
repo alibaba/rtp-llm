@@ -326,6 +326,8 @@ def _dash_error_mapping_for_ft_exception(
     """
 
     exception_type = exc.exception_type
+    if exception_type == ExceptionType.MM_DOWNLOAD_FAILED:
+        return _DashFtErrorMapping(DASH_ERROR_BAD_REQUEST, exc.message)
     if exception_type in (
         ExceptionType.UNSAFE_INPUT_CONTENT,
         ExceptionType.UNSAFE_OUTPUT_CONTENT,
