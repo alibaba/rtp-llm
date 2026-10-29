@@ -100,7 +100,9 @@ def try_fp8_hc_medium_up_mix(x, weight, scale, normed, branches):
         and torch.cuda.get_device_capability(x.device) == (12, 0)
     ):
         return None
-    from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
+    from rtp_llm.models_py.modules.base.common.fp8_linear import (
+        _quantize_projection_input,
+    )
 
     rows = x.reshape(-1, 320)
     padding = (-rows.shape[0]) % 16
@@ -111,7 +113,9 @@ def try_fp8_hc_medium_up_mix(x, weight, scale, normed, branches):
         if padding
         else None
     )
-    quantized, input_scale = scaled_fp8_per_tensor_quant(rows, output=padded)
+    quantized, input_scale = _quantize_projection_input(
+        rows, role="DECODE", output=padded
+    )
     return run_quantized(
         quantized, weight, input_scale, scale, normed.reshape(-1, 10240)
     ).reshape(*x.shape[:-1], 2560)

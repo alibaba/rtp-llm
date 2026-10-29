@@ -18,6 +18,29 @@ MODULE = "rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_t
 
 
 class MediumHCConsumerTest(unittest.TestCase):
+    def test_native_quantization_matches_for_edge_values(self):
+        w = (torch.randn(10240, 320, device="cuda") * 0.1).to(torch.float8_e4m3fn)
+        sw = torch.tensor([0.119713], device="cuda")
+        quant_module = "rtp_llm.models_py.triton_kernels.common.fp8_small_quant"
+        for rows in (8, 12, 16, 20, 24, 28, 32):
+            x = torch.randn(rows, 320, device="cuda", dtype=torch.bfloat16)
+            norm = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+            for kind in ("random", "zero", "subnormal", "nonfinite"):
+                if kind == "zero":
+                    x.zero_()
+                elif kind == "subnormal":
+                    x.fill_(1.0e-40)
+                elif kind == "nonfinite":
+                    x.normal_()
+                    x[0, 0] = float("inf")
+                    x[-1, 1] = float("nan")
+                with patch(quant_module + ".try_small_fp8_quant", return_value=None):
+                    expected = try_fp8_hc_medium_up_mix(x, w, sw, norm, 4)
+                actual = try_fp8_hc_medium_up_mix(x, w, sw, norm, 4)
+                torch.testing.assert_close(
+                    actual, expected, rtol=0, atol=0, equal_nan=True
+                )
+
     def test_up_consumer_non_power_of_two_scales(self):
         torch.manual_seed(28173)
         for rows in (8, 16, 20, 24, 28, 32):
