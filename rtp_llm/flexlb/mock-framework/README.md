@@ -493,7 +493,7 @@ Engine JAR 的默认入口为 `EngineHost`。共享模式下 P/D 的 command、c
 
 主动下线会终止该实例的在途请求；生产 Master 淘汰旧地址前仍可能有路由失败，不能将当前操作称为无损缩容。Case 应按场景判断过渡期错误和收敛后的成功率。生命周期验收持续记录请求结果，验证两种 JVM 放置下剩余实例继续服务、真实 Master 最终移除旧地址、新实例能接请求，以及历史指标仍可查询。另用故意保留旧 Prometheus target 的场景检查采集不会串到新实例，并注入第二个创建/停止失败，检查已完成操作不重放、整次实验报错并清理。
 
-共享宿主关闭最后一个 Engine 后仍保留，允许再次扩容；独立宿主在关闭实例后回收进程。每次新增使用新编号、目录和未用过的监听地址。编号表示一次创建，例如删除 prefill-0 后再次扩容会创建 prefill-2，不填补旧编号；创建失败也不回收编号。它只用于内部对象映射和产物路径，Case 仍使用服务地址，不增加 node/generation 标签或选择器。实验目录和实例目录拒绝覆盖；Java 以 CREATE_NEW 写入 effective-config.json，另一宿主也不能重新使用旧实例目录。重新创建必须使用新编号与新目录，Runner 断点恢复、同身份原地重启不在当前能力范围。`hosts/engine-shared/` 或 `hosts/engine-<实例>/` 保存 JVM 日志，`components/<实例>/` 保存 config、effective-config、endpoints 和 ready，不复制宿主日志到各实例。下线删除 ready；endpoints、日志和配置作为该组件的原始产物保留，不另行维护实例历史。
+共享宿主关闭最后一个 Engine 后仍保留，允许再次扩容；独立宿主在关闭实例后回收进程。每次新增使用新编号、目录和未用过的监听地址。编号表示一次创建，例如删除 prefill-0 后再次扩容会创建 prefill-2，不填补旧编号；创建失败也不回收编号。它只用于内部对象映射和产物路径，Case 仍使用服务地址，不增加 node/generation 标签或选择器。实验目录和实例目录拒绝覆盖；Java 以 CREATE_NEW 写入 effective-config.json，另一宿主也不能重新使用旧实例目录。重新创建必须使用新编号与新目录，Runner 断点恢复、Engine 同身份原地重启不在当前能力范围。`hosts/engine-shared/` 或 `hosts/engine-<实例>/` 保存 JVM 日志，`components/<实例>/` 保存 config、effective-config、endpoints 和 ready，不复制宿主日志到各实例。下线删除 ready；endpoints、日志和配置作为该组件的原始产物保留，不另行维护实例历史。
 
 `topology.json` 只保存当前活动实例，不生成 topology-history.json，不保存实例起止时间或退役台账。活动 Master 的 discovery.json 随当前 Engine 更新，角色缩到零时写空地址列表。Master 查询直接返回生产 WorkerDirectory 当前观察到的地址，不经实例 ID 或历史地址表转换；因此生产发现尚未淘汰的旧地址仍会如实返回。消费者的刷新和淘汰由自身实现负责，Case 检查其收敛结果。最终清理清空当前拓扑。
 
@@ -503,9 +503,13 @@ Runner 每秒开始一轮宿主健康检查，单次 HTTP 调用限时 10 秒，
 
 Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退出，各角色服务负责自己的生命周期，`RunEnvironment` 统一安排最终清理。进程监督器不识别 Master 业务接口，也不合并返回值。真实 Master 的状态查询由 `interfaces/master.py` 按 targets 逐实例调用，并保留每个 Master 的独立结果。
 
-`master/stop(targets)` 由 Python 停止选定的独立 Master JVM，省略 targets 时停止全部活动 Master；空集合、重复或失效地址在任何停止前报错。停止前完成末次采样、登记预期退出，确认退出后移出活动发现与 Prometheus 目标，删除 ready，保留原 endpoints、日志和配置。意外退出仍使整个实验 ERROR；强制 SIGKILL、部分停止失败同样报错，不重放已完成动作。
+`master/stop(targets)` 由 Python 停止选定的独立 Master JVM，省略 targets 时停止全部活动 Master；空集合、重复或失效地址在任何停止前报错。停止前完成末次采样、登记预期退出，确认退出后移出活动发现与 Prometheus 目标，删除 ready，保留原 endpoints、日志和配置。默认 `mode: terminate` 使用正常停止；若需要 SIGKILL 兜底仍报错。显式 `mode: kill` 直接杀掉选定进程组并等待回收，只有这次退出视为预期故障注入；其他实例退出、操作前已退出及部分停止失败仍报错，不重放已完成动作。
 
 `master/start(count=1)` 的 count 范围为 1–1024，从 environment.master 的配置创建新 JVM，复用本实验的 ZK、HIPPO_ROLE 和公共服务端口，使用递增编号、新回环 IP、新产物目录。控制 HTTP 也绑定新 IP，防止旧控制引用命中新进程。初始启动和动态启动共用同一路径；补回时允许某个 Engine 角色已缩到零，按当前空发现启动。返回新 RPC 地址列表，选举和采集基线完成才返回。这里的 start 是新增/补回，不恢复旧身份。旧 step 引用始终指向旧地址，不能自动替换成新地址。Java 不提供 Master 集群生命周期服务。
+
+`master/restart(targets)` 恢复本次实验中已停止的 Master，省略 targets 时恢复全部已停止 Master；活动、未知、重复或显式空目标拒绝执行。恢复保留原服务地址、逻辑身份和选举组，启动新进程，当前拓扑与采集重新注册。每次启动使用独立进程监督身份和 `components/<实例>/restart-<序号>/` 目录；原配置、endpoints 和日志不覆盖。管理器只在内存保留可恢复实例的配置与当前启动信息，不增加实例历史文件。`master/start` 仍表示新建实例，旧地址引用不会自动指向它。
+
+`master/idle(targets)` 在 Python 直接读取各选定 Master 的原生 GET `/rtp_llm/inflight_status`，检查 scheduler inflight、P inflight、D queued 和 D running 全部为零。所有 Master 均须提供有效非负整数 ledger；缺失字段、接口不可达或格式错误均报错，不补零。这个读数不代替流量期间的选举或就绪判断。
 
 滚动替换直接组合查询、stop、start。下面使用固定观察等待，实际 Case 应按需要配置等待时间及门禁；新主产生不保证在途请求无损：
 
@@ -690,9 +694,14 @@ EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册�
 | engine/prefill/tps | P 实际计算 token 增量／完成 Forward 耗时增量。 |
 | engine/prefill/tps_with_cache | P 输入 token 增量／完成 Forward 耗时增量，输入含命中。 |
 | engine/decode/tps | D 完成 Forward 输出 token 增量／墙钟时间。 |
+| client/success_rate | 区间内成功终态计数增量／全部终态计数增量，先对各 Client 算增量再聚合；可选 targets。 |
 | prometheus/query | 固定 query_time 的一次 scalar 或 float instant vector，保留标签、数值和 sample_time。 |
 
 普通接口在本次独占 Prometheus 内按 role 和 instance 地址过滤，先逐条 Counter 算增量再聚合以处理 reset；hit_rate 不能平均节点比率。显式空 targets 报错，选择器转义；每个选中实例的分子/分母至少需要两次采样，重复或缺失序列报错。range 在固定 end 执行单次 instant query，窗口=end−start，精度 ms，低于 1ms 拒绝；latest 用检查前 60s 内最近两次采样的 irate，不平均整分钟。缺少采样或没有可计算 Forward 时报错。
+
+`client/success_rate` 按完成时间统计，分母包含 success/error/timeout/cancelled。它没有最小请求数门槛；窗口无终态时分母为零，或任一 Client 的终态序列采集不完整时均报错。至少两次抓取是计数器增量的计算条件，不是请求数要求。近期完成请求可能在更早时发出；此口径不表示同一发送阶段的成功率。
+
+`cases/master_ha_failover/case.yaml` 用同一轮固定 QPS 播放贯穿杀 A、恢复 A、杀 B、恢复 B。操作通过已保存的地址列表引用，恢复前不杀另一侧；恢复后检查原主不被抢占。Case 在保守等待后直接检查最近完成请求的成功率，最后收集并检查 Master owner 归零，不使用进度接口、最少样本数、精确事件窗口或 HA 专用执行器。启动配方仍由 `mock-case launch <case>/case.yaml` 生成；双 Master 要求本机可绑定两个回环 IP。该 Case 验证当前固定 QPS 播放下的滚动恢复，不声称覆盖旧 trace 到达节奏或原负载均衡实验。
 
 原始 PromQL 不自动加过滤。matrix/string/native histogram、非有限值、查询 warning 或后端失败都不作为有效门禁；普通指标恰好一个有限值。原始查询返回结构化结果，不隐式聚合或对各样本套用数值门禁。查询不重试，HTTP 和求值均受步骤剩余预算限制。
 

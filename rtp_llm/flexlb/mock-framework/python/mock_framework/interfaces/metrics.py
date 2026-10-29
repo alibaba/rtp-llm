@@ -117,15 +117,19 @@ def scope(ctx, args, role):
     return f'role={json.dumps(role)},instance=~{json.dumps(expression)}', targets
 
 
+async def counter_history(ctx, name, labels, targets, at, millis):
+    counts = await instant(ctx, f'count_over_time({name}{{{labels}}}[{millis}ms])', at)
+    if len(counts) != len(targets) or {s.labels.get('instance') for s in counts} != set(targets) or any(s.value < 2 for s in counts):
+        raise ExecutionError('Incomplete metric coverage for selected instances')
+
+
 async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
     at, millis, operation = window(ctx, args)
     labels, targets = scope(ctx, args, role)
     # Every selected instance must contribute the counter history; aggregate alone hides missing peers.
     for name in [numerator] + ([denominator] if denominator else []):
         check_labels = labels + (f',kind={json.dumps(kind)}' if name == numerator and kind else '')
-        counts = await instant(ctx, f'count_over_time({name}{{{check_labels}}}[{millis}ms])', at)
-        if len(counts) != len(targets) or {s.labels.get('instance') for s in counts} != set(targets) or any(s.value < 2 for s in counts):
-            raise ExecutionError('Incomplete metric coverage for selected instances')
+        await counter_history(ctx, name, check_labels, targets, at, millis)
     def aggregate(name, selector):
         return f'sum({operation}({name}{{{selector}}}[{millis}ms]))'
     expression = aggregate(numerator, labels + (f',kind={json.dumps(kind)}' if kind else ''))
@@ -163,3 +167,20 @@ async def decode_tps(ctx, args: MetricArgs) -> float:
 async def client_qps(ctx, args: MetricArgs) -> float:
     """Rate of Client calls started, not successful completions or Master acceptance."""
     return await metric(ctx, args, 'client', 'mock_client_requests_issued_total')
+
+
+@case_interface('client/success_rate', effect='read', unit='ratio')
+async def client_success_rate(ctx, args: MetricArgs) -> float:
+    """Success share of terminal observations in the selected interval; no request-count floor."""
+    at, millis, operation = window(ctx, args)
+    labels, targets = scope(ctx, args, 'client')
+    name = 'mock_client_requests_finished_total'
+    for outcome in ('success', 'error', 'timeout', 'cancelled'):
+        await counter_history(ctx, name, labels + ',outcome=' + json.dumps(outcome), targets, at, millis)
+    success = f'{name}{{{labels},outcome="success"}}'
+    total = f'{name}{{{labels}}}'
+    expression = f'sum({operation}({success}[{millis}ms])) / sum({operation}({total}[{millis}ms]))'
+    values = await instant(ctx, expression, at)
+    if len(values) != 1 or not 0 <= values[0].value <= 1:
+        raise ExecutionError('Client success rate requires terminal observations in the selected interval')
+    return values[0].value

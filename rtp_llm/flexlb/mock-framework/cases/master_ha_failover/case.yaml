@@ -1,0 +1,154 @@
+id: master_ha_failover
+name: Master 滚动重启
+describe: 一轮持续流量贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
+environment:
+  master:
+    config:
+      FLEXLB_CONFIG: >-
+        {"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":4},"requestLifecycle":{"request":{"timeoutMs":5000}},"grpcServer":{"executorCoreSize":2,"executorMaxSize":4,"executorQueueSize":64,"shutdownQuietPeriodMs":10}}
+      MODEL_SERVICE_CONFIG: >-
+        {"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"}}]}
+  prefill:
+    engine: rtp
+    config:
+      seq_size_per_block: 16
+      test_block_num: 4096
+      reserve_block_ratio: 0
+      max_seq_len: 4096
+      compute.expression: 1 + batchSize
+  decode:
+    engine: rtp
+    config:
+      seq_size_per_block: 16
+      test_block_num: 4096
+      reserve_block_ratio: 0
+      max_seq_len: 4096
+      compute.expression: 1 + batchSize
+  client:
+    config: {}
+    deployment:
+      replicas: 2
+phases:
+  - id: ready
+    describe: 先取得 A 的实际地址，再新增 B；两个 Master 始终为独立 JVM。
+    timeout: 120s
+    steps:
+      - id: a
+        describe: 记录首个 Master 的实际地址列表作为 A。
+        interface: master/leadership/get
+        expect: {count: 1}
+      - id: b
+        describe: 新增第二个 Master 并保存其地址列表作为 B。
+        interface: master/start
+        expect: {count: 1}
+        wait_after: 10s
+      - id: initial_leader
+        describe: 检查所有存活 Master 中唯一的主节点。
+        interface: master/leadership/get
+        expect: {eq: {ref: steps.a}}
+  - id: rolling
+    describe: 持续流量中先杀 A、恢复 A，再杀 B、恢复 B；不重启 Client。
+    timeout: 600s
+    steps:
+      - id: traffic
+        describe: client0 分配一轮固定 QPS 播放，先等待 30 秒建立基线。
+        interface: client/start
+        args:
+          requests_file: requests.binpb.zst
+          qps: 4
+          concurrency: 32
+          queue_capacity: 64
+          request_timeout: 120s
+          drain_timeout: 150s
+        wait_after: 30s
+      - id: baseline
+        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+        interface: client/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect: {gte: 0.95}
+      - id: kill_a
+        describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
+        interface: master/stop
+        args:
+          targets: {ref: steps.a}
+          mode: kill
+        expect: {eq: {ref: steps.a}}
+        within: 45s
+        wait_after: 30s
+      - id: b_leader
+        describe: 检查所有存活 Master 中唯一的主节点。
+        interface: master/leadership/get
+        expect: {eq: {ref: steps.b}}
+      - id: b_success
+        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+        interface: client/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect: {gte: 0.95}
+      - id: restore_a
+        describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
+        interface: master/restart
+        args:
+          targets: {ref: steps.a}
+        expect: {eq: {ref: steps.a}}
+        within: 120s
+        wait_after: 30s
+      - id: a_rejoined_without_preemption
+        describe: 检查所有存活 Master 中唯一的主节点。
+        interface: master/leadership/get
+        expect: {eq: {ref: steps.b}}
+      - id: kill_b
+        describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
+        interface: master/stop
+        args:
+          targets: {ref: steps.b}
+          mode: kill
+        expect: {eq: {ref: steps.b}}
+        within: 45s
+        wait_after: 30s
+      - id: a_leader
+        describe: 检查所有存活 Master 中唯一的主节点。
+        interface: master/leadership/get
+        expect: {eq: {ref: steps.a}}
+      - id: a_success
+        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+        interface: client/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect: {gte: 0.95}
+      - id: restore_b
+        describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
+        interface: master/restart
+        args:
+          targets: {ref: steps.b}
+        expect: {eq: {ref: steps.b}}
+        within: 120s
+        wait_after: 30s
+      - id: b_rejoined_without_preemption
+        describe: 检查所有存活 Master 中唯一的主节点。
+        interface: master/leadership/get
+        expect: {eq: {ref: steps.a}}
+      - id: both_success
+        describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+        interface: client/success_rate
+        args:
+          range:
+            - -20s
+            - 0s
+        expect: {gte: 0.95}
+      - id: collected
+        describe: 停止发送并收齐所有 Client 已发请求的终态；留出保守清理时间。
+        interface: client/stop
+        within: 180s
+        wait_after: 10s
+      - id: idle
+        describe: 两个 Master 的 scheduler 和 P/D owner ledger 均已归零。
+        interface: master/idle
+        expect: {eq: true}

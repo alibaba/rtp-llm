@@ -71,6 +71,27 @@ class ProcessSupervisor:
         errors = await self.stop([name], 3)
         return errors
 
+    async def kill_expected(self, name):
+        child = self._children[name]
+        if child.returncode is not None:
+            raise ExecutionError(f'{name} already exited before intentional kill')
+        self._expected.add(name)
+        errors = []
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except OSError as error:
+            errors.append(f'{name}: cannot kill process group: {error}')
+        try:
+            await asyncio.wait_for(child.wait(), timeout=3)
+        except TimeoutError:
+            errors.append(f'{name}: process did not exit after intentional SIGKILL')
+        if child.returncode is not None:
+            if child.returncode not in (-signal.SIGKILL, 128 + signal.SIGKILL):
+                errors.append(f'{name}: unexpected exit status during kill: {child.returncode}')
+            self.records.emit(event='process_stopped', node=name, code=child.returncode)
+            del self._children[name]
+        return errors
+
     async def stop(self, names, grace):
         children = [(name, self._children[name]) for name in names if name in self._children]
         errors = [f'{name}: exited unexpectedly before stop with code {child.returncode}'

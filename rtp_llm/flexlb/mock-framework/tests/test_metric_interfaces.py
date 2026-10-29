@@ -104,3 +104,51 @@ def test_metric_scope_uses_current_instances_and_rejects_removed_addresses():
     assert metrics.scope(ctx, args, 'prefill')[1] == ['127.0.0.1:1002']
     with pytest.raises(ExecutionError):
         metrics.scope(ctx, metrics.MetricArgs(targets=['127.0.0.1:1001'], range=['-60s', '0s']), 'prefill')
+
+
+def test_success_rate_aggregates_all_terminals_without_a_request_count_floor(monkeypatch):
+    calls = []
+    ctx = context()
+    for node in ctx.nodes:
+        node['role'] = 'client'
+    async def instant(ctx, expression, at):
+        calls.append((expression, at))
+        if expression.startswith('count_over_time'):
+            return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 2, at) for port in (1001, 1002)]
+        # Even one successful terminal in the interval is sufficient.
+        return [metrics.QuerySample({}, 1.0, at)]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    assert asyncio.run(metrics.client_success_rate(ctx, metrics.MetricArgs(range=['-20s', '0s']))) == 1
+    assert len(calls) == 5 and len({at for _, at in calls}) == 1
+    assert all('outcome=' + json.dumps(outcome) in calls[i][0]
+               for i, outcome in enumerate(('success', 'error', 'timeout', 'cancelled')))
+    expression = calls[-1][0]
+    numerator, denominator = expression.split(' / ')
+    assert 'outcome="success"' in numerator and 'outcome=' not in denominator
+    assert 'sum(increase(' in expression and '[20000ms]' in expression
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -0.1, 1.1])
+def test_success_rate_rejects_zero_terminal_nan_and_invalid_ratios(monkeypatch, value):
+    ctx = context()
+    for node in ctx.nodes:
+        node['role'] = 'client'
+    async def instant(ctx, expression, at):
+        if expression.startswith('count_over_time'):
+            return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 2, at) for port in (1001, 1002)]
+        return [metrics.QuerySample({}, value, at)]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    with pytest.raises(ExecutionError, match='terminal observations'):
+        asyncio.run(metrics.client_success_rate(ctx, metrics.MetricArgs(range=['-20s', '0s'])))
+
+
+def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
+    ctx = context()
+    for node in ctx.nodes:
+        node['role'] = 'client'
+    async def instant(ctx, expression, at):
+        ports = (1001,) if 'outcome="timeout"' in expression else (1001, 1002)
+        return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 2, at) for port in ports]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    with pytest.raises(ExecutionError, match='coverage'):
+        asyncio.run(metrics.client_success_rate(ctx, metrics.MetricArgs(range=['-20s', '0s'])))

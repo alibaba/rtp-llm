@@ -193,3 +193,55 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         assert not {'master-0', 'master-1'} & collection['targets'].keys()
         assert 'master-2' in collection['targets'] and collection['complete']
     assert_reaped(output)
+
+
+def test_kill_and_restore_keep_addresses_and_preserve_each_launch_artifact(tmp_path):
+    case, registry, launch = generic(tmp_path, [
+        step('killed', 'master/stop', args={'targets': ['127.0.0.1:12000'], 'mode': 'kill'}),
+        step('restored', 'master/restart', args={'targets': {'ref': 'steps.killed'}}),
+        step('killed_again', 'master/stop', args={'targets': {'ref': 'steps.restored'}, 'mode': 'kill'}),
+        step('restored_again', 'master/restart', args={'targets': {'ref': 'steps.killed'}}),
+        step('all', 'master/stop')])
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'PASS', result
+    values = {v['step']: v['result'] for v in logs(output) if v['event'] == 'step_finished'}
+    assert all(values[key] == ['127.0.0.1:12000'] for key in ('killed', 'restored', 'killed_again', 'restored_again'))
+    assert values['all'] == ['127.0.0.1:12000', '127.0.0.1:12001']
+    directory = output / 'components/master-0'
+    endpoints = [json.loads((path / 'endpoints.json').read_text()) for path in
+                 (directory, directory / 'restart-1', directory / 'restart-2')]
+    assert endpoints[0] == endpoints[1] == endpoints[2]
+    assert all((path / 'stdout.log').is_file() for path in (directory, directory / 'restart-1', directory / 'restart-2'))
+    started = [v for v in logs(output) if v['event'] == 'process_started']
+    assert len(started) == 4 and len({v['pid'] for v in started}) == 4
+    killed = [v for v in logs(output) if v['event'] == 'process_stopped' and v['code'] == -9]
+    assert len(killed) == 2
+    assert not (output / 'topology-history.json').exists()
+    assert_reaped(output)
+
+
+def test_restart_does_not_hide_unexpected_exit_of_new_process(tmp_path):
+    case, registry, launch = generic(tmp_path, [
+        step('killed', 'master/stop', args={'targets': ['127.0.0.1:12000'], 'mode': 'kill'}),
+        step('restored', 'master/restart', args={'targets': {'ref': 'steps.killed'}}, wait_after='1s'),
+        step('never', 'master/start')])
+    peer = tmp_path / 'peer.py'
+    peer.write_text(peer.read_text().replace('time.sleep(120)',
+        "time.sleep(.1) if 'restart-' in str(directory) else time.sleep(120)\nif 'restart-' in str(directory): sys.exit(19)"))
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'ERROR' and 'master-0-restart-1 exited unexpectedly with code 19' in result['error']
+    assert not any(item.get('step') == 'never' for item in logs(output))
+    assert_reaped(output)
+
+
+@pytest.mark.parametrize('steps', [
+    [step('bad', 'master/restart', args={'targets': ['127.0.0.1:12000']})],
+    [step('bad', 'master/restart', args={'targets': ['missing:1']})]])
+def test_restart_requires_owned_stopped_masters(tmp_path, steps):
+    case, registry, launch = generic(tmp_path, steps)
+    output = tmp_path / 'run'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'ERROR' and 'stopped addresses' in result['error']
+    assert_reaped(output)

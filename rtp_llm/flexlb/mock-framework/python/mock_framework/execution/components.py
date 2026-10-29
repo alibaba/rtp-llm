@@ -13,15 +13,18 @@ class ComponentLauncher:
         self.supervisor, self.topology, self.records = supervisor, topology, records
         self.environment = environment
 
-    async def start(self, role, index, recipe, *, configure=None, validate=None, require_endpoints=False):
+    async def start(self, role, index, recipe, *, configure=None, validate=None, require_endpoints=False, attempt=0):
         name = f'{role}-{index}'
         directory = self.records.directory / 'components' / name
+        process = name if attempt == 0 else f'{name}-restart-{attempt}'
+        if attempt:
+            directory = directory / f'restart-{attempt}'
         directory.mkdir(parents=True)
         config, ready = directory / 'config.json', directory / 'ready.json'
         write_json(config, {'component_role': role, 'component': copy.deepcopy(self.environment[role]),
                            'environment': self.environment, 'index': index, 'id': name})
         env = {} if configure is None else configure(directory)
-        await self.supervisor.spawn(name, recipe['command'], recipe['cwd'],
+        await self.supervisor.spawn(process, recipe['command'], recipe['cwd'],
             {**os.environ, **recipe['env'], **env, 'MOCK_TOPOLOGY_FILE': str(self.topology.directory / 'topology.json'),
              'MOCK_NODE_ID': name, 'MOCK_COMPONENT': role, 'MOCK_CONFIG_FILE': str(config),
              'MOCK_READY_FILE': str(ready), 'MOCK_OUTPUT_DIR': str(directory)}, directory)
@@ -33,7 +36,7 @@ class ComponentLauncher:
                 raise ExecutionError(f'Invalid readiness file for {name}')
             return value['url']
         control = await self.supervisor.guard(await_ready(), float(duration(recipe['startup_timeout'])))
-        self.records.emit(event='process_ready', node=name, url=control)
+        self.records.emit(event='process_ready', node=process, url=control)
         path = directory / 'endpoints.json'
         endpoint = json.loads(path.read_text()) if path.is_file() else None
         if endpoint is None and require_endpoints:

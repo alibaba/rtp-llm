@@ -276,3 +276,14 @@ def test_replacement_master_can_discover_roles_scaled_to_zero(tmp_path):
     environment = master_environment(configuration(), [], tmp_path, require_engines=False)
     route = json.loads(environment['MODEL_SERVICE_CONFIG'])
     assert json.loads(Path(route['discovery_file']).read_text()) == {'p-domain': [], 'd-domain': []}
+
+
+def test_restart_port_probe_still_rejects_an_active_listener():
+    import socket
+    from mock_framework.execution.master import check_master_ports
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        with pytest.raises(ExecutionError, match='Cannot bind Master'):
+            check_master_ports('127.0.0.1', listener.getsockname()[1])

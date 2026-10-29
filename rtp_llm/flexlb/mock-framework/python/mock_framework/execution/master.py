@@ -85,6 +85,7 @@ class MasterGroup:
         self.records, self.monitoring = records, monitoring
         self.environment, self._owned = {}, []
         self._next = 0
+        self._instances = {}
         self._lock = asyncio.Lock()
 
     async def prepare(self):
@@ -138,54 +139,88 @@ class MasterGroup:
         if self.component is not None:
             for node in snapshot:
                 if node['role'] == 'master':
-                    refresh_discovery(self.component['config'], snapshot, self.records.directory / 'components' / node['id'])
+                    refresh_discovery(self.component['config'], snapshot,
+                        self._instances.get(node['rpc'], {}).get('directory', self.records.directory / 'components' / node['id']))
+
+    async def _launch(self, index, attempt=0):
+        name = f'master-{index}'
+        process = name if attempt == 0 else f'{name}-restart-{attempt}'
+        directory = self.records.directory / 'components' / name
+        if attempt:
+            directory = directory / f'restart-{attempt}'
+        self._owned.append(process)
+        if attempt:
+            address = next(address for address, item in self._instances.items() if item['index'] == index)
+            self._instances[address]['directory'] = directory
+        endpoint = await self.launcher.start('master', index, self.recipe,
+            configure=lambda directory: self._environment(index, directory),
+            validate=lambda value, control: self._validate(name, index, value, control),
+            require_endpoints=bool(self.environment), attempt=attempt)
+        if self.monitoring:
+            self.monitoring.discover(name, directory)
+            if self.monitoring.baselined:
+                await self.monitoring.baseline([name])
+        return endpoint, {'index': index, 'attempt': attempt, 'process': process,
+                          'directory': directory, 'name': name}
 
     async def start(self, count):
         async with self._lock:
             if self.recipe is None or not 1 <= count <= 1024:
                 raise ExecutionError('master/start requires configured Masters and count in 1..1024')
-            result, nodes = [], []
+            result = []
             for _ in range(count):
                 index = self._next
                 self._next += 1
-                name = f'master-{index}'
-                self._owned.append(name)
-                endpoint = await self.launcher.start('master', index, self.recipe,
-                    configure=lambda directory: self._environment(index, directory),
-                    validate=lambda value, control: self._validate(name, index, value, control),
-                    require_endpoints=bool(self.environment))
-                if self.monitoring:
-                    self.monitoring.discover(name, self.records.directory / 'components' / name)
+                endpoint, instance = await self._launch(index)
                 if endpoint is not None:
-                    result.append(endpoint['rpc']); nodes.append(name)
-            if self.monitoring and self.monitoring.baselined and nodes:
-                await self.monitoring.baseline(nodes)
+                    self._instances[endpoint['rpc']] = instance
+                    result.append(endpoint['rpc'])
             return result
 
-    async def stop(self, targets):
+    def _selected(self, targets, *, active):
+        available = {node['rpc'] for node in self.topology.active('master')}
+        candidates = available if active else self._instances.keys() - available
+        addresses = sorted(candidates) if targets is None else targets
+        if not addresses or len(set(addresses)) != len(addresses) or set(addresses) - candidates:
+            state = 'active' if active else 'stopped'
+            raise ExecutionError(f'Master targets must be nonempty, unique, {state} addresses')
+        return list(addresses)
+
+    async def stop(self, targets, mode='terminate'):
         async with self._lock:
-            available = {node['rpc']: node for node in self.topology.active('master')}
-            addresses = sorted(available) if targets is None else targets
-            if not addresses or len(set(addresses)) != len(addresses) or set(addresses) - available.keys():
-                raise ExecutionError('Master targets must be nonempty, unique, active addresses')
-            selected = [available[address] for address in addresses]
-            if any(self.supervisor.child(node['id']).returncode is not None for node in selected):
+            if mode not in ('terminate', 'kill'):
+                raise ExecutionError('Unknown Master stop mode')
+            addresses = self._selected(targets, active=True)
+            selected = [self._instances[address] for address in addresses]
+            if any(self.supervisor.child(item['process']).returncode is not None for item in selected):
                 raise ExecutionError('Selected Master is not running')
-            self.records.emit(event='instances_selected', operation='master/stop', targets=addresses)
+            self.records.emit(event='instances_selected', operation='master/stop', targets=addresses, mode=mode)
             if self.monitoring:
-                await self.monitoring.final_scrape([node['id'] for node in selected])
-            for node in selected:
-                name = node['id']
-                child = self.supervisor.child(name)
-                errors = await self.supervisor.stop_expected(name)
+                await self.monitoring.final_scrape([item['name'] for item in selected])
+            for item in selected:
+                child = self.supervisor.child(item['process'])
+                operation = self.supervisor.kill_expected if mode == 'kill' else self.supervisor.stop_expected
+                errors = await operation(item['process'])
                 if child.returncode is not None:
-                    (self.records.directory / 'components' / name / 'ready.json').unlink(missing_ok=True)
-                    self.topology.retire(name)
+                    (item['directory'] / 'ready.json').unlink(missing_ok=True)
+                    self.topology.retire(item['name'])
                     if self.monitoring:
-                        self.monitoring.retire(name)
+                        self.monitoring.retire(item['name'])
                 if errors:
                     raise ExecutionError('; '.join(errors))
-            return list(addresses)
+            return addresses
+
+    async def restart(self, targets):
+        async with self._lock:
+            addresses = self._selected(targets, active=False)
+            for address in addresses:
+                item = self._instances[address]
+                item['attempt'] += 1
+                endpoint, replacement = await self._launch(item['index'], item['attempt'])
+                if endpoint is None or endpoint['rpc'] != address:
+                    raise ExecutionError('Restarted Master changed its service address')
+                self._instances[address] = replacement
+            return addresses
 
     async def close(self):
         return await self.supervisor.stop(self._owned, 3)
@@ -230,6 +265,8 @@ def check_master_ports(host, port):
     try:
         for offset in (0, 2):
             with socket.socket() as probe:
+                # Match the native listener: TIME_WAIT must not prevent an owned address from restarting.
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind((host, port + offset))
     except OSError as error:
         detail = 'enable loopback aliases or run on Linux' if error.errno == errno.EADDRNOTAVAIL else str(error)
