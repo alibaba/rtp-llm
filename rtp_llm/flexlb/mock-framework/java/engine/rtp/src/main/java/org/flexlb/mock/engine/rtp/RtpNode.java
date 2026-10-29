@@ -25,7 +25,7 @@ public final class RtpNode implements AutoCloseable {
     private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cache = new KvCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
+        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy(),
             config.deviceCache(), config.hostBlocks(), config.hostPolicy(), config.deviceWatermark(), config.hostWatermark());
         try { service = new RtpRpcService(config, cache, schedulers); }
         catch (RuntimeException error) { cache.close(); throw error; }

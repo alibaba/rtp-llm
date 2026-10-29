@@ -473,7 +473,7 @@ class PdGenerationTest {
     }
 
     @Test void prefillDoesNotStartBeforeDecodeAllocationAcknowledgement() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cache().acquire(6, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cache().acquire(12, List.of()).lease();
                 var call = new Call(p, input(d, 1, 5, 4, 2500, true))) {
             await(() -> d.status().getWaitingQueryLen() == 1);
             assertEquals(0, p.status().getRunningTaskInfoCount()); assertEquals(16, p.status().getAvailableKvCache());
@@ -484,7 +484,7 @@ class PdGenerationTest {
     }
 
     @Test void growthPressureFailsLikeRtpAndCannotResumeAfterRelease() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = d.node.cache().acquire(2, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = d.node.cache().acquire(4, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 2500, true))) {
             call.output(1, false, 1); call.output(2, false, 1);
             assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
@@ -505,7 +505,7 @@ class PdGenerationTest {
     }
 
     @Test void deadlineDuringCapacityWaitReleasesRequestAndDoesNotWakeIntoGeneration() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cache().acquire(3, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cache().acquire(6, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 300, true))) {
             await(() -> d.status().getWaitingQueryLen() == 1);
             call.error(Status.Code.DEADLINE_EXCEEDED);

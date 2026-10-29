@@ -38,13 +38,13 @@ class RtpNodeTest {
                 assertEquals(128, status.getTotalKvCache()); assertEquals(128, status.getAvailableKvCache());
                 assertEquals(4096, status.getMaxSeqLen());
                 assertTrue(rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getStatusVersion() > status.getStatusVersion());
-                var lease = node.cache().acquire(2, List.of()).lease();
+                var lease = node.cache().acquire(32, List.of()).lease();
                 assertEquals(96, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
-                lease.markValid(2); lease.publish(List.of(1L, -2L)); lease.close();
+                lease.publish(List.of(1L, -2L), 32); lease.close();
                 var snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 assertEquals(Set.of(1L, -2L), snapshot.getCacheKeysMap().keySet());
                 assertEquals(16, snapshot.getBlockSize()); assertEquals(128, snapshot.getAvailableKvCache());
-                var pinned = node.cache().acquire(1, List.of(1L)).lease();
+                var pinned = node.cache().acquire(16, List.of(1L)).lease();
                 var unchanged = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(snapshot.getVersion()).build());
                 assertEquals(snapshot.getVersion(), unchanged.getVersion()); assertEquals(0, unchanged.getCacheKeysCount());
                 assertEquals(112, unchanged.getAvailableKvCache()); pinned.close();

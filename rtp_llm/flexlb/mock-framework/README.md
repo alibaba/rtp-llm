@@ -617,7 +617,9 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 容量使用原生 `test_block_num` 和 `reserve_block_ratio`。Device 可用块数=test_block_num−1；Host 使用 `memory_cache_blocks` 个块。reserve 默认 5%，约束首次分配，运行中增长可以使用预留。需求超过单实例上限为永久不足，暂时被其他请求占用为可重试；增长一次补齐差额，失败不留下半次新增分配。容量不足后的等待/结束决定仍在 Scheduler，运行中的 RTP Decode 增长失败会结束该请求，不实现主动换出。显式投机的首次 D 分配也包含 reserveStep，在 PD 交接前准备目标容量。
 
-`Lease.markValid` 登记完整有效块数；`publish` 校验并注册稳定前缀，不关闭租约；`close` 只释放该请求引用。Scheduler 在 Compute 成功后登记有效范围，在 PD 读入成功后登记输入 KV，并在成功终态且所有 Compute/PD 使用结束后发布完整 prompt 块。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容暂不额外建立前缀索引。多个请求可共享已注册的不可变 Device 块，最后一个使用引用释放后才允许驱逐。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
+Scheduler 与 KV 管理器按 Token 交互：`acquire(requiredTokens, keys)` 首次取得资源，`Lease.ensureCapacity(requiredTokens)` 保证本轮容量，`reusedTokens()` 返回复用 Token 数。容量的 Block 换算和向上取整封装在 KV 管理器中；已有容量足够或需求变小时不缩容、不重复申请，超过容量上限返回永久不足。容量配置、物理池和状态快照仍使用原生 Block 口径。
+
+不再每轮调用 markValid，也不在 Lease 中重复保存计算进度。Scheduler 在成功终态且所有 Compute/PD 使用结束后调用 `publish(keys, validTokens)`，一次声明有效范围并注册完整 prompt 块；KV 管理器校验有效范围未超过已分配容量、key 数未超过完整有效块数。`publish` 不关闭租约，`close` 只释放请求引用。投机拒绝区域、预留空间、失败/取消请求不发布，生成内容暂不额外建立前缀索引。多个请求可共享已注册的不可变 Device 块，最后一个使用引用释放后才允许驱逐。Host-only 的私有 Device 副本与 Host 记作两层真实占用。
 
 Device/Host 水位按占用比例工作：达到 high 后，尽量回收到 low；仍在使用的资源不会移动。第一版在请求资源释放时同步检查水位，不建后台扫描线程；`enable_memory_cache` 要求显式正数 `memory_cache_blocks`。Disk/Remote 仍拒绝开启。Host 传输超时保留在 pending_config，本地瞬间完成不使用该超时。
 

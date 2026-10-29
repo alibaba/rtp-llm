@@ -18,7 +18,7 @@ public final class KvCache implements AutoCloseable {
                            int referencedBlocks, long version, Set<Long> keys) {}
     private final BlockPool device, host;
     private final BlockTree tree;
-    private final int reserve;
+    private final int blockSize, reserve;
     private final boolean deviceCache;
     private final Watermark deviceWatermark, hostWatermark;
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -28,24 +28,26 @@ public final class KvCache implements AutoCloseable {
     /** The observer must only signal; it must never acquire an Engine scheduling lock. */
     public synchronized void onCapacityChange(Runnable observer) { capacityChanged = Objects.requireNonNull(observer); }
 
-    public KvCache(int blocks, int reserve, EvictionPolicy policy) {
-        this(blocks, reserve, policy, true, 0, policy, null, null);
+    public KvCache(int blockSize, int blocks, int reserve, EvictionPolicy policy) {
+        this(blockSize, blocks, reserve, policy, true, 0, policy, null, null);
     }
-    public KvCache(int blocks, int reserve, EvictionPolicy policy, boolean deviceCache, int hostBlocks,
+    public KvCache(int blockSize, int blocks, int reserve, EvictionPolicy policy, boolean deviceCache, int hostBlocks,
                    EvictionPolicy hostPolicy, Watermark deviceWatermark, Watermark hostWatermark) {
-        if (blocks <= 0 || reserve < 0 || reserve > blocks || hostBlocks < 0)
+        if (blockSize < 1 || blocks <= 0 || reserve < 0 || reserve > blocks || hostBlocks < 0)
             throw new IllegalArgumentException("Invalid block capacity/reserve");
         device = new BlockPool(blocks); host = new BlockPool(hostBlocks);
         tree = new BlockTree(Objects.requireNonNull(policy), Objects.requireNonNull(hostPolicy));
-        this.reserve = reserve; this.deviceCache = deviceCache;
+        this.blockSize = blockSize; this.reserve = reserve; this.deviceCache = deviceCache;
         this.deviceWatermark = deviceWatermark; this.hostWatermark = hostWatermark;
     }
-    public synchronized Admission acquire(int demand, List<Long> keys) {
+    public synchronized Admission acquire(long requiredTokens, List<Long> keys) {
         if (closed) throw new IllegalStateException("Cache is closed");
         validate(keys);
-        if (demand < 0 || keys.size() > demand) throw new IllegalArgumentException("Invalid block demand/key count");
+        long blockDemand = blocksFor(requiredTokens);
+        if (keys.size() > requiredTokens / blockSize) throw new IllegalArgumentException("Keys exceed complete input blocks");
         tree.validatePath(keys);
-        if ((long) demand + reserve > device.snapshot().total()) return rejected(Failure.PERMANENT);
+        if (blockDemand > device.snapshot().total() - reserve) return rejected(Failure.PERMANENT);
+        int demand = (int) blockDemand;
         var matched = tree.match(keys);
         matched.forEach(tree::pin);
         var direct = new IdentityHashMap<BlockTree.Node, BlockPool.Reference>();
@@ -86,35 +88,28 @@ public final class KvCache implements AutoCloseable {
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
         private final int reused;
-        private int validBlocks;
         private boolean terminal;
-        private Lease(List<Slot> slots, int reused) { this.slots = slots; this.reused = reused; validBlocks = reused; }
-        public int blocks() { synchronized (KvCache.this) { return terminal ? 0 : slots.size(); } }
-        public int reusedBlocks() { synchronized (KvCache.this) { return terminal ? 0 : reused; } }
-        public void markValid(int blocks) {
+        private Lease(List<Slot> slots, int reused) { this.slots = slots; this.reused = reused; }
+        public long reusedTokens() { synchronized (KvCache.this) { return terminal ? 0 : (long) reused * blockSize; } }
+        public Failure ensureCapacity(long requiredTokens) {
             synchronized (KvCache.this) {
                 requireOpen();
-                if (blocks < validBlocks || blocks > slots.size()) throw new IllegalArgumentException("Invalid KV validity frontier");
-                validBlocks = blocks;
-            }
-        }
-        public Failure growTo(int target) {
-            synchronized (KvCache.this) {
-                requireOpen();
-                if (target < slots.size()) throw new IllegalArgumentException("Growth cannot shrink a lease");
+                long target = blocksFor(requiredTokens);
+                if (target <= slots.size()) return null;
                 if (target > device.snapshot().total()) return Failure.PERMANENT;
-                int need = target - slots.size();
+                int need = (int) target - slots.size();
                 if (need > device.snapshot().available() || !makeDeviceFree(need)) return Failure.RETRYABLE;
                 for (var ref : Objects.requireNonNull(device.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
                 return null;
             }
         }
         /** Publication does not release request ownership. Only complete immutable blocks are accepted. */
-        public boolean publish(List<Long> keys) {
+        public boolean publish(List<Long> keys, long validTokens) {
             synchronized (KvCache.this) {
                 if (terminal) return false;
                 validate(keys); tree.validatePath(keys);
-                if (keys.size() > validBlocks) throw new IllegalArgumentException("Cannot publish invalid KV");
+                if (validTokens < 0 || validTokens > (long) slots.size() * blockSize || keys.size() > validTokens / blockSize)
+                    throw new IllegalArgumentException("Published prefix exceeds valid KV or allocated capacity");
                 for (int i = 0; i < keys.size(); i++) {
                     var slot = slots.get(i);
                     if (slot.node != null && slot.node.key != keys.get(i))
@@ -199,6 +194,10 @@ public final class KvCache implements AutoCloseable {
                 hostTriggered &= used(host) > low;
             }
         } finally { balancing = false; }
+    }
+    private long blocksFor(long tokens) {
+        if (tokens < 0) throw new IllegalArgumentException("Negative Token capacity");
+        return tokens / blockSize + (tokens % blockSize == 0 ? 0 : 1);
     }
     private static int used(BlockPool pool) { return pool.snapshot().total() - pool.snapshot().free(); }
     private static final class Slot {

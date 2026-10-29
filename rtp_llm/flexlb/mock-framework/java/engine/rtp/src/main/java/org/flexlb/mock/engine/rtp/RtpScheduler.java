@@ -193,12 +193,7 @@ final class RtpScheduler implements Scheduler {
             return failure == null;
         }
         long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
-        long demand = (tokens + config.blockSize() - 1) / config.blockSize();
-        if (demand > Integer.MAX_VALUE) {
-            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode verification window exceeds representable KV capacity"));
-            return false;
-        }
-        var failure = entry.lease.growTo(Math.max((int) demand, entry.lease.blocks()));
+        var failure = entry.lease.ensureCapacity(tokens);
         if (failure != null) {
             // RTP running streams fail KV growth; only admission waits for capacity.
             finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode KV growth failed: " + failure));
@@ -224,7 +219,6 @@ final class RtpScheduler implements Scheduler {
                 var result = config.compute().completed(member.step());
                 int committed = result.committedTokens();
                 entry.state.commit(committed, outcome.elapsedNanos());
-                entry.lease.markValid((int) (((long) entry.input.tokens() + entry.state.snapshot().generated() - 1) / config.blockSize()));
                 entry.nextStep = null;
                 output += committed;
                 if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
@@ -285,7 +279,6 @@ final class RtpScheduler implements Scheduler {
         if (!prefill()) {
             if (entry.lease == null || entry.loaded || entry.generating)
                 throw new RequestFailure(INVALID, "Unexpected KV load completion");
-            entry.lease.markValid(entry.input.tokens() / config.blockSize());
             entry.loaded = true;
             entry.prefillFinished = transferred.prefillFinished();
         }
@@ -364,16 +357,14 @@ final class RtpScheduler implements Scheduler {
             && (prefill() || !config.disableDecodeFirstReuse());
         int matched = Math.min(entry.input.keys().size(), (entry.input.tokens() - 1) / config.blockSize());
         long capacityTokens = (long) entry.input.tokens() + (prefill() ? 0 : config.compute().kvReserveTokens());
-        long demand = (capacityTokens + config.blockSize() - 1) / config.blockSize();
-        if (demand > Integer.MAX_VALUE) return KvCache.Failure.PERMANENT;
-        var admission = cache.acquire((int) demand, reuse ? entry.input.keys().subList(0, matched) : List.of());
+        var admission = cache.acquire(capacityTokens, reuse ? entry.input.keys().subList(0, matched) : List.of());
         entry.attemptedGeneration = admission.generation();
         if (admission.lease() == null) return admission.failure();
         if (entry.admittedAt == Long.MIN_VALUE) entry.admittedAt = System.nanoTime();
         entry.lease = admission.lease();
-        entry.reused = admission.lease().reusedBlocks() * config.blockSize();
+        entry.reused = Math.toIntExact(admission.lease().reusedTokens());
         entry.state.attach(entry.lease, () -> entry.lease.publish(
-            config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse() ? entry.input.keys() : List.of()));
+            config.reuseCache() && (config.deviceCache() || config.hostBlocks() > 0) && entry.input.reuse() ? entry.input.keys() : List.of(), entry.input.tokens()));
         metrics.cacheLookup(entry.input.tokens(), entry.reused);
         return null;
     }
@@ -413,7 +404,7 @@ final class RtpScheduler implements Scheduler {
     }
     private ReportedPhase reportedPhase(Entry entry) {
         return entry.phase == FORWARD || entry.phase == RUNNING || !prefill() && entry.phase == OUTPUT
-            ? ReportedPhase.RUNNING : entry.lease != null && entry.lease.blocks() > 0
+            ? ReportedPhase.RUNNING : entry.lease != null
                 ? ReportedPhase.KV_ALLOCATED : ReportedPhase.RECEIVED;
     }
     private EngineMetrics.State metricState() {
