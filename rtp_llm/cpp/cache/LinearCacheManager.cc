@@ -10,46 +10,45 @@ namespace rtp_llm {
 namespace {
 
 int estimatePeakFromSlotCosts(std::vector<int> block_costs,
+                              int              first_decode_slots,
+                              int              first_decode_tail_start,
                               int              final_slots,
                               int              new_slot_cost,
-                              int              reserve_step,
-                              int              retained_tail_blocks,
-                              bool             enable_reuse_cache,
-                              int              linear_step) {
+                              int              retained_tail_blocks) {
     int physical_blocks = std::accumulate(block_costs.begin(), block_costs.end(), 0);
     int peak_blocks     = physical_blocks;
-
-    while (static_cast<int>(block_costs.size()) < final_slots) {
-        block_costs.push_back(new_slot_cost);
-        physical_blocks += new_slot_cost;
-        peak_blocks = std::max(peak_blocks, physical_blocks);
-
-        for (int slot = static_cast<int>(block_costs.size()) - retained_tail_blocks - 1 - reserve_step; slot >= 0;
-             --slot) {
-            auto& cost = block_costs[static_cast<size_t>(slot)];
-            if (cost == 0) {
-                continue;
-            }
-            if (enable_reuse_cache && (slot + 1) % linear_step == 0) {
-                continue;
-            }
-            physical_blocks -= cost;
-            cost = 0;
+    for (int slot = first_decode_tail_start; slot < std::min(first_decode_slots, static_cast<int>(block_costs.size()));
+         ++slot) {
+        if (block_costs[slot] == 0) {
+            block_costs[slot] = new_slot_cost;
+            physical_blocks += new_slot_cost;
         }
+    }
+    size_t next_to_release = 0;
+    auto   advance         = [&](int slots) {
+        while (static_cast<int>(block_costs.size()) < slots) {
+            block_costs.push_back(new_slot_cost);
+            physical_blocks += new_slot_cost;
+        }
+        peak_blocks = std::max(peak_blocks, physical_blocks);
+        const size_t tail_start =
+            block_costs.size() - std::min(static_cast<size_t>(retained_tail_blocks), block_costs.size());
+        while (next_to_release < tail_start) {
+            physical_blocks -= block_costs[next_to_release];
+            block_costs[next_to_release++] = 0;
+        }
+    };
+    advance(first_decode_slots);
+    while (static_cast<int>(block_costs.size()) < final_slots) {
+        advance(static_cast<int>(block_costs.size()) + 1);
     }
     return peak_blocks;
 }
 
 }  // namespace
 
-void LinearCacheManager::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
-    out.clear();
-    out.reserve(in.size());
-    for (auto b : in) {
-        if (!isNullBlockIdx(b)) {
-            out.push_back(b);
-        }
-    }
+int LinearCacheManager::retainedDecodeBlocks(int reserve_step) const {
+    return std::max(2, static_cast<int>(activeTailBlocks())) + reserve_step;
 }
 
 int LinearCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
@@ -58,28 +57,11 @@ int LinearCacheManager::needBlocksNum(int seq_len, int current_blocks, int reser
     return std::max((seq_len + block_size - 1) / block_size + extra_blocks - current_blocks, 0);
 }
 
-int LinearCacheManager::materializedTailBlockCount() const {
-    return std::max(1, static_cast<int>(activeTailBlocks()));
-}
-
-int LinearCacheManager::retainedTailBlockCount() const {
-    return std::max(2, materializedTailBlockCount());
-}
-
 bool LinearCacheManager::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
-    if (pos < 0) {
-        return false;
-    }
-
-    const int  step                     = std::max(1, linear_step_);
-    const int  materialized_tail_blocks = materializedTailBlockCount();
-    const int  seq_slots                = needBlocksNum(seq_len, 0, 0);
-    const int  total_slots              = needBlocksNum(seq_len, 0, reserve_step);
-    const bool is_seq_tail =
-        (seq_slots > 0) && (pos >= std::max(0, seq_slots - materialized_tail_blocks)) && (pos < seq_slots);
-    const bool is_reserve = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
-    const bool step_hit   = (((pos + 1) % step) == 0);
-    return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+    (void)reserve_step;
+    const int tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
+    const int total_slots = needBlocksNum(seq_len, 0);
+    return pos >= total_slots - std::min(tail_blocks, total_slots) && pos < total_slots;
 }
 
 int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
@@ -87,7 +69,6 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                                int                     remaining_tokens,
                                                int                     reserve_step,
                                                bool                    enable_reuse_cache) const {
-    const int step              = std::max(1, linear_step_);
     const int current_seq_slots = (seq_len + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int final_seq_slots   = (seq_len + remaining_tokens + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int extra_blocks      = reserve_step ? reserve_step - 1 : 0;
@@ -104,14 +85,24 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
             current_physical_blocks += allocated;
         }
     } else {
-        const int initial_slots = current_seq_slots + extra_blocks;
+        const int initial_slots = current_seq_slots;
         for (int i = 0; i < initial_slots; ++i) {
             block_costs.push_back(shouldMaterializeBlock(i, seq_len, reserve_step, enable_reuse_cache) ? 1 : 0);
         }
     }
 
-    const int peak_blocks = estimatePeakFromSlotCosts(
-        std::move(block_costs), total_slots, 1, reserve_step, retainedTailBlockCount(), enable_reuse_cache, step);
+    if (remaining_tokens <= 0) {
+        return std::accumulate(block_costs.begin(), block_costs.end(), 0) - current_physical_blocks;
+    }
+    const int first_decode_slots = needBlocksNum(seq_len + 1, 0, reserve_step);
+    const int first_decode_tail_start =
+        std::max(needBlocksNum(seq_len + 1, 0) - static_cast<int>(std::max<size_t>(1, activeTailBlocks())), 0);
+    const int peak_blocks = estimatePeakFromSlotCosts(std::move(block_costs),
+                                                      first_decode_slots,
+                                                      first_decode_tail_start,
+                                                      total_slots,
+                                                      1,
+                                                      retainedDecodeBlocks(reserve_step));
     return std::max(peak_blocks - current_physical_blocks, 0);
 }
 
@@ -121,14 +112,13 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                            int  reserve_step,
                                                            bool enable_reuse_cache,
                                                            int  target_batch_size) const {
-    const int  step       = std::max(1, linear_step_);
     const int  batch_size = std::max(target_batch_size, 1);
     const auto seq_slots  = [&](int length) { return (length + seqSizePerBlock() - 1) / seqSizePerBlock(); };
 
     const int        common_slots   = seq_slots(common_seq_len);
     const int        initial_slots  = seq_slots(seq_len);
     const int        reserve_blocks = reserve_step > 0 ? reserve_step - 1 : 0;
-    const int        initial_total  = initial_slots + reserve_blocks;
+    const int        initial_total  = initial_slots;
     const int        final_total    = seq_slots(seq_len + remaining_tokens) + reserve_blocks;
     std::vector<int> block_costs;
     block_costs.reserve(static_cast<size_t>(std::max(initial_total, final_total)));
@@ -142,13 +132,16 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
         block_costs.push_back(shouldMaterializeBlock(slot, seq_len, reserve_step, enable_reuse_cache) ? batch_size : 0);
     }
 
-    return estimatePeakFromSlotCosts(std::move(block_costs),
-                                     final_total,
-                                     batch_size,
-                                     reserve_step,
-                                     retainedTailBlockCount(),
-                                     enable_reuse_cache,
-                                     step);
+    if (remaining_tokens <= 0) {
+        return std::accumulate(block_costs.begin(), block_costs.end(), 0);
+    }
+    return estimatePeakFromSlotCosts(
+        std::move(block_costs),
+        needBlocksNum(seq_len + 1, 0, reserve_step),
+        std::max(needBlocksNum(seq_len + 1, 0) - static_cast<int>(std::max<size_t>(1, activeTailBlocks())), 0),
+        final_total,
+        batch_size,
+        retainedDecodeBlocks(reserve_step));
 }
 
 NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common_seq_len,
@@ -157,49 +150,24 @@ NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common
                                                  int                      reuse_blocks_len,
                                                  bool                     reuse_enabled,
                                                  const RequiredPositions& required_positions) const {
+    (void)reserve_step;
     NeedBlocksInfo info;
-
-    const int common_slots = needBlocksNum(common_seq_len, 0);
-    const int total_slots  = needBlocksNum(seq_len, 0, reserve_step);
-
-    auto common_required = [&](int pos) { return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled); };
-    auto final_required  = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled); };
+    const int      reuse_slots  = reuse_enabled ? reuse_blocks_len : 0;
+    const int      common_slots = needBlocksNum(common_seq_len, 0);
+    const int      total_slots  = needBlocksNum(seq_len, 0);
 
     for (int pos = 0; pos < common_slots; ++pos) {
-        if (common_required(pos)) {
-            info.common_blocks++;
+        if ((pos >= reuse_slots && shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled))
+            || required_positions.count(static_cast<size_t>(pos)) != 0) {
+            ++info.common_blocks;
         }
     }
-    for (int pos = 0; pos < total_slots; ++pos) {
-        if (final_required(pos) && !(pos < common_slots && common_required(pos))) {
-            info.extra_blocks++;
-        }
-    }
-
-    const int reused_tail_pos = (reuse_enabled && reuse_blocks_len > 0) ? reuse_blocks_len - 1 : -1;
-    if (reused_tail_pos >= 0) {
-        if (reused_tail_pos < common_slots && common_required(reused_tail_pos)) {
-            info.common_blocks--;
-        } else if (reused_tail_pos < total_slots && final_required(reused_tail_pos)) {
-            info.extra_blocks--;
-        }
-    }
-
-    for (const size_t position : required_positions) {
-        if (position >= static_cast<size_t>(total_slots)) {
-            continue;
-        }
-        if (position < static_cast<size_t>(common_slots)) {
-            if (!common_required(static_cast<int>(position)) || static_cast<int>(position) == reused_tail_pos) {
-                ++info.common_blocks;
-            }
-        } else if (!final_required(static_cast<int>(position))) {
+    for (int pos = common_slots; pos < total_slots; ++pos) {
+        if ((pos >= reuse_slots && shouldMaterializeBlock(pos, seq_len, 0, reuse_enabled))
+            || required_positions.count(static_cast<size_t>(pos)) != 0) {
             ++info.extra_blocks;
         }
     }
-
-    info.common_blocks = std::max(info.common_blocks, 0);
-    info.extra_blocks  = std::max(info.extra_blocks, 0);
     return info;
 }
 
@@ -209,6 +177,25 @@ bool LinearCacheManager::malloc(BlockIds&                block_ids,
                                 int                      reserve_step,
                                 std::vector<size_t>*     backfilled_positions,
                                 const RequiredPositions& required_positions) {
+    (void)reserve_step;
+    return mallocImpl(block_ids, seq_len, 0, true, enable_reuse_cache, backfilled_positions, required_positions);
+}
+
+bool LinearCacheManager::mallocForDecode(BlockIds&            block_ids,
+                                         int                  seq_len,
+                                         bool                 enable_reuse_cache,
+                                         int                  reserve_step,
+                                         std::vector<size_t>* backfilled_positions) {
+    return mallocImpl(block_ids, seq_len, reserve_step, false, enable_reuse_cache, backfilled_positions, {});
+}
+
+bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
+                                    int                      seq_len,
+                                    int                      reserve_step,
+                                    bool                     is_prefill,
+                                    bool                     enable_reuse_cache,
+                                    std::vector<size_t>*     backfilled_positions,
+                                    const RequiredPositions& required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -217,8 +204,14 @@ bool LinearCacheManager::malloc(BlockIds&                block_ids,
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
     auto should_materialize = [&](int pos) {
-        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache)
-               || required_positions.find(static_cast<size_t>(pos)) != required_positions.end();
+        if (required_positions.count(static_cast<size_t>(pos)) != 0) {
+            return true;
+        }
+        if (is_prefill) {
+            return pos >= current_blocks_len && shouldMaterializeBlock(pos, seq_len, 0, enable_reuse_cache);
+        }
+        const int seq_slots = needBlocksNum(seq_len, 0);
+        return pos >= std::max(0, seq_slots - std::max(1, static_cast<int>(activeTailBlocks())));
     };
 
     std::vector<size_t> positions_to_backfill;
@@ -292,17 +285,13 @@ void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     if (block_indices.empty()) {
         return;
     }
-    const int step                 = std::max(1, linear_step_);
-    const int retained_tail_blocks = retainedTailBlockCount();
-    const int block_size           = static_cast<int>(block_indices.size());
+    (void)enable_reuse_cache;
+    const int block_size = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - retained_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+    for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step), block_size) - 1; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
-            continue;
-        }
-        if (enable_reuse_cache && ((i + 1) % step) == 0) {
             continue;
         }
         blocks_to_free.push_back(block_indices[i]);

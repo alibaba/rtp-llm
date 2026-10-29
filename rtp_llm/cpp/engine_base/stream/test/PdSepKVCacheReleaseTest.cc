@@ -691,9 +691,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     std::iota(tokens.begin(), tokens.end(), 1);
 
     auto config = makeDsv4Config();
-    // linear_step=4: with the default step of 1 every slot is a step hit and all
-    // blocks materialize, defeating the tail-only assertions below.
-    config.linear_step = 4;
     prepareStreamWithConfig(tokens, config, spb, RoleType::PREFILL);
     allocateAndFinish();
 
@@ -703,16 +700,13 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     for (const auto& tag : config.groupTags()) {
         ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
         const auto&  blocks = resource.kvCache().blocks(0, tag);
-        const size_t tail   = static_cast<size_t>(config.group(tag).policy.active_tail_blocks);
-        if (tail == 0) {
-            // Paged group: every logical block is materialized from position 0.
-            EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << tag;
-        } else {
-            // Tail group: only the last `tail` logical blocks are materialized.
-            EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "tail group " << tag << " should keep only tail blocks";
-            for (size_t pos = blocks.size() - tail; pos < blocks.size(); ++pos) {
-                EXPECT_FALSE(isNullBlockIdx(blocks[pos])) << "tail group " << tag << " pos " << pos;
-            }
+        const auto&  policy = config.group(tag).policy;
+        const size_t tail   = policy.enable_prefix_reuse ?
+                                  std::min(blocks.size(), static_cast<size_t>(config.reuse_cache_tail_blocks)) :
+                                  std::min(blocks.size(), static_cast<size_t>(policy.active_tail_blocks));
+        for (size_t pos = 0; pos < blocks.size(); ++pos) {
+            const bool expected = policy.active_tail_blocks == 0 || pos >= blocks.size() - tail;
+            EXPECT_EQ(!isNullBlockIdx(blocks[pos]), expected) << "group " << tag << " pos " << pos;
         }
     }
 
