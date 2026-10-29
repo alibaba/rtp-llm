@@ -368,6 +368,64 @@ TEST_F(GenerateStreamTest, speculativeProbabilitiesStopAtCommittedTokenBoundary)
     EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, probs.narrow(1, 0, 1)));
 }
 
+TEST_F(GenerateStreamTest, speculativeProbabilitiesFollowOutputTokenWindows) {
+    for (auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        for (int output_mode = 0; output_mode < 3; ++output_mode) {
+            for (int final_count : {3, 4}) {
+                SCOPED_TRACE(::testing::Message() << "mode=" << static_cast<int>(mode) << " output_mode=" << output_mode
+                                                  << " final_count=" << final_count);
+                GenerateStreamBuilder builder;
+                auto                  stream = builder.createContextStream({1});
+                auto                  config = stream->generateConfig();
+                config->max_new_tokens       = 8;
+                config->min_new_tokens       = 8;
+                config->ignore_eos           = true;
+                config->is_streaming         = output_mode == 1;
+                config->pd_separation        = output_mode == 2;
+                config->aux_info             = false;
+                config->return_all_probs     = mode;
+                markRunning(stream);
+
+                auto expected_tokens = torch::arange(10, 19, torch::kInt32).reshape({1, 9});
+                auto expected_probs  = torch::arange(1, 37, torch::kFloat32).reshape({1, 9, 4});
+                expected_probs       = expected_probs / expected_probs.sum(-1, true);
+                // MTP may reuse its CPU probability staging buffer in the next round.
+                auto staging_probs = torch::empty({1, 4, 4}, torch::kFloat32);
+                int  generated     = 0;
+                int  emitted       = 0;
+                for (int count : {1, 4, final_count}) {
+                    auto probs = staging_probs.narrow(1, 0, count);
+                    probs.copy_(expected_probs.narrow(1, generated, count));
+                    ASSERT_NO_THROW(stream->update(
+                        {.new_tokens             = expected_tokens.narrow(1, generated, count),
+                         .num_new_tokens         = count,
+                         .all_probs              = probs,
+                         .update_remote_generate = false}));
+                    staging_probs.fill_(-1);
+                    generated = std::min(generated + count, 8);
+                    if (output_mode == 0 && generated < 8) {
+                        EXPECT_FALSE(stream->hasOutput());
+                        continue;
+                    }
+
+                    auto result = stream->nextOutput(100);
+                    ASSERT_TRUE(result.ok()) << result.status().ToString();
+                    ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                    const auto& output = result.value().generate_outputs[0];
+                    EXPECT_TRUE(torch::equal(output.output_ids,
+                                             expected_tokens.narrow(1, emitted, generated - emitted)));
+                    ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                    EXPECT_TRUE(torch::equal(*output.aux_info.all_probs,
+                                             expected_probs.narrow(1, emitted, generated - emitted)));
+                    EXPECT_EQ(output.finished, generated == 8);
+                    emitted = generated;
+                }
+                EXPECT_EQ(emitted, 8);
+            }
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
     auto builder                                             = GenerateStreamBuilder();
     auto stream                                              = builder.createContextStream({1, 2, 3});
