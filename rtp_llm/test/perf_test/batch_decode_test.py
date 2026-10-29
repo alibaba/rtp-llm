@@ -14,7 +14,11 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from rtp_llm.test.perf_test.cache_grid_runner import CacheGridRunner
-from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataclass import (
+    PerfTestConfig,
+    TableType,
+    create_metrics_table,
+)
 from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
@@ -141,7 +145,9 @@ def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
         ]
         block = int(config.get("cache_block_size", 4096))
         if block <= 0 or any(ratio < 0.0 or ratio >= 1.0 for ratio in ratios):
-            raise ValueError("cache_ratios must be in [0, 1) and block must be positive")
+            raise ValueError(
+                "cache_ratios must be in [0, 1) and block must be positive"
+            )
         raw_cases = []
         case_id = 0
         for seq_len in seq_lens:
@@ -472,6 +478,7 @@ def _run_decode(
                 **kwargs,
             ).run()
         else:
+            grid_metrics = []
             for input_len in config.input_len_list:
                 filtered_bs = filter_bs_by_kvcache(
                     config.batch_size_list, input_len, max_kv
@@ -481,7 +488,7 @@ def _run_decode(
                         f"No BS fits KV cache for input_len={input_len}, skipping"
                     )
                     continue
-                GridRunner(
+                metrics = GridRunner(
                     port,
                     dp_size,
                     filtered_bs,
@@ -490,6 +497,16 @@ def _run_decode(
                     is_decode=True,
                     **kwargs,
                 ).run()
+                grid_metrics.extend(metrics)
+            if grid_metrics:
+                create_metrics_table(
+                    TableType.Decode,
+                    grid_metrics,
+                    kwargs.get("dump_json_path", "."),
+                    {"dp_size": dp_size, "tp_size": kwargs.get("tp_size", 1)},
+                    "Decode Result",
+                    kwargs.get("generate_config"),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -679,8 +696,9 @@ def main() -> str:
             decode_test_length=args.decode_test_length,
             generate_config=generate_config,
             num_measures=args.num_measures,
-            log_path=server.log_file_path or "",
         )
+        if args.partial == 1 and args.target_tpot > 0:
+            runner_kwargs["log_path"] = server.log_file_path or ""
 
         if args.partial == 2:
             _run_prefill(

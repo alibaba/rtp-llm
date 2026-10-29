@@ -105,6 +105,10 @@ def pad(ts: List[torch.Tensor], align_size: int, dim: int):
         raise Exception("unknown padding dim: " + str(dim))
 
     z = torch.zeros(pad_shape, device=ts[0].device).to(ts[0].dtype)
+    if ts[0].dtype == torch.float8_e8m0fnu:
+        return torch.cat((ts[0].view(torch.uint8), z.view(torch.uint8)), dim).view(
+            ts[0].dtype
+        )
     return torch.cat((ts[0], z), dim).to(ts[0].device).contiguous()
 
 

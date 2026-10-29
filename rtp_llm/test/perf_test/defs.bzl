@@ -12,7 +12,7 @@ def perf_test(name, model_type, ckpt_path, gpu_type,
               tokenizer_path = None,
               compare_test_result = "",
               envs = {},
-              args = [], data = [], deps = []):
+              args = [], data = [], deps = [], env_inherit = [], entry_point = None):
     if tokenizer_path == None:
         tokenizer_path = ckpt_path
 
@@ -37,8 +37,8 @@ def perf_test(name, model_type, ckpt_path, gpu_type,
 
     native.py_test(
         name = name,
-        main = "//rtp_llm/test/perf_test:test_entry.py",
-        srcs = ["//rtp_llm/test/perf_test:test_entry.py"],
+        main = entry_point or "//rtp_llm/test/perf_test:test_entry.py",
+        srcs = ["//rtp_llm/test/perf_test:test_entry.py"] + ([entry_point] if entry_point else []),
         timeout = "eternal",
         deps = [
             "//rtp_llm:pyodps",
@@ -54,6 +54,7 @@ def perf_test(name, model_type, ckpt_path, gpu_type,
             "gpu": gpu_type,
             "gpu_count": str(world_size),
         },
+        env_inherit = env_inherit,
         env = {
             "WORLD_SIZE": str(world_size),
         }

@@ -9,7 +9,21 @@ import unittest
 
 import torch
 
-from rtp_llm.utils.model_weight import concat_1, stack_0, stack_moe_w1
+from rtp_llm.utils.model_weight import concat_1, pad, stack_0, stack_moe_w1
+
+
+class TestScalePadding(unittest.TestCase):
+    def test_ue8m0_padding_preserves_raw_scale_bytes(self):
+        raw = torch.tensor([[125, 126, 127], [128, 129, 130]], dtype=torch.uint8)
+        scale = raw.view(torch.float8_e8m0fnu)
+        for dim in (0, 1):
+            actual = pad([scale], 4, dim)
+            expected = torch.cat(
+                [scale.float(), torch.zeros((2, 3) if dim == 0 else (2, 1))], dim=dim
+            ).to(scale.dtype)
+            torch.testing.assert_close(
+                actual.view(torch.uint8), expected.view(torch.uint8)
+            )
 
 
 class TestStackMoeW1(unittest.TestCase):

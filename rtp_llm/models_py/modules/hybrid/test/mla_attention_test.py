@@ -121,8 +121,10 @@ def make_sparse_routing_attention():
     topk_indices = torch.tensor([[1]], dtype=torch.int32)
     attention.indexer = Mock(return_value=topk_indices)
     attention.q_lora_rank = 0
+    attention.reuse_topk_indices = False
+    attention._fuse_kv_a_norm = False
     attention.num_heads = 1
-    attention.attn_config = SimpleNamespace(size_per_head=2)
+    attention.attn_config = SimpleNamespace(size_per_head=2, is_sparse=True)
     attention.q_head_dim = 2
     attention.kv_lora_rank = 1
     attention.qk_rope_head_dim = 1

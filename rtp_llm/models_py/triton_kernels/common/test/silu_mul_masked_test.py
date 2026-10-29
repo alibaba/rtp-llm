@@ -4,12 +4,16 @@ import os
 import random
 import shutil
 import unittest
+from functools import partial
 from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 import torch
 
 from rtp_llm.models_py.triton_kernels.common.activation import (
+    create_packed_scale_tensor,
+    silu_and_mul_masked_post_quant_fwd,
+    silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_bf16_deep_gemm_masked,
     silu_mul_fp8_quant_deep_gemm_masked,
     silu_mul_masked_bf16_no_post_quant_fwd,
@@ -58,6 +62,40 @@ class SiluMulMaskedTest(unittest.TestCase):
             raise unittest.SkipTest("CUDA is not available")
         torch.set_default_device("cuda")
         # self.output_dir = SiluMulMaskedTest.output_dir
+
+    def test_zero_activation_fp8_quantization(self):
+        inputs = torch.zeros((2, 4, 1024), dtype=torch.bfloat16, device="cuda")
+        masked_m = torch.tensor([4, 4], dtype=torch.int32, device="cuda")
+        kernels = [
+            (partial(kernel, scale_ue8m0=ue8m0), False)
+            for kernel in (
+                silu_and_mul_masked_post_quant_fwd,
+                partial(silu_mul_masked_fp8_post_quant_fwd, expected_m=4),
+            )
+            for ue8m0 in (False, True)
+        ] + [(silu_and_mul_masked_post_quant_packed_fwd, True)]
+        for index, (kernel, packed) in enumerate(kernels):
+            with self.subTest(kernel=index):
+                output = torch.empty(
+                    (2, 4, 512), dtype=torch.float8_e4m3fn, device="cuda"
+                )
+                scales = (
+                    create_packed_scale_tensor(2, 4, 1024, 128, inputs.device)
+                    if packed
+                    else torch.empty((2, 4, 4), dtype=torch.float32, device="cuda")
+                )
+                kernel(inputs, output, scales, 128, masked_m)
+                self.assertTrue(torch.isfinite(output.float()).all().item())
+                self.assertTrue((output.float() == 0).all().item())
+                if packed:
+                    for shift in (0, 8, 16, 24):
+                        exponent = (scales >> shift) & 0xFF
+                        self.assertTrue(
+                            ((exponent > 0) & (exponent < 255)).all().item()
+                        )
+                else:
+                    self.assertTrue(torch.isfinite(scales).all().item())
+                    self.assertTrue((scales > 0).all().item())
 
     def _generate_ref_output(self, up_gate_output: torch.Tensor) -> torch.Tensor:
         N = up_gate_output.shape[2]

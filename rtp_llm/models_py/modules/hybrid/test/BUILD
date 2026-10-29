@@ -1,4 +1,36 @@
+load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+
 test_envs = {}
+
+cuda13_sm100_py_test(
+    name = "stable_topk_test",
+    srcs = ["stable_topk_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
+    name = "dense_mlp_parallelism_test",
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["dense_mlp_parallelism_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
+    name = "decode_metadata_contract_test",
+    srcs = ["decode_metadata_contract_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
+py_test(
+    name = "indexer_paged_contract_test",
+    srcs = ["indexer_paged_contract_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
 
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs

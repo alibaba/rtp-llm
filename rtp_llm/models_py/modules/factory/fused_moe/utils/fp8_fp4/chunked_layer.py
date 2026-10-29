@@ -24,6 +24,124 @@ _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
 )
 
+_MOE_DECODE_FORWARD: ContextVar[bool] = ContextVar("moe_decode_forward", default=False)
+
+
+def moe_decode_forward() -> bool:
+    return _MOE_DECODE_FORWARD.get()
+
+
+def planned_moe_tokens() -> Optional[int]:
+    return _SYNCHRONIZED_CHUNK_TOKENS.get()
+
+
+def synchronize_moe_chunk_tokens(tokens: int, device: torch.device) -> int:
+    """Use the layer-stack plan or synchronize a standalone EP invocation."""
+    if moe_decode_forward():
+        return tokens
+    planned = planned_moe_tokens()
+    if planned is not None:
+        return planned
+    if (
+        not dist.is_available()
+        or not dist.is_initialized()
+        or (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
+    ):
+        return tokens
+    count = torch.tensor(tokens, dtype=torch.int64, device=device)
+    dist.all_reduce(count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+    return int(count.item())
+
+
+def _should_chunk_moe(
+    tokens: int,
+    capacity: int,
+    *,
+    is_decode_forward: bool = False,
+    chunking_enabled: bool = True,
+) -> bool:
+    if capacity <= 0:
+        raise ValueError(f"max_tokens_per_rank must be positive, got {capacity}")
+    capturing = torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+    if is_decode_forward or capturing:
+        if tokens > capacity:
+            mode = "decode" if is_decode_forward else "CUDA graph capture"
+            raise ValueError(
+                f"{mode} MoE input tokens={tokens} exceeds "
+                f"max_tokens_per_rank={capacity}"
+            )
+        return False
+    return chunking_enabled and tokens > capacity
+
+
+def run_moe_chunks(
+    x: torch.Tensor,
+    capacity: int,
+    call_chunk: Callable[[int, int, Optional[torch.Tensor]], Optional[torch.Tensor]],
+    *,
+    is_decode_forward: bool = False,
+    chunking_enabled: bool = True,
+    synchronized_tokens: Optional[int] = None,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Execute the same token chunks on every EP rank, including empty ranks.
+
+    ``call_chunk(start, end, out_view)`` may write into ``out_view`` or return
+    a result to copy there. With no supplied output, an unchunked invocation
+    returns the callback's tensor directly; chunked calls get fresh storage.
+    A supplied token plan avoids another collective at each layer.
+    """
+    tokens = x.size(0)
+    # Validate fixed-shape calls before synchronizing or invoking the backend.
+    _should_chunk_moe(
+        tokens,
+        capacity,
+        is_decode_forward=is_decode_forward,
+        chunking_enabled=chunking_enabled,
+    )
+    fixed_shape = is_decode_forward or (
+        torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+    )
+    if fixed_shape or not chunking_enabled:
+        chunk_tokens = tokens
+    elif synchronized_tokens is not None:
+        chunk_tokens = max(tokens, int(synchronized_tokens))
+    else:
+        chunk_tokens = synchronize_moe_chunk_tokens(tokens, x.device)
+
+    def invoke(start: int, end: int, output: Optional[torch.Tensor]) -> torch.Tensor:
+        result = call_chunk(start, end, output)
+        if output is None:
+            if result is None:
+                raise ValueError("MoE chunk callback must return a tensor without out")
+            return result
+        if result is not None and result is not output:
+            output.copy_(result)
+        return output
+
+    if not _should_chunk_moe(
+        chunk_tokens,
+        capacity,
+        is_decode_forward=is_decode_forward,
+        chunking_enabled=chunking_enabled,
+    ):
+        return invoke(0, tokens, out)
+
+    global _CHUNKED_MOE_LOGGED
+    if not _CHUNKED_MOE_LOGGED:
+        _CHUNKED_MOE_LOGGED = True
+        logging.info(
+            "[MoE] chunked forward: synchronized_tokens=%d chunk_tokens=%d",
+            chunk_tokens,
+            capacity,
+        )
+    output = torch.empty_like(x) if out is None else out
+    for start in range(0, chunk_tokens, capacity):
+        local_start = min(start, tokens)
+        end = min(start + capacity, tokens)
+        invoke(local_start, end, output[local_start:end])
+    return output
+
 
 def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
     cp_size = max(int(cp_size), 1)
@@ -92,35 +210,47 @@ def _get_or_create_final_out(
 
 @contextmanager
 def synchronized_moe_chunk_plan(
-    layers: Iterable[nn.Module], tokens: int, device: torch.device
+    layers: Iterable[nn.Module],
+    tokens: int,
+    device: torch.device,
+    *,
+    is_decode_forward: bool = False,
 ):
-    """Synchronize the largest EP token count once for a prefill layer stack."""
-    if (
-        not dist.is_available()
-        or not dist.is_initialized()
-        or (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
-    ):
-        yield
-        return
+    """Share one EP MAX token count across all prefill layers and recipes."""
+    from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
 
-    needs_sync = any(
-        getattr(getattr(layer, "ffn", layer), "strategy_name", None)
-        in {"mega_moe", "mega_moe_se"}
-        and not getattr(getattr(layer, "ffn", layer), "_is_decode_role", False)
-        and getattr(getattr(layer, "ffn", layer), "chunking_enabled", False)
-        for layer in layers
-    )
-    if not needs_sync:
-        yield
-        return
-
-    token_count = torch.tensor(int(tokens), dtype=torch.int64, device=device)
-    dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-    token = _SYNCHRONIZED_CHUNK_TOKENS.set(int(token_count.item()))
+    phase_token = _MOE_DECODE_FORWARD.set(is_decode_forward)
+    plan_token = None
     try:
+        modules = (
+            getattr(layer, "ffn", getattr(layer, "mlp", layer)) for layer in layers
+        )
+        # Generic model layers own a FusedMoe whose prepared executor chunks;
+        # DeepSeek's specialized layers own chunking directly.
+        modules = (
+            getattr(getattr(layer, "fused_moe", None), "fused_experts", layer)
+            for layer in modules
+        )
+        needs_sync = not is_decode_forward and any(
+            not getattr(layer, "_is_decode_role", False)
+            and (
+                getattr(layer, "_prepared_policy", None) is not None
+                or (
+                    getattr(layer, "strategy_name", None) in MEGA_MOE_STRATEGIES
+                    and getattr(layer, "chunking_enabled", False)
+                )
+            )
+            for layer in modules
+        )
+        if needs_sync:
+            plan_token = _SYNCHRONIZED_CHUNK_TOKENS.set(
+                synchronize_moe_chunk_tokens(tokens, device)
+            )
         yield
     finally:
-        _SYNCHRONIZED_CHUNK_TOKENS.reset(token)
+        if plan_token is not None:
+            _SYNCHRONIZED_CHUNK_TOKENS.reset(plan_token)
+        _MOE_DECODE_FORWARD.reset(phase_token)
 
 
 class ChunkedFp8Fp4MoeLayer(nn.Module):
@@ -206,22 +336,12 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         return self._moe.shared_experts
 
     def _should_chunk(self, tokens: int, *, is_decode_forward: bool = False) -> bool:
-        max_tokens = self.max_tokens_per_rank
-        if max_tokens <= 0:
-            raise ValueError(f"max_tokens_per_rank must be positive, got {max_tokens}")
-        capturing = (
-            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        return _should_chunk_moe(
+            tokens,
+            self.max_tokens_per_rank,
+            is_decode_forward=self._is_decode_role or is_decode_forward,
+            chunking_enabled=self.chunking_enabled,
         )
-        is_decode = self._is_decode_role or is_decode_forward
-        if is_decode or capturing:
-            if tokens > max_tokens:
-                mode = "decode" if is_decode else "CUDA graph capture"
-                raise ValueError(
-                    f"{mode} MoE input tokens={tokens} exceeds "
-                    f"max_tokens_per_rank={max_tokens}"
-                )
-            return False
-        return self.chunking_enabled and tokens > max_tokens
 
     def _synchronized_chunk_tokens(
         self,
@@ -239,14 +359,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             or not dist.is_initialized()
         ):
             return tokens
-        planned_tokens = _SYNCHRONIZED_CHUNK_TOKENS.get()
-        if planned_tokens is not None:
-            return planned_tokens
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            return tokens
-        token_count = torch.tensor(tokens, dtype=torch.int64, device=device)
-        dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-        return int(token_count.item())
+        return synchronize_moe_chunk_tokens(tokens, device)
 
     def _observer(self, positions: Optional[torch.Tensor]):
         return self._observer_factory(positions) if self._observer_factory else None
@@ -275,7 +388,6 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_forward: bool = False,
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        global _CHUNKED_MOE_LOGGED
         shape = x.shape
         flat_x = x.reshape(-1, self.dim)
         flat_ids = None if input_ids is None else input_ids.reshape(-1)
@@ -295,43 +407,28 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             flat_x.dtype,
             flat_x.device,
         )[: flat_x.size(0)]
-        if not self._should_chunk(
-            synchronized_tokens, is_decode_forward=is_decode_forward
-        ):
-            if observer is None:
-                self._call_moe(flat_x, flat_ids, out=output)
-            else:
-                self._call_moe(flat_x, flat_ids, observer=observer, out=output)
-            return output.view(shape)
 
-        if not _CHUNKED_MOE_LOGGED:
-            _CHUNKED_MOE_LOGGED = True
-            logging.info(
-                "[MoE] chunked forward: synchronized_tokens=%d chunk_tokens=%d",
-                synchronized_tokens,
-                self.max_tokens_per_rank,
-            )
-        for start in range(0, synchronized_tokens, self.max_tokens_per_rank):
-            local_start = min(start, flat_x.size(0))
-            end = min(start + self.max_tokens_per_rank, flat_x.size(0))
-            chunk_ids = None if flat_ids is None else flat_ids[local_start:end]
-            chunk_observer = None
-            if observer is not None:
+        def call_chunk(start, end, out_view):
+            chunk_ids = None if flat_ids is None else flat_ids[start:end]
+            chunk_observer = observer
+            if observer is not None and synchronized_tokens > self.max_tokens_per_rank:
                 chunk_positions = (
-                    positions[local_start:end] if positions is not None else None
+                    positions[start:end] if positions is not None else None
                 )
                 chunk_observer = self._observer(chunk_positions)
             if chunk_observer is None:
-                self._call_moe(
-                    flat_x[local_start:end],
-                    chunk_ids,
-                    out=output[local_start:end],
-                )
-            else:
-                self._call_moe(
-                    flat_x[local_start:end],
-                    chunk_ids,
-                    observer=chunk_observer,
-                    out=output[local_start:end],
-                )
+                return self._call_moe(flat_x[start:end], chunk_ids, out=out_view)
+            return self._call_moe(
+                flat_x[start:end], chunk_ids, observer=chunk_observer, out=out_view
+            )
+
+        run_moe_chunks(
+            flat_x,
+            self.max_tokens_per_rank,
+            call_chunk,
+            is_decode_forward=self._is_decode_role or is_decode_forward,
+            chunking_enabled=self.chunking_enabled,
+            synchronized_tokens=synchronized_tokens,
+            out=output,
+        )
         return output.view(shape)
