@@ -126,6 +126,7 @@ def mhc_pre_big_fuse(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     fn_rounded: torch.Tensor | None = None,
+    batch_invariant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert residual.dtype == torch.bfloat16
     assert fn.dtype == torch.float32
@@ -152,8 +153,11 @@ def mhc_pre_big_fuse(
     backend = _requested_backend()
     block_k = 64
     block_m = 64
+    # Decode/verification must retain the one-token reduction even when
+    # CUDA Graph padding or request batching increases the number of rows.
+    grid_size = 1 if batch_invariant else _ceil_div(num_tokens, block_m)
     n_splits = (
-        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+        _compute_num_split(block_k, mhc_hidden_size, grid_size)
         if backend in ("deepgemm", "tilelang_splitk")
         else 1
     )

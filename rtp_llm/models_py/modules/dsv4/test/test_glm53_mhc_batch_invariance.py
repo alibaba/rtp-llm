@@ -2,8 +2,38 @@
 
 import importlib
 import unittest
+from types import SimpleNamespace
 
 import torch
+
+from rtp_llm.models_py.modules.dsv4.forward_metadata import scoped_forward_metadata
+
+
+class _InitialPreModel(torch.nn.Module):
+    def __init__(self, *, mtp=False):
+        super().__init__()
+        self.config = SimpleNamespace(
+            model_type="glm_5_mtp" if mtp else "glm5_3_flash", is_glm53_mtp=mtp
+        )
+
+    @scoped_forward_metadata
+    def forward(self, inputs, residual, weights):
+        from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_pre
+
+        return tk_mhc_pre(
+            residual,
+            *weights,
+            norm_eps=1e-6,
+            pre_eps=1e-6,
+            sinkhorn_eps=1e-6,
+            sinkhorn_iters=20,
+        )
+
+
+def _inputs(*, prefill=False, verify=False):
+    return SimpleNamespace(
+        attention_inputs=SimpleNamespace(is_prefill=prefill, is_target_verify=verify)
+    )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -54,6 +84,68 @@ class TestGlm53MhcBatchInvariance(unittest.TestCase):
     def assert_bits(self, actual, expected):
         for got, want in zip(actual, expected):
             torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+    @torch.inference_mode()
+    def test_initial_pre_decode_and_verify_preserve_single_tokens(self):
+        for hidden in (4096, 7168):
+            values, weights = self.inputs(256, hidden=hidden)
+            residual = values[1]
+            model = _InitialPreModel()
+            single = [model(_inputs(), row, weights) for row in residual.split(1)]
+            expected = tuple(torch.cat([row[k] for row in single]) for k in range(3))
+            for mtp, verify in ((False, False), (False, True), (True, False)):
+                model = _InitialPreModel(mtp=mtp)
+                inputs = _inputs(prefill=verify, verify=verify)
+                for count in (4, 8, 64, 128, 192, 256):
+                    with self.subTest(
+                        hidden=hidden, mtp=mtp, verify=verify, tokens=count
+                    ):
+                        self.assert_bits(
+                            model(inputs, residual[:count], weights),
+                            tuple(x[:count] for x in expected),
+                        )
+                order = torch.randperm(256, device="cuda")
+                self.assert_bits(
+                    model(inputs, residual[order], weights),
+                    tuple(x[order] for x in expected),
+                )
+
+    @torch.inference_mode()
+    def test_initial_pre_cuda_graph_replay(self):
+        values, weights = self.inputs(256)
+        residual = values[1]
+        model = _InitialPreModel()
+        inputs = _inputs(prefill=True, verify=True)
+        for _ in range(3):
+            model(inputs, residual, weights)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = model(inputs, residual, weights)
+        residual.normal_()
+        graph.replay()
+        expected = [model(_inputs(), row, weights) for row in residual.split(1)]
+        expected = tuple(torch.cat([row[k] for row in expected]) for k in range(3))
+        self.assert_bits(actual, expected)
+
+    @torch.inference_mode()
+    def test_initial_pre_preserves_prefill_reduction(self):
+        from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_pre
+
+        values, weights = self.inputs(256)
+        residual = values[1]
+        expected = tk_mhc_pre(
+            residual,
+            *weights,
+            norm_eps=1e-6,
+            pre_eps=1e-6,
+            sinkhorn_eps=1e-6,
+            sinkhorn_iters=20,
+        )
+        for mtp in (False, True):
+            self.assert_bits(
+                _InitialPreModel(mtp=mtp)(_inputs(prefill=True), residual, weights),
+                expected,
+            )
 
     @torch.inference_mode()
     def test_batch_size_order_and_ownership(self):
