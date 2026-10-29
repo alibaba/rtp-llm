@@ -263,3 +263,31 @@ py_library(
         "//rtp_llm:triton",
     ],
 )
+
+# Exact PLE leaf modules without the full engine build closure.
+py_library(
+    name = "ple_component_testlib",
+    testonly = True,
+    srcs = [
+        "kernels/cuda/fp8_kernel/fp8_kernel.py",
+        "modules/__init__.py",
+        "modules/base/__init__.py",
+        "modules/base/common/__init__.py",
+        "modules/base/common/fp8_linear.py",
+        "modules/hybrid/__init__.py",
+        "modules/hybrid/gated_residual.py",
+        "modules/qwen4_exp/ple/__init__.py",
+        "modules/qwen4_exp/ple/ple.py",
+        "modules/qwen4_exp/ple/ple_gate_triton.py",
+        "modules/qwen4_exp/ple/ple_conv_triton.py",
+        "modules/qwen4_exp/ple/ple_page_projection.py",
+    ],
+    data = [
+        "//rtp_llm:__init__.py",
+        "//rtp_llm:device/__init__.py",
+        "//rtp_llm:device/device_type.py",
+        "//rtp_llm:utils/fp8_constants.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:torch", "//rtp_llm:triton", "//rtp_llm/models_py/triton_kernels:common"],
+)

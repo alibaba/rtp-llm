@@ -5,6 +5,17 @@ import triton
 import triton.language as tl
 
 
+def _sm_supported(device: torch.device) -> bool:
+    """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
+    major, minor = torch.cuda.get_device_capability(device)
+    return major == 9 or (major, minor) == (12, 0)
+
+
+def _valid_page_size(page_size) -> bool:
+    """Pages are positive int multiples of 64; bool is not a legal page."""
+    return type(page_size) is int and page_size > 0 and page_size % 64 == 0
+
+
 @triton.jit
 def _page_amax(
     X,
@@ -45,20 +56,35 @@ def _page_quant(
     REDUCE: tl.constexpr,
     BLOCK: tl.constexpr,
     ROW_SCALES: tl.constexpr,
+    SM90_NATIVE_SCALE: tl.constexpr,
 ):
     page, tile = tl.program_id(0), tl.program_id(1)
     i = tl.arange(0, REDUCE)
     maximum = tl.max(tl.load(Partial + page * TILES + i, i < TILES, other=0.0), 0)
-    scale = maximum * (1.0 / 448.0)
+    if SM90_NATIVE_SCALE:
+        # Match the native Hopper CUDA quantizer: rounded division with FTZ.
+        # Reciprocal multiplication can move BF16 inputs across FP8 ties.
+        # Keep the previously validated SM120 arithmetic unchanged.
+        normal_min = 1.1754943508222875e-38
+        maximum = tl.where(maximum < normal_min, 0.0, maximum)
+        scale = tl.div_rn(maximum, 448.0)
+        scale = tl.where(scale < normal_min, 0.0, scale)
+    else:
+        scale = maximum * (1.0 / 448.0)
     if tile == 0:
         tl.store(RawScale + page, scale)
         # cublasLt per-tensor epilogue multiplies the two scales first.
         tl.store(KeyScale + page, scale * tl.load(WK))
         tl.store(ValueScale + page, scale * tl.load(WV))
-        if ROW_SCALES:
-            row = page * PAGE + tl.arange(0, PAGE)
-            tl.store(RowKeyScale + row, scale * tl.load(WK))
-            tl.store(RowValueScale + row, scale * tl.load(WV))
+    if ROW_SCALES:
+        # Distribute bounded row-scale stores across quantization tiles.
+        # The grid covers ceil(PAGE / 16) even for narrow test inputs, so
+        # non-power-of-two pages need neither a large vector nor a serial loop.
+        lane = tile * 16 + tl.arange(0, 16)
+        row = page * PAGE + lane
+        inside = (lane < PAGE) & (row < PADDED)
+        tl.store(RowKeyScale + row, scale * tl.load(WK), inside)
+        tl.store(RowValueScale + row, scale * tl.load(WV), inside)
     offset = tile * BLOCK + tl.arange(0, BLOCK)
     absolute = page * PAGE * K + offset
     valid = (offset < PAGE * K) & (absolute < ROWS * K)
@@ -72,8 +98,14 @@ def _page_quant(
 
 def quantize_pages(x, key_scale, value_scale, page_size=128, *, row_scales=False):
     rows, width = x.shape
-    padded = triton.cdiv(rows, page_size) * page_size
-    pages, tiles = triton.cdiv(rows, page_size), triton.cdiv(page_size * width, 4096)
+    if not _valid_page_size(page_size):
+        raise ValueError(
+            f"page size must be a positive multiple of 64, got {page_size!r}"
+        )
+    pages = triton.cdiv(rows, page_size)
+    # Keep the prior page-padded GEMM geometry and deterministic zero padding.
+    padded = pages * page_size
+    tiles = max(triton.cdiv(page_size * width, 4096), triton.cdiv(page_size, 16))
     partial = torch.empty((pages, tiles), device=x.device, dtype=torch.float32)
     scales = [
         torch.empty(pages, device=x.device, dtype=torch.float32) for _ in range(3)
@@ -106,6 +138,7 @@ def quantize_pages(x, key_scale, value_scale, page_size=128, *, row_scales=False
         REDUCE=triton.next_power_of_2(tiles),
         BLOCK=4096,
         ROW_SCALES=row_scales,
+        SM90_NATIVE_SCALE=torch.cuda.get_device_capability(x.device)[0] == 9,
     )
     return quantized, (scales[0], *row_sf) if row_scales else scales
 
@@ -124,19 +157,23 @@ def project_pages_pair(x, first, second, page_size=128):
         and x.shape[0] == 1
         and x.shape[2] == 2560
         and 128 <= x.shape[1] <= 32768
-        and page_size == 128
+        and _valid_page_size(page_size)
         and x.is_cuda
         and x.is_contiguous()
         and x.dtype == torch.bfloat16
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and _sm_supported(x.device)
         and tuple(first.weight.shape) == (10240, 2560)
         and tuple(second.weight.shape) == (2560, 2560)
         and first.weight.device == second.weight.device == x.device
     ):
         return None
     quantized, scales = quantize_pages(
-        x.squeeze(0), first.scale, second.scale, row_scales=True
+        x.squeeze(0),
+        first.scale,
+        second.scale,
+        page_size=page_size,
+        row_scales=True,
     )
     outputs = []
     for index, projection in enumerate((first, second)):

@@ -12,6 +12,12 @@ import triton
 import triton.language as tl
 
 
+def _sm_supported(device: torch.device) -> bool:
+    """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
+    major, minor = torch.cuda.get_device_capability(device)
+    return major == 9 or (major, minor) == (12, 0)
+
+
 @triton.jit
 def _ple_gate(
     Key,
@@ -32,6 +38,7 @@ def _ple_gate(
     HIDDEN_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
     PROJECTED_FP32: tl.constexpr = False,
+    PAGE: tl.constexpr = 128,
 ):
     # row * WIDTH exceeds int32 once a single prefill step passes ~2^31/10240
     # rows; max_seq_len=262144 allows that, so promote before multiplying.
@@ -42,7 +49,7 @@ def _ple_gate(
     hc_col = branch * H + col
     k = tl.load(Key + row * KEY_STRIDE + hc_col, valid, other=0).to(tl.float32)
     if PROJECTED_FP32:
-        k = (k * tl.load(KS + row // 128)).to(tl.bfloat16).to(tl.float32)
+        k = (k * tl.load(KS + row // PAGE)).to(tl.bfloat16).to(tl.float32)
     q = tl.load(Hidden + row * HIDDEN_STRIDE + hc_col, valid, other=0).to(tl.float32)
     gk = tl.load(GK + hc_col, valid, other=0).to(tl.float32)
     gq = tl.load(GQ + hc_col, valid, other=0).to(tl.float32)
@@ -61,7 +68,7 @@ def _ple_gate(
     gate = tl.sigmoid(signed).to(tl.bfloat16).to(tl.float32)
     value = tl.load(Value + row * VALUE_STRIDE + col, valid, other=0).to(tl.float32)
     if PROJECTED_FP32:
-        value = (value * tl.load(VS + row // 128)).to(tl.bfloat16).to(tl.float32)
+        value = (value * tl.load(VS + row // PAGE)).to(tl.bfloat16).to(tl.float32)
     gated = (gate * value).to(tl.bfloat16)
     f = gated.to(tl.float32)
     gc = tl.load(GC + hc_col, valid, other=0).to(tl.float32)
@@ -71,14 +78,26 @@ def _ple_gate(
 
 
 def try_ple_gate(
-    key, value, hidden, norm_key, norm_query, norm_conv, eps, projection_scales=None
+    key,
+    value,
+    hidden,
+    norm_key,
+    norm_query,
+    norm_conv,
+    eps,
+    projection_scales=None,
+    *,
+    page_size=128,
 ):
     projected = projection_scales is not None
     if projected and not (
-        hidden.shape[0] == 1
+        type(page_size) is int
+        and page_size > 0
+        and page_size % 64 == 0
+        and hidden.shape[0] == 1
         and len(projection_scales) == 2
         and all(
-            s.shape == (triton.cdiv(hidden.shape[1], 128),)
+            s.shape == (triton.cdiv(hidden.shape[1], page_size),)
             and s.device == hidden.device
             and s.dtype == torch.float32
             and s.is_contiguous()
@@ -89,7 +108,7 @@ def try_ple_gate(
     if not (
         hidden.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(hidden.device) == (12, 0)
+        and _sm_supported(hidden.device)
         and hidden.ndim == 3
         and (
             hidden.shape[0] == 1 or all(x.is_contiguous() for x in (key, value, hidden))
@@ -138,5 +157,6 @@ def try_ple_gate(
             BLOCK=4096,
             num_warps=4,
             PROJECTED_FP32=projected,
+            PAGE=page_size,
         )
     return gated, normed

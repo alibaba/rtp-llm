@@ -9,6 +9,12 @@ from torch import nn
 from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 
 
+def _sm_supported(device: torch.device) -> bool:
+    """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
+    major, minor = torch.cuda.get_device_capability(device)
+    return major == 9 or (major, minor) == (12, 0)
+
+
 class Qwen4ExpNGramEmbedding(nn.Module):
     """Hashed n-gram lookup feeding the PLE layer.
 
@@ -745,10 +751,12 @@ class Qwen4ExpPLELayer(nn.Module):
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Gather once while retaining every page's resumable prefill state.
 
-        Projections and convolution keep their original page-sized shapes to
-        preserve BF16 accumulation and rounding. N-gram hashing, shard gather,
-        and its TP reduction run once per request, including a partial final
-        page and a reused prefix's left context. With ``add_residual``, the
+        Projection quantization retains each page's scale domain and the
+        original BF16 materialization boundaries. Supported inputs use batched
+        projections and gate/convolution consumers; other inputs retain the
+        page projection or full page-loop fallback. N-gram hashing, shard
+        gather, and its TP reduction run once per request, including a partial
+        final page and a reused prefix's left context. With ``add_residual``, the
         convolution epilogue also adds the outer residual after rounding the
         PLE output to BF16, as in vLLM's outer-residual PLE consumer.
         """
@@ -771,7 +779,7 @@ class Qwen4ExpPLELayer(nn.Module):
             and hyper_states.is_cuda
             and hyper_states.dtype == torch.bfloat16
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
+            and _sm_supported(hyper_states.device)
             and self.key_projection is not None
             and self.value_projection is not None
             and self.key_projection.use_scaled_mm
@@ -818,6 +826,7 @@ class Qwen4ExpPLELayer(nn.Module):
                     self.norm_conv,
                     self.norm_eps,
                     projection_scales=projection_scales,
+                    page_size=page_size,
                 )
                 if fused is not None:
                     gated, normed = fused

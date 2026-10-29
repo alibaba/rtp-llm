@@ -5,6 +5,12 @@ import triton
 import triton.language as tl
 
 
+def _sm_supported(device: torch.device) -> bool:
+    """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
+    major, minor = torch.cuda.get_device_capability(device)
+    return major == 9 or (major, minor) == (12, 0)
+
+
 @triton.jit
 def _ple_conv(
     Gated,
@@ -68,7 +74,7 @@ def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
     if not (
         gated.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(gated.device) == (12, 0)
+        and _sm_supported(gated.device)
         and gated.dtype == normed.dtype == weight.dtype == torch.bfloat16
         and gated.ndim == 3
         and gated.shape == normed.shape
