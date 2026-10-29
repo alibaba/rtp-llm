@@ -53,6 +53,22 @@ class MoeTopkTritonTest(unittest.TestCase):
             graph.replay()
             self.compare(logits, ids, weights)
 
+    def test_selection_preserves_softmax_rounding_ties_and_underflow(self):
+        for dtype in (torch.bfloat16, torch.float32):
+            with self.subTest(dtype=dtype):
+                logits = torch.zeros(2, 512, device="cuda", dtype=dtype)
+                logits[0, 511] = 1e-10
+                logits[1] = torch.linspace(
+                    -2000, -1500, 512, device="cuda", dtype=dtype
+                )
+                logits[1, 511] = 0
+                ids = torch.empty(2, 10, device="cuda", dtype=torch.int32)
+                weights = torch.empty(2, 10, device="cuda")
+                self.fused(logits, ids, weights)
+                self.compare(logits, ids, weights)
+                self.assertEqual(ids[0].tolist(), list(range(10)))
+                self.assertEqual(ids[1].tolist(), [511, *range(9)])
+
     def test_large_prefill_batches_use_fused_routing_and_match_native(self):
         for rows in (8192, 12288, 16384):
             for dtype in (torch.bfloat16, torch.float32):

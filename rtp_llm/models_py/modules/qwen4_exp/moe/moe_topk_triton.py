@@ -18,9 +18,13 @@ def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr):
     chosen = tl.full((16,), 0, tl.float32)
     norm = tl.full((), 0, tl.float32)
     for i in tl.static_range(10):
-        # Separate reductions keep the native lower-ID tie break and allow
-        # the one-warp integer minimum to use the hardware reduction path.
-        best = tl.max(probabilities, 0)
+        # Softmax probabilities are nonnegative; their signed integer bits
+        # preserve ordering above the -1 sentinel. Both warp reductions can
+        # use hardware instructions, without changing softmax rounding ties.
+        # Invalid softmax rows contain only NaNs and retain the override below.
+        best = tl.max(probabilities.to(tl.int32, bitcast=True), 0).to(
+            tl.float32, bitcast=True
+        )
         expert = tl.min(tl.where(probabilities == best, experts, 2147483647), 0)
         chosen = tl.where(slots == i, best, chosen)
         norm = norm + best
