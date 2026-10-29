@@ -175,7 +175,15 @@ std::vector<std::vector<int>> ChatRender::get_all_extra_stop_word_ids_list() {
 RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
     py::gil_scoped_acquire acquire;
 
-    auto chat_request   = render_.attr("getRequest")(reqBody);
+    py::object chat_request;
+    try {
+        chat_request = render_.attr("getRequest")(reqBody);
+    } catch (const py::error_already_set& error) {
+        if (error.matches(PyExc_ValueError)) {
+            throw ChatRequestParseError(error.what());
+        }
+        throw;
+    }
     auto rendered_input = render_.attr("render_chat")(chat_request);
 
     auto                         input_ids    = py::cast<std::vector<int>>(rendered_input.attr("input_ids"));

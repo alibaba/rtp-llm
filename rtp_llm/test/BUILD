@@ -510,3 +510,9 @@ py_test(
     srcs = ["kmonitor_metric_reporter_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "compact_logprobs_renderer_test",
+    srcs = ["compact_logprobs_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

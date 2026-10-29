@@ -964,6 +964,14 @@ class BackendRPCServerVisitor:
             )
 
     def _validate_input(self, input: GenerateInput) -> None:
+        if (
+            input.generate_config.return_logprobs
+            or input.generate_config.top_logprobs > 0
+        ):
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "compact logprobs requests are not supported yet",
+            )
         if input.prompt_length <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,

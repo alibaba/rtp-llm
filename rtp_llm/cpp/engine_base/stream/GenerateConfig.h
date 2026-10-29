@@ -42,6 +42,11 @@ inline ThinkingMode normalizeThinkingMode(int value) {
     return static_cast<ThinkingMode>(value);
 }
 
+class LogprobsConfigParseError: public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
+
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
     int global_request_id  = -1;
@@ -97,6 +102,8 @@ public:
     bool                          force_disable_sp_run      = false;
     bool                          force_sp_accept           = false;
     ReturnAllProbsMode            return_all_probs          = ReturnAllProbsMode::NONE;
+    bool                          return_logprobs           = false;
+    int                           top_logprobs              = 0;
     bool                          return_softmax_probs      = false;
     bool                          aux_info                  = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -379,6 +386,13 @@ public:
             } catch (autil::legacy::ExceptionBase& e2) {
                 // field absent or other parse error — keep prior value
             }
+        }
+        try {
+            JSONIZE(return_logprobs);
+            JSONIZE(top_logprobs);
+        } catch (const autil::legacy::ExceptionBase& error) {
+            // Optional request configs catch autil errors and discard the entire config.
+            throw LogprobsConfigParseError("invalid compact logprobs configuration: " + error.GetMessage());
         }
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);

@@ -54,6 +54,10 @@ void InferenceParsedRequest::extractRequestGenerateConfigs(RawRequest&          
                                                            const std::shared_ptr<TokenProcessor>& token_processor) {
     if (req.generate_config.has_value()) {
         auto& config = req.generate_config.value();
+        if (config.return_logprobs || config.top_logprobs > 0) {
+            throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
+                                         "compact logprobs are not supported by the C++ frontend");
+        }
         if (req.yield_generator == false && config.return_incremental == true) {
             throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR,
                                          "request is non_stream but use incremental decoder");
@@ -90,7 +94,11 @@ InferenceParsedRequest InferenceParsedRequest::extractRequest(const std::string&
                                                               const ModelConfig&                     model_config,
                                                               const std::shared_ptr<TokenProcessor>& token_processor) {
     RawRequest req;
-    FromJsonString(req, body);
+    try {
+        FromJsonString(req, body);
+    } catch (const LogprobsConfigParseError& error) {
+        throw HttpApiServerException(HttpApiServerException::ERROR_GENERATE_CONFIG_FORMAT, error.what());
+    }
 
     InferenceParsedRequest pr;
     pr.private_request = req.private_request;

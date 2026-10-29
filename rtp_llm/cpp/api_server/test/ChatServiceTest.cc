@@ -122,6 +122,87 @@ protected:
     std::vector<int>                                     data_;
 };
 
+TEST_F(ChatServiceTest, RejectCompactLogprobsBeforeGeneration) {
+    EXPECT_CALL(*mock_render_, render_chat_request).Times(0);
+    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).Times(0);
+    for (const std::string& config :
+         {std::string(R"({"return_logprobs":true})"), std::string(R"({"top_logprobs":1})")}) {
+        for (const std::string& stream : {std::string("false"), std::string("true")}) {
+            http_server::HttpRequest request;
+            const std::string body = R"({"messages":[],"extra_configs":)" + config + R"(,"stream":)" + stream + "}";
+            request._request       = CreateHttpPacket(body);
+            try {
+                chat_service_->chatCompletions(writer_, request, 10086);
+                FAIL() << "compact logprobs request was accepted";
+            } catch (const HttpApiServerException& error) {
+                EXPECT_EQ(error.getType(), HttpApiServerException::UNSUPPORTED_OPERATION);
+            }
+        }
+    }
+}
+
+TEST_F(ChatServiceTest, RejectMalformedCompactLogprobsBeforeGeneration) {
+    EXPECT_CALL(*mock_render_, render_chat_request).Times(0);
+    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).Times(0);
+    for (const std::string& field :
+         {std::string(R"("top_logprobs":true)"),
+          std::string(R"("top_logprobs":"3")"),
+          std::string(R"("return_logprobs":"true")"),
+          std::string(R"("return_logprobs":1)")}) {
+        http_server::HttpRequest request;
+        const std::string body = R"({"messages":[],"extra_configs":{"max_new_tokens":16,)" + field + "}}";
+        request._request       = CreateHttpPacket(body);
+        try {
+            chat_service_->chatCompletions(writer_, request, 10086);
+            FAIL() << "malformed compact logprobs config was accepted: " << field;
+        } catch (const HttpApiServerException& error) {
+            EXPECT_EQ(error.getType(), HttpApiServerException::ERROR_GENERATE_CONFIG_FORMAT);
+        }
+    }
+}
+
+TEST(ChatRenderRequestTest, TranslatesOnlyValidationErrorsFromRequestParsing) {
+    py::gil_scoped_acquire acquire;
+    auto renderer = py::module_::import("types").attr("SimpleNamespace")();
+    renderer.attr("getRequest") = py::cpp_function([](const std::string&) -> py::object {
+        throw py::value_error("invalid top_logprobs");
+    });
+    ChatRender render(renderer);
+    EXPECT_THROW(render.render_chat_request("{}"), ChatRequestParseError);
+
+    renderer.attr("getRequest") = py::cpp_function([](const std::string&) -> py::object {
+        throw py::type_error("parser implementation error");
+    });
+    EXPECT_THROW(render.render_chat_request("{}"), py::error_already_set);
+
+    renderer.attr("getRequest") = py::cpp_function([](const std::string&) { return py::dict(); });
+    renderer.attr("render_chat") = py::cpp_function([](py::object) -> py::object {
+        throw py::value_error("rendering implementation error");
+    });
+    EXPECT_THROW(render.render_chat_request("{}"), py::error_already_set);
+}
+
+TEST_F(ChatServiceTest, ClassifiesRequestValidationErrorBeforeGeneration) {
+    EXPECT_CALL(*mock_render_, render_chat_request)
+        .Times(2)
+        .WillRepeatedly(Throw(ChatRequestParseError("invalid top_logprobs")));
+    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).Times(0);
+    http_server::HttpRequest request;
+    request._request = CreateHttpPacket(R"({"messages":[],"logprobs":true,"top_logprobs":25})");
+    for (const bool render_only : {false, true}) {
+        try {
+            if (render_only) {
+                chat_service_->chatRender(writer_, request);
+            } else {
+                chat_service_->chatCompletions(writer_, request, 10086);
+            }
+            FAIL() << "invalid request reached generation";
+        } catch (const HttpApiServerException& error) {
+            EXPECT_EQ(error.getType(), HttpApiServerException::ERROR_INPUT_FORMAT_ERROR);
+        }
+    }
+}
+
 TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     http_server::HttpRequest request;
     const std::string        body = R"del({

@@ -168,6 +168,9 @@ message GenerateConfigPB {
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
     bool frontend_metric_streaming = 77;
+    reserved "response_format";
+    bool return_logprobs = 78;
+    uint32 top_logprobs = 79;
 }
 
 message MMPreprocessConfigPB {
@@ -374,6 +377,11 @@ message FlattenOutputPB {
     PromptLogitsOutputPB prompt_logits = 9;
     // Output of the deployment-registered post-layers CustomHandler.
     TensorPB custom_output = 10;
+    TensorPB token_logprobs = 11;
+    TensorPB top_logprob_token_ids = 12;
+    TensorPB top_logprobs = 13;
+    repeated int32 logprobs_offsets = 14;
+    repeated int32 logprobs_counts = 15;
 }
 
 message GenerateOutputsPB {

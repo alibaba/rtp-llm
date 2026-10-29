@@ -45,3 +45,9 @@ py_test(
     srcs = ["base_tokenizer_lock_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "token_bytes_test",
+    srcs = ["token_bytes_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

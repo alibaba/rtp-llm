@@ -8,7 +8,12 @@ import logging
 import os
 import sys
 import tempfile
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
+
+if TYPE_CHECKING:
+    from rtp_llm.frontend.tokenizer_factory.tokenizers.token_bytes import (
+        TokenBytesDecoder,
+    )
 
 
 def _purge_dynamic_modules() -> None:
@@ -392,6 +397,18 @@ class BaseTokenizer:
     @property
     def pad_token(self):
         return self.tokenizer.pad_token
+
+    @functools.cached_property
+    def _token_bytes_decoder(self) -> "TokenBytesDecoder":
+        from rtp_llm.frontend.tokenizer_factory.tokenizers.token_bytes import (
+            TokenBytesDecoder,
+        )
+
+        return TokenBytesDecoder(self.tokenizer)
+
+    def token_id_to_bytes(self, token_id: int) -> Optional[bytes]:
+        """Recover raw bytes without encoding an incomplete decoded token."""
+        return self._token_bytes_decoder.decode(token_id)
 
     def get_real_tokenizer(self):
         return self.tokenizer
