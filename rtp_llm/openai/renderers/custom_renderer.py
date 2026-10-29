@@ -109,6 +109,7 @@ class StreamStatus:
     responded_string = ""
     delta_output_string = ""
     has_real_aux_info: bool = True
+    ignore_eos: bool = False
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
@@ -137,11 +138,12 @@ class StreamStatus:
             self._fallback_aux_info.output_len = len(self.output_ids_list)
             self._fallback_aux_info.step_output_len = len(delta_output_ids)
             output.aux_info = self._fallback_aux_info
+        eos_kwargs = {"ignore_eos": True} if self.ignore_eos else {}
         self.finish_reason = check_finish_func(
-            self.output_ids_list, self.input_token_length
+            self.output_ids_list, self.input_token_length, **eos_kwargs
         )
         self.output_ids = remove_stop_word_ids_func(
-            self.output_ids_list, delta_output_ids
+            self.output_ids_list, delta_output_ids, **eos_kwargs
         )
 
     def update_result(self):
@@ -1174,6 +1176,8 @@ class CustomChatRenderer:
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
+        for status in status_list:
+            status.ignore_eos = generate_config.ignore_eos
         index = 0
         resolved_thinking_mode = generate_config.thinking_mode
         if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
@@ -1783,16 +1787,18 @@ class CustomChatRenderer:
         return chat_response.model_dump_json(exclude_none=True)
 
     def _check_finish_reason(
-        self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1
+        self,
+        token_ids: List[int],
+        input_token_length: int,
+        max_new_tokens: int = -1,
+        ignore_eos: bool = False,
     ) -> Optional[FinisheReason]:
-        stop_word_ids_list_all = (
-            self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
-        )
+        stop_word_ids_list_all = self._stop_word_ids_to_match(ignore_eos)
         if max_new_tokens > 0 and len(token_ids) >= max_new_tokens:
             return FinisheReason.length
         if len(token_ids) + input_token_length >= self.max_seq_len:
             return FinisheReason.length
-        if token_ids and token_ids[-1] == self.eos_token_id:
+        if not ignore_eos and token_ids and token_ids[-1] == self.eos_token_id:
             return FinisheReason.stop
         for stop_word_ids in stop_word_ids_list_all:
             if (len(token_ids) >= len(stop_word_ids)) and (
@@ -1801,8 +1807,24 @@ class CustomChatRenderer:
                 return FinisheReason.stop
         return None
 
+    def _stop_word_ids_to_match(self, ignore_eos: bool) -> List[List[int]]:
+        # Mirrors GenerateStream::matchStopWordsList: with ignore_eos the engine
+        # keeps generating past a single-token EOS stop word, so the renderer
+        # must not end or truncate the stream there either.
+        stop_word_ids_list_all = (
+            self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
+        )
+        if ignore_eos:
+            stop_word_ids_list_all = [
+                ids for ids in stop_word_ids_list_all if ids != [self.eos_token_id]
+            ]
+        return stop_word_ids_list_all
+
     def _remove_stop_word_ids(
-        self, output_ids: List[int], delta_output_ids: List[int]
+        self,
+        output_ids: List[int],
+        delta_output_ids: List[int],
+        ignore_eos: bool = False,
     ) -> List[int]:
         """
         Truncate token sequence at FIRST occurrence of stop word (eos or stop_word_ids).
@@ -1814,12 +1836,14 @@ class CustomChatRenderer:
         Args:
             output_ids: Complete output token sequence to truncate
             delta_output_ids: New tokens in this chunk (unused in current implementation)
+            ignore_eos: Request asked to generate past EOS, so EOS is not a stop here
 
         Returns:
             Truncated output_ids list, with everything from first stop word removed
 
         Behavior:
             1. Check for eos_token_id anywhere in sequence, truncate at first occurrence
+               (skipped when ignore_eos is set, together with a single-token EOS stop word)
             2. Check for stop_word_ids sequences, truncate at first occurrence
             3. If multiple stop words found, truncate at the earliest position
 
@@ -1832,15 +1856,13 @@ class CustomChatRenderer:
             String-level truncation is still needed after this (see _process_stop_words)
             because stop words may span multiple tokens or appear mid-token.
         """
-        stop_word_ids_list_all = (
-            self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
-        )
+        stop_word_ids_list_all = self._stop_word_ids_to_match(ignore_eos)
 
         # Find earliest position of any stop token (EOS or stop word sequence)
         min_stop_pos = len(output_ids)
 
         # Check for eos token position
-        if self.eos_token_id in output_ids:
+        if not ignore_eos and self.eos_token_id in output_ids:
             eos_pos = output_ids.index(self.eos_token_id)
             min_stop_pos = min(min_stop_pos, eos_pos)
 

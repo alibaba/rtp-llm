@@ -38,6 +38,9 @@ class RemoveStopWordIdsTest(TestCase):
         self.renderer._remove_stop_word_ids = (
             CustomChatRenderer._remove_stop_word_ids.__get__(self.renderer)
         )
+        self.renderer._stop_word_ids_to_match = (
+            CustomChatRenderer._stop_word_ids_to_match.__get__(self.renderer)
+        )
 
     def test_truncate_at_eos(self):
         # EOS token in middle of sequence - should truncate
@@ -156,6 +159,17 @@ class RemoveStopWordIdsTest(TestCase):
         output_ids = [100, 300, 301, 102]
         result = self.renderer._remove_stop_word_ids(output_ids, [])
         self.assertEqual(result, [100])
+
+    def test_ignore_eos_keeps_tokens_after_eos(self):
+        # ignore_eos: the engine generates past EOS, so EOS (and a single-token EOS
+        # stop word) must not truncate; other stop words still do
+        self.renderer.stop_words_id_list = [[2], [151643]]
+        output_ids = [100, 2, 102, 103]
+        result = self.renderer._remove_stop_word_ids(output_ids, [], ignore_eos=True)
+        self.assertEqual(result, [100, 2, 102, 103])
+        output_ids = [100, 2, 151643, 103]
+        result = self.renderer._remove_stop_word_ids(output_ids, [], ignore_eos=True)
+        self.assertEqual(result, [100, 2])
 
 
 class ProcessStopWordsTest(TestCase):
@@ -643,6 +657,39 @@ class TestStopWordTruncation(_RendererTestBase):
             is_streaming=True,
         )
         self.assertEqual(delta2.output_str, "")
+
+    async def test_ignore_eos_streams_past_eos(self):
+        """ignore_eos: EOS does not finish or truncate the stream; only max_new_tokens ends it."""
+        eos = 2
+        tokenizer = self._make_tokenizer({100: "A", eos: "", 103: "B"})
+        renderer = self._make_renderer(
+            tokenizer, eos_token_id=eos, stop_word_ids_list=[[eos]]
+        )
+        status = await self._make_status(renderer)
+        status.ignore_eos = True
+
+        delta1 = await renderer._update_single_status(
+            status,
+            self._create_output([100, eos]),
+            max_new_tokens=4,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=True,
+        )
+        self.assertEqual(delta1.output_str, "A")
+        self.assertIsNone(status.finish_reason)
+
+        delta2 = await renderer._update_single_status(
+            status,
+            self._create_output([103, 100]),
+            max_new_tokens=4,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=True,
+        )
+        self.assertEqual(delta2.output_str, "BA")
+        self.assertEqual(status.finish_reason, FinisheReason.length)
+        self.assertEqual(status.output_ids, [100, eos, 103, 100])
 
 
 if __name__ == "__main__":
