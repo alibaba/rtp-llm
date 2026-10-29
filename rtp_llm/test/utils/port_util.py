@@ -100,6 +100,8 @@ class ExpiredLockFile:
 
 
 DEFAULT_PORT_RANGE_START = 10000
+# Remote actions have private TMPDIRs but share the host's listening ports.
+DEFAULT_PORT_LOCK_DIR = Path("/tmp/test_port_locks")
 
 
 class PortManager:
@@ -107,7 +109,7 @@ class PortManager:
         self.start_port = start_port or get_random_start_port()
         self.port_range = (self.start_port, get_linux_random_port_range()[0])
         self.ttl = ttl
-        self.lock_dir = lock_dir or Path(tempfile.gettempdir()) / "test_port_locks"
+        self.lock_dir = lock_dir or DEFAULT_PORT_LOCK_DIR
         self.lock_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"port_range: {self.port_range} lock: {self.lock_dir}")
 
@@ -195,7 +197,7 @@ class PortsContext:
     """
 
     def __init__(self, lock_dir: Path = None, num_ports: int = 1, ttl: int = 3600):
-        lock_dir = lock_dir or Path(tempfile.gettempdir()) / "test_port_locks"
+        lock_dir = lock_dir or DEFAULT_PORT_LOCK_DIR
         self.manager = PortManager(lock_dir, get_random_start_port(), ttl)
         self.num_ports = num_ports
         self.ports = None
