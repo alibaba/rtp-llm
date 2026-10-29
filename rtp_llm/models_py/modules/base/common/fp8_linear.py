@@ -70,7 +70,25 @@ class Fp8Linear(nn.Module):
         return out
 
     def forward_silu_and_mul(self, gate_up):
-        """Consume a gated projection with one activation/FP8 quant launch."""
+        """Consume a gated projection with fused activation and FP8 quantization."""
+        if (
+            self.compute_weight is None
+            and self.role in ("PREFILL", "PDFUSION")
+            and gate_up.ndim == 2
+            and 4093 <= gate_up.shape[0] <= 16384
+            and gate_up.shape[1] == self.weight.shape[1] * 2
+            and gate_up.is_cuda
+            and torch.version.hip is None
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.prefill_silu_quant_triton import (
+                try_silu_mul_quant,
+            )
+
+            result = try_silu_mul_quant(gate_up)
+            if result is not None:
+                return self._run_quantized(
+                    *result, gate_up.shape[:-1], gate_up.shape[0]
+                ).to(gate_up.dtype)
         if not (
             self.compute_weight is None
             and self.role in ("DECODE", "PDFUSION")

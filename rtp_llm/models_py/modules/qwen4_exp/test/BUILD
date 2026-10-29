@@ -277,6 +277,15 @@ py_test(
 )
 
 py_test(
+    name = "prefill_silu_quant_test",
+    srcs = ["prefill_silu_quant_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "sparse_prefill_bitmap_test",
     srcs = ["sparse_prefill_bitmap_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
