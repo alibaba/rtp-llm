@@ -130,6 +130,24 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        "@rtp_llm//:using_ppu": [
+            "apache-tvm-ffi==0.1.12",
+            # Runtime JIT dependencies are intentionally outside the Bazel lock.
+            "tilelang==0.1.13",
+            "torch-c-dlpack-ext==0.1.5",
+            "mkl==2021.1.1",
+            "safetensors==0.8.0",
+            "torch@https://pkg.flytiger-eco.com/artifactory/pypi_generic/torch/2.11.0+v0.2.0.ppu2.2.0/torch-2.11.0+cu130alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=34ec402766652465f13482025b8ebc35fe7a0921a5325c6b7d308fe31976d7ff",
+            "torchvision@https://pkg.flytiger-eco.com/artifactory/pypi_generic/torchvision/0.26.0+v0.1.0.ppu2.2.0/torchvision-0.26.0+cu130torch2.11.0alios7u2ce-cp312-cp312-linux_x86_64.whl#sha256=7fe8f5e0c4da1c422531cb3b944f1a33d8a69374d4233da3d33e3e79c7cae270",
+            "triton@https://pkg.flytiger-eco.com/artifactory/pypi_generic/triton/3.7.0+v0.1.0.ppu2.2.0/triton-3.7.0+cu130alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=eb031cb95386502e15fcffb45b81e032c61214b79b4df586295b0ccf9457f372",
+            "flash-attn@https://pkg.flytiger-eco.com/artifactory/pypi_generic/flash_attn/2.8.2+v0.2.0.ppu2.2.0/flash_attn-2.8.2+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=b9cda956074fd27848ccfc665cb8bce2fa67ef54ef7f597f4030e3196a986ec0",
+            "flash-attn-3@https://pkg.flytiger-eco.com/artifactory/pypi_generic/flash_attn_3/2.8.2+v0.2.0.ppu2.2.0/flash_attn_3-2.8.2+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=2eb7b83c68f6f20a6e543b352237a0e2216c90a216d795ec25bb9f913d67d427",
+            "flash-mla@https://pkg.flytiger-eco.com/artifactory/pypi_generic/flash_mla/2.0.0+v0.2.0.ppu2.2.0/flash_mla-2.0.0+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=e5394c4a9244bfecc68ad3ec89a6922640d2a11d6eee2e2a1263cad830ff1138",
+            "flashinfer-python@https://pkg.flytiger-eco.com/artifactory/pypi_generic/flashinfer_python/0.6.8.post1+v0.2.0.ppu2.2.0/flashinfer_python-0.6.8.post1+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=57c9072c2a41af8d19735c03ae1eb0d0d92bd6f2d5e0154fac44997c00b02031",
+            "deep-gemm@https://pkg.flytiger-eco.com/artifactory/pypi_generic/deep_gemm/1.0.0+v0.4.0.ppu2.2.0/deep_gemm-1.0.0+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=7e42900e3e86927f874daac8466f2d8611efe9b0c2ffeea30a306fe5e445a0cd",
+            "deep-ep@https://pkg.flytiger-eco.com/artifactory/pypi_generic/deep_ep/2.2.1+v0.1.0.ppu2.2.0/deep_ep-2.2.1+cu130torch2.11.0alios7u2oe-cp312-cp312-linux_x86_64.whl#sha256=e02ca174935722009cb89180bed021caf092f37b32fe5bdd75d388aaa7ff1fda",
+            "fast-hadamard-transform@https://pkg.flytiger-eco.com/artifactory/pypi_generic/fast_hadamard_transform/1.1.0.post2+v0.1.0.ppu2.2.0/fast_hadamard_transform-1.1.0.post2+cu130torch2.11.0alios7u2ce-cp312-cp312-linux_x86_64.whl#sha256=a310e83135c8cc717a6568ead29fd004839aa192d8ddc0f0cf99d077b6dc2294",
+        ],
         "@rtp_llm//:using_cuda13_x86": [
             # torch 2.11+cu130 mirrored on OSS (artlab pytorch mirror has no cu130 yet,
             # source upstream is download.pytorch.org/whl/cu130).
@@ -243,20 +261,6 @@ def whl_deps():
             "fast-safetensors==0.7.3+torch2.1.2.rocm",
             "fastsafetensors==0.1.19rc5+ali",
         ],
-        "@rtp_llm//:using_ppu": [
-            "torch==2.11.0+cu130alios7u2oe",
-            "torchvision==0.26.0+cu130torch2.11.0alios7u2ce",
-            "triton==3.7.0+cu130alios7u2oe",
-            "flash_attn==2.8.2+cu130torch2.11.0alios7u2oe",
-            "flash-attn-3==2.8.2+cu130torch2.11.0alios7u2oe",
-            "flashinfer-python==0.6.8.post1+cu130torch2.11.0alios7u2oe",
-            "deep-ep==2.2.1+cu130torch2.11.0alios7u2oe",
-            "deep-gemm==1.0.0+cu130torch2.11.0alios7u2oe",
-            "flash-mla==2.0.0+cu130torch2.11.0alios7u2oe",
-            "tilelang==0.1.13",
-            "apache-tvm-ffi==0.1.12",
-            "torch-c-dlpack-ext==0.1.5",
-        ],  # PPU SDK 2.2.0 / cu130 / alios7u2 / cp312 wheels
         "//conditions:default": ["torch==2.1.2"],
     })
 
@@ -379,7 +383,7 @@ def cuda_register():
 
 def triton_deps(names):
     return select({
-        "@rtp_llm//:using_ppu": [requirement_ppu(name) for name in names],
+        "@rtp_llm//:using_ppu": [requirement_ppu(name) for name in names if name not in _PPU_LOCK_SKIPPED],
         "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name) for name in names],
         "//conditions:default": [],
     })

@@ -657,7 +657,7 @@ grpcio_tools_req = select({
 })
 
 setuptools_req = select({
-    "@//:using_ppu": ["setuptools==75.8.0"],
+    "@//:using_ppu": ["setuptools==70.3.0"],
     "//conditions:default": ["setuptools==60.5.0"],
 })
 
