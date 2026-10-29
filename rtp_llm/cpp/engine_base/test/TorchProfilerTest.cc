@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <thread>
 
 #include "c10/util/Exception.h"
 #include "gtest/gtest.h"
@@ -187,6 +188,29 @@ TEST(TorchProfilerTest, CpuStopRecordsTeardownAndIsIdempotent) {
     auto [second_result, second_name] = profile.stopAndCollect();
     EXPECT_EQ(second_result, nullptr);
     EXPECT_TRUE(second_name.empty());
+}
+
+TEST(TorchProfilerTest, AsyncTransferEventsAreImportedOnOwnerAndLateCompletionIsSafe) {
+    TorchProfile profile("async_transfer_test_");
+    TorchProfileTestPeer::useCpuActivities(profile);
+    profile.start();
+    std::thread worker([] {
+        AsyncProfileSpan span("disk_read", 42, 0, 8);
+        span.finish();
+    });
+    worker.join();
+    AsyncProfileSpan pending("staging_wait", 43, 0, 8);
+    auto [result, name] = profile.stopAndCollect();
+    ASSERT_NE(result, nullptr);
+    size_t complete = 0, incomplete = 0;
+    for (const auto& event : result->events()) {
+        complete += event.name().find("cache.transfer.disk_to_device.disk_read(request_id=42") == 0;
+        incomplete += event.name().find("staging_wait(request_id=43") != std::string::npos
+                      && event.name().find("incomplete=1") != std::string::npos;
+    }
+    EXPECT_EQ(complete, 1u);
+    EXPECT_EQ(incomplete, 1u);
+    EXPECT_NO_THROW(pending.finish());
 }
 
 TEST(TorchProfilerTest, DestructorDoesNotThrowWhenTraceCannotBeSaved) {

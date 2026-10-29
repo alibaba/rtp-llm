@@ -93,6 +93,13 @@ cc_library(
 )
 
 cc_library(
+    name = "async_profiling_scope",
+    hdrs = ["AsyncProfilingScope.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "profiling_scope",
     hdrs = [
         "ProfilingScope.h",

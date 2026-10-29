@@ -769,6 +769,10 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_descriptor_count_compat_metric,
                                   "rtp_llm_kv_cache_transfer_descriptor_count");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_latency_us_metric, "rtp_llm_kv_cache_transfer_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(transfer_stage_latency_us_metric, "rtp_llm_kv_cache_transfer_stage_latency_us");
+    REGISTER_QPS_MUTABLE_METRIC(transfer_stage_qps_metric, "rtp_llm_kv_cache_transfer_stage_qps");
+    REGISTER_QPS_MUTABLE_METRIC(transfer_stage_latency_sum_us_metric, "rtp_llm_kv_cache_transfer_stage_latency_sum_us");
+    REGISTER_QPS_MUTABLE_METRIC(transfer_stage_dropped_qps_metric, "rtp_llm_kv_cache_transfer_stage_dropped_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_task_queue_wait_latency_us_metric,
                                   "rtp_llm_kv_cache_transfer_task_queue_wait_latency_us");
     REGISTER_QPS_MUTABLE_METRIC(task_queue_waiting_tasks_metric, "rtp_llm_kv_cache_task_queue_waiting_tasks");
@@ -779,6 +783,32 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
     REGISTER_QPS_MUTABLE_METRIC(transfer_bytes_metric, "rtp_llm_kv_cache_transfer_bytes");
     return true;
+}
+
+void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*              tags,
+                                        RtpLLMCacheTransferStageMetricsCollector* collector) {
+    if (collector->dropped_count)
+        transfer_stage_dropped_qps_metric->Report(tags, collector->dropped_count);
+    if (collector->sample_count == 0)
+        return;
+    if (collector->tags_prepared) {
+        transfer_stage_latency_us_metric->Report(tags, collector->latency_us);
+        transfer_stage_latency_sum_us_metric->Report(tags, collector->latency_sum_us);
+        transfer_stage_qps_metric->Report(tags, collector->sample_count);
+        return;
+    }
+    kmonitor::MetricsTags stage_tags = tags ? *tags : kmonitor::MetricsTags{};
+    stage_tags.AddTag("operation", collector->operation);
+    stage_tags.AddTag("source_tier", collector->source_tier);
+    stage_tags.AddTag("target_tier", collector->target_tier);
+    stage_tags.AddTag("stage", collector->stage);
+    stage_tags.AddTag("scope", collector->scope);
+    stage_tags.AddTag("success", collector->success ? "true" : "false");
+    if (collector->rank >= 0) {
+        stage_tags.AddTag("transfer_rank", std::to_string(collector->rank));
+    }
+    transfer_stage_latency_us_metric->Report(&stage_tags, collector->latency_us);
+    transfer_stage_qps_metric->Report(&stage_tags, collector->sample_count);
 }
 
 void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*          tags,

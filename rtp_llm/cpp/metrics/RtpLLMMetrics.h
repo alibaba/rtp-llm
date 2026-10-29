@@ -1168,6 +1168,22 @@ public:
     std::string                     pool_type;
 };
 
+class RtpLLMCacheTransferStageMetricsCollector final {
+public:
+    std::string operation{"load"};
+    std::string source_tier{"DISK"};
+    std::string target_tier{"DEVICE"};
+    std::string stage;
+    std::string scope;
+    int64_t     rank       = -1;
+    double      latency_us     = 0;
+    bool        success    = true;
+    uint64_t    sample_count   = 1;
+    uint64_t    latency_sum_us = 0;
+    uint64_t    dropped_count  = 0;
+    bool        tags_prepared  = false;
+};
+
 class RtpLLMCacheCopyErrorMetricsCollector final {
 public:
     std::string error_type;
@@ -1179,6 +1195,7 @@ public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheCopyErrorMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferStageMetricsCollector* collector);
 
 private:
     kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
@@ -1195,6 +1212,10 @@ private:
     kmonitor::MutableMetric* task_queue_backlog_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* transfer_stage_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* transfer_stage_latency_sum_us_metric       = nullptr;
+    kmonitor::MutableMetric* transfer_stage_dropped_qps_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

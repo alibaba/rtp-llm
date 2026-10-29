@@ -32,6 +32,7 @@
 #include "autil/legacy/jsonizable.h"
 #include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
@@ -1952,17 +1953,19 @@ private:
     const int32_t         default_query_type_ = static_cast<int32_t>(kv_cache_manager::QueryType::QT_PREFIX_MATCH);
 };
 
-KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                            cache_config,
-                                       const KVCacheConfig&                          kv_cache_config,
-                                       const RuntimeConfig&                          runtime_config,
-                                       const ParallelismConfig&                      parallelism_config,
-                                       const SpeculativeExecutionConfig&             sp_config,
-                                       std::shared_ptr<BroadcastManager>             broadcast_manager,
-                                       bool                                          gdr_enabled,
-                                       std::shared_ptr<kmonitor::MetricsReporter>    metrics_reporter,
-                                       std::shared_ptr<kvcm::ClientWrapper>          client_wrapper):
+KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                         cache_config,
+                                       const KVCacheConfig&                       kv_cache_config,
+                                       const RuntimeConfig&                       runtime_config,
+                                       const ParallelismConfig&                   parallelism_config,
+                                       const SpeculativeExecutionConfig&          sp_config,
+                                       std::shared_ptr<BroadcastManager>          broadcast_manager,
+                                       bool                                       gdr_enabled,
+                                       std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+                                       std::shared_ptr<kvcm::ClientWrapper>       client_wrapper):
     StorageBackend(makeStorageBackendExecutor(kv_cache_config.kvcm_asyncwrapper_thread_num,
-                                              kv_cache_config.kvcm_asyncwrapper_queue_size)),
+                                              kv_cache_config.kvcm_asyncwrapper_queue_size),
+                   std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter),
+                   parallelism_config.world_rank),
     impl_(std::make_unique<Impl>(cache_config,
                                  kv_cache_config,
                                  runtime_config,

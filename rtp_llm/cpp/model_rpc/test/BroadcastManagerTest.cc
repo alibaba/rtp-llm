@@ -31,6 +31,25 @@ TEST(BroadcastDiagnosticsTest, ConnectFailureKeepsQueryDirectionAndReportsEachRa
     EXPECT_NO_THROW(result.waitDone());
 }
 
+TEST(BroadcastDiagnosticsTest, CompletionTimesAreRecordedOncePerRankAndOnlyWhenFinished) {
+    using Result  = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    auto   first  = std::make_shared<Result::WorkerRpcContext>();
+    auto   second = std::make_shared<Result::WorkerRpcContext>();
+    Result result({first, second});
+    EXPECT_EQ(result.completionTimesUs(), (std::vector<int64_t>{0, 0}));
+    result.finishRank(1, true);
+    auto times = result.completionTimesUs();
+    EXPECT_EQ(times[0], 0);
+    EXPECT_GT(times[1], 0);
+    const auto walls = result.completionWallTimesUs();
+    EXPECT_GT(walls[1], 0);
+    result.finishRank(1, true);
+    EXPECT_EQ(result.completionTimesUs(), times);
+    result.finishRank(0, true);
+    EXPECT_GE(result.completionTimesUs()[0], times[1]);
+    EXPECT_TRUE(result.done());
+}
+
 TEST(BroadcastDiagnosticsTest, OtherRpcFailuresAreNotConnectFailures) {
     for (const auto& status : {grpc::Status(grpc::StatusCode::UNAVAILABLE, "server temporarily busy"),
                                grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "Connect Failed"),

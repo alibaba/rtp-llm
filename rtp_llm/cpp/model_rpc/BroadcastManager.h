@@ -54,6 +54,8 @@ public:
         worker_contexts_(worker_rpc_contexts),
         finished_(worker_rpc_contexts.size(), false),
         rpc_succeeded_(worker_rpc_contexts.size(), false),
+        completion_times_us_(worker_rpc_contexts.size(), 0),
+        completion_wall_times_us_(worker_rpc_contexts.size(), 0),
         direction_(std::move(direction)),
         rpc_tag_("request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction_),
         connect_failure_reporter_(std::move(connect_failure_reporter)) {}
@@ -132,6 +134,17 @@ public:
         return responses;
     }
 
+    // Coordinator-local monotonic timestamps; no cross-host clock subtraction.
+    std::vector<int64_t> completionTimesUs() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return completion_times_us_;
+    }
+
+    std::vector<int64_t> completionWallTimesUs() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return completion_wall_times_us_;
+    }
+
     void finishRank(size_t rank, bool cq_event_ok) {
         std::vector<DoneCallback> callbacks;
         bool                      report_connect_failure = false;
@@ -146,7 +159,13 @@ public:
             } else if (finished_[rank]) {
                 return;
             } else {
-                finished_[rank] = true;
+                finished_[rank]                 = true;
+                completion_times_us_[rank]      = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                      std::chrono::steady_clock::now().time_since_epoch())
+                                                      .count();
+                completion_wall_times_us_[rank] = std::chrono::duration_cast<std::chrono::microseconds>(
+                                                      std::chrono::system_clock::now().time_since_epoch())
+                                                      .count();
                 ++finished_count_;
                 const auto& ctx      = worker_contexts_[rank];
                 rpc_succeeded_[rank] = cq_event_ok && ctx->status.ok();
@@ -221,6 +240,8 @@ private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
     std::vector<bool>                              rpc_succeeded_;
+    std::vector<int64_t>                           completion_times_us_;
+    std::vector<int64_t>                           completion_wall_times_us_;
     const std::string                              direction_;
     const std::string                              rpc_tag_;
     const std::function<void(const std::string&)>  connect_failure_reporter_;

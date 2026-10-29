@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <cstdio>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -21,6 +22,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -1011,6 +1013,192 @@ TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPo
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->callback_queue_waiting_tasks_metric, queue_wait_tags), 1);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_qps_metric), 0u);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_in_flight_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, DiskLoadStagesAreTaggedAndReportedOnceWithoutChangingTransferTotals) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto reporter         = std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter);
+    {
+        TransferStageTimer timer(reporter, "disk_read", 12345, 0, 8, 3);
+        timer.finish(true);
+        timer.finish(false);
+    }
+    reporter->flushStageMetrics();
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "DISK");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("stage", "disk_read");
+    tags.AddTag("scope", "worker_batch");
+    tags.AddTag("success", "true");
+    tags.AddTag("transfer_rank", "3");
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_latency_us_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+    EXPECT_GE(snapshotQps(metrics->transfer_stage_latency_us_metric, tags), 0);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_in_flight_metric), 0u);
+    reporter->reportDiskLoadStage("disk_read", -1, true);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_latency_us_metric), 1u);
+    {
+        TransferStageTimer cancelled(reporter, "staging_wait", 12345, 0, 8, 3);
+        // Destruction of a cancelled/unwinding callback reports failure once.
+    }
+    reporter->flushStageMetrics();
+    tags.DelTag("stage");
+    tags.AddTag("stage", "staging_wait");
+    tags.DelTag("success");
+    tags.AddTag("success", "false");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+    EXPECT_GE(snapshotQps(metrics->transfer_stage_latency_us_metric, tags), 0);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 2u);
+}
+
+TEST(BlockTreeCacheMetricsTest, UnifiedStageLabelsDistinguishHostDiskAndStorageOperations) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto reporter         = std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter);
+    auto session          = AsyncProfileSession::start();
+    for (const auto identity : {CacheStageContext::local(Tier::HOST, Tier::DEVICE),
+                                CacheStageContext::local(Tier::DEVICE, Tier::HOST),
+                                CacheStageContext::local(Tier::HOST, Tier::DISK),
+                                CacheStageContext::local(Tier::DISK, Tier::HOST),
+                                CacheStageContext::local(Tier::DEVICE, Tier::DISK),
+                                CacheStageContext::storage("match"),
+                                CacheStageContext::storage("read"),
+                                CacheStageContext::storage("write")}) {
+        TransferStageTimer timer(reporter, "probe", 12345, 2, 4, 3, "test", 99, identity);
+        timer.finish(false);
+        timer.finish(true);
+        reporter->flushStageMetrics();
+        kmonitor::MetricsTags tags("operation", identity.operation);
+        tags.AddTag("source_tier", identity.source);
+        tags.AddTag("target_tier", identity.target);
+        tags.AddTag("scope", "test");
+        tags.AddTag("stage", "probe");
+        tags.AddTag("success", "false");
+        tags.AddTag("transfer_rank", "3");
+        auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+        ASSERT_NE(metrics, nullptr);
+        EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+        EXPECT_GE(snapshotQps(metrics->transfer_stage_latency_us_metric, tags), 0);
+        EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+    }
+    const auto events = session->finish();
+    EXPECT_EQ(events.size(), 8u);
+    for (const auto& event : events) {
+        EXPECT_EQ(event.name.find("disk_to_device"), std::string::npos);
+        EXPECT_NE(event.name.find("request_id=12345"), std::string::npos);
+    }
+}
+
+static kmonitor::MetricsTags stageTags(int rank = -1) {
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "DISK");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("stage", "disk_read");
+    tags.AddTag("scope", "worker_batch");
+    tags.AddTag("success", "true");
+    if (rank >= 0)
+        tags.AddTag("transfer_rank", std::to_string(rank));
+    return tags;
+}
+
+TEST(BlockTreeCacheMetricsTest, BufferedStagesPreserveWeightedSumAndCountAcrossUnequalFlushes) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    auto*                         metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    reporter.reportDiskLoadStage("disk_read", 100, true);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 0u);
+    reporter.flushStageMetrics();
+    for (size_t i = 0; i < 9; ++i)
+        reporter.reportDiskLoadStage("disk_read", 10, true);
+    reporter.flushStageMetrics();
+    const auto tags = stageTags();
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 10);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_latency_sum_us_metric, tags), 190);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, ConcurrentStageSamplesAreReportedOrAccountedAsDropped) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    constexpr size_t              threads = 8, samples = 10000;
+    std::vector<std::thread>      workers;
+    for (size_t i = 0; i < threads; ++i)
+        workers.emplace_back([&] {
+            for (size_t j = 0; j < samples; ++j)
+                reporter.reportDiskLoadStage("disk_read", 7, true, 0);
+        });
+    for (auto& worker : workers)
+        worker.join();
+    reporter.flushStageMetrics();
+    auto*      metrics  = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    const auto tags     = stageTags(0);
+    const auto accepted = snapshotQps(metrics->transfer_stage_qps_metric, tags);
+    EXPECT_GT(accepted, 0);
+    double dropped = 0;
+    if (metricSeriesCount(metrics->transfer_stage_dropped_qps_metric))
+        dropped = snapshotQps(metrics->transfer_stage_dropped_qps_metric, kmonitor::MetricsTags{});
+    EXPECT_DOUBLE_EQ(accepted + dropped, threads * samples);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_latency_sum_us_metric, tags), accepted * 7);
+}
+
+TEST(BlockTreeCacheMetricsTest, StageSeriesCapacityIsBoundedAndOverflowIsVisible) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    for (int rank = 0; rank < 600; ++rank)
+        reporter.reportDiskLoadStage("disk_read", 1, true, rank);
+    reporter.flushStageMetrics();
+    auto*      metrics  = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    const auto accepted = metricSeriesCount(metrics->transfer_stage_qps_metric);
+    EXPECT_GT(accepted, 0u);
+    EXPECT_LE(accepted, 512u);
+    const auto dropped = snapshotQps(metrics->transfer_stage_dropped_qps_metric, kmonitor::MetricsTags{});
+    EXPECT_DOUBLE_EQ(accepted + dropped, 600);
+}
+
+// Measures real producer APIs. KMonitor's synchronous tag/report path is the
+// previous implementation; buffered observations use the production fast path.
+TEST(BlockTreeCacheMetricsTest, StageProducerOverheadBenchmark) {
+    for (size_t threads : {1u, 8u}) {
+        auto raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+        constexpr size_t              samples = 10000;
+        const auto                    measure = [&](bool buffered) {
+            const auto               start = std::chrono::steady_clock::now();
+            std::vector<std::thread> workers;
+            for (size_t thread = 0; thread < threads; ++thread)
+                workers.emplace_back([&, thread] {
+                    for (size_t i = 0; i < samples; ++i) {
+                        if (buffered)
+                            reporter.reportDiskLoadStage("disk_read", 7, true, thread);
+                        else {
+                            RtpLLMCacheTransferStageMetricsCollector c;
+                            c.stage      = "disk_read";
+                            c.scope      = "worker_batch";
+                            c.latency_us = 7;
+                            c.success    = true;
+                            c.rank       = thread;
+                            raw->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferStageMetricsCollector>(nullptr,
+                                                                                                              &c);
+                        }
+                    }
+                });
+            for (auto& worker : workers)
+                worker.join();
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+                       .count()
+                   / static_cast<double>(threads * samples);
+        };
+        const auto synchronous = measure(false), buffered = measure(true);
+        std::printf("CACHE_STAGE_PRODUCER_BENCH threads=%zu samples=%zu synchronous_ns=%.1f buffered_ns=%.1f\n",
+                    threads,
+                    threads * samples,
+                    synchronous,
+                    buffered);
+        reporter.flushStageMetrics();
+    }
 }
 
 TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsLatencyAndDirection) {

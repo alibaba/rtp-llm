@@ -26,6 +26,9 @@
 namespace rtp_llm {
 
 class BatchKVCacheResource;
+class BlockTreeCacheMetricsReporter;
+class TransferStageTimer;
+class SharedTransferStageTimer;
 
 struct StorageBlockHandle {
     std::string  tag;
@@ -166,8 +169,12 @@ public:
 
     // An injected executor may be observed by its owner but belongs to only
     // one backend; init rejects binding the same instance a second time.
-    explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
+    explicit StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor         = nullptr,
+                            std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
+                            int64_t                                        world_rank       = -1);
     virtual ~StorageBackend();
+    // Atomic replacement allows attaching the cache reporter before or after init.
+    void setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter);
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
@@ -233,18 +240,29 @@ private:
     };
     using Operation = std::function<void(Lifecycle outcome)>;
 
-    std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request, bool for_write = false);
+    std::shared_ptr<storage_backend_detail::StorageTaskState>
+    prepare(StorageRequest request, bool for_write = false, uint64_t trace_id = 0);
+    SharedTransferStageTimer stageTimer(const char*           stage,
+                                        const StorageRequest& request,
+                                        const char*           operation,
+                                        uint64_t              trace_id) const noexcept;
+    TransferStageTimer       stageValue(const char*           stage,
+                                        const StorageRequest& request,
+                                        const char*           operation,
+                                        uint64_t              trace_id) const noexcept;
     void validateRequest(const StorageRequest& request, bool allow_null_blocks, bool for_write = false) const;
     bool                                 dispatch(Operation operation);
     void                                 taskFinished();
-    void                                 quarantineTask(
-        const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
-        bool                                                             is_write,
-        StorageQuarantineReason                                          reason);
+    void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
+                        bool                                                             is_write,
+                        StorageQuarantineReason                                          reason);
     std::shared_ptr<const CacheTopology> topology_;
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;
     std::shared_ptr<StorageBackendExecutor> executor_;
+    std::shared_ptr<BlockTreeCacheMetricsReporter> stage_metrics_reporter_;
+    std::atomic<bool>                              stage_metrics_enabled_{false};
+    const int64_t                                  world_rank_;
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};
 
