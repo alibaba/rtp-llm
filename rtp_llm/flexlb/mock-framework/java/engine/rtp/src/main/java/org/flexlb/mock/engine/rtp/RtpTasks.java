@@ -2,9 +2,7 @@ package org.flexlb.mock.engine.rtp;
 
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.mock.engine.RequestFailure;
 import org.flexlb.mock.engine.Scheduler;
-import org.flexlb.mock.engine.RequestState.Phase;
 
 /** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
 final class RtpTasks {
@@ -16,27 +14,20 @@ final class RtpTasks {
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, deadline,
             PrefixKeys.completeBlocks(input, blockSize), input.getGenerateConfig().getReuseCache(), retained);
     }
-    static TaskInfoPB.Builder task(Scheduler.Request request) {
-        var input = request.input(); var progress = request.snapshot();
-        boolean running = request.running();
-        long now = System.nanoTime();
-        long execution = progress.executionNanos() + (progress.phase() == Phase.FORWARD ? Math.max(0, now - request.stepStarted()) : 0);
-        return TaskInfoPB.newBuilder().setRequestId(input.requestId()).setBatchId(input.groupId()).setInputLength(input.tokens())
-            .setPrefixLength(request.reused()).setPriority(input.priority()).setDpRank(0).setIsWaiting(!running)
-            .setPhase(running ? TaskPhase.TASK_PHASE_RUNNING : request.allocated() ? TaskPhase.TASK_PHASE_KV_ALLOCATED
-                : progress.phase() == Phase.CAPACITY ? TaskPhase.TASK_PHASE_RECEIVED : TaskPhase.TASK_PHASE_PENDING)
-            .setIterateCount(progress.iterations())
-            .setWaitingTimeMs(TimeUnit.NANOSECONDS.toMillis(Math.max(0, now - input.started() - execution)))
-            .setExecutionTimeMs(TimeUnit.NANOSECONDS.toMillis(execution));
-    }
-    static TaskInfoPB finished(Scheduler.Request request, RequestFailure failure) {
-        var task = task(request).setEndTimeMs(System.currentTimeMillis());
-        if (failure != null) {
-            var status = RtpErrors.status(failure); long code = RtpErrors.code(failure);
-            task.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(code == 0 ? status.getCode().value() : code)
-                .setErrorMessage(status.getDescription() == null ? status.getCode().name() : status.getDescription()));
-        }
-        return task.build();
+    static TaskInfoPB task(Scheduler.Task task) {
+        var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
+            .setInputLength(task.inputLength()).setPrefixLength(task.prefixLength()).setPriority(task.priority())
+            .setDpRank(0).setPhase(switch (task.phase()) {
+                case PENDING -> TaskPhase.TASK_PHASE_PENDING;
+                case RECEIVED -> TaskPhase.TASK_PHASE_RECEIVED;
+                case KV_ALLOCATED -> TaskPhase.TASK_PHASE_KV_ALLOCATED;
+                case RUNNING -> TaskPhase.TASK_PHASE_RUNNING;
+            }).setIsWaiting(task.phase() != Scheduler.ReportedPhase.RUNNING)
+            .setIterateCount(task.iterations()).setWaitingTimeMs(task.waitingMillis())
+            .setExecutionTimeMs(task.executionMillis()).setEndTimeMs(task.endTimeMillis());
+        if (task.errorCode() != 0)
+            result.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(task.errorCode()).setErrorMessage(task.errorMessage()));
+        return result.build();
     }
     static long after(long now, long nanos) {
         try { return Math.addExact(now, nanos); }

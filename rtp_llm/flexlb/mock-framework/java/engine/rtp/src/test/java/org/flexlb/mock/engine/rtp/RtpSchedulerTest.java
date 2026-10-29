@@ -45,24 +45,30 @@ class RtpSchedulerTest {
     }
     private static void complete(Scheduler scheduler, Scheduler.Work work, RtpConfig config) {
         var sample = config.compute().plan(config.role(), config.id(), work.batch());
-        scheduler.completed(work, new SimulatedCompute.Outcome(SimulatedCompute.State.COMPLETED, sample, 10_000_000));
+        scheduler.computeCompleted(work, new SimulatedCompute.Outcome(SimulatedCompute.State.COMPLETED, sample, 10_000_000));
+    }
+    private static void loaded(Scheduler scheduler, Scheduler.Request request) {
+        try (var use = scheduler.beginTransfer(request)) {
+            scheduler.transferCompleted(request, new RtpTransferResult(3, null));
+        }
     }
     private static void generate(Scheduler scheduler, Scheduler.Request request) {
-        scheduler.dependencyCompleted(request, new Scheduler.Loaded(3));
-        scheduler.dependencyCompleted(request, Scheduler.Signal.GENERATE);
+        loaded(scheduler, request);
+        scheduler.control(request, RtpControl.GENERATE);
     }
 
     @Test void retainedPrefillKeepsKvThroughReadUntilTransferAcknowledgement() throws Exception {
         var config = config("prefill", "1", 2); var listener = new Listener();
         try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
-            var request = scheduler.submit(input(1, true), listener);
+            var request = scheduler.input(input(1, true), listener);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(new QueueSnapshot(0, 0, 0, 1), scheduler.queues());
             assertFalse(listener.terminal.isDone()); assertEquals(5, cache.snapshot(0, false).availableBlocks());
-            assertThrows(RequestFailure.class, () -> scheduler.dependencyCompleted(request, Scheduler.Signal.TRANSFER_ACKNOWLEDGED));
-            var read = scheduler.readReady(request);
-            scheduler.dependencyCompleted(request, Scheduler.Signal.TRANSFER_ACKNOWLEDGED);
+            assertThrows(RequestFailure.class, () -> scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED));
+            var read = scheduler.beginTransfer(request);
+            scheduler.transferCompleted(request, new RtpTransferResult(3, null));
+            scheduler.control(request, RtpControl.TRANSFER_ACKNOWLEDGED);
             assertEquals(5, cache.snapshot(0, false).availableBlocks()); assertFalse(listener.terminal.isDone());
             read.close(); drain(scheduler);
             assertNull(listener.terminal.get(1, TimeUnit.SECONDS)); assertEquals(8, cache.snapshot(0, false).availableBlocks());
@@ -73,7 +79,7 @@ class RtpSchedulerTest {
         var config = config("decode", "1", 2); var first = new Listener(); var second = new Listener();
         try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
-            var a = scheduler.submit(input(1, false), first); var b = scheduler.submit(input(2, false), second);
+            var a = scheduler.input(input(1, false), first); var b = scheduler.input(input(2, false), second);
             scheduler.maintain(); drain(scheduler); generate(scheduler, a); generate(scheduler, b);
             var batch = scheduler.schedule();
             assertEquals(2, batch.batch().dps().getFirst().requests().size());
@@ -97,10 +103,10 @@ class RtpSchedulerTest {
     @Test void closingEngineDefersCleanupUntilOutstandingReadReturns() throws Exception {
         Object lock = new Object(); var config = config("prefill", "1", 1); var listener = new Listener();
         try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), config.compute(), config.role(), config.id())) {
-            var request = engine.submit(input(1, true), listener);
+             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+            var request = engine.input(input(1, true), listener);
             listener.output.get(2, TimeUnit.SECONDS);
-            var read = engine.readReady(request);
+            var read = engine.beginTransfer(request);
             engine.close();
             assertEquals(5, cache.snapshot(0, false).availableBlocks()); assertFalse(listener.terminal.isDone());
             read.close();
@@ -114,15 +120,15 @@ class RtpSchedulerTest {
         var config = config("decode", "1", 2); var listener = new Listener();
         try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
-            var old = scheduler.submit(input(1, false), listener);
+            var old = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler);
             assertEquals(new QueueSnapshot(0, 0, 1, 0), scheduler.queues());
-            assertThrows(RequestFailure.class, () -> scheduler.dependencyCompleted(old, Scheduler.Signal.GENERATE));
-            scheduler.dependencyCompleted(old, new Scheduler.Loaded(3)); assertNull(scheduler.schedule());
+            assertThrows(RequestFailure.class, () -> scheduler.control(old, RtpControl.GENERATE));
+            loaded(scheduler, old); assertNull(scheduler.schedule());
             scheduler.finish(old, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); drain(scheduler);
-            var replacement = scheduler.submit(input(1, false), new Listener());
+            var replacement = scheduler.input(input(1, false), new Listener());
             scheduler.maintain(); scheduler.finish(old, null);
-            scheduler.dependencyCompleted(old, Scheduler.Signal.GENERATE);
+            scheduler.control(old, RtpControl.GENERATE);
             assertFalse(replacement.snapshot().terminating());
             assertEquals(0, replacement.snapshot().generated()); assertNull(scheduler.schedule());
         }
@@ -133,7 +139,7 @@ class RtpSchedulerTest {
         try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var held = cache.acquire(12, List.of()).lease();
-            var first = new Listener(); scheduler.submit(input(1, false), first); scheduler.submit(input(2, false), new Listener());
+            var first = new Listener(); scheduler.input(input(1, false), first); scheduler.input(input(2, false), new Listener());
             assertNull(scheduler.schedule()); assertFalse(first.terminal.isDone());
             held.close();
             var batch = scheduler.schedule(); assertEquals(2, batch.batch().dps().getFirst().requests().size());
@@ -154,10 +160,10 @@ class RtpSchedulerTest {
             }
         };
         try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), config.compute(), config.role(), config.id())) {
-            engine.submit(input(1, false), slow);
+             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+            engine.input(input(1, false), slow);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
-            engine.submit(input(2, false), next);
+            engine.input(input(2, false), next);
             assertNull(next.terminal.get(2, TimeUnit.SECONDS)); assertFalse(slow.terminal.isDone());
             release.countDown(); assertNull(slow.terminal.get(2, TimeUnit.SECONDS));
         } finally { release.countDown(); }
@@ -169,7 +175,7 @@ class RtpSchedulerTest {
         };
         try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
-            var request = scheduler.submit(input(1, false), listener);
+            var request = scheduler.input(input(1, false), listener);
             scheduler.maintain(); drain(scheduler); generate(scheduler, request);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(1, TimeUnit.SECONDS).reason());
@@ -181,17 +187,17 @@ class RtpSchedulerTest {
         var config = config("prefill", "1", 2, 5);
         try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
-            scheduler.submit(input(1, false), new Listener());
-            var waiting = scheduler.submit(input(2, false), new Listener());
+            scheduler.input(input(1, false), new Listener());
+            var waiting = scheduler.input(input(2, false), new Listener());
             var work = scheduler.schedule();
             assertEquals(1, work.batch().dps().getFirst().requests().size());
-            assertFalse(waiting.allocated()); assertEquals(9, cache.snapshot(0, false).availableBlocks());
+            assertEquals(Scheduler.ReportedPhase.RECEIVED, scheduler.status(0).tasks().stream().filter(task -> task.requestId() == waiting.input().requestId()).findFirst().orElseThrow().phase()); assertEquals(9, cache.snapshot(0, false).availableBlocks());
             complete(scheduler, work, config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(12, cache.snapshot(0, false).availableBlocks());
             var oversized = new Scheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, false);
             assertEquals(RequestFailure.Reason.INVALID,
-                assertThrows(RequestFailure.class, () -> scheduler.submit(oversized, new Listener())).reason());
+                assertThrows(RequestFailure.class, () -> scheduler.input(oversized, new Listener())).reason());
             assertTrue(scheduler.requests().isEmpty());
         }
     }
@@ -208,15 +214,59 @@ class RtpSchedulerTest {
             }
         };
         try (var cache = new DeviceCache(12, 0, DeviceCache.EvictionPolicy.LRU);
-             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), config.compute(), config.role(), config.id())) {
-            var request = engine.submit(input(1, false), listener);
+             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+            var request = engine.input(input(1, false), listener);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
             engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel"));
             release.countDown();
             assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(2, TimeUnit.SECONDS).reason());
-            var next = new Listener(); engine.submit(input(2, false), next);
+            var next = new Listener(); engine.input(input(2, false), next);
             assertNull(next.terminal.get(2, TimeUnit.SECONDS));
             assertEquals(12, cache.snapshot(0, false).availableBlocks());
         } finally { release.countDown(); }
     }
+    @Test void terminalStatusIsCommittedBeforeTheExternalTerminalCallbackReturns() throws Exception {
+        var config = config("prefill", "0", 1);
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+        var listener = new Listener() {
+            @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
+                entered.countDown();
+                try { assertTrue(release.await(3, TimeUnit.SECONDS)); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new RuntimeException(error); }
+                super.terminal(request, failure);
+            }
+        };
+        var lock = new Object();
+        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+             var loop = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+            loop.input(input(1, false), listener);
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            var status = loop.status(0);
+            assertTrue(status.tasks().isEmpty()); assertEquals(0, status.running()); assertEquals(0, status.waiting());
+            assertEquals(1, status.finishedVersion()); assertEquals(1, status.finished().getFirst().requestId());
+            assertThrows(UnsupportedOperationException.class, () -> status.finished().clear());
+            assertTrue(loop.status(status.finishedVersion()).finished().isEmpty());
+        } finally { release.countDown(); }
+    }
+
+    @Test void statusIsReadOnlyAndWaitingTimeFreezesAtResourceAdmission() throws Exception {
+        var config = config("prefill", "1", 1);
+        try (var cache = new DeviceCache(8, 0, DeviceCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            scheduler.input(input(1, true), new Listener());
+            var before = scheduler.status(0);
+            assertEquals(Scheduler.ReportedPhase.RECEIVED, before.tasks().getFirst().phase());
+            assertEquals(8, cache.snapshot(0, false).availableBlocks(), "A status query must not allocate");
+            var work = scheduler.schedule();
+            complete(scheduler, work, config); drain(scheduler);
+            var ready = scheduler.status(0).tasks().getFirst();
+            assertEquals(Scheduler.ReportedPhase.KV_ALLOCATED, ready.phase());
+            Thread.sleep(20);
+            var later = scheduler.status(0).tasks().getFirst();
+            assertEquals(ready.waitingMillis(), later.waitingMillis());
+            assertTrue(later.executionMillis() >= ready.executionMillis() + 10);
+            assertEquals(Scheduler.ReportedPhase.RECEIVED, before.tasks().getFirst().phase(), "Snapshots must not change later");
+        }
+    }
+
 }

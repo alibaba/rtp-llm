@@ -30,7 +30,19 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     }
     io.grpc.BindableService transfer() { return transfer; }
     void rpcAddress(String address) { if (generation != null) generation.address(address); }
-    public void close() { closed = true; if (generation != null) generation.close(); if (requests != null) requests.close(); if (decode != null) decode.close(); }
+    public void close() {
+        closed = true;
+        RuntimeException failure = null;
+        for (AutoCloseable component : new AutoCloseable[]{generation, transfer, requests, decode}) {
+            if (component == null) continue;
+            try { component.close(); }
+            catch (Exception error) {
+                if (failure == null) failure = new IllegalStateException("Cannot close RTP component", error);
+                else failure.addSuppressed(error);
+            }
+        }
+        if (failure != null) throw failure;
+    }
     String scrapeMetrics() { return requests == null ? decode.scrapeMetrics() : requests.scrapeMetrics(); }
 
     @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
@@ -114,7 +126,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 .setDpSize(1).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))
-                .addAllRunningTaskInfo(tasks.tasks()).addAllFinishedTaskList(tasks.finished()).setLatestFinishedVersion(tasks.finishedVersion())
+                .addAllRunningTaskInfo(tasks.tasks().stream().map(RtpTasks::task).toList())
+                .addAllFinishedTaskList(tasks.finished().stream().map(RtpTasks::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
                 .setWaitingQueryLen(tasks.waiting()).setRunningQueryLen(tasks.running())
                 .build();
         });

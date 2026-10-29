@@ -7,7 +7,7 @@ import static org.flexlb.mock.cache.BlockPool.Kind.*;
 public final class DeviceCache implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
     public enum EvictionPolicy { LRU, LFU, FIFO }
-    public record Admission(Lease lease, Failure failure) {}
+    public record Admission(Lease lease, Failure failure, long generation) {}
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, Set<Long> keys) {}
     private final BlockPool pool;
@@ -15,6 +15,10 @@ public final class DeviceCache implements AutoCloseable {
     private final int reserve;
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean closed;
+    private Runnable capacityChanged = () -> {};
+
+    /** The observer must only signal; it must never acquire an Engine scheduling lock. */
+    public synchronized void onCapacityChange(Runnable observer) { capacityChanged = Objects.requireNonNull(observer); }
 
     public DeviceCache(int blocks, int reserve, EvictionPolicy policy) {
         if (blocks <= 0 || reserve < 0 || reserve > blocks) throw new IllegalArgumentException("Invalid block capacity/reserve");
@@ -32,11 +36,11 @@ public final class DeviceCache implements AutoCloseable {
         int reused = slots.size(), need = demand - reused;
         if ((long) need + reserve > pool.snapshot().available() || !makeFree(need)) {
             release(slots);
-            return new Admission(null, failure(need));
+            return new Admission(null, failure(need), pool.generation());
         }
         for (var reference : Objects.requireNonNull(pool.allocate(need, REQUEST))) slots.add(new Slot(reference, null));
         var lease = new Lease(slots, reused); active.add(lease);
-        return new Admission(lease, null);
+        return new Admission(lease, null, pool.generation());
     }
     public long allocationGeneration() { return pool.generation(); }
     public void awaitCapacityChange(long observed, long waitMs) throws InterruptedException { pool.awaitChange(observed, waitMs); }
@@ -107,10 +111,12 @@ public final class DeviceCache implements AutoCloseable {
         return (long) demand + reserve > pool.snapshot().total() ? Failure.PERMANENT : Failure.RETRYABLE;
     }
     private void release(List<Slot> slots) {
+        int available = pool.snapshot().available();
         for (var slot : slots) {
             if (slot.node != null) tree.unpin(slot.node);
             slot.reference.close();
         }
+        if (pool.snapshot().available() > available) capacityChanged.run();
     }
     private static final class Slot {
         final BlockPool.Reference reference;

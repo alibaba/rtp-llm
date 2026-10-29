@@ -65,7 +65,12 @@ class LocalPrefillTest {
             assertEquals(Status.Code.CANCELLED, old.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertTrue(cache.snapshot(-1, true).keys().isEmpty());
             var fresh = engine.submit(input(1, 0, true)); old.cancel();
-            assertEquals(1, engine.snapshot(0).running()); fresh.cancel();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (engine.snapshot(0).running() == 0) {
+                assertTrue(System.nanoTime() < deadline); Thread.sleep(1);
+            }
+            fresh.cancel();
+            assertEquals(Status.Code.CANCELLED, fresh.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
         }
     }

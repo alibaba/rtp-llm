@@ -4,6 +4,23 @@
 
 当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、文本请求列表/文件播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集数据格式转换及 ViT/vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
+## Scheduler 输入、执行完成、传输完成与状态查询
+
+Scheduler 是每个后端的请求状态与调度策略所有者，不只是选择 batch 的函数。公共接入代码解析协议、检查格式并发送回执；`input` 决定初始状态、队列与资源准入，成功登记不等于资源已就绪。计算结果、传输结果和协议许可分别进入明确入口，外部组件不直接修改请求阶段或队列。
+
+- `input(request, listener)`：登记请求并执行后端准入策略。
+- `schedule()`：返回本次 Forward 的执行计划，不暴露或取走内部 running 容器。
+- `computeCompleted(work, result)`：提交本次计算进度，决定继续计算、等待交接或终结。Compute 不修改后端状态。
+- `transferCompleted(request, result)`：接收异步 KV 传输结果，由后端决定下一步；传输结束不自动等于整个请求结束。
+- `control(request, event)`：处理后端协议许可等少量控制输入；RTP 的 GENERATE、LOAD ACK 等类型留在 RTP 模块。
+- `status(latestFinishedVersion)`：按最终上报语义返回不可变的任务快照及原生协议要求的完成增量，不推进状态机。
+
+PD 的初始通知/初始化和 KV 传输分开。当前接入协议共用，KV 传输使用公共异步组件，第一版只建模零耗时完成；保留完成、失败、取消和资源使用权接口，不加入带宽、分块或争用模型。P 计算完成后可以退出计算集合，但仍持有 KV；本地传输结束和 D 的 LOAD ACK 是不同事实，确认前不能释放源 KV。网络协议仍由 RTP 适配器执行，状态决策及转移归 Scheduler。
+
+EngineLoop 负责唤醒、执行和结果交接，不判断后端队列和协议阶段。新输入、Compute/Transfer 完成、输出恢复可写、取消、资源释放和关闭触发唤醒；同时按最近请求 deadline 定时唤醒。无事件、无期限时阻塞等待，不固定周期轮询。Forward 在途时仍处理状态维护和 I/O 事件，但不提交第二个 Forward。资源可用变化必须有明确通知，不能在移除轮询后遗漏容量唤醒。
+
+状态转换与任务快照复制使用同一调度锁。查询可读到转换前或转换后的已提交状态，不能读到队列移动一半的状态；不等完整调度轮、Forward 或 PD 完成，不维护影子状态。活动记录移除与完成增量发布在同次状态提交完成，网络通知在锁外执行。Cache 单独采样一次，再由既有 GetWorkerStatus 编码组装；不承诺任务与 Cache 来自同一全局时刻。这与 real RTP 分开读取运行记录、Stream 阶段和 Cache 的边界一致，不复制其类之间的分工。
+
 ## 设计边界
 
 本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通文本请求列表/文件播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
@@ -51,29 +68,29 @@ P 接入层保留原生报文、模型上下文及生成参数校验，单批 to
 本批仅完成装配与公共组件边界；vLLM Scheduler 尚未实现，Python 后端选择和对应 Case 接线留到后续。没有自动插件扫描、空后端占位或静默回退到 RTP。
 
 ```text
-网络/控制线程 → submit / dependencyCompleted / finish
+网络/控制线程 → input / control / transferCompleted / finish
                            ↓
 EngineLoop：维护到期与依赖 → Scheduler.schedule → Compute.forward
                            ↑                         ↓
-                      下一轮调度 ← Scheduler.completed
+                      下一轮调度 ← Scheduler.computeCompleted
                                       ↓
                          锁外发送输出/就绪/终态通知
 ```
 
-每个 Engine 同时至多一个 Forward。初次和空闲后先调度；每轮计算结束后，结果交回 Scheduler 提交进度、检查有效性并决定继续或结束。公共 RequestState 保证终态与资源清理只发生一次，但不替调度器决定队列迁移。Scheduler 不持有执行器、计时线程或 EngineLoop，也不发送网络响应。
+每个 Engine 同时至多一个 Forward。初次和空闲后先调度；每轮计算结束后，结果交回 Scheduler 提交进度、检查有效性并决定继续或结束。公共 RequestState 保证终态与资源清理只发生一次，但不定义后端阶段或替调度器决定队列迁移。Scheduler 不持有执行器、计时线程或 EngineLoop，也不发送网络响应。
 
 | 边界 | 职责 |
 | --- | --- |
-| `submit(Input, Listener)` | 校验身份、接纳并登记请求，返回只读请求句柄。外部不能取得可变队列或修改请求进度。 |
+| `input(Input, Listener)` | 校验身份、接纳并登记请求，返回只读请求句柄。外部不能取得可变队列或修改请求进度。 |
 | `schedule()` | 检查预算与资源，调整内部队列，返回本轮 Work/ForwardBatch；没有可执行工作时返回空。 |
-| `completed(work, outcome)` / `failed(work, error)` | 提交本轮有效结果，决定后续队列和阶段完成，清理本轮资源引用。 |
-| `dependencyCompleted(request, result)` | 接收 KV 加载、生成许可、输出就绪、传输确认等明确事实，不把传输成功当作自动获准生成。 |
-| `finish` / `readReady` | 终止请求，或为已经就绪的数据取得短期读取引用；读取结束不等于收到远端传输确认。 |
-| `requests` / `queues` | 返回请求快照及调度器定义的统计，不暴露容器。 |
+| `computeCompleted(work, outcome)` / `failed(work, error)` | 提交本轮有效结果，决定后续队列和阶段完成，清理本轮资源引用。 |
+| `transferCompleted(request, result)` / `control(request, event)` | 分别接收传输完成结果和后端协议许可，不把传输成功当作自动获准生成。 |
+| `finish` / `beginTransfer` | 终止请求，或为已经就绪的数据取得短期读取引用；读取结束不等于收到远端传输确认。 |
+| `status(latestFinishedVersion)` | 同一调度锁内复制已提交任务、计数和原生完成增量；不推进状态，不返回可变请求。 |
 
 ForwardBatch 是本轮执行输入，不是 running 容器本身。它固定请求成员、本轮 token 数和执行身份；请求的持续状态由 Scheduler 保留。P 通常只执行一轮，D 在 running 中跨轮保留，不每轮回到 waiting。外部线程可在 Forward 期间经公共入口提交请求或依赖事实，但不能修改已经提交的 batch。
 
-Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络发送。公共 EngineLoop 每 50ms 维护一次期限与外部容量变化，入队、依赖完成和执行完成也会立即唤醒；容量版本未变化时不反复尝试初始分配。没有可执行 batch 也必须处理取消、期限和传输结果，不能依赖下一次 Forward 才收尾。
+Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络发送。公共 EngineLoop 使用一个虚拟线程等待事件和最近 deadline，入队、控制/执行完成、容量释放和关闭都会唤醒；没有固定周期轮询，容量版本未变化时不反复尝试初始分配。没有可执行 batch 也必须处理取消、期限和传输结果，不能依赖下一次 Forward 才收尾。
 
 通知按请求顺序、锁外执行。每个请求最多一个尚未处理完的输出；慢消费者只暂停自己的下一轮，不堵住其他请求的计算。接纳上限同时覆盖等待通知完成的请求，不能把它们搬到另一条无界队列。通知失败进入该请求的失败清理；终态通知等基础设施异常使 Engine 的后续状态读取明确报错。
 
@@ -332,11 +349,11 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 
 新增 Case 操作在 `interfaces/` 用现有装饰器注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
-共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RtpTasks/RtpErrors 在边界转换输入、状态和错误码。RtpScheduler 无 gRPC/protobuf/执行器依赖，拥有 FIFO、持续 running、资源准入和执行结果提交。
+共享指代码复用，不是不同实例共享资源。本批按职责重写 LocalPrefill/DecodeAdmission：它们保留原生校验、ALLOCATE/LOAD/GENERATE 协议状态和响应编码，通过公共 Scheduler.Request 句柄与 EngineLoop 交互；RtpTasks 只转换输入与状态编码，RtpErrors 负责原生错误码；上报阶段、准入等待时间和终态完成记录由 RtpScheduler 提交。RtpScheduler 无 gRPC/protobuf/执行器依赖，拥有 FIFO、持续 running、资源准入和执行结果提交。
 
 RequestState 是共享的请求进度、终态和资源清理机制。调度器决定何时申请和成功发布缓存；公共机制确保终态只通知一次、发布失败也尝试释放、取消请求不能再提交进度。Forward 持有资源使用权，终止请求不会提前释放仍被使用的块；EngineLoop 对执行对象做身份校验，晚到回调不能影响下一次执行。当前模拟 Forward 使用可取消计时；单成员取消保留整批执行，全部成员终止或关闭 Engine 时才取消计时并释放使用权。
 
-P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保留 KV，直到 LOAD ACK、取消或期限到达；读取期间另持资源引用。D 的接入/传输与计算进度分开保存，完成后的 token/迭代数只由调度域推进。请求终态先清理资源、记录指标，再通知协议适配器记录原生历史和完成响应。历史通知异步，资源释放与历史可见之间可能有短暂间隔。
+P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保留 KV，直到 LOAD ACK、取消或期限到达；读取期间另持资源引用。D 的接入/传输与计算进度分开保存，完成后的 token/迭代数只由调度域推进。请求终态先清理资源；Scheduler 在同次状态提交中记录指标、发布原生完成增量并移除活动请求。随后由协议适配器异步完成 RPC 响应，不影响状态查询的可见性。
 
 当前生产路径支持多个独立请求合批，P/D 使用相同调度循环。测试覆盖持续 Decode、批内独立取消、临时容量等待、输出阻塞和 PD 确认边界；完整 group、分块 Prefill 和 vLLM 未实现。
 

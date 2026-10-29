@@ -6,9 +6,10 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import org.flexlb.mock.engine.rtp.transfer.*;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
+import org.flexlb.mock.engine.*;
 
 /** Mock-only P cache-store boundary. A source is a live computed request, never an LRU lookup. */
-final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase {
+final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase implements AutoCloseable {
     private record Key(String client, long request) {}
     private static final class Entry {
         final TransferRequest request;
@@ -16,6 +17,7 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         final CompletableFuture<LocalPrefill.Result> ready = new CompletableFuture<>();
         final AtomicBoolean reader = new AtomicBoolean();
         LocalPrefill.Session session;
+        volatile KvTransfer.Execution execution;
         Entry(TransferRequest request, TransferMetadata metadata) { this.request = request; this.metadata = metadata; }
     }
     final class Source implements AutoCloseable {
@@ -26,8 +28,10 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
         void preempt() { entry.session.preempt(); }
         void expire() { entry.session.expire(); }
         void acknowledged() { requests.transferred(entry.session); }
-        @Override public void close() { entry.session.cancel(); }
+        @Override public void close() { cancel(entry); }
     }
+    private final KvTransfer model = new KvTransfer();
+    private boolean closed;
     private final RtpConfig config;
     private final LocalPrefill requests;
     private final ConcurrentMap<Key, Entry> active = new ConcurrentHashMap<>();
@@ -39,8 +43,11 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
     Source start(TransferRequest request, long deadline) {
         var key = key(request); layout(request); requests.validate(request.getInput(), true); var entry = new Entry(request, metadata(request));
         synchronized (entry) {
-            if (active.putIfAbsent(key, entry) != null)
-                throw Status.ALREADY_EXISTS.withDescription("Prefill transfer already exists").asRuntimeException();
+            synchronized (active) {
+                if (closed) throw Status.UNAVAILABLE.withDescription("Transfer service closed").asRuntimeException();
+                if (active.putIfAbsent(key, entry) != null)
+                    throw Status.ALREADY_EXISTS.withDescription("Prefill transfer already exists").asRuntimeException();
+            }
             try {
                 var session = requests.submit(request.getInput(), deadline, true); entry.session = session;
                 session.termination.thenAccept(result -> {
@@ -71,15 +78,47 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                     throw Status.ALREADY_EXISTS.withDescription("Prefill transfer already has a reader").asRuntimeException();
             }
         } catch (StatusRuntimeException error) { response.onError(error); return; }
-        response.setOnCancelHandler(entry.session::cancel);
+        response.setOnCancelHandler(() -> cancel(entry));
         entry.ready.thenAccept(result -> {
             if (response.isCancelled()) { entry.session.cancel(); return; }
             if (!result.status().isOk()) { response.onError(RtpErrors.failure(result.status(), result.engineCode())); return; }
-            try (var use = requests.readReady(entry.session)) {
-                if (response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-                response.onNext(entry.metadata); response.onCompleted();
-            } catch (RuntimeException error) { entry.session.cancel(); response.onError(error); }
+            RequestState.Use use;
+            try { use = requests.beginTransfer(entry.session); }
+            catch (RuntimeException error) { cancel(entry); response.onError(error); return; }
+            KvTransfer.Execution execution;
+            try { execution = model.submit(use); }
+            catch (RuntimeException error) { use.close(); cancel(entry); response.onError(error); return; }
+            entry.execution = execution;
+            if (response.isCancelled() || entry.session.request.snapshot().terminating()) execution.cancel();
+            execution.completion().thenAccept(outcome -> {
+                var failure = outcome.state() == KvTransfer.State.COMPLETED ? null : new RequestFailure(
+                    outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
+                    "KV transfer " + outcome.state(), outcome.error());
+                try {
+                    requests.transferCompleted(entry.session, new RtpTransferResult(entry.metadata.getStopAfter(), failure));
+                    if (response.isCancelled()) return;
+                    if (failure != null) throw RtpErrors.failure(failure);
+                    if (entry.session.request.snapshot().terminating()) throw Status.CANCELLED.asRuntimeException();
+                    response.onNext(entry.metadata); response.onCompleted();
+                } catch (RuntimeException error) { cancel(entry); if (!response.isCancelled()) response.onError(error); }
+            });
         });
+    }
+
+    private void cancel(Entry entry) {
+        if (entry.session != null) entry.session.cancel();
+        var execution = entry.execution;
+        if (execution != null) execution.cancel();
+    }
+    @Override public void close() {
+        java.util.List<Entry> entries;
+        synchronized (active) {
+            if (closed) return;
+            closed = true;
+            entries = java.util.List.copyOf(active.values());
+        }
+        for (var entry : entries) synchronized (entry) { cancel(entry); }
+        model.close();
     }
 
     private void layout(TransferRequest request) {

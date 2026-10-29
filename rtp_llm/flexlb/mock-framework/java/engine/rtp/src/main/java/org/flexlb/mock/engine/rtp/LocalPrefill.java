@@ -13,11 +13,10 @@ final class LocalPrefill implements AutoCloseable {
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
     private final RtpConfig config;
     private final EngineLoop engine;
-    private final TaskHistory history = new TaskHistory();
 
     LocalPrefill(RtpConfig config, DeviceCache cache, Scheduler.Factory schedulers) {
         this.config = config;
-        engine = new EngineLoop(this, schedulers.create(this, cache), config.compute(), config.role(), config.id());
+        engine = new EngineLoop(this, schedulers.create(this, cache), cache, config.compute(), config.role(), config.id());
     }
 
     final class Session implements Scheduler.Listener {
@@ -40,7 +39,6 @@ final class LocalPrefill implements AutoCloseable {
             if (retained) result.complete(success(request));
         }
         @Override public void terminal(Scheduler.Request request, RequestFailure failure) {
-            history.add(RtpTasks.finished(request, failure));
             var ended = failure == null ? success(request) : new Result(null, RtpErrors.status(failure), RtpErrors.code(failure));
             result.complete(ended);
             termination.complete(ended);
@@ -53,7 +51,7 @@ final class LocalPrefill implements AutoCloseable {
         validate(input, retained);
         var session = new Session(input, retained);
         try {
-            session.request = engine.submit(RtpTasks.input(input, Long.toString(input.getRequestId()), System.nanoTime(),
+            session.request = engine.input(RtpTasks.input(input, Long.toString(input.getRequestId()), System.nanoTime(),
                 rpcDeadline, retained, config.blockSize()), session);
         } catch (RequestFailure failure) {
             if (failure.reason() == RequestFailure.Reason.INVALID)
@@ -68,25 +66,25 @@ final class LocalPrefill implements AutoCloseable {
             throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
         var generation = input.getGenerateConfig();
         RtpRequestValidation.supported(input);
-        if (input.getTokenIdsCount() < 1 || (long) input.getTokenIdsCount() + 1 > config.maxSeqLen()
+        if (input.getTokenIdsCount() < 1
                 || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()
                 || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
             throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
     }
 
-    RequestState.Use readReady(Session session) {
-        try { return engine.readReady(session.request); }
+    RequestState.Use beginTransfer(Session session) {
+        try { return engine.beginTransfer(session.request); }
+        catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
+    }
+    void transferCompleted(Session session, RtpTransferResult result) {
+        try { engine.transferCompleted(session.request, result); }
         catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
     }
     void transferred(Session session) {
-        try { engine.dependencyCompleted(session.request, Scheduler.Signal.TRANSFER_ACKNOWLEDGED); }
+        try { engine.control(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
         catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
     }
-    synchronized TaskHistory.Snapshot snapshot(long latestFinished) {
-        var counts = engine.queues();
-        return history.snapshot(latestFinished, engine.requests().stream().map(r -> RtpTasks.task(r).build()).toList(),
-            counts.waiting() + counts.loading() + counts.ready(), counts.running());
-    }
+    Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }
     @Override public void close() { engine.close(); }
 }

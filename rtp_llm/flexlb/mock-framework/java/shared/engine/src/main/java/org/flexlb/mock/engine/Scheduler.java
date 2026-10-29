@@ -28,9 +28,6 @@ public interface Scheduler extends AutoCloseable {
         Input input();
         RequestState.Snapshot snapshot();
         int reused();
-        long stepStarted();
-        boolean allocated();
-        boolean running();
     }
 
     record Output(int generated, int iterations, int committed, boolean finished) {}
@@ -43,23 +40,28 @@ public interface Scheduler extends AutoCloseable {
         void terminal(Request request, RequestFailure failure);
     }
 
-    sealed interface Dependency permits Loaded, Signal {}
-    record Loaded(int stopAfter) implements Dependency {
-        public Loaded {
-            if (stopAfter < 1) throw new IllegalArgumentException("Invalid transferred stop length");
-        }
+    interface Control {}
+    interface TransferResult { RequestFailure failure(); }
+    enum ReportedPhase { PENDING, RECEIVED, KV_ALLOCATED, RUNNING }
+    record Task(long requestId, long batchId, int inputLength, int prefixLength, int priority,
+                ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,
+                long endTimeMillis, long errorCode, String errorMessage) {}
+    record Status(List<Task> tasks, List<Task> finished, long finishedVersion, int waiting, int running) {
+        public Status { tasks = List.copyOf(tasks); finished = List.copyOf(finished); }
     }
-    enum Signal implements Dependency { GENERATE, OUTPUT_WRITABLE, TRANSFER_ACKNOWLEDGED, PREFILL_COMPLETE }
 
     /** Owner is an opaque execution object, never a request ID or a mutable queue. */
     record Work(Object owner, ForwardBatch batch) {
         public Work { Objects.requireNonNull(owner); Objects.requireNonNull(batch); }
     }
 
-    Request submit(Input input, Listener listener);
-    void dependencyCompleted(Request request, Dependency dependency);
+    Request input(Input input, Listener listener);
+    void control(Request request, Control event);
+    void transferCompleted(Request request, TransferResult result);
     void finish(Request request, RequestFailure failure);
-    RequestState.Use readReady(Request request);
+    RequestState.Use beginTransfer(Request request);
+    Status status(long latestFinishedVersion);
+    long nextDeadline();
     List<Request> requests();
     QueueSnapshot queues();
     String scrapeMetrics();
@@ -67,7 +69,7 @@ public interface Scheduler extends AutoCloseable {
     /** Also runs while a Forward is pending: deadlines and I/O admission must not depend on compute completion. */
     void maintain();
     Work schedule();
-    void completed(Work work, SimulatedCompute.Outcome outcome);
+    void computeCompleted(Work work, SimulatedCompute.Outcome outcome);
     void failed(Work work, RuntimeException error);
     boolean cancelled(Work work);
 

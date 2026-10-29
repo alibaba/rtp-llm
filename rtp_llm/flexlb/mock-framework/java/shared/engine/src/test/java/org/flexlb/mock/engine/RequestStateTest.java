@@ -42,13 +42,11 @@ class RequestStateTest {
         assertEquals(RequestFailure.Reason.TIMEOUT, ended.getFirst().reason());
     }
 
-    @Test void transferPinKeepsReadyStateAndDelaysCleanupUntilReaderExits() {
+    @Test void transferPinDelaysCleanupUntilReaderExits() {
         var closed = new AtomicInteger(); var ended = new ArrayList<RequestFailure>();
         var state = new RequestState(Long.MAX_VALUE, ended::add);
         state.attach(closed::incrementAndGet, () -> {});
-        state.phase(RequestState.Phase.READY);
         var reader = state.pin();
-        assertEquals(RequestState.Phase.READY, state.snapshot().phase());
         state.finish(null);
         assertEquals(0, closed.get()); assertTrue(ended.isEmpty());
         reader.close(); reader.close();

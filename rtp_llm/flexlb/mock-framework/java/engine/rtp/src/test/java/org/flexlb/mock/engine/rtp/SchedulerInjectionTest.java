@@ -39,10 +39,13 @@ class SchedulerInjectionTest {
         boolean submitted, closed;
         RejectingScheduler(Object lock) { this.lock = lock; }
         private void locked() { assertTrue(Thread.holdsLock(lock)); }
-        @Override public Request submit(Input input, Listener listener) {
+        @Override public Request input(Input input, Listener listener) {
             locked(); submitted = true;
             throw new RequestFailure(RequestFailure.Reason.OVERLOADED, "injected scheduler admission");
         }
+        @Override public long nextDeadline() { locked(); return Long.MAX_VALUE; }
+        @Override public Status status(long latest) { locked(); return new Status(List.of(), List.of(), latest, 0, 0); }
+        @Override public void transferCompleted(Request request, TransferResult result) { fail("No admitted transfer"); }
         @Override public void maintain() { locked(); }
         @Override public Work schedule() { locked(); return null; }
         @Override public List<Request> requests() { locked(); return List.of(); }
@@ -50,10 +53,10 @@ class SchedulerInjectionTest {
         @Override public String scrapeMetrics() { locked(); return "injected_scheduler 1\n"; }
         @Override public List<Runnable> takeNotifications() { locked(); return List.of(); }
         @Override public void close() { locked(); closed = true; }
-        @Override public void dependencyCompleted(Request request, Dependency dependency) { fail("No admitted request"); }
+        @Override public void control(Request request, Control event) { fail("No admitted request"); }
         @Override public void finish(Request request, RequestFailure failure) { fail("No admitted request"); }
-        @Override public RequestState.Use readReady(Request request) { throw new AssertionError("No admitted request"); }
-        @Override public void completed(Work work, SimulatedCompute.Outcome outcome) { fail("No admitted work"); }
+        @Override public RequestState.Use beginTransfer(Request request) { throw new AssertionError("No admitted request"); }
+        @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) { fail("No admitted work"); }
         @Override public void failed(Work work, RuntimeException error) { fail("No admitted work"); }
         @Override public boolean cancelled(Work work) { throw new AssertionError("No admitted work"); }
     }
