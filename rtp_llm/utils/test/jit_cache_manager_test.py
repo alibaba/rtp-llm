@@ -264,6 +264,46 @@ class WrapperCacheSetupTest(JitCacheTestBase):
 
 
 class StoreTest(JitCacheTestBase):
+    def test_deep_gemm_read_events_do_not_rescan_entries(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        entry = component.local_dir / "cache" / "hash"
+        entry.mkdir(parents=True)
+        for name, payload in (
+            ("kernel.cu", b"source"),
+            ("kernel.cubin", b"binary"),
+            ("meta.json", b"{}"),
+            (".committed", b""),
+        ):
+            (entry / name).write_bytes(payload)
+        manager = jit.JitCacheManager(jit.Scope("test", self.root, (component,)), "")
+        read_processed = threading.Event()
+        handle_event = manager.on_any_event
+
+        def observe(event):
+            handle_event(event)
+            if event.event_type == "closed_no_write":
+                read_processed.set()
+
+        manager.on_any_event = observe
+        observer = jit.Observer()
+        observer.schedule(manager, str(component.local_dir), recursive=True)
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as validate:
+            observer.start()
+            try:
+                (entry / "meta.json").read_bytes()
+                self.assertTrue(read_processed.wait(5), "read event was not handled")
+            finally:
+                observer.stop()
+                observer.join(5)
+            self.assertFalse(observer.is_alive())
+            validate.assert_not_called()
+        self.assertFalse(manager._dirty.is_set())
+
     def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
         component = replace(
             next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),

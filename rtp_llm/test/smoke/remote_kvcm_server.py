@@ -24,6 +24,7 @@ class RemoteKVCMServer:
     ):
         self._kvcm_config = kvcm_config
         self._server_path = server_path
+        self._server_process = None
         self._block_path = server_path + "/block/"
         self._bin_path = server_path + "/bin/kv_cache_manager_bin"
         self._fault_trigger = False
@@ -46,7 +47,9 @@ class RemoteKVCMServer:
         if not os.path.exists(self._kvcm_src_logs_path):
             logging.warning(f"path [{self._kvcm_src_logs_path}] not exist")
             return
-        shutil.copytree(self._kvcm_src_logs_path, self._kvcm_dst_logs_path)
+        shutil.copytree(
+            self._kvcm_src_logs_path, self._kvcm_dst_logs_path, dirs_exist_ok=True
+        )
 
     def address(self) -> str:
         return self._address
@@ -155,6 +158,8 @@ class RemoteKVCMServer:
             time.sleep(retry_interval)
 
     def stop_server(self):
+        if self._server_process is None:
+            return
         if self._fault_trigger:
             if self.clearFaults():
                 logging.info("clear faults injection success")
@@ -175,7 +180,11 @@ class RemoteKVCMServer:
                 for child in alive:
                     child.kill()  # 强制终止未退出的进程
                 parent.terminate()
-                parent.wait()
+                try:
+                    parent.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    parent.kill()
+                    parent.wait(timeout=5)
                 self._server_process = None
             except Exception as e:
                 logging.warning("failed to get process with: " + str(e))

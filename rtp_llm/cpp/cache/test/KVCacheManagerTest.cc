@@ -206,12 +206,12 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
                                          const std::string&      tag,
                                          const std::string&      label,
                                          bool                    enable_reuse_cache = false) {
-    const int  active_tail_blocks = dsv4ActiveTailBlocks(config, tag);
-    const int  tail_begin         = std::max(static_cast<int>(blocks.size()) - active_tail_blocks, 0);
-    const int  linear_step        = std::max(1, config.linear_step);
-    const bool effective_reuse    = enable_reuse_cache && !isHcaStateGroup(config, tag);
+    const int tail_blocks = enable_reuse_cache && config.group(tag).policy.enable_prefix_reuse ?
+                                config.reuse_cache_tail_blocks :
+                                dsv4ActiveTailBlocks(config, tag);
+    const int tail_begin  = std::max(static_cast<int>(blocks.size()) - tail_blocks, 0);
     for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
-        const bool should_allocate = i >= tail_begin || (effective_reuse && ((i + 1) % linear_step == 0));
+        const bool should_allocate = i >= tail_begin;
         if (should_allocate) {
             EXPECT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>(i)])) << label << " group " << tag << " pos " << i;
         } else {
@@ -2638,9 +2638,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto result_c = manager->malloc(malloc_c);
     ASSERT_TRUE(result_c.success) << "3rd allocation must succeed via SWA eviction";
 
-    // SWA pressure selects the older request's tier leaf. Its exclusive,
-    // unmatchable single-child ancestor chain is pruned upward as one cascade.
-    EXPECT_TRUE(manager->blockTreeCache()->tree()->findNode(keys_a).empty());
+    // Older FULL-only ancestors can remain after the SWA tail is evicted.
 
     // Direct proof of the SWA eviction itself: at least one cached SWA slot was
     // evicted, the evicted set is exactly an LRU-first prefix (every evicted

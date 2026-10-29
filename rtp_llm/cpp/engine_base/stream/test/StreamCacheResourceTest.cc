@@ -356,7 +356,7 @@ protected:
     void prepareLinearHistoryResource(bool enable_reclaim = true) {
         auto config = test::makeSimpleHybridMhaCacheConfig(
             /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/2, DataType::TYPE_FP16);
-        config.linear_step                 = 1;
+        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
         config.enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
@@ -558,7 +558,7 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimPreservesBorrowedResourcesAn
 
 TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastIncludesFutureDecodeForFreshContext) {
     auto config                        = test::makeSimpleLinearCacheConfig(1, 64, 2, DataType::TYPE_FP16);
-    config.linear_step                 = 1;
+    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     config.enable_linear_cache_reclaim = true;
     prepareResourceWithCacheConfig(config, {1, 2}, true, RoleType::PDFUSION, {}, 1, 64);
     stream_->generateConfig()->reuse_cache = true;
@@ -649,7 +649,7 @@ TEST_F(StreamCacheResourceTest, PDLinearTailHandoffKeepsInitialAdmissionEqualToA
     for (bool enable_reclaim : {false, true}) {
         SCOPED_TRACE(enable_reclaim);
         auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-        config.linear_step                 = 1;
+        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
         config.enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
@@ -682,7 +682,7 @@ TEST_F(StreamCacheResourceTest, LinearCacheSwitchCombinationsPreserveRoleOwnersh
                 SCOPED_TRACE(testing::Message() << "role=" << roleTypeToString(role) << " reclaim=" << enable_reclaim
                                                 << " tail=" << enable_tail_only);
                 auto config        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-                config.linear_step = 1;
+                config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
                 config.enable_linear_cache_reclaim = enable_reclaim;
                 prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, role, {}, 1, 64);
                 auto& resource                                 = stream_->streamCacheResource();
@@ -833,6 +833,73 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
                       group.policy.group_type == CacheGroupType::LINEAR ? (BlockIndicesType{5, 2}) :
                                                                           (BlockIndicesType{2, 5}));
         }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReuseState) {
+    for (const int tail_blocks : {2, 8}) {
+        SCOPED_TRACE(tail_blocks);
+// Full-checkpoint materialization window (pre-#1574 linear_step=1).
+        auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+        config.reuse_cache_tail_blocks = tail_blocks;
+        KVCacheConfig tiered_config;
+        tiered_config.enable_device_cache  = false;
+        tiered_config.enable_memory_cache  = true;
+        tiered_config.memory_cache_size_mb = 1;
+        prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9}, true, RoleType::PDFUSION, tiered_config);
+        auto& resource                                         = stream_->streamCacheResource();
+        resource.resource_context_.enable_device_cache         = false;
+        resource.resource_context_.enable_memory_cache         = true;
+        stream_->generate_input_->generate_config->reuse_cache = true;
+        initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+        const auto&                                cache = cache_manager_->block_tree_cache_;
+        std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(cache->groupSets().size()));
+        for (const auto& group : cache->groupSets()) {
+            const auto host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_FALSE(isNullBlockIdx(host_block));
+            BlockIndicesType device_blocks;
+            for (const auto& pool : group->devicePools()) {
+                const auto allocated = pool->malloc(1);
+                ASSERT_TRUE(allocated.has_value());
+                pool->incRef(*allocated);
+                device_blocks.push_back(allocated->front());
+            }
+            ASSERT_TRUE(cache
+                            ->executeTransfer(TransferTask(
+                                {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks, host_block)},
+                                std::chrono::seconds(30)))
+                            .ok());
+            for (size_t member = 0; member < device_blocks.size(); ++member) {
+                group->devicePools()[member]->decRef(device_blocks[member]);
+            }
+            slots[0][group->groupSetId()].host_block = host_block;
+        }
+        ASSERT_EQ(cache->tree()
+                      ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, slots, false, false)
+                      .accepted_resource_count,
+                  cache->groupSets().size());
+        for (const auto& group : cache->groupSets()) {
+            group->releaseSingleBlock(Tier::HOST, slots[0][group->groupSetId()].host_block, BlockTreeRefType::CACHE);
+        }
+
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_NE(resource.allocator_load_context_, nullptr);
+        resource.allocator_load_context_->waitDone();
+        ASSERT_TRUE(resource.loadCacheDone());
+        ASSERT_EQ(stream_->reuseLength(), 2);
+        ASSERT_TRUE(stream_->isContextStream());
+        ASSERT_FALSE(stream_->chunkedPrefillEnabled());
+        const auto before = resource.kvCache().blocks(0, "linear");
+        ASSERT_EQ(before.size(), 5u);
+        ASSERT_GT(before[0], 0);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        EXPECT_EQ(resource.kvCache().blocks(0, "linear"), before);
+        EXPECT_EQ(resource.kvCache().cacheResource(0).kernelBlocks("linear"), before);
+
+        stream_->setIsContextStream(false);
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        EXPECT_TRUE(isNullBlockIdx(resource.kvCache().blocks(0, "linear")[0]));
+        resource.releaseResource();
     }
 }
 

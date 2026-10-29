@@ -313,17 +313,14 @@ environmentBuffers(const BackendEnvironment& environment, int layer, const std::
     return result;
 }
 
-[[maybe_unused]] BackendEnvironment makeMultiGroupBackendEnvironment(const std::string& pool_name,
-                                                                     size_t             full_group_count,
-                                                                     size_t             linear_group_count,
-                                                                     int                linear_step = 2) {
+[[maybe_unused]] BackendEnvironment
+makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group_count, size_t linear_group_count) {
     RTP_LLM_CHECK(full_group_count > 0 && linear_group_count > 0);
     BackendEnvironment result;
     const size_t       group_count         = full_group_count + linear_group_count;
     result.cache_config.dtype              = DataType::TYPE_FP16;
     result.cache_config.layer_num          = static_cast<uint32_t>(group_count);
     result.cache_config.seq_size_per_block = 8;
-    result.cache_config.linear_step        = linear_step;
 
     std::vector<KVCacheSpecPtr>   specs;
     std::vector<std::vector<int>> layers_by_group;

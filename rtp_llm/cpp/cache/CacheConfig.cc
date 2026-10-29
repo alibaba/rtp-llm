@@ -461,11 +461,6 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
     setTopology(std::move(new_groups), std::move(new_layers));
 }
 
-uint32_t CacheConfig::baselineBlockNum(CacheGroupType type, uint32_t baseline, int linear_step) {
-    const auto step = static_cast<uint32_t>(std::max(1, linear_step));
-    return type == CacheGroupType::SWA ? baseline / step + (baseline % step != 0 ? 1u : 0u) : baseline;
-}
-
 uint32_t CacheConfig::blockWeight(const std::string& tag) const {
     const auto it = pool_block_weights.find(tag);
     return it == pool_block_weights.end() ? 1u : it->second;
@@ -474,10 +469,12 @@ uint32_t CacheConfig::blockWeight(const std::string& tag) const {
 uint32_t CacheConfig::blockNumForGroup(const GroupBase& group, uint32_t baseline) const {
     const auto weight = blockWeight(group.tag);
     RTP_LLM_CHECK_WITH_INFO(weight > 0, "cache pool '%s' block weight must be positive", group.tag.c_str());
+    // Main's #1574 rule: a group either pins its own explicit block count or
+    // follows the global baseline; pool weights scale the baseline share.
     const uint64_t blocks =
         group.policy.explicit_block_num > 0 ?
             group.policy.explicit_block_num :
-            static_cast<uint64_t>(baselineBlockNum(group.policy.group_type, baseline, linear_step)) * weight;
+            static_cast<uint64_t>(baseline) * weight;
     RTP_LLM_CHECK_WITH_INFO(
         blocks <= static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
         "cache pool '%s' block count exceeds int32 block ID range: baseline=%u weight=%u blocks=%lu",
@@ -497,10 +494,8 @@ uint32_t CacheConfig::maxBaselineBlockNum() const {
         }
         const auto weight = blockWeight(group.tag);
         RTP_LLM_CHECK_WITH_INFO(weight > 0, "cache pool '%s' block weight must be positive", group.tag.c_str());
-        uint64_t limit = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) / weight;
-        if (group.policy.group_type == CacheGroupType::SWA) {
-            limit *= static_cast<uint32_t>(std::max(1, linear_step));
-        }
+        // Baseline * weight must stay inside the int32 block-ID range.
+        const uint64_t limit = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) / weight;
         maximum = std::min(maximum, limit);
     }
     return static_cast<uint32_t>(maximum);
@@ -521,6 +516,9 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         return;
     }
 
+    // Main's #1574 sizing rule (explicit block count or global baseline)
+    // folded into blockNumForGroup, which additionally applies the pool
+    // block-weight multiplier.
     auto       groups = topology().groups();
     for (auto& group : groups) {
         group.block_num = blockNumForGroup(group, global_block_num);
@@ -565,7 +563,7 @@ std::string CacheConfig::debugString(size_t indent) const {
     }
 
     os << indent1 << "# Attention Configuration:\n";
-    OUTPUT_FIELD(linear_step);
+    OUTPUT_FIELD(reuse_cache_tail_blocks);
     OUTPUT_FIELD_EXPR("full_group_num",
                       std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
                           return group.policy.group_type == CacheGroupType::FULL;

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <sstream>
@@ -191,7 +192,11 @@ struct KVCacheConfig {
     double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
-    int    linear_step                                  = 1;  // for linear attention cache reuse
+    // Reusable tail retention (main #1574) plus per-pool explicit block
+    // budgets; replace the old linear_step field.
+    int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
+    uint32_t linear_pool_blocks                           = 0;
+    uint32_t swa_pool_blocks                              = 0;
     // Opt-in request policy; only models declaring history-state reclaim support may enable it.
     bool enable_linear_cache_reclaim = false;
     // Optional JSON map from cache-group tags to positive pool block-count weights.
@@ -220,11 +225,11 @@ struct KVCacheConfig {
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
-    // linear-step-derived block count.
+    // automatically derived block count.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
-    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
+    // follows dsv4_fixed_pool_blocks or the normal automatically derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned

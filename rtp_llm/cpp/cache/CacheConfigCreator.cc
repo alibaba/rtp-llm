@@ -26,7 +26,7 @@ namespace {
 // kernel block passes it and then produces a partial compression unit.
 constexpr uint32_t kCompressedKernelSeqSizeAlignment = 128;
 
-bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget, int step) {
+bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
     if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
         return false;
     }
@@ -39,8 +39,9 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
         remaining -= static_cast<size_t>(block_num) * budget.paged_block_bytes;
     }
 
-    const auto swa_blocks = CacheConfig::baselineBlockNum(CacheGroupType::SWA, block_num, step);
-    return budget.swa_block_bytes == 0 || static_cast<size_t>(swa_blocks) <= remaining / budget.swa_block_bytes;
+    // Main #1574 keeps SWA pool blocks at the same baseline count (tail
+    // retention is a runtime concern), so no SWA downsampling here.
+    return budget.swa_block_bytes == 0 || static_cast<size_t>(block_num) <= remaining / budget.swa_block_bytes;
 }
 
 void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
@@ -362,15 +363,16 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
 
 }  // namespace
 
-uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step) {
-    RTP_LLM_CHECK_WITH_INFO(budget.paged_block_bytes > 0 || budget.swa_block_bytes > 0,
-                            "kv cache block budget has zero marginal block bytes");
+uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
+    if (budget.paged_block_bytes == 0 && budget.swa_block_bytes == 0) {
+        return budget.explicit_pool_reserve_bytes <= total_budget_bytes ? 1u : 0u;
+    }
 
     uint32_t low  = 0;
     uint32_t high = budget.max_baseline_block_num;
     while (low < high) {
         const uint32_t mid = low + static_cast<uint32_t>((static_cast<uint64_t>(high) - low + 1) / 2);
-        if (blockNumFitsBudget(mid, total_budget_bytes, budget, linear_step)) {
+        if (blockNumFitsBudget(mid, total_budget_bytes, budget)) {
             low = mid;
         } else {
             high = mid - 1;
@@ -404,7 +406,28 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle) {
     auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-    config.linear_step = std::max(1, kv_cache_config.linear_step);
+    // Main #1574: reusable tail retention plus optional per-pool explicit
+    // block budgets for LINEAR/SWA pools.
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
+    config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
+    {
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            const uint32_t override_blocks =
+                group.policy.group_type == CacheGroupType::LINEAR ? kv_cache_config.linear_pool_blocks :
+                group.policy.group_type == CacheGroupType::SWA    ? kv_cache_config.swa_pool_blocks :
+                                                                    0;
+            RTP_LLM_CHECK_WITH_INFO(override_blocks != 1
+                                        && override_blocks <= static_cast<uint32_t>(std::numeric_limits<int>::max()),
+                                    "pool blocks for tag=%s must be 0 or in [2, INT_MAX]",
+                                    group.tag.c_str());
+            if (override_blocks > 0 && group.policy.explicit_block_num == 0) {
+                group.policy.explicit_block_num     = override_blocks;
+                group.policy.charge_to_paged_budget = group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+    }
     if (!kv_cache_config.enable_linear_cache_reclaim) {
         return config;
     }
@@ -450,11 +473,12 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
                                                    const KVCacheConfig&     kv_cache_config,
                                                    int                      gen_num_per_cycle) {
     auto config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-    // Upstream warmup pools reserve the sentinel block plus one allocatable
-    // block per group, and never inherit linear_step: the SWA
-    // ceil(baseline/step) shrink would collapse those groups to sentinel-only.
-    config.linear_step = 1;
     config.finalizeBlockNums(2, RuntimeConfig{});
+    auto groups = config.topology().groups();
+    for (auto& group : groups) {
+        group.block_num = 2;
+    }
+    config.setTopology(std::move(groups), config.topology().layers());
     return config;
 }
 
@@ -505,7 +529,7 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
         const auto block_budget = blockBudgetForConfig(config);
         if (block_budget.explicit_pool_reserve_bytes > 0) {
-            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > block_budget.explicit_pool_reserve_bytes,
+            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size >= block_budget.explicit_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
                                     "(reduce explicitly sized pool blocks if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
@@ -514,7 +538,7 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                              kv_cache_mem_size / 1024 / 1024,
                              block_budget.explicit_pool_reserve_bytes / 1024 / 1024);
         }
-        block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget, config.linear_step);
+        block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least one baseline block, got %u", block_num);
     RTP_LLM_CHECK_WITH_INFO(block_num <= config.maxBaselineBlockNum(),
@@ -574,7 +598,9 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
         }
     };
     number(1);  // Signature format version.
-    number(std::max(1, config.linear_step));
+    // Main #1574's tail-retention knob replaces the old linear_step sizing
+    // input in the cross-rank sizing signature.
+    number(static_cast<uint64_t>(config.reuse_cache_tail_blocks));
     number(config.groups().size());
     for (const auto& group : config.groups()) {
         number(group.tag.size());

@@ -185,7 +185,9 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
         std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
     if (!load_context || !load_context->needBackendMatch()) {
         std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
-        MallocResult                  incr_result           = incrMalloc(malloc_info);
+        auto                          prefill_info          = malloc_info;
+        prefill_info.enable_remove_skipped_blocks           = false;
+        MallocResult incr_result                            = incrMalloc(prefill_info);
         if (!incr_result.success) {
             if (load_context != nullptr) {
                 load_context->abortPending();
@@ -884,7 +886,9 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
     std::lock_guard<std::mutex> lock(malloc_mutex_);
     bool                        success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
     if (success) {
-        const auto incr_result = incrMalloc(malloc_info);
+        auto prefill_info                         = malloc_info;
+        prefill_info.enable_remove_skipped_blocks = false;
+        const auto incr_result                    = incrMalloc(prefill_info);
         success                = incr_result.success;
         if (!success) {
             prepared.materialize_status = incr_result.status;
@@ -930,13 +934,20 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             const auto required_positions = chunkCachePositions(malloc_info, config_.group(tag));
-            if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
-                    block_ids,
-                    group_seq_len,
-                    reuseEnabledForGroup(malloc_info, config_, tag),
-                    reserve_step,
-                    &filled_positions,
-                    required_positions)) {
+            auto&       group              = kv_cache_groups_[static_cast<size_t>(group_id)];
+            // reuseEnabledForGroup keeps the group-scoped reuse gating (incl.
+            // pd_decode_linear_tail_only) on both of main's allocation paths.
+            const bool allocated =
+                malloc_info.enable_remove_skipped_blocks ?
+                     group->mallocForDecode(
+                        block_ids, group_seq_len, reuseEnabledForGroup(malloc_info, config_, tag), reserve_step, &filled_positions) :
+                     group->malloc(block_ids,
+                                  group_seq_len,
+                                  reuseEnabledForGroup(malloc_info, config_, tag),
+                                  reserve_step,
+                                  &filled_positions,
+                                  required_positions);
+            if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
                 failed_group = group_id;
@@ -1675,11 +1686,11 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
         const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
         const auto  required_positions = chunkRequiredPositions(malloc_info, *group);
         const auto  need               = group->getNeedBlocks(group_common_seq,
-                                                              group_seq_len,
-                                                              malloc_info.complete_token_ids->getReserveStep(),
-                                                              reuse_blocks_len,
-                                                              reuse_enabled,
-                                                              required_positions);
+                                               group_seq_len,
+                                               malloc_info.complete_token_ids->getReserveStep(),
+                                               reuse_blocks_len,
+                                               reuse_enabled,
+                                               required_positions);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
     }
@@ -1840,10 +1851,12 @@ bool CoordinatorCacheManager::doInit() {
 
         SingleTypeCacheManagerPtr group;
         if (group_type == CacheGroupType::LINEAR) {
-            group = std::make_shared<LinearCacheManager>(cache_group, group_pool, group_id, config_.linear_step);
+            group = std::make_shared<LinearCacheManager>(
+                cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
             linear_group_ids_.push_back(group_id);
         } else if (group_type == CacheGroupType::SWA) {
-            group = std::make_shared<SWACacheManager>(cache_group, group_pool, group_id, config_.linear_step);
+            group =
+                std::make_shared<SWACacheManager>(cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
             swa_group_ids_.push_back(group_id);
         } else {
             group = std::make_shared<FullCacheManager>(cache_group, group_pool, group_id);

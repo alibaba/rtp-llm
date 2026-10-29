@@ -141,6 +141,34 @@ class BackendRegistryTest(unittest.TestCase):
     def test_draining_slot_without_hooks_is_noop(self):
         run_backend_registrations("nobody_registered_here")
 
+    @patch("rtp_llm.utils.backend_registry.importlib.import_module")
+    def test_missing_public_ppu_entrypoint_keeps_utils_only_consumers_working(self, load):
+        load.side_effect = ModuleNotFoundError(name="rtp_llm.models_py")
+        seen = []
+        register_backend_hook("linear", lambda: seen.append(True))
+        run_backend_registrations("linear")
+        self.assertEqual(seen, [True])
+
+    @patch("rtp_llm.utils.backend_registry.importlib.import_module")
+    def test_missing_ppu_entrypoint_dependency_is_not_hidden(self, load):
+        load.side_effect = ModuleNotFoundError(name="deep_gemm")
+        with self.assertRaises(ModuleNotFoundError) as error:
+            run_backend_registrations("linear")
+        self.assertEqual(error.exception.name, "deep_gemm")
+        self.assertNotIn("linear", backend_registry._started)
+
+    @patch("rtp_llm.utils.backend_registry.importlib.import_module")
+    def test_public_ppu_hook_installed_before_slot_is_consumed(self, load):
+        seen = []
+
+        def install(module_name):
+            self.assertEqual(module_name, "rtp_llm.models_py")
+            register_backend_hook("linear", lambda: seen.append(True))
+
+        load.side_effect = install
+        run_backend_registrations("linear")
+        self.assertEqual(seen, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

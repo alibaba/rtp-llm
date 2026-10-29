@@ -292,7 +292,8 @@ TEST(KVCMMockFullLinearTest, FullLinearWriteRoutesEachGroupToItsOwnLayerBuffers)
         kv_cache_manager::LocationSpecUnit{"tp0_Ffull1", "full_uri"},
         kv_cache_manager::LocationSpecUnit{"tp0_Llinear", "linear_uri"},
     }};
-    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, std::vector<int64_t>{101}, _, std::vector<std::string>{}, 600))
+    EXPECT_CALL(*client_wrapper,
+                getWriteLocation(_, _, std::vector<int64_t>{101}, _, std::vector<std::string>{"Ffull1Llinear"}, 600))
         .WillOnce(Return(std::make_pair(true, write_location)));
     for (const auto& tag : std::vector<std::string>{"full1", "linear"}) {
         const auto                        bases = tag == "full1" ? expected_full_bases : expected_linear_bases;
