@@ -645,10 +645,14 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
     // Float partial indices are exact only below 2^24.
     const bool point_mass_path = batch_all_greedy && draft_vocab_size < (1u << 24);
 #if USING_CUDA
+    // A compact prefilter of `force_topk` rows is exact whenever the joint
+    // top-k/top-p support cannot reach past it. MtpExecutor::sampleDSparkDraft
+    // only passes force_topk > 0 when every row has a bounded explicit
+    // top_k <= force_topk and a filtered top_p, so the retained support is a
+    // subset of the compact rows and both truncations resolve identically on
+    // either width.
     const int64_t compact_width =
-        !point_mass_path && !top_k.defined() && force_topk > 0 && force_topk < static_cast<int64_t>(draft_vocab_size) ?
-            force_topk :
-            0;
+        !point_mass_path && force_topk > 0 && force_topk < static_cast<int64_t>(draft_vocab_size) ? force_topk : 0;
     const bool sample_from_strided_q = !point_mass_path && compact_width == 0 && !top_k.defined() && !top_p.defined();
 #else
     const int64_t compact_width         = 0;
@@ -692,9 +696,13 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
         filter_draft ? torch::empty({batch_size, sampling_width},
                                     torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device())) :
                        torch::Tensor();
-    torch::Tensor topk_probabilities = top_k.defined() && top_p.defined() && !point_mass_path && joint_max_top_k == 0 ?
-                                           torch::empty_like(sampling_probabilities) :
-                                           torch::Tensor();
+    // Compact rows leave sampling_probabilities undefined, so size this scratch
+    // from sampling_width instead of cloning it.
+    torch::Tensor topk_probabilities =
+        top_k.defined() && top_p.defined() && !point_mass_path && joint_max_top_k == 0 ?
+            torch::empty({batch_size, sampling_width},
+                         torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device())) :
+            torch::Tensor();
     std::vector<torch::Tensor> token_columns;
     token_columns.reserve(propose_step_);
     // lm_head shards are padded to a TP alignment before gather. Sampling
