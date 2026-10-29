@@ -135,6 +135,7 @@ class GptModelBase(nn.Module):
                     weight=self.weight,
                     attn_inputs=group_inputs,
                     fmha_config=self.fmha_config,
+                    hw_kernel_config=self.py_hw_kernel_config,
                     is_cuda_graph=is_cuda_graph,
                     cuda_graph_selection_mode=cuda_graph_selection_mode,
                     decode_cascade_max_requests=getattr(
@@ -149,6 +150,7 @@ class GptModelBase(nn.Module):
             weight=self.weight,
             attn_inputs=attention_inputs,
             fmha_config=self.fmha_config,
+            hw_kernel_config=self.py_hw_kernel_config,
             is_cuda_graph=is_cuda_graph,
             cuda_graph_selection_mode=cuda_graph_selection_mode,
             decode_cascade_max_requests=getattr(self, "decode_cascade_max_requests", 0),

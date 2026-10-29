@@ -212,6 +212,18 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         ),
     )
 
+    hw_kernel_group.add_argument(
+        "--enable_fuse_kernels",
+        env_name="ENABLE_FUSE_KERNELS",
+        bind_to=(hw_kernel_config, "enable_fuse_kernels"),
+        type=str2bool,
+        default=True,
+        help=(
+            "Enable optional MLA, Indexer and MLP fusion kernels. "
+            "Required layout kernels (strided slice and output BMM) remain enabled."
+        ),
+    )
+
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True

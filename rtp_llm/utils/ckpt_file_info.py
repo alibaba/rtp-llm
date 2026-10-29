@@ -4,7 +4,7 @@ import logging
 import os
 import struct
 from pathlib import PosixPath
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -54,7 +54,10 @@ class CkptFileInfo:
     finetune_type: FinetuneType
 
     def __init__(
-        self, file_name: str, finetune_type: FinetuneType = FinetuneType.pretrain
+        self,
+        file_name: str,
+        finetune_type: FinetuneType = FinetuneType.pretrain,
+        tensor_names: Optional[Sequence[str]] = None,
     ) -> None:
 
         if file_name.endswith((".safetensors")):
@@ -68,7 +71,14 @@ class CkptFileInfo:
         self.finetune_type = finetune_type
         self._unadvised_read_bytes = 0
         self._fadvise_broken = False
-        self._load_meta(self.file_name)
+        self._metadata_loaded = False
+        if tensor_names is not None and self.is_safetensor():
+            # A HuggingFace index already provides every tensor name. Keep a
+            # lightweight key-only mapping and defer the remote shard header
+            # read until physical read order is explicitly requested.
+            self.metadata = dict.fromkeys(tensor_names)
+        else:
+            self._load_meta(self.file_name)
 
     def get_tensor_names(self) -> List[str]:
         return [name for name in self.metadata.keys()]
@@ -99,6 +109,8 @@ class CkptFileInfo:
         抛出:
             RuntimeError: 如果文件元数据未正确加载
         """
+        if self.is_safetensor() and not self._metadata_loaded:
+            self._load_meta(self.file_name)
         if not hasattr(self, "_sorted_tensor_cache"):
             # 延迟初始化排序缓存
             self._sorted_tensor_cache = self._build_sorted_tensor_list()
@@ -145,6 +157,9 @@ class CkptFileInfo:
             self.metadata = meta
         else:
             self.metadata = torch.load(file, pickle_module=meta_pickler)
+        self._metadata_loaded = True
+        if hasattr(self, "_sorted_tensor_cache"):
+            del self._sorted_tensor_cache
 
     def get_tensor_type(self, tensor_name: str) -> torch.dtype:
         file: str = self.file_name
