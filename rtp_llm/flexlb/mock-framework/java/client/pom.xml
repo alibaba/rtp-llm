@@ -4,6 +4,7 @@
   <parent><groupId>org.flexlb.mock</groupId><artifactId>mock-framework</artifactId><version>1.0-SNAPSHOT</version><relativePath>../../pom.xml</relativePath></parent>
   <artifactId>mock-client</artifactId>
   <dependencies>
+    <dependency><groupId>com.github.luben</groupId><artifactId>zstd-jni</artifactId><version>1.5.5-11</version></dependency>
     <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-runtime</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-metrics</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>org.flexlb</groupId><artifactId>flexlb-grpc</artifactId><version>1.0.0-SNAPSHOT</version>
@@ -16,7 +17,15 @@
     <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-rtp</artifactId><version>${project.version}</version><scope>test</scope></dependency>
     <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.8.2</version><scope>test</scope></dependency>
   </dependencies>
-  <build><plugins>    <plugin>
+  <build>
+    <extensions><extension><groupId>kr.motd.maven</groupId><artifactId>os-maven-plugin</artifactId><version>1.7.1</version></extension></extensions>
+    <plugins>
+    <plugin>
+      <groupId>org.xolstice.maven.plugins</groupId><artifactId>protobuf-maven-plugin</artifactId><version>0.6.1</version>
+      <configuration><protocArtifact>com.google.protobuf:protoc:3.25.1:exe:${os.detected.classifier}</protocArtifact></configuration>
+      <executions><execution><goals><goal>compile</goal></goals></execution></executions>
+    </plugin>
+    <plugin>
     <groupId>org.apache.maven.plugins</groupId><artifactId>maven-shade-plugin</artifactId><version>3.5.3</version>
     <executions><execution><phase>package</phase><goals><goal>shade</goal></goals><configuration>
       <createDependencyReducedPom>false</createDependencyReducedPom>

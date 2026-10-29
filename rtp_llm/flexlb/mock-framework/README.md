@@ -225,9 +225,35 @@ client0 在 start 的步骤预算内逐条校验输入，并按全局序号 `k %
 
 各 Client 只上报自己的 issued/finished、TTFT 和请求耗时；client0 不把全局汇总重复上报。缺实例或采样不足按公共查询规则报错。Client 执行结果包含 produced/issued/finished/unsent、在途/队列余量、各终态计数和异常，不把业务错误计数当成执行异常。
 
-每个 Client 在自己的 `playback/<轮次>/` 保存计划与结果；client0 另在 `coordinator/<轮次>/` 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和下一轮不会覆盖旧结果。当前落盘输入分片、计划和汇总，逐请求执行记录及查询仍待实现。输入分片不是实际发送/完成的证据。
+每个 Client 在自己的 `playback/<轮次>/` 保存计划与结果；client0 另在 `coordinator/<轮次>/` 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和下一轮不会覆盖旧结果。输入分片保存规范化输入，逐请求执行事实另存为 `requests.binpb.zst`。输入分片不是实际发送/完成的证据。
 
-剩余待讨论项收敛为：旧采集数据如何转换成规范化输入，是否需要部分停止，逐请求记录格式，以及适合真实负载的队列/并发默认值。QPS 的容忍度和窗口由 Case 检查指定，不在 Client 再定义一份。
+剩余待讨论项收敛为：旧采集数据如何转换成规范化输入，是否需要部分停止，以及适合真实负载的队列/并发默认值。QPS 的容忍度和窗口由 Case 检查指定，不在 Client 再定义一份。
+
+### Client 逐请求记录与查询
+
+`NativeClient` 在实际执行边界记录 ISSUED、SCHEDULE_START、SCHEDULE_RESULT、FIRST_TOKEN 和 TERMINAL。同一个逻辑请求的主备尝试共用 request_id，issued 只计一次。记录包含墙钟毫秒、单调耗时、目标 Master、尝试序号、gRPC 状态与业务错误码、首 token 耗时、实际输出 token 数及终态。不记录输入 token 正文或完整响应，错误说明最多 4096 字符，截断会标记。Schedule 响应分别保留传输状态、原始业务 code（成功通常为 200）和可空 response_success；业务拒绝不会伪装成 gRPC 传输失败。Schedule 超时/取消的结果只表示 Client 观察，不证明远端未接收；Cancel 仍是尽力而为。
+
+每个 Client 每轮独占 `components/<client>/playback/<轮次>/requests.binpb.zst`，目录与记录文件拒绝覆盖。公共字段定义是 `java/client/src/main/proto/client_evidence.proto`，Java 在 Maven 构建时生成，Python 提交同一 protoc 3.25.1 生成的 `client_evidence_pb2.py`；修改 proto 时必须重新生成两侧，不能分别手写协议。
+
+每个文件由连续帧组成：4 字节大端压缩长度，再接一个带校验和的独立 Zstd frame；解压后为 varint 长度和一个 Protobuf EventBatch。每帧携带版本、Client、playback、帧序号与分片身份，每条事件有连续序号。最后一帧携带 Seal 的 issued/finished 计数。没有额外 JSONL 执行记录或永久逐请求索引，`mock-requests` 只在查看时解码输出。
+
+网络回调只向有字节上限的队列追加事件，单独写线程按约 1 MiB 或 1 秒成帧并 force 到磁盘。当前队列上限 8 MiB、Zstd level 3，是初始参数，不是最大吞吐承诺。入队、写入、持久化不是同一个状态；Client 只有等待最终 Seal 写入并 force 成功才完成。队列满、超大事件、写入失败或收尾超时使 worker 报错，client0 沿用现有监督机制停止整轮。进程意外退出可能留下未完成请求；不能补造终态，也不能把无 Seal 的文件判完整。
+
+`client/stop` 及 Runner 收尾会流式读取各 Client 的本轮记录，与控制回执及 result.json 对账。缺文件、损坏、事件缺序、身份不符、未完成请求、缺 Seal 或计数不符都使实验 ERROR。Python 同时只保留在途请求状态，不把所有请求载入内存。查询过滤和返回条数限制不会跳过其余记录的完整性验证。
+
+`client/requests` 是 Python Case 读取接口，不经过 Java 服务。默认查最新一轮、全部 Client；`targets` 使用现有 Client RPC 地址，`playback` 可选择历史轮次。`request_ids`、`outcome`、`since_ms`、`until_ms` 可筛选，其中时间按请求发送墙钟的 `[since_ms, until_ms)` 计算。返回 matched、筛选后 outcomes、records、truncated；limit 默认 20、范围 0–1000，只限制明细条数。明细按 Client 选择顺序和各自完成顺序返回，不承诺全局时间排序。运行中尚未封口的轮次报错；先 stop/收集再查询。
+
+```yaml
+- id: collected
+  describe: 停止并核对本轮全部请求
+  interface: client/stop
+- id: failed_requests
+  describe: 查看本轮失败请求
+  interface: client/requests
+  args: {outcome: error, limit: 20}
+```
+
+离线工具从 `topology-history.json` 读取历史 Client 地址，因此收尾清空当前发现不影响查询。离线查看：`uv run mock-requests <Case输出目录> --playback 1 --outcome timeout`；可重复 `--target <Client地址>` 或 `--request-id <ID>`。命令流式输出 JSON 到终端，需要时可重定向导出；遇到坏尾部会非零退出，已输出部分仅作为恢复前缀，不能当作完整结果。
 
 ### Python 指标查询与公共指标
 
@@ -455,7 +481,7 @@ Engine 独立宿主在对象关闭后登记预期退出并回收；其他运行�
 
 进程退出、调用异常、空指标结果或门禁失败都会中止后续步骤并收尾。收尾对本次拥有的进程组先 TERM 后 KILL；主动取消也清理。结果为 PASS/FAIL/ERROR/CANCELLED，清理或采集异常不能得到 PASS。
 
-运行目录不覆盖已有目录，保存原始 Case、编译配置、启动配方、接口清单、代码版本和工作区差异、组件配置和日志、phase/step 时间线、门禁查询时刻/真实值/阈值/结果及实际 PromQL。逐请求持久化及正式历史查看服务尚未接入。测试 TransportProbe 只验证进程与传输，不替代业务实现。
+运行目录不覆盖已有目录，保存原始 Case、编译配置、启动配方、接口清单、代码版本和工作区差异、组件配置和日志、phase/step 时间线、门禁查询时刻/真实值/阈值/结果及实际 PromQL。Client 逐请求记录和离线读取已接入，Engine 全链路记录与正式历史查看服务尚未实现。测试 TransportProbe 只验证进程与传输，不替代业务实现。
 
 ## 真实 Master 适配
 
@@ -583,7 +609,7 @@ StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概�
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。文本请求列表/文件的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。旧采集格式转换与完整逐请求执行记录尚未接通。
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。文本请求列表/文件的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。Client 逐请求执行记录已接通；旧采集格式转换、Engine 与 Master 的完整服务端证据仍未接通。
 
 ## 指标、采集和查询
 

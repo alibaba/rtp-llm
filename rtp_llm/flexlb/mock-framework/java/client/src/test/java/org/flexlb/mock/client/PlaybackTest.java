@@ -28,7 +28,7 @@ class PlaybackTest {
         assertTrue(condition.getAsBoolean(), "Condition did not become true");
     }
     @Test void naturalEndDrainsQueueAndConsumesRealNativeResponses() throws Exception {
-        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(shard(master(h), 3, 10, 2, 4), new ClientMetrics(), topology(h))) {
+        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(shard(master(h), 3, 10, 2, 4), new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".binpb.zst"), "client-0")) {
             load.begin(System.currentTimeMillis() + 30);
             var result = load.await(5000);
             assertTrue(result.done()); assertFalse(result.stopped()); assertTrue(result.errors().isEmpty(), result.toString());
@@ -37,7 +37,7 @@ class PlaybackTest {
         }
     }
     @Test void fullQueueFailsInsteadOfBlockingDroppingOrExceedingConcurrency() throws Exception {
-        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(shard(master(h), 30, 500, 1, 1), new ClientMetrics(), topology(h))) {
+        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(shard(master(h), 30, 500, 1, 1), new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".binpb.zst"), "client-0")) {
             h.tokenDelay = 300;
             load.begin(System.currentTimeMillis() + 30);
             var result = load.await(5000);
@@ -47,7 +47,7 @@ class PlaybackTest {
         }
     }
     @Test void stopBeforeBeginDoesNotSendAndIsIdempotent() throws Exception {
-        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(shard(master(h), 3, 10, 1, 2), new ClientMetrics(), topology(h))) {
+        try (var h = new NativeClientTest.Harness(); var load = new LoadClient(shard(master(h), 3, 10, 1, 2), new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".binpb.zst"), "client-0")) {
             load.halt(); load.halt();
             var result = load.await(5000);
             assertEquals(0, result.issued()); assertEquals(3, result.unsent()); assertTrue(result.errors().isEmpty());
@@ -59,7 +59,7 @@ class PlaybackTest {
             h.tokenDelay = 5000;
             var plan = shard(master(h), 10, 20, 1, 10);
             plan = new Shard(1, plan.masters(), plan.requests_file(), plan.count(), 0, 1, 1, plan.sha256(), plan.qps(), 1, 10, 10000, 80);
-            try (var load = new LoadClient(plan, new ClientMetrics(), topology(h))) {
+            try (var load = new LoadClient(plan, new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".binpb.zst"), "client-0")) {
                 load.begin(System.currentTimeMillis() + 30);
                 assertTrue(h.scheduleEntered.await(2, TimeUnit.SECONDS));
                 load.halt(); long issued = load.state().issued();
@@ -73,7 +73,7 @@ class PlaybackTest {
         try (var h = new NativeClientTest.Harness()) {
             h.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
             var metrics = new ClientMetrics();
-            try (var load = new LoadClient(shard(master(h), 3, 10, 1, 4), metrics, topology(h))) {
+            try (var load = new LoadClient(shard(master(h), 3, 10, 1, 4), metrics, topology(h), directory.resolve(UUID.randomUUID() + ".binpb.zst"), "client-0")) {
                 load.begin(System.currentTimeMillis() + 30);
                 var result = load.await(5000);
                 assertEquals(3, result.finished()); assertTrue(result.errors().isEmpty());

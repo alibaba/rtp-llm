@@ -51,16 +51,19 @@ def state():
     return dict(done=True, stopped=False, produced=1, issued=1, finished=1, unsent=0, queued=0, inflight=0, outcomes={'success': 1, 'error': 0, 'timeout': 0, 'cancelled': 0}, errors=[])
 
 
-def test_stop_collects_all_original_clients_without_task_id(monkeypatch):
+def test_stop_collects_all_original_clients_without_task_id(monkeypatch, tmp_path):
     calls = []
     async def post(url, body):
         calls.append(body)
         return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
     monkeypatch.setattr(client, 'post', post)
-    ctx = context(); ctx.processes.client_pending = True
+    ctx = context(); ctx.processes.client_pending = True; ctx.records.directory = tmp_path
+    verified = []
+    monkeypatch.setattr(client, 'verify_playback', lambda *args: verified.append(args))
     result = asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
     assert set(result) == {'c:1', 'c:2'} and not ctx.processes.client_pending
     assert calls[0]['args'] == {} and ctx.events[0]['event'] == 'client_result'
+    assert len(verified) == 1 and verified[0][0] == tmp_path
 
 
 @pytest.mark.parametrize('bad', ['missing', 'overflow', 'unfinished'])
@@ -133,6 +136,8 @@ def test_client_playback_through_real_master(tmp_path, replicas, file_input):
         start['args'].update(requests_file=source.name, qps=24, concurrency=16, queue_capacity=32)
         start['wait_after'] = '24s'
         data['phases'][0]['timeout'] = '60s'
+    data['phases'][0]['steps'].append({'id': 'records', 'describe': 'Read sealed Client evidence',
+        'interface': 'client/requests', 'args': {'limit': 2}})
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data))
     registry = Registry.standard(); case = compile_case(path, registry)
     components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
@@ -174,6 +179,17 @@ def test_client_playback_through_real_master(tmp_path, replicas, file_input):
                 assert index not in seen
                 seen.add(index)
     if file_input: assert seen == set(range(count))
+    from mock_framework.evidence import playback_directories, read_requests
+    topology = json.loads((output / 'topology-history.json').read_text())
+    records = [record for directory in playback_directories(output, topology) for record in read_requests(directory)]
+    assert len(records) == count and {record.request_id for record in records} == set(range(1, count + 1))
+    assert all(record.outcome == 'success' and record.ttft_nanos is not None and record.output_tokens == 3 for record in records)
+    assert all(len(record.attempts) == 1 and record.attempts[0].grpc_code == 'OK'
+               and record.attempts[0].response_success is True for record in records)
+    queried, = [event['result'] for line in (output / 'events.jsonl').read_text().splitlines()
+                if (event := json.loads(line)).get('event') == 'step_finished' and event.get('step') == 'records']
+    assert queried['matched'] == count and queried['outcomes']['success'] == count
+    assert len(queried['records']) == 2 and queried['truncated']
 
 
 @pytest.mark.parametrize('failed', [False, True])

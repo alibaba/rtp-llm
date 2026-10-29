@@ -52,9 +52,12 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     @Override public synchronized Ack prepare(Shard args) throws Exception {
         if (closed || args.sequence() <= workerSequence || worker != null && !worker.state().done())
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
-        save(directory.resolve("playback/" + args.sequence() + "/plan.json"), args);
+        var playback = directory.resolve("playback/" + args.sequence());
+        Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
+        save(playback.resolve("plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics, topology); workerSequence = args.sequence();
+        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.binpb.zst"), id);
+        workerSequence = args.sequence();
         return new Ack(true);
     }
     private synchronized LoadClient worker(long expected) {

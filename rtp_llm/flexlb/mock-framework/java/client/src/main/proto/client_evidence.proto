@@ -1,0 +1,39 @@
+syntax = "proto3";
+package flexlb.mock.evidence;
+option java_package = "org.flexlb.mock.client.evidence";
+option java_outer_classname = "ClientEvidence";
+
+message Event {
+  enum Kind { UNKNOWN = 0; ISSUED = 1; SCHEDULE_START = 2; SCHEDULE_RESULT = 3; FIRST_TOKEN = 4; TERMINAL = 5; }
+  uint64 sequence = 1;
+  int64 request_id = 2;
+  int64 epoch_ms = 3;
+  int64 elapsed_nanos = 4;
+  Kind kind = 5;
+  uint32 attempt = 6;
+  string master = 7;
+  string grpc_code = 8;
+  int64 error_code = 9;
+  string message = 10;
+  string outcome = 11;
+  uint32 output_tokens = 12;
+  optional int64 ttft_nanos = 13;
+  optional bool response_success = 14;
+}
+message Seal {
+  uint64 issued = 1;
+  uint64 finished = 2;
+}
+message EventBatch {
+  uint32 version = 1;
+  string client = 2;
+  uint64 playback = 3;
+  uint64 frame = 4;
+  int64 first_request_id = 5;
+  uint64 first_index = 6;
+  uint32 stride = 7;
+  uint64 planned = 8;
+  uint32 concurrency = 9;
+  repeated Event events = 10;
+  Seal seal = 11;
+}
