@@ -296,7 +296,7 @@ class _FusedSharedExperts(nn.Module):
             )
         else:
             if valid_mask is not None:
-                ids = torch.where(valid_mask[:, None], ids, 0)
+                ids = torch.where(valid_mask[:, None], ids, -1)
                 routing = torch.where(valid_mask[:, None], routing, 0)
             self.packer.pack(routed_input, routing, ids, self.buf, tokens)
             self.shared_x[:tokens].copy_(hidden)
@@ -455,7 +455,7 @@ class KimiK3LatentMoE(nn.Module):
             return routing, ids
         return (
             torch.where(valid_mask[:, None], routing, 0),
-            torch.where(valid_mask[:, None], ids, 0),
+            torch.where(valid_mask[:, None], ids, -1),
         )
 
     def _fused_expert_step(self, hidden, routed_input, routing, ids, valid_mask):

@@ -49,7 +49,6 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_mhc_prenorm_shapes,
     _compute_mhc_prenorm_num_split,
     _cp_direct_gather_batch_warmup_sizes,
-    _cp_padded_tokens_per_rank_bound,
     _cp_restore_batch_warmup_sizes,
     _dense_gemm_m_grid,
     _dist_rank,
@@ -77,6 +76,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     ChunkedFp8Fp4MoeLayer,
 )
+from rtp_llm.utils.token_capacity import cp_padded_tokens_per_rank_bound
 
 
 def _module_type(name, attrs):
@@ -362,7 +362,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             ),
             262146,
         )
-        self.assertEqual(_cp_padded_tokens_per_rank_bound(200002, 4), 50002)
+        self.assertEqual(cp_padded_tokens_per_rank_bound(200002, 4), 50002)
 
     def test_dense_warmup_decode_uses_model_token_capacity(self):
         self.assertEqual(

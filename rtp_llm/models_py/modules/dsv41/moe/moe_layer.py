@@ -31,6 +31,7 @@ from rtp_llm.models_py.modules.dsv41.chunk_env import (
     dsv4_chunk_tokens_from_env,
     dsv4_global_chunk_tokens_configured,
 )
+from rtp_llm.utils.token_capacity import cp_padded_tokens_per_rank_bound
 
 from .gate import Gate
 from .shared_expert import (
@@ -56,45 +57,6 @@ def moe_chunk_tokens_from_env(default: int = DEFAULT_MOE_CHUNK_TOKENS) -> int:
     return dsv4_chunk_tokens_from_env(
         "DSV4_MOE_CHUNK_TOKENS", default, min_value=min_value
     )
-
-
-def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
-    """Rank-local CP token upper bound, including ZigZag padding.
-
-    The C++ ZigZagProcessor pads each request to a multiple of
-    ``cp_size * 2`` so every rank gets an even-length local chunk.  A plain
-    ``max_seq_len // cp_size`` underestimates lengths such as 200002 with
-    CP=4: the local padded chunk is 50002, not 50000.
-    """
-    cp_size = max(int(cp_size), 1)
-    max_seq_len = max(int(max_seq_len), 0)
-    if cp_size <= 1:
-        return max_seq_len
-    if max_seq_len == 0:
-        return 0
-    global_alignment = cp_size * 2
-    padded_seq_len = (
-        (max_seq_len + global_alignment - 1) // global_alignment * global_alignment
-    )
-    return padded_seq_len // cp_size
-
-
-def cp_padded_batch_tokens_per_rank_bound(
-    max_batch_tokens: int, cp_size: int, max_batch_size: int
-) -> int:
-    """Bound a batch whose requests are padded independently for ZigZag CP.
-
-    Each nonempty request adds at most ``2 * cp_size - 1`` padding tokens.
-    The sum of padded lengths is a multiple of ``2 * cp_size``, so rounding
-    this upper bound down gives an even rank-local row count.
-    """
-    max_batch_tokens = max(int(max_batch_tokens), 0)
-    cp_size = max(int(cp_size), 1)
-    if cp_size == 1:
-        return max_batch_tokens
-    max_batch_size = min(max(int(max_batch_size), 1), max_batch_tokens)
-    alignment = 2 * cp_size
-    return 2 * ((max_batch_tokens + max_batch_size * (alignment - 1)) // alignment)
 
 
 def resolve_moe_max_tokens_per_rank(

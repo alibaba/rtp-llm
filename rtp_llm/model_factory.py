@@ -12,6 +12,7 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.moe_capacity import resolve_moe_prefill_capacity
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -421,15 +422,8 @@ class ModelFactory:
             use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
             seq_size_per_block=model_config.attn_config.tokens_per_block,
         )
-        scheduler_config = engine_config.runtime_config.fifo_scheduler_config
-        # Generic MoE executors allocate their fixed-capacity communication
-        # buffers while the Python model is constructed. Preserve the finalized
-        # scheduler prefill bound on the model config so those buffers cover a
-        # full admitted context batch, not just one maximum-length request.
-        model_config.moe_prefill_max_tokens_per_rank = min(
-            int(scheduler_config.max_context_batch_size)
-            * int(model_config.max_seq_len),
-            int(scheduler_config.max_batch_tokens_size),
+        model_config.moe_prefill_max_tokens_per_rank = resolve_moe_prefill_capacity(
+            engine_config, model_config
         )
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)

@@ -179,6 +179,12 @@ py_test(
 )
 
 py_test(
+    name = "token_capacity_test",
+    srcs = ["token_capacity_test.py"],
+    deps = ["//rtp_llm:token_capacity"],
+)
+
+py_test(
     name = "hot_hook_runtime_test",
     srcs = [
         "hot_hook_runtime_test.py",

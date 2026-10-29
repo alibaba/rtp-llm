@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
+from rtp_llm.utils.token_capacity import cp_padded_tokens_per_rank_bound
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _DENSE_GEMM_FALLBACK_M_GRID = [
@@ -75,18 +76,6 @@ _DEEPGEMM_WARMUP_COMPILE_RETRIES = 2
 _TILELANG_WARMUP_COMPILE_RETRIES = 2
 _TRITON_WARMUP_COMPILE_RETRIES = 2
 _TRITON_WARMUP_TMPDIR_ENV = "DSV4_TRITON_WARMUP_TMPDIR"
-
-
-def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
-    cp_size = max(int(cp_size), 1)
-    max_seq_len = max(int(max_seq_len), 0)
-    if cp_size <= 1 or max_seq_len == 0:
-        return max_seq_len
-    global_alignment = cp_size * 2
-    padded_seq_len = (
-        (max_seq_len + global_alignment - 1) // global_alignment
-    ) * global_alignment
-    return padded_seq_len // cp_size
 
 
 def _compute_state_ring_entries(
@@ -538,7 +527,7 @@ def resolve_dense_gemm_warmup_max_m(
         max_m = max(int(max_seq_len), 1)
         if cp_enabled:
             cp_size = max(int(cp_size or 1), 1)
-            max_m = max(_cp_padded_tokens_per_rank_bound(max_m, cp_size), 1)
+            max_m = max(cp_padded_tokens_per_rank_bound(max_m, cp_size), 1)
         return max_m
 
     tokens_per_batch = 1

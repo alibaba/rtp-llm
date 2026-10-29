@@ -14,7 +14,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     _FINAL_OUT_CACHE,
     DEFAULT_MOE_CHUNK_TOKENS,
     ChunkedFp8Fp4MoeLayer,
-    cp_padded_tokens_per_rank_bound,
     resolve_moe_max_tokens_per_rank,
     synchronized_moe_chunk_plan,
 )
@@ -22,6 +21,7 @@ from rtp_llm.models_py.utils.profiler import (
     disable_record_function_ranges,
     record_function_ranges_enabled,
 )
+from rtp_llm.utils.token_capacity import cp_padded_tokens_per_rank_bound
 
 
 class _FakeMoe(nn.Module):

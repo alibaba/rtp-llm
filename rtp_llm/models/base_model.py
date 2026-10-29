@@ -20,6 +20,7 @@ from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.moe_capacity import include_system_prompt_capacity
 from rtp_llm.config.output_vocab_config import load_output_vocab_ids
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
@@ -156,6 +157,12 @@ class BaseModel(object):
             or self.kv_cache_config.multi_task_prompt_str
         ):
             self.kv_cache_config.load_and_update_task_prompt_config(self.tokenizer)
+
+        include_system_prompt_capacity(
+            self.model_config,
+            self.kv_cache_config,
+            self.parallelism_config,
+        )
 
         if self.model_config.generate_env_config:
             self.load_default_generate_config(self.model_config.generate_env_config)

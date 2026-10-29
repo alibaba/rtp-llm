@@ -58,10 +58,10 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inpu
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
-    cp_padded_tokens_per_rank_bound,
     resolve_moe_max_tokens_per_rank,
 )
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.token_capacity import cp_padded_tokens_per_rank_bound
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 

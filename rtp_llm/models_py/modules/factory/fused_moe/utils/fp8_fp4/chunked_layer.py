@@ -14,6 +14,10 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
+from rtp_llm.utils.token_capacity import (
+    cp_padded_batch_tokens_per_rank_bound,
+    cp_padded_tokens_per_rank_bound,
+)
 
 DEFAULT_MOE_CHUNK_TOKENS = 16384
 Observer = Callable[[str, torch.Tensor], None]
@@ -23,18 +27,6 @@ _CHUNKED_MOE_LOGGED = False
 _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
 )
-
-
-def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
-    cp_size = max(int(cp_size), 1)
-    max_seq_len = max(int(max_seq_len), 0)
-    if cp_size <= 1 or max_seq_len == 0:
-        return max_seq_len
-    global_alignment = cp_size * 2
-    padded_seq_len = (
-        (max_seq_len + global_alignment - 1) // global_alignment
-    ) * global_alignment
-    return padded_seq_len // cp_size
 
 
 def resolve_moe_max_tokens_per_rank(
@@ -62,15 +54,11 @@ def resolve_moe_max_tokens_per_rank(
     budget = int(current_max_tokens_per_rank)
     cp_size = max(int(cp_size), 1)
     if cp_size > 1:
-        # The incoming scheduler budget is global, before per-request zigzag
-        # padding. Each of B requests can add at most (2 * CP - 1) tokens;
-        # the padded total is a multiple of 2 * CP. Bound both that total
-        # and B maximum-length requests, then apply the MoE chunk limit.
+        # Bound both the ragged scheduler batch and B maximum-length requests.
         batch_size = min(max(int(max_context_batch_size), 1), max(budget, 0))
-        alignment = 2 * cp_size
         budget = min(
             cp_padded_tokens_per_rank_bound(max_seq_len, cp_size) * batch_size,
-            2 * ((budget + batch_size * (alignment - 1)) // alignment),
+            cp_padded_batch_tokens_per_rank_bound(budget, cp_size, batch_size),
         )
     # A disabled/zero prefill budget must not create zero-sized runtime buffers.
     return max(min(budget, chunk_tokens) if chunking_enabled else budget, 1)

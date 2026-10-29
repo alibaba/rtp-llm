@@ -4,7 +4,6 @@ import logging
 import os
 from collections.abc import Mapping
 from functools import partial
-from math import gcd
 
 import torch
 from torch import nn
@@ -41,6 +40,7 @@ from rtp_llm.models_py.triton_kernels.moe.activation import situ_and_mul
 from rtp_llm.ops import HybridAttentionType, RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.token_capacity import sp_padded_tokens
 
 
 class KimiK3DenseMLP(nn.Module):
@@ -278,9 +278,11 @@ class KimiK3Model(GptModelBase):
         prefill_capacity = (int(global_prefill) + self.tp_size - 1) // self.tp_size
         decode_capacity = 1
         for width in (1, int(model_config.gen_num_per_cycle) + 1):
-            unit = self.tp_size // gcd(self.tp_size, width)
-            requests = (max_generate_batch_size + unit - 1) // unit * unit
-            decode_capacity = max(decode_capacity, requests * width // self.tp_size)
+            decode_capacity = max(
+                decode_capacity,
+                sp_padded_tokens(max_generate_batch_size, width, self.tp_size)
+                // self.tp_size,
+            )
         moe_capacity = (
             decode_capacity
             if parallelism_config.role_type == RoleType.DECODE
@@ -371,9 +373,7 @@ class KimiK3Model(GptModelBase):
             # SP pads complete requests, then expands each Verify request.
             # Aligning the token product underallocates for non-aligned batches.
             width = max(int(self.config.gen_num_per_cycle) + 1, 1)
-            unit = self.tp_size // gcd(self.tp_size, width)
-            requests = (self._max_generate_batch_size + unit - 1) // unit * unit
-            max_m = requests * width
+            max_m = sp_padded_tokens(self._max_generate_batch_size, width, self.tp_size)
         self._fp8_collective = Fp8CollectiveProjection(
             _get_group(Group.TP),
             device,

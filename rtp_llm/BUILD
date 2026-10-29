@@ -162,11 +162,13 @@ py_library(
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
         "utils/warmup.py",
+        "utils/token_capacity.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     deps = [
         ":jit_cache_env",
+        ":token_capacity",
         ":torch",
         ":safetensors",
         #":decord",
@@ -181,6 +183,11 @@ py_library(
 py_library(
     name = "warmup",
     srcs = ["utils/warmup.py"],
+)
+
+py_library(
+    name = "token_capacity",
+    srcs = ["utils/token_capacity.py"],
 )
 
 py_library(

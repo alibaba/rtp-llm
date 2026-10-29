@@ -3,15 +3,18 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.moe_capacity import include_system_prompt_capacity
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorSource
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV2Weight
 from rtp_llm.models.kimi_k25.kimi_k25 import KimiK25
 from rtp_llm.models.kimi_k25.kimi_k25_weight import KimiK25Weight
@@ -20,7 +23,16 @@ from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
+from rtp_llm.ops import (
+    CPRotateMethod,
+    HWKernelConfig,
+    MoeConfig,
+    ParallelismConfig,
+    RoleType,
+    SpeculativeExecutionConfig,
+    SpeculativeType,
+    TaskType,
+)
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
 
@@ -75,24 +87,38 @@ class _RoutedOnlyTensorSource(TensorSource):
 
 
 class MoeConfigPropagationTest(unittest.TestCase):
+    def _prefill_capacity_configs(self, configured_cap=0, chunk_size=0):
+        model_config = ModelConfig()
+        model_config.max_seq_len = 4096
+        model_config.model_name = "test-model"
+        model_config.task_type = TaskType.LANGUAGE_MODEL
+        model_config.attn_config.tokens_per_block = 64
+        engine_config = SimpleNamespace(
+            runtime_config=SimpleNamespace(
+                fifo_scheduler_config=SimpleNamespace(
+                    max_context_batch_size=3,
+                    max_batch_tokens_size=configured_cap,
+                    prefill_chunk_size=chunk_size,
+                ),
+                model_name="",
+                use_batch_decode_scheduler=False,
+                warm_up=False,
+                warm_up_with_loss=False,
+                max_generate_batch_size=16,
+            ),
+            pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=ParallelismConfig(),
+            kv_cache_config=KVCacheConfig(),
+            hw_kernel_config=HWKernelConfig(),
+            sp_config=SpeculativeExecutionConfig(),
+        )
+        return engine_config, model_config
+
     def test_scheduler_prefill_batch_capacity_reaches_generic_moe(self):
         for configured_cap, expected_cap in ((0, 12288), (7000, 7000)):
             with self.subTest(configured_cap=configured_cap):
-                model_config = ModelConfig()
-                model_config.max_seq_len = 4096
-                model_config.model_name = "test-model"
-                scheduler_config = SimpleNamespace(
-                    max_context_batch_size=3,
-                    max_batch_tokens_size=configured_cap,
-                    prefill_chunk_size=0,
-                )
-                engine_config = SimpleNamespace(
-                    runtime_config=SimpleNamespace(
-                        fifo_scheduler_config=scheduler_config,
-                        model_name="",
-                        use_batch_decode_scheduler=False,
-                    ),
-                    pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
+                engine_config, model_config = self._prefill_capacity_configs(
+                    configured_cap=configured_cap
                 )
 
                 ModelFactory.update_engine_config_from_model_config(
@@ -109,6 +135,280 @@ class MoeConfigPropagationTest(unittest.TestCase):
                 )
                 self.assertEqual(adapter.prefill_max_tokens_per_rank, expected_cap)
                 self.assertEqual(adapter.max_tokens_per_rank, expected_cap)
+
+    def test_chunked_prefill_capacity_reaches_generic_moe(self):
+        for role, chunk, batch_cap, expected_chunk, expected_cap in (
+            (RoleType.PREFILL, 130, 0, 128, 128),
+            (RoleType.PDFUSION, 130, 0, 128, 128),
+            (RoleType.DECODE, 130, 0, 0, 12288),
+            # The singleton admission path bypasses the batch cap.
+            (RoleType.PREFILL, 8192, 7000, 8192, 8192),
+        ):
+            with self.subTest(role=role, chunk=chunk, batch_cap=batch_cap):
+                engine, model = self._prefill_capacity_configs(batch_cap, chunk)
+                engine.pd_sep_config.role_type = role
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                moe_config = MoeConfig()
+                moe_config.ll_num_max_token = 256
+                adapter = MoEConfigAdapter(model, engine.parallelism_config, moe_config)
+
+                scheduler = engine.runtime_config.fifo_scheduler_config
+                self.assertEqual(scheduler.prefill_chunk_size, expected_chunk)
+                self.assertEqual(scheduler.max_batch_tokens_size, batch_cap or 12288)
+                self.assertEqual(model.max_seq_len, 4096)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, expected_cap)
+                self.assertEqual(adapter.prefill_max_tokens_per_rank, expected_cap)
+                self.assertEqual(adapter.max_tokens_per_rank, max(256, expected_cap))
+
+    def test_page_rr_chunk_capacity_with_standard_warmup(self):
+        for method in (CPRotateMethod.DISABLED, CPRotateMethod.PREFILL_CP):
+            with self.subTest(method=method):
+                engine, model = self._prefill_capacity_configs(1048576, 65536)
+                model.max_seq_len = 1048576
+                scheduler = engine.runtime_config.fifo_scheduler_config
+                scheduler.max_context_batch_size = 1
+                engine.runtime_config.warm_up = True
+                engine.parallelism_config.tp_size = 8
+                engine.parallelism_config.enable_sp = True
+                cp_config = engine.parallelism_config.prefill_cp_config
+                cp_config.method = method
+                cp_config.kv_cache_sharded = True
+                cp_config.prefill_cp_size = 8
+
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, 65536)
+                self.assertEqual(model.max_seq_len, 1048576)
+                self.assertEqual(scheduler.max_batch_tokens_size, 1048576)
+
+    def test_page_rr_capacity_includes_sp_tail_padding(self):
+        engine, model = self._prefill_capacity_configs(chunk_size=130)
+        model.attn_config.tokens_per_block = 1
+        engine.parallelism_config.tp_size = 8
+        engine.parallelism_config.enable_sp = True
+        engine.parallelism_config.prefill_cp_config.kv_cache_sharded = True
+        ModelFactory.update_engine_config_from_model_config(engine, model)
+        self.assertEqual(model.moe_prefill_max_tokens_per_rank, 136)
+        self.assertEqual(
+            engine.runtime_config.fifo_scheduler_config.prefill_chunk_size, 130
+        )
+
+    def test_query_cp_capacity_covers_ragged_rows_and_return_sequences(self):
+        # Enumerate packed chunk layouts independently of the capacity formula.
+        # A request can contribute multiple rows through num_return_sequences.
+        def layouts(tokens):
+            if tokens == 0:
+                yield ()
+            for first in range(1, tokens + 1):
+                for tail in layouts(tokens - first):
+                    yield (first, *tail)
+
+        for method in (
+            CPRotateMethod.ALL_GATHER,
+            CPRotateMethod.ALL_GATHER_WITH_OVERLAP,
+            CPRotateMethod.ALLTOALL,
+        ):
+            for tp in (2, 4, 8):
+                with self.subTest(method=method, tp=tp):
+                    engine, model = self._prefill_capacity_configs(chunk_size=8)
+                    model.attn_config.tokens_per_block = 1
+                    engine.parallelism_config.tp_size = tp
+                    engine.parallelism_config.prefill_cp_config.method = method
+                    engine.runtime_config.fifo_scheduler_config.max_context_batch_size = (
+                        1
+                    )
+                    ModelFactory.update_engine_config_from_model_config(engine, model)
+                    alignment = 2 * tp
+                    physical_sizes = [
+                        sum(
+                            ((length + alignment - 1) // alignment) * alignment
+                            for length in lengths
+                        )
+                        for tokens in range(1, 9)
+                        for lengths in layouts(tokens)
+                    ]
+                    self.assertEqual(
+                        model.moe_prefill_max_tokens_per_rank, max(physical_sizes)
+                    )
+
+    def test_non_language_tasks_keep_non_chunk_capacity(self):
+        for task in (TaskType.DENSE_EMBEDDING, TaskType.RERANKER):
+            with self.subTest(task=task):
+                engine, model = self._prefill_capacity_configs(chunk_size=128)
+                model.task_type = task
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, 12288)
+
+    def test_loss_warmup_uses_actual_rows_and_speculative_reserve(self):
+        for kind, gamma, expected in (
+            (SpeculativeType.NONE, 0, 12285),
+            (SpeculativeType.MTP, 3, 12276),
+            (SpeculativeType.DSPARK, 3, 12261),
+            (SpeculativeType.DSPARK, 0, 12285),
+        ):
+            with self.subTest(kind=kind, gamma=gamma):
+                engine, model = self._prefill_capacity_configs(7000, 128)
+                engine.runtime_config.warm_up = True
+                engine.runtime_config.warm_up_with_loss = True
+                engine.sp_config.type = kind
+                engine.sp_config.gen_num_per_cycle = gamma
+                with patch("rtp_llm.config.moe_capacity.is_cuda", return_value=True):
+                    ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, expected)
+
+    def test_loss_warmup_padding_is_per_sequence_for_cp_and_per_batch_for_sp(self):
+        for query_cp, expected in ((False, 12280), (True, 12288)):
+            with self.subTest(query_cp=query_cp):
+                engine, model = self._prefill_capacity_configs(chunk_size=128)
+                engine.parallelism_config.tp_size = 8
+                engine.parallelism_config.enable_sp = True
+                if query_cp:
+                    engine.parallelism_config.prefill_cp_config.method = (
+                        CPRotateMethod.ALL_GATHER
+                    )
+                engine.runtime_config.warm_up = True
+                engine.runtime_config.warm_up_with_loss = True
+                engine.sp_config.type = SpeculativeType.MTP
+                engine.sp_config.gen_num_per_cycle = 3
+                with patch("rtp_llm.config.moe_capacity.is_cuda", return_value=True):
+                    ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, expected)
+
+    def test_skipped_loss_warmup_does_not_expand_capacity(self):
+        for skip in ("disabled", "multimodal", "ffn_disaggregate", "non_cuda"):
+            with self.subTest(skip=skip):
+                engine, model = self._prefill_capacity_configs(chunk_size=128)
+                engine.runtime_config.warm_up = skip != "disabled"
+                engine.runtime_config.warm_up_with_loss = True
+                model.mm_model_config.is_multimodal = skip == "multimodal"
+                engine.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = (
+                    skip == "ffn_disaggregate"
+                )
+                with patch(
+                    "rtp_llm.config.moe_capacity.is_cuda",
+                    return_value=skip != "non_cuda",
+                ):
+                    ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, 128)
+
+    def test_decode_graph_does_not_force_max_seq_capacity(self):
+        for enabled, buckets, expected in (
+            (False, [512], 128),
+            (True, [], 128),
+            (True, [32, 512], 512),
+        ):
+            with self.subTest(enabled=enabled, buckets=buckets):
+                engine, model = self._prefill_capacity_configs(chunk_size=128)
+                engine.hw_kernel_config.enable_cuda_graph = enabled
+                engine.hw_kernel_config.decode_capture_batch_sizes = buckets
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, expected)
+
+    def test_mtp_graph_capacity_pads_complete_requests(self):
+        engine, model = self._prefill_capacity_configs(chunk_size=64)
+        engine.hw_kernel_config.enable_cuda_graph = True
+        engine.hw_kernel_config.decode_capture_batch_sizes = [17]
+        engine.parallelism_config.tp_size = 8
+        engine.parallelism_config.enable_sp = True
+        engine.sp_config.type = SpeculativeType.MTP
+        engine.sp_config.gen_num_per_cycle = 4
+        ModelFactory.update_engine_config_from_model_config(engine, model)
+        # 17 requests pad to 24 complete rows of width 5, rather than 88 tokens.
+        self.assertEqual(model.moe_prefill_max_tokens_per_rank, 120)
+
+    def test_query_cp_decode_graph_accounts_for_replicated_rows(self):
+        engine, model = self._prefill_capacity_configs(chunk_size=64)
+        engine.hw_kernel_config.enable_cuda_graph = True
+        engine.hw_kernel_config.decode_capture_batch_sizes = [256]
+        engine.parallelism_config.tp_size = 4
+        engine.parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        ModelFactory.update_engine_config_from_model_config(engine, model)
+        self.assertEqual(model.moe_prefill_max_tokens_per_rank, 1024)
+
+    def test_dspark_proposal_graph_padding_can_exceed_verify_padding(self):
+        engine, model = self._prefill_capacity_configs(chunk_size=8)
+        model.attn_config.tokens_per_block = 1
+        engine.runtime_config.max_generate_batch_size = 3
+        engine.hw_kernel_config.enable_cuda_graph = True
+        engine.parallelism_config.tp_size = 8
+        engine.parallelism_config.enable_sp = True
+        engine.sp_config.type = SpeculativeType.DSPARK
+        engine.sp_config.gen_num_per_cycle = 3
+        engine.sp_config.sp_dspark_sample_from_anchor = True
+        ModelFactory.update_engine_config_from_model_config(engine, model)
+        # Width 3 pads to eight requests (24 tokens); width 4 needs four (16).
+        self.assertEqual(model.moe_prefill_max_tokens_per_rank, 24)
+
+    def test_generation_prefill_graph_uses_token_bucket_only_on_owning_role(self):
+        for role, kind, expected in (
+            (RoleType.PREFILL, SpeculativeType.NONE, 128),
+            (RoleType.PDFUSION, SpeculativeType.NONE, 1024),
+            (RoleType.PDFUSION, SpeculativeType.MTP, 128),
+        ):
+            with self.subTest(role=role, kind=kind):
+                engine, model = self._prefill_capacity_configs(chunk_size=128)
+                engine.pd_sep_config.role_type = role
+                engine.sp_config.type = kind
+                engine.sp_config.gen_num_per_cycle = 1
+                engine.hw_kernel_config.enable_cuda_graph = True
+                engine.hw_kernel_config.generation_prefill_capture_token_buckets = [
+                    256,
+                    1024,
+                ]
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, expected)
+
+    def test_system_prompt_capacity_is_set_after_tokenization_before_loading(self):
+        for source in ("file", "string", "tokens"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as root:
+                engine, model = self._prefill_capacity_configs(chunk_size=128)
+                engine.parallelism_config.tp_size = 8
+                engine.parallelism_config.enable_sp = True
+                kv = engine.kv_cache_config
+                prompts = json.dumps([{"task_id": "task", "prompt": "prompt"}])
+                if source == "file":
+                    kv.multi_task_prompt = os.path.join(root, "prompts.json")
+                    with open(kv.multi_task_prompt, "w") as out:
+                        out.write(prompts)
+                elif source == "string":
+                    kv.multi_task_prompt_str = prompts
+                else:
+                    kv.insertMultiTaskPromptTokens("task", list(range(257)))
+                ModelFactory.update_engine_config_from_model_config(engine, model)
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, 128)
+                tokenizer = SimpleNamespace(encode=lambda _: list(range(257)))
+                with patch.object(
+                    BaseModel,
+                    "load_tokenizer",
+                    lambda obj: setattr(obj, "tokenizer", tokenizer),
+                ), patch.object(BaseModel, "_finalize_output_vocab_config"):
+                    BaseModel(
+                        model,
+                        engine.parallelism_config,
+                        engine.hw_kernel_config,
+                        kv,
+                        None,
+                        MoeConfig(),
+                        16,
+                        None,
+                        None,
+                        False,
+                        None,
+                    )
+                self.assertEqual(model.moe_prefill_max_tokens_per_rank, 264)
+
+    def test_system_prompts_execute_separately_and_query_cp_pads_each(self):
+        engine, model = self._prefill_capacity_configs(chunk_size=8)
+        model.attn_config.tokens_per_block = 1
+        engine.parallelism_config.tp_size = 4
+        engine.parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        ModelFactory.update_engine_config_from_model_config(engine, model)
+        engine.kv_cache_config.insertMultiTaskPromptTokens("short", list(range(60)))
+        engine.kv_cache_config.insertMultiTaskPromptTokens("long", list(range(129)))
+        include_system_prompt_capacity(
+            model, engine.kv_cache_config, engine.parallelism_config
+        )
+        self.assertEqual(model.moe_prefill_max_tokens_per_rank, 136)
 
     def test_declared_prefill_capacity_reaches_adapter(self):
         config = ModelConfig()

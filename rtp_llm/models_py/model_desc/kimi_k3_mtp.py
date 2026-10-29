@@ -1,7 +1,5 @@
 """Native recurrent K3 nextn layer; logits and recurrence have distinct outputs."""
 
-from math import gcd
-
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -10,6 +8,7 @@ from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.token_capacity import sp_padded_tokens
 
 
 class KimiK3MtpModel(KimiK3Model):
@@ -40,10 +39,7 @@ class KimiK3MtpModel(KimiK3Model):
                 self._max_generate_batch_size,
                 int(getattr(init_resource, "max_decode_graph_batch_size", 1)),
             )
-            request_alignment = self.tp_size // gcd(self.tp_size, q)
-            batch = (
-                (batch + request_alignment - 1) // request_alignment * request_alignment
-            )
+            max_tokens = sp_padded_tokens(batch, q, self.tp_size)
             attention = self.layers[0].attention
             # Proposal and update runners initialize this shared model.
             # Captured kernels retain raw pointers into the first workspace.
@@ -51,13 +47,13 @@ class KimiK3MtpModel(KimiK3Model):
             if existing is None:
                 attention._mtp_bf16_collectives = KimiK3MtpBf16Collectives(
                     attention.input.weight.device,
-                    max_tokens=batch * q,
+                    max_tokens=max_tokens,
                     hidden_size=self.config.hidden_size,
                 )
             elif (
                 existing.tp_size != self.tp_size
                 or existing.hidden_size != self.config.hidden_size
-                or existing.max_tokens < batch * q
+                or existing.max_tokens < max_tokens
             ):
                 raise ValueError(
                     "Cannot replace MTP workspaces retained by CUDA Graphs"

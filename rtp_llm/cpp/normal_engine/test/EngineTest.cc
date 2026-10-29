@@ -868,8 +868,8 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     auto engine                     = createMockEngine(config);
 
     // Token-heavy: one row walks the 19-token prompt in budget-4 chunks. Row-heavy: four rows
-    // each execute four tokens after a block-aligned 14-token synthetic prefix. The 7-token
-    // whole-segment shape runs once during warmup and once while constructing the system prompt.
+    // share the budget, each executing one token after a block-aligned 18-token synthetic prefix.
+    // The 7-token whole-segment shape runs once during warmup and once for the system prompt.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
                   {4, 0, 1},
@@ -877,7 +877,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {16, 14, 4},
+                  {4, 18, 4},
                   {7, 0, 1},
                   {7, 0, 1}}));
     const auto& cache_config = engine->resourceContext().cache_manager->cacheConfig();
@@ -908,7 +908,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupAlignsPrefixWithOddBudget) {
     config.forward_shapes     = std::make_shared<std::vector<ForwardShape>>();
     (void)createMockEngine(config);
 
-    // Middle chunks align to two-token blocks; the five-token row-heavy query keeps prefix 14.
+    // Middle chunks align to two-token blocks; five row-heavy rows share the budget after prefix 18.
     ASSERT_EQ(*config.forward_shapes,
               (std::vector<ForwardShape>{
                   {4, 0, 1},
@@ -916,7 +916,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupAlignsPrefixWithOddBudget) {
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {25, 14, 5},
+                  {5, 18, 5},
               }));
 }
 
@@ -953,7 +953,7 @@ TEST_F(NormalEngineTest, testChunkedPrefillGenerationGraphWarmupUsesChunkShapes)
                   {4, 8, 1},
                   {4, 12, 1},
                   {3, 16, 1},
-                  {16, 14, 4},
+                  {4, 18, 4},
               }));
 }
 

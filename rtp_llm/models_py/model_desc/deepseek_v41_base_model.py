@@ -53,14 +53,16 @@ from rtp_llm.models_py.modules.dsv41.decode.forward import (
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 from rtp_llm.models_py.modules.dsv41.moe.moe_layer import (
     chunked_moe_enabled,
-    cp_padded_batch_tokens_per_rank_bound,
-    cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
 )
 from rtp_llm.models_py.modules.dsv41.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv41.transformer import V4Args, V4Transformer
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.token_capacity import (
+    cp_padded_batch_tokens_per_rank_bound,
+    cp_padded_tokens_per_rank_bound,
+)
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
