@@ -115,6 +115,7 @@ void TorchProfile::start() {
     stopped_ = false;
     tap::prepareProfiler(config_, activities_);
     tap::enableProfiler(config_, activities_);
+    async_profile_ = AsyncProfileSession::start();
 }
 
 std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopAndCollect() {
@@ -125,7 +126,25 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
     // trace. Mark this wrapper stopped first so an exception is never retried
     // from the destructor.
     stopped_ = true;
-    auto res = detail::tryDisableProfiler(&tap::disableProfiler, [this] { drainProfileDevice(profile_device_); });
+    auto res = detail::tryDisableProfiler(&tap::disableProfiler, [this] {
+        try {
+            drainProfileDevice(profile_device_);
+        } catch (...) {
+            if (async_profile_) {
+                async_profile_->finish();
+                async_profile_.reset();
+            }
+            throw;
+        }
+        if (async_profile_) {
+            const auto events = async_profile_->finish();
+            async_profile_.reset();
+            for (const auto& event : events) {
+                tap::reportBackendEventToActiveKinetoProfiler(
+                    event.start_us, event.end_us, -1, at::RecordScope::FUNCTION, event.name, "RTP-LLM cache transfer");
+            }
+        }
+    });
     if (!res) {
         return {nullptr, ""};
     }

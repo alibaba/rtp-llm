@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -17,11 +18,13 @@ namespace rtp_llm {
 TransferExecutor::TransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                                    size_t                                         max_descriptors_per_batch,
                                    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
-                                   BlockTreeTaskPool*                             load_task_pool):
+                                   BlockTreeTaskPool*                             load_task_pool,
+                                   int64_t                                        world_rank):
     transfer_task_pool_(transfer_task_pool),
     load_task_pool_(load_task_pool == nullptr ? &transfer_task_pool : load_task_pool),
     max_descriptors_per_batch_(max_descriptors_per_batch),
-    metrics_reporter_(std::move(metrics_reporter)) {
+    metrics_reporter_(std::move(metrics_reporter)),
+    world_rank_(world_rank) {
     RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
 }
 
@@ -34,7 +37,30 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
     const auto    deadline    = task.deadline();
     auto          context     = std::make_shared<TransferBatchAsyncContext>(descriptors.size());
     const int64_t queue_begin = currentTimeUs();
-    auto          on_timeout  = [this, context, source, target, queue_begin]() {
+    const auto    identity    = CacheStageContext::local(source, target);
+    const auto    request_id  = task.requestId().value_or(-1);
+    const auto    transfer_id = task.traceId();
+    auto          total_timer = TransferStageTimer::create(metrics_reporter_,
+                                                           "worker_task_total",
+                                                           request_id,
+                                                           0,
+                                                           descriptors.size(),
+                                                           world_rank_,
+                                                           "worker_task",
+                                                           transfer_id,
+                                                           identity);
+    auto          queue_timer = TransferStageTimer::create(metrics_reporter_,
+                                                           "transfer_queue_wait",
+                                                           request_id,
+                                                           0,
+                                                           descriptors.size(),
+                                                           world_rank_,
+                                                           "worker_task",
+                                                           transfer_id,
+                                                           identity);
+    auto          on_timeout  = [this, context, source, target, queue_begin, queue_timer, total_timer]() {
+        queue_timer.finish(false);
+        total_timer.finish(false);
         if (metrics_reporter_ != nullptr) {
             metrics_reporter_->reportQueueWaitMetric(
                 false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
@@ -53,7 +79,13 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
          context,
          source,
          target,
+         identity,
+         request_id,
+         transfer_id,
+         queue_timer,
+         total_timer,
          queue_begin]() {
+            queue_timer.finish(true);
             const auto& descriptors = task.descriptors();
             if (metrics_reporter_ != nullptr) {
                 metrics_reporter_->reportQueueWaitMetric(
@@ -78,7 +110,21 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                                                                           descriptors.begin() + end);
                     const std::vector<const GroupSet*>    sub_group_sets(group_sets.begin() + begin,
                                                                       group_sets.begin() + end);
+                    const char*                           stage = source == Tier::DISK   ? "disk_read" :
+                                                                  target == Tier::DISK   ? "disk_write" :
+                                                                  target == Tier::DEVICE ? "h2d" :
+                                                                                           "d2h";
+                    TransferStageTimer                    batch_timer(metrics_reporter_,
+                                                                      stage,
+                                                                      request_id,
+                                                                      begin,
+                                                                      end,
+                                                                      world_rank_,
+                                                                      "worker_batch",
+                                                                      transfer_id,
+                                                                      identity);
                     auto batch = executeBatch(sub_hosts, sub_descriptors, sub_group_sets);
+                    batch_timer.finish(batch.ok());
                     if (!batch.ok()) {
                         for (size_t index = begin; index < end; ++index) {
                             RTP_LLM_LOG_WARNING("transfer batch item failed, index=%zu %s",
@@ -98,11 +144,14 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
             } catch (...) {
                 record_batch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
             }
+            total_timer.finish(result.ok());
             context->complete(std::move(result));
         },
         deadline,
         std::move(on_timeout));
     if (!accepted) {
+        queue_timer.finish(false);
+        total_timer.finish(false);
         context->complete(TransferResult(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: transfer queue is full or stopped"),
             CacheCopyError::NOT_EXECUTED));

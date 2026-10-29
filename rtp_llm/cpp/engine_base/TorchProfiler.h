@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 #include "torch/csrc/autograd/profiler_kineto.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -54,6 +55,7 @@ private:
     std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
     bool                        stopped_        = true;
     int                         profile_device_ = -1;
+    std::shared_ptr<AsyncProfileSession> async_profile_;
 };
 
 // Background thread that serializes profiler results to disk without blocking the engine loop.
