@@ -361,12 +361,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 {"source": "vit_server", "reason": "overload"},
             )
             self.engine.report_vit_error(e)
-            _mark_vit_error_reported(context)
-            context.abort(
-                grpc.StatusCode.RESOURCE_EXHAUSTED,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
-                ),
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e)),
             )
         except MMSchedulerTimeoutError as e:
             # Scheduler wait exceeded its embedding timeout.
@@ -376,12 +373,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 {"source": "vit_server", "reason": "timeout"},
             )
             self.engine.report_vit_error(e)
-            _mark_vit_error_reported(context)
-            context.abort(
-                grpc.StatusCode.DEADLINE_EXCEEDED,
-                format_mm_rpc_error(
-                    FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(e))
-                ),
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(e)),
             )
         except MMSchedulerRequestTooLargeError as e:
             # Client asked for more than a single request may carry -> a caller

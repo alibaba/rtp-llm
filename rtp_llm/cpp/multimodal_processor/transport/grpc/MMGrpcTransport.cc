@@ -72,7 +72,7 @@ public:
     ErrorResult<MultimodalOutputPB>
     request(const std::string& endpoint, MultimodalInputsPB& request_pb, DeadlineBudget& budget) override {
         if (budget.exhausted()) {
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "vit rpc budget exhausted before the call");
+            return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "vit rpc budget exhausted before the call");
         }
         auto connection_status = pool_.getConnection(endpoint);
         if (!connection_status.ok()) {
