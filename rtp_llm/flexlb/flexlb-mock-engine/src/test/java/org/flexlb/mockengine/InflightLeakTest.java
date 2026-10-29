@@ -41,8 +41,7 @@ class InflightLeakTest {
 
     private static final int BASE_PORT = 62000;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private MockEngineTestCluster cluster;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -78,10 +77,14 @@ class InflightLeakTest {
         JsonNode snapshot = cluster.snapshot();
         assertEquals(services.size(), snapshot.size());
         for (JsonNode engine : snapshot) {
-            assertEquals(0, engine.get("inflight").asInt(),
+            assertEquals(
+                    0,
+                    engine.get("inflight").asInt(),
                     "snapshot inflight should be 0 for port " + engine.get("port").asInt());
-            assertFalse(engine.get("leak_detected").asBoolean(),
-                    "snapshot leak_detected should be false for port " + engine.get("port").asInt());
+            assertFalse(
+                    engine.get("leak_detected").asBoolean(),
+                    "snapshot leak_detected should be false for port "
+                            + engine.get("port").asInt());
         }
     }
 
@@ -101,7 +104,9 @@ class InflightLeakTest {
         cluster.awaitInflight(prefillServices.get(0), 1, 1_000);
 
         // Stop 1 prefill engine via HTTP /stop_engine
-        MockEngineTestSupport.httpPost(cluster.controlPort(), "/stop_engine",
+        MockEngineTestSupport.httpPost(
+                cluster.controlPort(),
+                "/stop_engine",
                 "{\"port\":" + prefillServices.get(0).getGrpcPort() + "}");
         assertTrue(prefillServices.get(0).isStopped(), "engine should be stopped");
 
@@ -120,8 +125,11 @@ class InflightLeakTest {
         startCluster(model, 2, 2);
 
         // Inject enqueue_error on 1 prefill engine via HTTP /inject
-        MockEngineTestSupport.httpPost(cluster.controlPort(), "/inject",
-                "{\"port\":" + prefillServices.get(0).getGrpcPort()
+        MockEngineTestSupport.httpPost(
+                cluster.controlPort(),
+                "/inject",
+                "{\"port\":"
+                        + prefillServices.get(0).getGrpcPort()
                         + ",\"type\":\"enqueue_error\",\"enabled\":true}");
         assertTrue(prefillServices.get(0).getFaultConfig().isFailOnEnqueue());
 
@@ -138,7 +146,9 @@ class InflightLeakTest {
         }
 
         // Clear injection
-        MockEngineTestSupport.httpPost(cluster.controlPort(), "/clear_inject",
+        MockEngineTestSupport.httpPost(
+                cluster.controlPort(),
+                "/clear_inject",
                 "{\"port\":" + prefillServices.get(0).getGrpcPort() + "}");
         assertFalse(prefillServices.get(0).getFaultConfig().isFailOnEnqueue());
 
@@ -183,9 +193,14 @@ class InflightLeakTest {
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
                 String state = service.getRequestStates().get(requestId);
                 if (state != null) {
-                    assertNotEquals("running", state,
-                            "cancelled request " + requestId + " should not be in 'running' state"
-                                    + " on port " + service.getGrpcPort());
+                    assertNotEquals(
+                            "running",
+                            state,
+                            "cancelled request "
+                                    + requestId
+                                    + " should not be in 'running' state"
+                                    + " on port "
+                                    + service.getGrpcPort());
                 }
             }
         }
@@ -210,24 +225,25 @@ class InflightLeakTest {
 
         // Wait for requests to be in-flight
         cluster.awaitInflight(prefill, 1, 1_000);
-        assertTrue(prefill.getInflightCount() > 0,
-                "prefill should have inflight > 0 after enqueue");
+        assertTrue(
+                prefill.getInflightCount() > 0, "prefill should have inflight > 0 after enqueue");
 
         // During grace window (60s) — should NOT detect leak
         prefill.checkLeakDrain(60_000_000_000L);
-        assertFalse(prefill.isLeakDetected(),
-                "leak should NOT be detected during grace window");
+        assertFalse(prefill.isLeakDetected(), "leak should NOT be detected during grace window");
 
         // After grace expires (force with 0 grace) — should detect leak
         prefill.checkLeakDrain(0);
-        assertTrue(prefill.isLeakDetected(),
+        assertTrue(
+                prefill.isLeakDetected(),
                 "leak should be detected when inflight > 0 and grace expired");
 
         // Assert via HTTP snapshot
         JsonNode snapshot = cluster.snapshot();
         for (JsonNode engine : snapshot) {
             if (engine.get("port").asInt() == prefill.getGrpcPort()) {
-                assertTrue(engine.get("leak_detected").asBoolean(),
+                assertTrue(
+                        engine.get("leak_detected").asBoolean(),
                         "snapshot should show leak_detected=true for prefill engine");
             }
         }
@@ -271,13 +287,16 @@ class InflightLeakTest {
 
         // Assert runningTasks is empty on every engine
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertEquals(0, service.getRunningCount(),
+            assertEquals(
+                    0,
+                    service.getRunningCount(),
                     "runningTasks should be empty for engine on port " + service.getGrpcPort());
         }
 
         // Assert no leak was detected
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "leak should not be detected on engine on port " + service.getGrpcPort());
         }
     }
@@ -297,26 +316,34 @@ class InflightLeakTest {
 
             // Read Engine counters, not getWorkerStatus: this must be the first
             // poll after discovery, with every completion already in its delta.
-            AutoTpmE2EHarness.await(() -> h.decodeEngines.getFirst().getCompletedCount() == 4L,
-                    5_000L, "all four requests must finish before the first status pump");
+            AutoTpmE2EHarness.await(
+                    () -> h.decodeEngines.getFirst().getCompletedCount() == 4L,
+                    5_000L,
+                    "all four requests must finish before the first status pump");
             assertEquals(2, h.prefillEndpoint(0).getInflightBatchCount());
             assertEquals(4, h.prefillEndpoint(0).observedRequestCount());
 
             h.pumpPrefillOnce(0);
-            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount(),
+            assertEquals(
+                    0,
+                    h.prefillEndpoint(0).getInflightBatchCount(),
                     "the first real status response must release both completed batches");
             assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
             h.pumpDecodeOnce(0);
             h.pumpPrefillOnce(0);
-            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount(),
+            assertEquals(
+                    0,
+                    h.prefillEndpoint(0).getInflightBatchCount(),
                     "repeated polls must not restore or double-release completed ownership");
 
             List<CompletableFuture<Response>> secondWave = new ArrayList<>();
             for (long requestId = 90_005L; requestId <= 90_006L; requestId++) {
                 secondWave.add(h.scheduler.submit(h.context(requestId, 50)));
             }
-            AutoTpmE2EHarness.await(() -> h.decodeEngines.getFirst().getCompletedCount() == 6L,
-                    5_000L, "returned batch slots must allow the next requests to dispatch");
+            AutoTpmE2EHarness.await(
+                    () -> h.decodeEngines.getFirst().getCompletedCount() == 6L,
+                    5_000L,
+                    "returned batch slots must allow the next requests to dispatch");
             h.pumpOnce();
             assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount());
             assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
@@ -329,7 +356,8 @@ class InflightLeakTest {
         }
     }
 
-    private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode) throws IOException {
+    private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
+            throws IOException {
         cluster = MockEngineTestCluster.start(model, BASE_PORT, nPrefill, nDecode);
         services = cluster.services();
         prefillServices = cluster.prefills();
@@ -348,23 +376,25 @@ class InflightLeakTest {
         List<EngineRpcService.GenerateOutputsPB> outputs = new ArrayList<>();
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<Throwable> error = new AtomicReference<>();
-        service.generateStreamCall(request, new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.GenerateOutputsPB value) {
-                outputs.add(value);
-            }
+        service.generateStreamCall(
+                request,
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(EngineRpcService.GenerateOutputsPB value) {
+                        outputs.add(value);
+                    }
 
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
+                    @Override
+                    public void onError(Throwable throwable) {
+                        error.set(throwable);
+                        latch.countDown();
+                    }
 
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
+                    @Override
+                    public void onCompleted() {
+                        latch.countDown();
+                    }
+                });
         try {
             if (!latch.await(10, TimeUnit.SECONDS)) {
                 fail("generateStreamCall timeout for requestId " + request.getRequestId());

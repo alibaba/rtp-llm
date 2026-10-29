@@ -1,7 +1,7 @@
 package org.flexlb.service;
 
-import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;

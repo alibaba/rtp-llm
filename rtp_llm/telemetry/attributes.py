@@ -70,8 +70,8 @@ ACS_ARMS_TENANT_SPAN_POLICY = "acs.arms.tenant.span.policy"  # value: "mask"
 
 # --- rtp_llm.* internal ---
 # Caller-supplied correlation id on transparent ingress/forwarding spans. Keep
-# this distinct from the platform-indexed request_id key, which represents the
-# generated engine request and creates a model-topology node in Unitrace.
+# this distinct from the platform-indexed request_id key, which represents an
+# engine item or the enclosing batch observation in Unitrace.
 RTP_LLM_EXTERNAL_REQUEST_ID = "rtp_llm.external_request_id"
 RTP_LLM_PD_SEP = "rtp_llm.pd_sep"
 RTP_LLM_CACHE_TOTAL_REUSE_LEN = "rtp_llm.cache.total_reuse_len"

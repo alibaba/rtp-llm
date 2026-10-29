@@ -19,7 +19,8 @@ public class ServiceDiscoveryConfiguration {
             return new LocalServiceDiscovery(route.getHosts());
         }
         if (!route.getHosts().isEmpty()) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must use either hosts or discovery_file");
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG must use either hosts or discovery_file");
         }
         return new LocalServiceDiscovery(file);
     }

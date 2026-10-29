@@ -22,9 +22,7 @@ public class MockDecodeWorker extends MockWorker {
      * Create a decode mock worker with the given behavior.
      */
     public MockDecodeWorker(MockWorkerBehavior behavior) {
-        super(behavior.toBuilder()
-                .roleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
-                .build());
+        super(behavior.toBuilder().roleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE).build());
     }
 
     /**

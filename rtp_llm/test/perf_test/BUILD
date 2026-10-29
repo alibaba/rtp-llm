@@ -1,4 +1,5 @@
 package(default_visibility = ["//visibility:public"])
+load("//rtp_llm/test/perf_test:defs.bzl", "perf_test")
 
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
@@ -988,6 +989,120 @@ test_suite(
         ":v4_flash_dp4_decode_grid_perf",
         ":v4_flash_dp4_decode_bs128_64k_perf",
         ":v4_flash_dp4_decode_64k_mtp_grid_perf",
+    ],
+    tags = ["manual"],
+)
+
+# Public PPU Qwen3.5-MoE performance coverage. These targets are manual and
+# require the corresponding model weights on a PPU worker.
+perf_test(
+    name = "qwen35_moe_ppu_decode_dp8_ll_cg_full_grid",
+    model_type = "qwen35_moe",
+    ckpt_path = "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    gpu_type = "PPU-ZW810E",
+    envs = {"LOAD_METHOD": "scratch"},
+    args = [
+        "--input_len", "1024,4096,8192,16384,32768,65536,131072",
+        "--batch_size", "1,8,16,32,64,128",
+        "--partial", "1", "--concurrency_limit", "128",
+        "--decode_test_length", "30", "--num_measures", "5",
+        "--act_type", "BF16", "--seq_size_per_block", "2048",
+        "--kernel_seq_size_per_block", "128",
+        "--reserver_runtime_mem_mb", "4096", "--tp_size", "1",
+        "--dp_size", "8", "--world_size", "8",
+        "--use_deepep_moe", "1", "--use_deepep_low_latency", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,8,16,32,64,128",
+    ],
+)
+
+perf_test(
+    name = "qwen35_moe_ppu_decode_dp8_seq65k",
+    model_type = "qwen35_moe",
+    ckpt_path = "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    gpu_type = "PPU-ZW810E",
+    envs = {"LOAD_METHOD": "scratch"},
+    args = [
+        "--input_len", "65536", "--batch_size", "1,2,4,8,16,32,64,128",
+        "--partial", "1", "--concurrency_limit", "128",
+        "--decode_test_length", "30", "--num_measures", "5",
+        "--act_type", "BF16", "--seq_size_per_block", "2048",
+        "--kernel_seq_size_per_block", "128",
+        "--reserver_runtime_mem_mb", "4096", "--tp_size", "1",
+        "--dp_size", "8", "--world_size", "8",
+        "--use_deepep_moe", "1", "--use_deepep_low_latency", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64,128",
+    ],
+)
+
+perf_test(
+    name = "qwen35_moe_ppu_decode_dp8_seq32k",
+    model_type = "qwen35_moe",
+    ckpt_path = "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    gpu_type = "PPU-ZW810E",
+    envs = {"LOAD_METHOD": "scratch"},
+    args = [
+        "--input_len", "32768", "--batch_size", "1,2,4,8,16,32,64,128",
+        "--partial", "1", "--concurrency_limit", "128",
+        "--decode_test_length", "30", "--num_measures", "5",
+        "--act_type", "BF16", "--seq_size_per_block", "2048",
+        "--kernel_seq_size_per_block", "128",
+        "--reserver_runtime_mem_mb", "4096", "--tp_size", "1",
+        "--dp_size", "8", "--world_size", "8",
+        "--use_deepep_moe", "1", "--use_deepep_low_latency", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64,128",
+    ],
+)
+
+perf_test(
+    name = "qwen35_moe_ppu_decode_dp8_ll_cg_kspb128",
+    model_type = "qwen35_moe",
+    ckpt_path = "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    gpu_type = "PPU-ZW810E",
+    envs = {"LOAD_METHOD": "scratch"},
+    args = [
+        "--input_len", "8192", "--batch_size", "1,128",
+        "--partial", "1", "--concurrency_limit", "128",
+        "--decode_test_length", "30", "--num_measures", "5",
+        "--act_type", "BF16", "--seq_size_per_block", "2048",
+        "--kernel_seq_size_per_block", "128",
+        "--reserver_runtime_mem_mb", "4096", "--tp_size", "1",
+        "--dp_size", "8", "--world_size", "8",
+        "--use_deepep_moe", "1", "--use_deepep_low_latency", "1",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,8,16,32,64,128",
+    ],
+)
+
+perf_test(
+    name = "qwen35_moe_ppu_prefill_tp8_deepep_normal_deepgemm_contiguous_v3",
+    model_type = "qwen35_moe",
+    ckpt_path = "/mnt/nas1/hf/Qwen3.5-35B-A3B",
+    gpu_type = "PPU-ZW810E",
+    envs = {"LOAD_METHOD": "scratch"},
+    args = [
+        "--input_len", "1024,2048,4096,8192,16384,32768,65536",
+        "--partial", "2", "--concurrency_limit", "8",
+        "--num_measures", "5", "--warm_up", "0",
+        "--act_type", "BF16", "--seq_size_per_block", "2048",
+        "--kernel_seq_size_per_block", "128",
+        "--reserver_runtime_mem_mb", "4096", "--tp_size", "8",
+        "--world_size", "8", "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--moe_strategy", "no_quant_dp_normal_deepgemm",
+    ],
+)
+
+test_suite(
+    name = "perf_ppu_qwen35",
+    tests = [
+        ":qwen35_moe_ppu_decode_dp8_ll_cg_full_grid",
+        ":qwen35_moe_ppu_decode_dp8_seq65k",
+        ":qwen35_moe_ppu_decode_dp8_seq32k",
+        ":qwen35_moe_ppu_decode_dp8_ll_cg_kspb128",
+        ":qwen35_moe_ppu_prefill_tp8_deepep_normal_deepgemm_contiguous_v3",
     ],
     tags = ["manual"],
 )

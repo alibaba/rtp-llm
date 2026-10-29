@@ -321,14 +321,15 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     """
     started = time.monotonic()
     stale_candidates = []
-    for root, _dirs, files in os.walk(workspace, followlinks=False):
-        op_dir = Path(root)
-        # FlashInfer layout only: cached_ops/<op_name>/build.ninja (never trust an
-        # unrelated build.ninja deeper in the tree).
-        if op_dir.parent.name != "cached_ops" or "build.ninja" not in files:
-            continue
-        if _flashinfer_op_is_stale(op_dir):
-            stale_candidates.append(op_dir)
+    # FlashInfer layout only: cached_ops/<op_name>/build.ninja. Scan that one
+    # directory directly instead of walking the workspace tree: the workspace
+    # root must never be treated as enumerable (a HOME-sized root once dragged
+    # the whole FUSE-mounted model library into this scan).
+    cached_ops_root = workspace / "cached_ops"
+    if cached_ops_root.is_dir():
+        for op_dir in sorted(cached_ops_root.iterdir()):
+            if (op_dir / "build.ninja").is_file() and _flashinfer_op_is_stale(op_dir):
+                stale_candidates.append(op_dir)
     logging.info(
         f"[Package Setup] FlashInfer eviction scan found "
         f"{len(stale_candidates)} stale candidate(s) under {workspace}"
@@ -363,11 +364,14 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
 def setup_jit_cache(cache_dir=None, packages=None):
     logging.info("[Package Setup] setup_jit_cache starting")
     bootstrap_remote_jit_dir()
+    # The workspace must be the actual FlashInfer cache directory, never HOME:
+    # on CI workers HOME transitively contains the FUSE-mounted model library,
+    # and the eviction scan below would then crawl every .git/objects fanout
+    # (measured minutes per test action at 0% GPU).
     cache_env.configure_writable_cache_env(
         "FLASHINFER_WORKSPACE_BASE",
-        Path.home(),
+        Path.home() / ".cache" / "flashinfer",
         "flashinfer",
-        cache_subpath=(".cache", "flashinfer"),
     )
     _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
     cache_env.configure_writable_cache_env(

@@ -282,20 +282,29 @@ def admission_slo_deadline(ctx: CaseContext):
 # ===========================================================================
 
 
-def _request_capacity_wave(ctx: CaseContext, *, label: str, dispatcher: str,
-                         queue_timeout_ms: int):
+def _request_capacity_wave(
+    ctx: CaseContext, *, label: str, dispatcher: str, queue_timeout_ms: int
+):
     """A per-Prefill limit of one parks overflow until completion or queue TTL."""
     config = build_flexlb_config(
-        ordering="fifo", decision="single", dispatcher=dispatcher,
+        ordering="fifo",
+        decision="single",
+        dispatcher=dispatcher,
         queue_timeout_ms=queue_timeout_ms,
-        request_timeout_ms=60_000, decision_lifetime=2.0,
+        request_timeout_ms=60_000,
+        decision_lifetime=2.0,
         max_inflight_per_prefill_worker=1,
     )
-    env = ctx.env_manager.ensure(EnvSpec(
-        label=f"{label}_{ctx.profile}", n_prefill=1, n_decode=2,
-        perf=default_perf(), master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": config},
-    ))
+    env = ctx.env_manager.ensure(
+        EnvSpec(
+            label=f"{label}_{ctx.profile}",
+            n_prefill=1,
+            n_decode=2,
+            perf=default_perf(),
+            master_profile=ctx.profile,
+            master_env={"FLEXLB_CONFIG": config},
+        )
+    )
     ops = ctx.engine_ops(env)
     names = _prefill_names(ops)
     if not names:
@@ -313,40 +322,73 @@ def _request_capacity_wave(ctx: CaseContext, *, label: str, dispatcher: str,
             response = ops.schedule(request_id, input_len=512, output_len=2)
             scheduled_after = time.monotonic() - started
             if response.code != 200 or not response.success:
-                return False, response.code, str(response.error_message), scheduled_after
-            input_pb = None if response.enqueued_by_master else ops.build_generate_input(
-                request_id, input_len=512, output_len=2)
+                return (
+                    False,
+                    response.code,
+                    str(response.error_message),
+                    scheduled_after,
+                )
+            input_pb = (
+                None
+                if response.enqueued_by_master
+                else ops.build_generate_input(request_id, input_len=512, output_len=2)
+            )
             handle = ops.start_stream(response, request_id, input_pb=input_pb)
             ended = handle.wait_end(30.0)
             if not ended:
                 handle.cancel()
-            return bool(ended and handle.snap.completed and not handle.snap.error), response.code, str(handle.snap.error or ""), scheduled_after
+            return (
+                bool(ended and handle.snap.completed and not handle.snap.error),
+                response.code,
+                str(handle.snap.error or ""),
+                scheduled_after,
+            )
 
         with ThreadPoolExecutor(max_workers=len(request_ids)) as pool:
             outcomes = list(pool.map(run, request_ids))
         sampler.stop()
         served = [item for item in outcomes if item[0]]
         rejected = [item for item in outcomes if not item[0]]
-        no_count_rejection = all(code != 8502 and "queue_full" not in error.lower()
-                                 for _, code, error, _ in outcomes)
+        no_count_rejection = all(
+            code != 8502 and "queue_full" not in error.lower()
+            for _, code, error, _ in outcomes
+        )
         if queue_timeout_ms < 3000:
-            expected = len(served) == 1 and len(rejected) == 5 and all(
-                code == 8511 and elapsed >= queue_timeout_ms / 1000.0 * 0.8
-                and any(term in error.lower() for term in ("deadline", "expired"))
-                for _, code, error, elapsed in rejected)
+            expected = (
+                len(served) == 1
+                and len(rejected) == 5
+                and all(
+                    code == 8511
+                    and elapsed >= queue_timeout_ms / 1000.0 * 0.8
+                    and any(term in error.lower() for term in ("deadline", "expired"))
+                    for _, code, error, elapsed in rejected
+                )
+            )
         else:
             expected = len(served) == len(request_ids) and any(
-                elapsed >= 1.0 for _, _, _, elapsed in served)
+                elapsed >= 1.0 for _, _, _, elapsed in served
+            )
         clean, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
         for name in names:
             ops.set_perf(name, prefill_fixed_ms=100.0)
         _, recovery_error = ops.run_one_request(
-            ops.next_request_id(base), input_len=512, output_len=2,
-            stream_timeout_s=STREAM_TIMEOUT_S)
-        passed = expected and no_count_rejection and sampler.max_parked >= 1 and clean and recovery_error is None
-        return passed, (f"served={len(served)}, rejected={rejected}, parked_max={sampler.max_parked}, "
-                        f"no_count_rejection={no_count_rejection}, clean={clean}({clean_detail}), "
-                        f"recovery_error={recovery_error}")
+            ops.next_request_id(base),
+            input_len=512,
+            output_len=2,
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        passed = (
+            expected
+            and no_count_rejection
+            and sampler.max_parked >= 1
+            and clean
+            and recovery_error is None
+        )
+        return passed, (
+            f"served={len(served)}, rejected={rejected}, parked_max={sampler.max_parked}, "
+            f"no_count_rejection={no_count_rejection}, clean={clean}({clean_detail}), "
+            f"recovery_error={recovery_error}"
+        )
     except Exception as exc:
         return False, f"exception: {exc!r}"
     finally:
@@ -359,12 +401,15 @@ def _request_capacity_wave(ctx: CaseContext, *, label: str, dispatcher: str,
                 pass
 
 
-
-@case("admission_global_queue_ttl", profiles=["batch-window"],
-      source="Global overflow waits until queue TTL; no global request-count rejection.")
+@case(
+    "admission_global_queue_ttl",
+    profiles=["batch-window"],
+    source="Global overflow waits until queue TTL; no global request-count rejection.",
+)
 def admission_global_queue_ttl(ctx: CaseContext):
-    return _request_capacity_wave(ctx, label="global_queue_ttl", dispatcher="non_batch", queue_timeout_ms=1500)
-
+    return _request_capacity_wave(
+        ctx, label="global_queue_ttl", dispatcher="non_batch", queue_timeout_ms=1500
+    )
 
 
 # ===========================================================================
@@ -1033,6 +1078,7 @@ class _ParkedSampler:
         best = max(self.samples, key=lambda s: s[1], default=None)
         return best[2] if best is not None else "no samples"
 
+
 def _await_tracked(fired: list, wait_s: float = 45.0) -> list:
     """Concurrently await every tracked stream.
 
@@ -1063,22 +1109,28 @@ def _await_tracked(fired: list, wait_s: float = 45.0) -> list:
         return list(pool.map(_one, fired))
 
 
-
-
-
-
-@case("admission_prefill_request_capacity_park", profiles=["batch-window"], requires=["enqueue_batch"],
-      source="BATCH maxInflightPerPrefillWorker limits concurrent batches; completion wakes worker-queue waiters.")
+@case(
+    "admission_prefill_request_capacity_park",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source="BATCH maxInflightPerPrefillWorker limits concurrent batches; completion wakes worker-queue waiters.",
+)
 def admission_prefill_request_capacity_park(ctx: CaseContext):
-    return _request_capacity_wave(ctx, label="prefill_request_park", dispatcher="batch", queue_timeout_ms=60000)
+    return _request_capacity_wave(
+        ctx, label="prefill_request_park", dispatcher="batch", queue_timeout_ms=60000
+    )
 
 
-
-@case("admission_prefill_request_capacity_deadline", profiles=["batch-window"], requires=["enqueue_batch"],
-      source="Request-capacity backpressure preserves the queue deadline; already delivered work retains ownership.")
+@case(
+    "admission_prefill_request_capacity_deadline",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source="Request-capacity backpressure preserves the queue deadline; already delivered work retains ownership.",
+)
 def admission_prefill_request_capacity_deadline(ctx: CaseContext):
-    return _request_capacity_wave(ctx, label="prefill_request_deadline", dispatcher="batch", queue_timeout_ms=1500)
-
+    return _request_capacity_wave(
+        ctx, label="prefill_request_deadline", dispatcher="batch", queue_timeout_ms=1500
+    )
 
 
 # ===========================================================================
@@ -1086,15 +1138,19 @@ def admission_prefill_request_capacity_deadline(ctx: CaseContext):
 # ===========================================================================
 
 
-
-
-
-
-@case("admission_nonbatch_request_capacity_wait", profiles=["single-nonbatch"], requires=["generate_stream"],
-      source="NON_BATCH maxInflightPerPrefillWorker limits outstanding requests; completion resumes global waiters.")
+@case(
+    "admission_nonbatch_request_capacity_wait",
+    profiles=["single-nonbatch"],
+    requires=["generate_stream"],
+    source="NON_BATCH maxInflightPerPrefillWorker limits outstanding requests; completion resumes global waiters.",
+)
 def admission_nonbatch_request_capacity_wait(ctx: CaseContext):
-    return _request_capacity_wave(ctx, label="nonbatch_request_wait", dispatcher="non_batch", queue_timeout_ms=60000)
-
+    return _request_capacity_wave(
+        ctx,
+        label="nonbatch_request_wait",
+        dispatcher="non_batch",
+        queue_timeout_ms=60000,
+    )
 
 
 # ===========================================================================

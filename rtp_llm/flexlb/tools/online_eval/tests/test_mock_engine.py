@@ -94,14 +94,29 @@ class MockEngineDiscoveryTest(unittest.TestCase):
             {
                 "http_port": 9100,
                 "engines": [
-                    {"name": "prefill-0", "role": "prefill", "ip": "127.0.0.1", "http_port": 8100},
-                    {"name": "decode-0", "role": "decode", "ip": "127.0.0.1", "http_port": 8200},
+                    {
+                        "name": "prefill-0",
+                        "role": "prefill",
+                        "ip": "127.0.0.1",
+                        "http_port": 8100,
+                    },
+                    {
+                        "name": "decode-0",
+                        "role": "decode",
+                        "ip": "127.0.0.1",
+                        "http_port": 8200,
+                    },
                 ],
             },
             {
                 "http_port": 9200,
                 "engines": [
-                    {"name": "prefill-1", "role": "prefill", "ip": "127.0.0.1", "http_port": 8300},
+                    {
+                        "name": "prefill-1",
+                        "role": "prefill",
+                        "ip": "127.0.0.1",
+                        "http_port": 8300,
+                    },
                 ],
             },
         ]
@@ -120,7 +135,10 @@ class MockEngineDiscoveryTest(unittest.TestCase):
         self.assertEqual({"MODEL_SERVICE_CONFIG"}, set(payload["env"]))
         config = json.loads(payload["env"]["MODEL_SERVICE_CONFIG"])
         self.assertEqual(
-            {"mock.prefill": ["127.0.0.1:8100", "127.0.0.1:8300"], "mock.decode": ["127.0.0.1:8200"]},
+            {
+                "mock.prefill": ["127.0.0.1:8100", "127.0.0.1:8300"],
+                "mock.decode": ["127.0.0.1:8200"],
+            },
             config["hosts"],
         )
         self.assertEqual("http://127.0.0.1:9100", routes["decode-0"])
@@ -433,9 +451,7 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         )
         details = self.pb2.ErrorDetailsPB()
         metadata = dict(raised.exception.trailing_metadata() or ())
-        self.assertTrue(
-            details.ParseFromString(metadata["grpc-status-details-bin"])
-        )
+        self.assertTrue(details.ParseFromString(metadata["grpc-status-details-bin"]))
         self.assertEqual(8429, details.error_code)
 
     def _input_pb(self, request_id: int):

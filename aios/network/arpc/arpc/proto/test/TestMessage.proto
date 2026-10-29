@@ -1,0 +1,30 @@
+syntax = "proto2";
+
+option cc_generic_services = true;
+
+package arpc;
+
+message Query {
+    optional string name = 1;
+    optional uint32 sleep_millis = 2;
+}
+
+message SubRequest {
+    optional string name = 1;
+}
+
+// Exercises the arpc zero-copy stream paths: plain strings, RAW_STRING
+// (std::RawString) buffers carrying device/remote_device, scalars and nested
+// messages. Field numbers stay below 16 so every tag serializes in one byte,
+// matching the iov-length expectations in RdmaZeroCopyStreamTest.
+message StreamTestRequest {
+    repeated string str_value = 1;
+    repeated bytes raw_str_value = 2 [ctype = RAW_STRING];
+    optional int32 int_value = 3;
+    repeated double double_value = 4;
+    repeated SubRequest sub_request_value = 5;
+}
+
+service EchoTest {
+    rpc Echo(Query) returns (Query);
+}

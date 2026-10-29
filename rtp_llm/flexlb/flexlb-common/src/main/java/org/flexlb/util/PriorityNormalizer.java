@@ -31,8 +31,7 @@ public final class PriorityNormalizer {
      */
     public static final int NO_PRIORITY = 0;
 
-    private PriorityNormalizer() {
-    }
+    private PriorityNormalizer() {}
 
     /**
      * Returns true iff the value denotes an explicit priority (i.e. is not

@@ -35,11 +35,7 @@ public class CacheHitTheoryStats {
         }
 
         return new Snapshot(
-                nowMs,
-                normalizedHit,
-                normalizedTotal,
-                allHitCount.sum(),
-                allTotalCount.sum());
+                nowMs, normalizedHit, normalizedTotal, allHitCount.sum(), allTotalCount.sum());
     }
 
     private static double ratio(long hitCount, long totalCount) {
@@ -53,11 +49,12 @@ public class CacheHitTheoryStats {
         private final long allHitCount;
         private final long allTotalCount;
 
-        private Snapshot(long nowMs,
-                         long requestHitCount,
-                         long requestTotalCount,
-                         long allHitCount,
-                         long allTotalCount) {
+        private Snapshot(
+                long nowMs,
+                long requestHitCount,
+                long requestTotalCount,
+                long allHitCount,
+                long allTotalCount) {
             this.nowMs = nowMs;
             this.requestHitCount = requestHitCount;
             this.requestTotalCount = requestTotalCount;

@@ -42,8 +42,7 @@ class KvAllocatedReportOptInTest {
 
     private static final int BASE_PORT = 63400;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -51,11 +50,14 @@ class KvAllocatedReportOptInTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "kv-allocated-optin-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        scheduler =
+                Executors.newScheduledThreadPool(
+                        4,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "kv-allocated-optin-scheduler");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = new ConcurrentHashMap<>();
         nextPortOffset = 0;
     }
@@ -84,18 +86,25 @@ class KvAllocatedReportOptInTest {
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
         assertEquals(2, status.getWaitingQueryLen(), "two requests queued");
         for (EngineRpcService.TaskInfoPB task : status.getRunningTaskInfoList()) {
-            assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING, task.getPhase(),
+            assertEquals(
+                    EngineRpcService.TaskPhase.TASK_PHASE_RUNNING,
+                    task.getPhase(),
                     "flag OFF: queued decode tasks must keep today's "
                             + "TASK_PHASE_RUNNING reporting (zero behavior change), "
-                            + "request " + task.getRequestId());
+                            + "request "
+                            + task.getRequestId());
         }
-        assertEquals(3, status.getRunningTaskInfoCount(),
+        assertEquals(
+                3,
+                status.getRunningTaskInfoCount(),
                 "all admitted requests keep their runningTasks claim");
         // KV accounting, flag OFF (P2-5 byte-for-byte guard): only the one
         // truly RUNNING request holds KV — queued requests stay uncounted
         // until run start, exactly today's behavior. Block-pool caliber:
         // inputLen=8 rounds up to ceil(8/1024)=1 block = 1024 tokens.
-        assertEquals(1024, decode.getActiveKvTokens(),
+        assertEquals(
+                1024,
+                decode.getActiveKvTokens(),
                 "default OFF: only the running request's block lease is counted");
 
         awaitDecodeQuiescence(decode, 30_000);
@@ -118,26 +127,38 @@ class KvAllocatedReportOptInTest {
 
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
         assertEquals(2, status.getWaitingQueryLen());
-        assertEquals(1, phaseCount(status, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING),
+        assertEquals(
+                1,
+                phaseCount(status, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING),
                 "exactly the one truly running request reports RUNNING");
-        assertEquals(2, phaseCount(status, EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED),
+        assertEquals(
+                2,
+                phaseCount(status, EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED),
                 "flag ON: both queued requests must surface as KV_ALLOCATED "
                         + "(accepted layer window)");
-        assertEquals(1, status.getRunningQueryLen(),
+        assertEquals(
+                1,
+                status.getRunningQueryLen(),
                 "runningQueryLen must not count KV_ALLOCATED (queued) tasks");
         // KV accounting, flag ON (P2-5): KV_ALLOCATED means "KV reserved", so
         // the two queued requests hold their reservation from enqueue — all
         // three requests (1 running + 2 queued) are counted. Block-pool
         // caliber: 3 leases x 1 block = 3 x 1024 tokens.
-        assertEquals(3 * 1024, decode.getActiveKvTokens(),
+        assertEquals(
+                3 * 1024,
+                decode.getActiveKvTokens(),
                 "opt-in: queued requests must hold their KV reservation from enqueue");
 
         // As slots free, queued requests drain and their phase flips to
         // RUNNING; eventually everything completes with no leak.
         awaitDecodeQuiescence(decode, 30_000);
-        assertEquals(3, decode.getCompletedCount(),
+        assertEquals(
+                3,
+                decode.getCompletedCount(),
                 "queued requests must still drain and complete normally");
-        assertEquals(0, decode.getActiveKvTokens(),
+        assertEquals(
+                0,
+                decode.getActiveKvTokens(),
                 "opt-in: enqueue-time KV must not be double-counted at run start "
                         + "(net zero after quiescence)");
         decode.checkLeakDrain(0L);
@@ -151,27 +172,38 @@ class KvAllocatedReportOptInTest {
 
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 1L, 8), -1, null));
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 2L, 8), -1, null));
-        assertEquals(2 * 1024, decode.getActiveKvTokens(),
+        assertEquals(
+                2 * 1024,
+                decode.getActiveKvTokens(),
                 "opt-in: running + queued requests both hold KV before the cancel");
 
         // Cancel the QUEUED request (rid=2) through Decode's ordinary internal
         // stream-cancellation path. Priority Cancel RPC itself is Prefill-only.
         EngineRpcService.TaskPhase phase = decode.cancel(2L);
-        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED, phase,
+        assertEquals(
+                EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED,
+                phase,
                 "cancel of a queued request must report the KV_ALLOCATED phase");
         // Cancel of a queued opt-in request must release its enqueue-time KV
         // reservation immediately (P2-5), leaving only the running request's
         // block lease (1 block = 1024 tokens).
-        assertEquals(1024, decode.getActiveKvTokens(),
+        assertEquals(
+                1024,
+                decode.getActiveKvTokens(),
                 "cancelling the queued request must release its KV reservation");
 
         // Iron rule 4: CANCELLED terminal surfaces in the next WorkerStatus.
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
-        boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId() == 2L
-                        && task.getErrorInfo().getErrorCode()
-                        == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
-        assertTrue(cancelledReported,
+        boolean cancelledReported =
+                status.getFinishedTaskListList().stream()
+                        .anyMatch(
+                                task ->
+                                        task.getRequestId() == 2L
+                                                && task.getErrorInfo().getErrorCode()
+                                                        == EngineRpcService.ErrorCodePB.CANCELLED
+                                                                .getNumber());
+        assertTrue(
+                cancelledReported,
                 "CANCELLED completion for request 2 must appear in WorkerStatus");
 
         awaitDecodeQuiescence(decode, 30_000);
@@ -183,11 +215,12 @@ class KvAllocatedReportOptInTest {
 
     // ──────────── Helpers ────────────
 
-    private static int phaseCount(EngineRpcService.WorkerStatusPB status,
-                                  EngineRpcService.TaskPhase phase) {
-        return (int) status.getRunningTaskInfoList().stream()
-                .filter(task -> task.getPhase() == phase)
-                .count();
+    private static int phaseCount(
+            EngineRpcService.WorkerStatusPB status, EngineRpcService.TaskPhase phase) {
+        return (int)
+                status.getRunningTaskInfoList().stream()
+                        .filter(task -> task.getPhase() == phase)
+                        .count();
     }
 
     private JavaMockEngineCluster.FastRpcService newDecodeService(
@@ -196,5 +229,4 @@ class KvAllocatedReportOptInTest {
         return MockEngineTestSupport.decodeService(
                 model, port, services, scheduler, decodeMaxConcurrency);
     }
-
 }

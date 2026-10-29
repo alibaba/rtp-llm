@@ -29,17 +29,16 @@ final class RouteProjectionTestSupport {
                     .thenComparingLong(GroupPlanner.Item::requestId);
 
     static final RouteProjection.DeliveryProjection ROUTE =
-            new RouteDeliveryStrategy(
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
+            new RouteDeliveryStrategy(mock(RequestRegistry.class), mock(DeliveryMetrics.class))
                     .projectionPolicy();
     static final RouteProjection.DeliveryProjection BATCH =
             new BatchDeliveryStrategy(
-                    () -> CapacityBoundary.Attempt.rejected(
-                            CapacityBoundary.OWNERSHIP_LOST),
-                    () -> 1L,
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
+                            () ->
+                                    CapacityBoundary.Attempt.rejected(
+                                            CapacityBoundary.OWNERSHIP_LOST),
+                            () -> 1L,
+                            mock(RequestRegistry.class),
+                            mock(DeliveryMetrics.class))
                     .projectionPolicy();
 
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
@@ -53,27 +52,18 @@ final class RouteProjectionTestSupport {
 
                 @Override
                 public double predictBatchMs(
-                        org.flexlb.balance.prediction.PrefillBatchFeatures
-                                features) {
+                        org.flexlb.balance.prediction.PrefillBatchFeatures features) {
                     return features.items().stream()
-                            .mapToLong(item -> estimateMs(
-                                    item.seqLen(), item.hitCache()))
+                            .mapToLong(item -> estimateMs(item.seqLen(), item.hitCache()))
                             .sum();
                 }
             };
 
-    private RouteProjectionTestSupport() {
-    }
+    private RouteProjectionTestSupport() {}
 
-    static GroupPlanner.Constraints constraints(
-            int maxRequests,
-            long collectionWindowMs) {
+    static GroupPlanner.Constraints constraints(int maxRequests, long collectionWindowMs) {
         return new GroupPlanner.Constraints(
-                maxRequests,
-                1_000_000L,
-                1_000_000L,
-                0L,
-                collectionWindowMs);
+                maxRequests, 1_000_000L, 1_000_000L, 0L, collectionWindowMs);
     }
 
     static QueueSnapshot queue(
@@ -93,21 +83,12 @@ final class RouteProjectionTestSupport {
         List<GroupPlanner.Item> ordered = new ArrayList<>(activeItems);
         ordered.sort(ordering);
         return new QueueSnapshot(
-                NOW_MS,
-                queueScheduling,
-                ordering,
-                constraints,
-                ordered,
-                admissionBlock);
+                NOW_MS, queueScheduling, ordering, constraints, ordered, admissionBlock);
     }
 
     static GroupPlanner.Item item(
-            long requestId,
-            int priority,
-            long enqueueSequence,
-            long serviceTokens) {
-        return item(requestId, priority, enqueueSequence,
-                serviceTokens, Long.MAX_VALUE);
+            long requestId, int priority, long enqueueSequence, long serviceTokens) {
+        return item(requestId, priority, enqueueSequence, serviceTokens, Long.MAX_VALUE);
     }
 
     static GroupPlanner.Item item(
@@ -117,22 +98,12 @@ final class RouteProjectionTestSupport {
             long serviceTokens,
             long expiresAtMs) {
         return new GroupPlanner.Item(
-                requestId,
-                priority,
-                enqueueSequence,
-                NOW_MS - 1L,
-                expiresAtMs,
-                serviceTokens,
-                0L);
+                requestId, priority, enqueueSequence, NOW_MS - 1L, expiresAtMs, serviceTokens, 0L);
     }
 
     static RouteProjection.Probe probe(
-            long requestId,
-            int priority,
-            long sequenceLength,
-            long hitCache) {
-        return probe(requestId, priority, NOW_MS, Long.MAX_VALUE,
-                sequenceLength, hitCache);
+            long requestId, int priority, long sequenceLength, long hitCache) {
+        return probe(requestId, priority, NOW_MS, Long.MAX_VALUE, sequenceLength, hitCache);
     }
 
     static RouteProjection.Probe probe(
@@ -143,13 +114,7 @@ final class RouteProjectionTestSupport {
             long sequenceLength,
             long hitCache) {
         return new RouteProjection.Probe(
-                requestId,
-                priority,
-                enqueuedAtMs,
-                expiresAtMs,
-                sequenceLength,
-                hitCache,
-                hitCache);
+                requestId, priority, enqueuedAtMs, expiresAtMs, sequenceLength, hitCache, hitCache);
     }
 
     static WorkSnapshot noCommittedWork() {
@@ -160,8 +125,7 @@ final class RouteProjectionTestSupport {
             List<WorkSnapshot.RequestWork> requests,
             List<WorkSnapshot.BatchWork> batches,
             long unknownRequestCount) {
-        return new WorkSnapshot(
-                NOW_MS, requests, batches, unknownRequestCount);
+        return new WorkSnapshot(NOW_MS, requests, batches, unknownRequestCount);
     }
 
     static RouteProjection.Candidate project(
@@ -171,10 +135,6 @@ final class RouteProjectionTestSupport {
             RouteProjection.Probe probe,
             RouteProjection.DeliveryProjection deliveryProjection) {
         return RouteProjection.project(
-                new RouteProjection.Inputs(
-                        queue, work),
-                probe,
-                evaluator,
-                deliveryProjection);
+                new RouteProjection.Inputs(queue, work), probe, evaluator, deliveryProjection);
     }
 }

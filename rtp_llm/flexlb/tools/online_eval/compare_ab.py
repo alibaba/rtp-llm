@@ -659,9 +659,7 @@ def _collect_balance_batch(agg_a, agg_b, out):
 
 def compute_diff(metric, noise_floor_pct):
     """Fills diff, significance, regression direction, tier, and note in place."""
-    crit, cat, direction = CRITICALITY.get(
-        metric["name"], (INFO, "ratio", "neutral")
-    )
+    crit, cat, direction = CRITICALITY.get(metric["name"], (INFO, "ratio", "neutral"))
     metric["criticality"], metric["category"] = crit, cat
     metric["directionality"] = direction
     a, b = metric["a"], metric["b"]
@@ -673,11 +671,9 @@ def compute_diff(metric, noise_floor_pct):
         metric["comparable"] = comparable
         metric["rel_significant"] = metric["abs_significant"] = metric[
             "significant"
-        ] = comparable and a != b
+        ] = (comparable and a != b)
         metric["abs_diff"] = "bool-mismatch" if comparable and a != b else None
-        metric["significant_regression"] = _is_significant_regression(
-            metric, direction
-        )
+        metric["significant_regression"] = _is_significant_regression(metric, direction)
         _assign_tier(metric)
         return
 
@@ -931,11 +927,7 @@ def render_stdout(payload):
             abs_part = f" (abs {abs_s})" if abs_s else ""
             note = f"  {m['note']}" if m["note"] else ""
             dirn = _direction_label(m)
-            dir_part = (
-                f"  {dirn}"
-                if dirn and (tier != 3 or m["significant"])
-                else ""
-            )
+            dir_part = f"  {dirn}" if dirn and (tier != 3 or m["significant"]) else ""
             if tier == 3 and not note:
                 note = "  ✓ 噪声内"
             lines.append(

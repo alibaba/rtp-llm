@@ -1,0 +1,665 @@
+// Test: qwen_7b/q_r_ppu_pd.json
+// Description: prefill/decode separation
+// Model: qwen_7b @ /mnt/nas1/hf/Qwen-7B-Chat/
+{
+    "model_type": "qwen_7b",
+    "model_path": "/mnt/nas1/hf/Qwen-7B-Chat/",
+    "query_result": [
+        // q0: messages with $prompt:s2
+{
+        "endpoint": "/v1/chat/completions",
+        "query": {
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "$prompt:s2"
+                        }
+                ],
+                "temperature": 0.0,
+                "top_p": 0.1
+        },
+        "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "QWen_7B",
+                "choices": [
+                        {
+                                "index": 0,
+                                "message": {
+                                        "role": "assistant",
+                                        "content": "1. What are some effective listening strategies for improving your English listening skills?\n\n  2. How can you practice listening to English on a regular basis?\n\n  3. What are some common mistakes to avoid when listening to English?\n\n  4. How can you use technology to improve your English listening skills?\n\n  5. What are some tips for staying focused while listening to English?"
+                                },
+                                "finish_reason": "stop"
+                        }
+                ],
+                "usage": {
+                        "prompt_tokens": 27,
+                        "total_tokens": 107,
+                        "completion_tokens": 80
+                }
+        }
+},
+        // q1: messages with $prompt:s2
+{
+        "endpoint": "/v1/chat/completions",
+        "query": {
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "$prompt:s2"
+                        }
+                ],
+                "functions": [
+                        {
+                                "name": "get_current_weather",
+                                "description": "Get the current weather in a given location.",
+                                "parameters": {
+                                        "type": "object",
+                                        "properties": {
+                                                "location": {
+                                                        "type": "string",
+                                                        "description": "The city and state, e.g. San Francisco, CA"
+                                                },
+                                                "unit": {
+                                                        "type": "string",
+                                                        "enum": [
+                                                                "celsius",
+                                                                "fahrenheit"
+                                                        ]
+                                                }
+                                        },
+                                        "required": [
+                                                "location"
+                                        ]
+                                }
+                        }
+                ],
+                "temperature": 0.0,
+                "top_p": 0.1
+        },
+        "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333931,
+                "model": "QWen_7B",
+                "choices": [
+                        {
+                                "index": 0,
+                                "message": {
+                                        "role": "assistant",
+                                        "content": "Thought: 提供的API对回答该问题帮助较小，我将不使用API直接作答。\nFinal Answer: 1. What are some effective listening strategies for improving English listening skills?\n2. How can I practice listening to different types of English audio, such as news broadcasts, podcasts, and movies?\n3. What are some common mistakes to avoid when listening to English, and how can I correct them?\n4. How can I improve my ability to understand spoken English at a faster pace?\n5. What are some tips for staying engaged and focused while listening to English, especially when the material is challenging?\n6. How can I practice active listening, such as taking notes and asking questions, to improve my comprehension?\n7. What role does context play in understanding spoken English, and how can I improve my ability to infer meaning from what I hear?\n8. How can I use technology, such as language learning apps and software, to enhance my English listening skills?\n9. What are some strategies for dealing with difficult-to-understand accents or speech patterns in English?\n10. How can I practice listening in real-life situations, such as in English-speaking classrooms or during conversations with native speakers?"
+                                },
+                                "finish_reason": "stop"
+                        }
+                ],
+                "usage": {
+                        "prompt_tokens": 249,
+                        "total_tokens": 493,
+                        "completion_tokens": 244
+                }
+        }
+},
+        // q2: messages with $prompt:s2
+{
+        "endpoint": "/v1/chat/completions",
+        "query": {
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "$prompt:s2"
+                        },
+                        {
+                                "role": "assistant",
+                                "content": "$prompt:s4",
+                                "function_call": {
+                                        "name": "get_current_weather",
+                                        "arguments": "{\"location\": \"杭州市余杭区\"}"
+                                }
+                        },
+                        {
+                                "role": "function",
+                                "name": "get_current_weather",
+                                "content": "$prompt:s3"
+                        }
+                ],
+                "functions": [
+                        {
+                                "name": "get_current_weather",
+                                "description": "Get the current weather in a given location.",
+                                "parameters": {
+                                        "type": "object",
+                                        "properties": {
+                                                "location": {
+                                                        "type": "string",
+                                                        "description": "The city and state, e.g. San Francisco, CA"
+                                                },
+                                                "unit": {
+                                                        "type": "string",
+                                                        "enum": [
+                                                                "celsius",
+                                                                "fahrenheit"
+                                                        ]
+                                                }
+                                        },
+                                        "required": [
+                                                "location"
+                                        ]
+                                }
+                        }
+                ],
+                "temperature": 0.0,
+                "top_p": 0.1
+        },
+        "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333932,
+                "model": "QWen_7B",
+                "choices": [
+                        {
+                                "index": 0,
+                                "message": {
+                                        "role": "assistant",
+                                        "content": "I now know the final answer.\nFinal Answer: 以英语听力方法为主题，可以提出以下問題：\n\n  1. What are some effective ways to improve English listening skills?\n  2. How can I practice listening to different accents and speeds of English speakers?\n  3. What are some common mistakes to avoid when listening to English?\n  4. How can I use technology to improve my English listening skills, such as podcasts or language learning apps?\n  5. What are some good resources for listening practice, such as news broadcasts or movies in English?"
+                                },
+                                "finish_reason": "stop"
+                        }
+                ],
+                "usage": {
+                        "prompt_tokens": 320,
+                        "total_tokens": 438,
+                        "completion_tokens": 118
+                }
+        }
+},
+        // q3: messages with $prompt:s2
+{
+        "endpoint": "/v1/chat/completions",
+        "query": {
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "$prompt:s2"
+                        }
+                ],
+                "functions": [
+                        {
+                                "name": "google_search",
+                                "description": "谷歌搜索是一个通用搜索引擎，可用于访问互联网、查询百科知识、了解时事新闻等。 Format the arguments as a JSON object.",
+                                "parameters": {
+                                        "type": "object",
+                                        "properties": [
+                                                {
+                                                        "name": "search_query",
+                                                        "description": "搜索关键词或短语",
+                                                        "required": true,
+                                                        "schema": {
+                                                                "type": "string"
+                                                        }
+                                                }
+                                        ]
+                                }
+                        },
+                        {
+                                "name": "image_gen",
+                                "description": "image_gen 是一个AI绘画（图像生成）服务，输入文本描述，返回根据文本作画得到的图片的URL。Format the arguments as a JSON object.",
+                                "parameters": {
+                                        "type": "object",
+                                        "properties": [
+                                                {
+                                                        "name": "prompt",
+                                                        "description": "英文关键词，描述了希望图像具有什么内容",
+                                                        "required": true,
+                                                        "schema": {
+                                                                "type": "string"
+                                                        }
+                                                }
+                                        ]
+                                }
+                        }
+                ],
+                "temperature": 0.0,
+                "top_p": 0.1,
+                "stream": true
+        },
+        "result": {
+                "choices": [
+                        {
+                                "index": 0,
+                                "delta": {
+                                        "role": "assistant",
+                                        "content": "Thought: 提供的API对回答该问题帮助较小，我将不使用API直接作答。\nFinal Answer: 1. What are some effective listening strategies for improving English language skills?\n2. How can I practice my English listening skills regularly?\n3. What role does active listening play in enhancing my understanding of spoken English?\n4. What are some common mistakes to avoid when listening to English?\n5. How can I improve my ability to distinguish different accents and speech patterns in English?\n6. What are some tips for improving my English pronunciation while listening?\n7. How can I practice listening to different types of English audio, such as news broadcasts, podcasts, and movies?\n8. What are some online resources or apps that can help me improve my English listening skills?\n9. How can I practice my English listening skills in real-life situations, such as at work or while traveling?\n10. What are some strategies for maintaining focus and staying engaged while listening to English audio?"
+                                },
+                                "finish_reason": "stop"
+                        }
+                ],
+                "usage": {
+                        "prompt_tokens": 355,
+                        "total_tokens": 555,
+                        "completion_tokens": 200
+                }
+        }
+},
+        // q4: messages with $prompt:s2
+{
+        "endpoint": "/v1/chat/completions",
+        "query": {
+                "messages": [
+                        {
+                                "role": "system",
+                                "content": "You are a helpful assistant."
+                        },
+                        {
+                                "role": "user",
+                                "content": "$prompt:s2"
+                        }
+                ],
+                "extra_configs": {
+                        "max_new_tokens": 500,
+                        "top_k": 1,
+                        "top_p": 0
+                }
+        },
+        "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "QWen_7B",
+                "choices": [
+                        {
+                                "index": 0,
+                                "message": {
+                                        "role": "assistant",
+                                        "content": "1. What are some effective listening strategies for improving your English listening skills?\n\n  2. How can you practice listening to English on a regular basis?\n\n  3. What are some common mistakes to avoid when listening to English?\n\n  4. How can you use technology to improve your English listening skills?\n\n  5. What are some tips for staying focused while listening to English?"
+                                },
+                                "finish_reason": "stop"
+                        }
+                ],
+                "usage": {
+                        "prompt_tokens": 27,
+                        "total_tokens": 107,
+                        "completion_tokens": 80
+                }
+        }
+},
+        // q5: $prompt:s4 — sharegpt [zh] 37 chars
+{
+        "query": {
+                "prompt": "$prompt:s4",
+                "generate_config": {
+                        "max_new_tokens": 500,
+                        "top_k": 1,
+                        "top_p": 0,
+                        "return_input_ids": true,
+                        "return_output_ids": true
+                }
+        },
+        "result": {
+                "response": "」\n這是一本繪本風格的插畫，畫面中有一個兩歲的台灣小男孩，他留著短髮，看起來非常可愛。小男孩手中抱著一隻非常胖的小豬，小豬的身體非常大，甚至比小男孩還要高。小男孩的臉上露出著開心的笑容，而小豬則看著小男孩，似乎也很享受被擁抱的感覺。\n整個畫面的氛圍非常溫馨，讓人感受到小男孩和小豬之間的親密關係。繪本風格的插畫通常會注重細節，因此在這本插畫中，可以看到小男孩的短髮、小豬的身體、房間的擺設等等，這些細節都讓整幅畫面更加生動、有質感。\n這本插畫可以被用來作為孩子的繪本，讓孩子們感受到人與動物之間的友誼和溫馨。同時，這本插畫也可以被用來作為教育工具，讓孩子們學習到如何與動物相處、如何珍惜生命等等。總之，這是一本非常有意義的插畫，能夠讓讀者感受到溫馨和感動。",
+                "output_ids": [
+                        [
+                                10429,
+                                198,
+                                99672,
+                                99639,
+                                21894,
+                                117071,
+                                21894,
+                                118923,
+                                9370,
+                                101255,
+                                102876,
+                                3837,
+                                102876,
+                                27091,
+                                15946,
+                                99992,
+                                99542,
+                                101296,
+                                106660,
+                                9370,
+                                105144,
+                                116787,
+                                3837,
+                                42411,
+                                99337,
+                                99610,
+                                99534,
+                                113815,
+                                3837,
+                                117518,
+                                99491,
+                                141878,
+                                1773,
+                                116787,
+                                105206,
+                                99963,
+                                99610,
+                                14777,
+                                110048,
+                                99491,
+                                101484,
+                                104006,
+                                117119,
+                                3837,
+                                30709,
+                                117119,
+                                9370,
+                                108632,
+                                99491,
+                                26288,
+                                3837,
+                                100636,
+                                56006,
+                                116787,
+                                100442,
+                                30534,
+                                44636,
+                                1773,
+                                116787,
+                                9370,
+                                106832,
+                                17447,
+                                105722,
+                                99610,
+                                86347,
+                                63109,
+                                110247,
+                                3837,
+                                68536,
+                                30709,
+                                117119,
+                                101461,
+                                111112,
+                                116787,
+                                3837,
+                                101994,
+                                104526,
+                                104028,
+                                99250,
+                                110848,
+                                99963,
+                                9370,
+                                107676,
+                                8997,
+                                111364,
+                                102876,
+                                27091,
+                                9370,
+                                101332,
+                                108703,
+                                99491,
+                                106257,
+                                101647,
+                                3837,
+                                111546,
+                                105322,
+                                116787,
+                                33108,
+                                30709,
+                                117119,
+                                110034,
+                                9370,
+                                101539,
+                                27641,
+                                107287,
+                                1773,
+                                117071,
+                                21894,
+                                118923,
+                                9370,
+                                101255,
+                                102876,
+                                102119,
+                                99496,
+                                104216,
+                                103275,
+                                105548,
+                                3837,
+                                101886,
+                                18493,
+                                99672,
+                                21894,
+                                101255,
+                                102876,
+                                15946,
+                                3837,
+                                106485,
+                                116787,
+                                9370,
+                                99534,
+                                113815,
+                                5373,
+                                30709,
+                                117119,
+                                9370,
+                                108632,
+                                5373,
+                                99218,
+                                55865,
+                                9370,
+                                114514,
+                                100597,
+                                104008,
+                                3837,
+                                105008,
+                                103275,
+                                105548,
+                                71268,
+                                100441,
+                                63431,
+                                99708,
+                                102876,
+                                27091,
+                                101896,
+                                21287,
+                                90775,
+                                5373,
+                                18830,
+                                101504,
+                                98650,
+                                8997,
+                                99672,
+                                21894,
+                                101255,
+                                102876,
+                                73670,
+                                99250,
+                                11622,
+                                99498,
+                                108318,
+                                104661,
+                                117071,
+                                21894,
+                                3837,
+                                100441,
+                                99657,
+                                100190,
+                                105322,
+                                17340,
+                                101905,
+                                115913,
+                                110034,
+                                9370,
+                                97815,
+                                44818,
+                                120,
+                                33108,
+                                106257,
+                                101647,
+                                1773,
+                                106608,
+                                3837,
+                                99672,
+                                21894,
+                                101255,
+                                102876,
+                                104047,
+                                99250,
+                                11622,
+                                99498,
+                                108318,
+                                99460,
+                                102011,
+                                3837,
+                                100441,
+                                99657,
+                                100190,
+                                106745,
+                                26939,
+                                100007,
+                                101905,
+                                115913,
+                                48921,
+                                101299,
+                                5373,
+                                100007,
+                                106812,
+                                100702,
+                                104008,
+                                1773,
+                                101415,
+                                53930,
+                                3837,
+                                99672,
+                                99639,
+                                21894,
+                                99491,
+                                108552,
+                                100942,
+                                9370,
+                                101255,
+                                102876,
+                                3837,
+                                107357,
+                                100441,
+                                101706,
+                                28946,
+                                105322,
+                                106257,
+                                101647,
+                                33108,
+                                98650,
+                                90775,
+                                1773,
+                                151645
+                        ]
+                ],
+                "input_ids": [
+                        [
+                                99534,
+                                113815,
+                                119236,
+                                104200,
+                                9370,
+                                101296,
+                                106660,
+                                105144,
+                                116787,
+                                3837,
+                                99963,
+                                99610,
+                                14777,
+                                110048,
+                                99165,
+                                101484,
+                                9370,
+                                100672,
+                                30709,
+                                117119,
+                                96050,
+                                45629,
+                                100501,
+                                9370,
+                                99218,
+                                55865,
+                                1773,
+                                117071,
+                                21894,
+                                118923,
+                                1773
+                        ]
+                ],
+                "finished": true
+        }
+},
+        // q6: $prompt:s4 — sharegpt [zh] 37 chars
+{
+        "query": {
+                "prompt": "$prompt:s4",
+                "generate_config": {
+                        "max_new_tokens": 500,
+                        "top_k": 1,
+                        "top_p": 0
+                }
+        },
+        "result": {
+                "response": "」\n這是一本繪本風格的插畫，畫面中有一個兩歲的台灣小男孩，他留著短髮，看起來非常可愛。小男孩手中抱著一隻非常胖的小豬，小豬的身體非常大，甚至比小男孩還要高。小男孩的臉上露出著開心的笑容，而小豬則看著小男孩，似乎也很享受被擁抱的感覺。\n整個畫面的氛圍非常溫馨，讓人感受到小男孩和小豬之間的親密關係。繪本風格的插畫通常會注重細節，因此在這本插畫中，可以看到小男孩的短髮、小豬的身體、房間的擺設等等，這些細節都讓整幅畫面更加生動、有質感。\n這本插畫可以被用來作為孩子的繪本，讓孩子們感受到人與動物之間的友誼和溫馨。同時，這本插畫也可以被用來作為教育工具，讓孩子們學習到如何與動物相處、如何珍惜生命等等。總之，這是一本非常有意義的插畫，能夠讓讀者感受到溫馨和感動。",
+                "finished": true
+        }
+},
+        // q7: $prompt:s1 — sharegpt [en] 21 chars
+{
+        "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                        "max_new_tokens": 1,
+                        "top_k": 1,
+                        "top_p": 0
+                }
+        },
+        "result": {
+                "response": "",
+                "finished": true
+        }
+},
+        // q8: $prompt:s2 — sharegpt [zh] 16 chars
+{
+        "query": {
+                "prompt": "$prompt:s2",
+                "generate_config": {
+                        "max_new_tokens": 500,
+                        "top_k": 1,
+                        "top_p": 0
+                }
+        },
+        "result": {
+                "response": "，让学生思考并回答。例如：\n\n1. 你认为英语听力有什么技巧可以提高听力效果？\n2. 在英语听力过程中，你遇到过哪些困难？你是如何克服的？\n3. 你认为英语听力练习中，哪种方式最有效？为什么？\n4. 在英语听力考试中，你有哪些策略可以提高分数？",
+                "finished": true
+        }
+},
+        // q9: chat-template wrapping candidates/s1
+{
+        "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n提供新高考三年规划与升学指导服务，包括强基计划择校、综合评价咨询、志愿填报、海外院校申请等，为高中生提供学业与职业生涯的完整规划。|im_end|>\n<|im_start|>assistant",
+                "generate_config": {
+                        "max_new_tokens": 500,
+                        "top_k": 1
+                },
+                "_prompt_source": "chat-template wrapping candidates/s1"
+        },
+        "result": {
+                "response": "新高考三年规划与升学指导服务旨在帮助高中生制定学业与职业生涯规划，包括强基计划择校、综合评价咨询、志愿填报、海外院校申请等。我们的服务将帮助学生更好地了解自己的兴趣和能力，从而选择最适合自己的发展方向。",
+                "finished": true
+        }
+},
+        // q10: $prompt:l2 — sharegpt [zh] 1856 chars
+{
+        "query": {
+                "generate_config": {
+                        "top_k": 1,
+                        "max_new_tokens": 500,
+                        "top_p": 0
+                },
+                "yield_generator": false,
+                "history": [],
+                "prompt": "$prompt:l2"
+        },
+        "result": {
+                "response": "",
+                "finished": true
+        }
+}
+    ]
+}

@@ -42,8 +42,7 @@ class HighConcurrencyStressTest {
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final int BASE_PORT = 62600;
 
-    @TempDir
-    Path tempDir;
+    @TempDir Path tempDir;
 
     private MockEngineTestCluster cluster;
     private ExecutorService workerPool;
@@ -86,31 +85,34 @@ class HighConcurrencyStressTest {
             final JavaMockEngineCluster.FastRpcService prefill =
                     prefillServices.get(batchIndex % prefillServices.size());
 
-            workerPool.submit(() -> {
-                try {
-                    EngineRpcService.GenerateInputPB[] inputs =
-                            new EngineRpcService.GenerateInputPB[batchSize];
-                    int decodeStart = batchIndex % decodeServices.size();
-                    for (int i = 0; i < batchSize; i++) {
-                        int decodePort = decodeServices
-                                .get((decodeStart + i) % decodeServices.size())
-                                .getGrpcPort();
-                        inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
-                    }
-                    EngineRpcService.EnqueueBatchResponsePB response =
-                            enqueue(prefill, batch(batchId, slot(0, inputs)));
-                    totalErrors.addAndGet(response.getErrorsCount());
-                    totalSuccesses.addAndGet(response.getSuccessesCount());
-                } catch (Throwable t) {
-                    totalErrors.incrementAndGet();
-                } finally {
-                    allEnqueued.countDown();
-                }
-            });
+            workerPool.submit(
+                    () -> {
+                        try {
+                            EngineRpcService.GenerateInputPB[] inputs =
+                                    new EngineRpcService.GenerateInputPB[batchSize];
+                            int decodeStart = batchIndex % decodeServices.size();
+                            for (int i = 0; i < batchSize; i++) {
+                                int decodePort =
+                                        decodeServices
+                                                .get((decodeStart + i) % decodeServices.size())
+                                                .getGrpcPort();
+                                inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
+                            }
+                            EngineRpcService.EnqueueBatchResponsePB response =
+                                    enqueue(prefill, batch(batchId, slot(0, inputs)));
+                            totalErrors.addAndGet(response.getErrorsCount());
+                            totalSuccesses.addAndGet(response.getSuccessesCount());
+                        } catch (Throwable t) {
+                            totalErrors.incrementAndGet();
+                        } finally {
+                            allEnqueued.countDown();
+                        }
+                    });
         }
 
         // Wait for all enqueue calls to return
-        assertTrue(allEnqueued.await(15, TimeUnit.SECONDS),
+        assertTrue(
+                allEnqueued.await(15, TimeUnit.SECONDS),
                 "all enqueue calls should complete within 15s");
 
         // ── Phase 2: Wait for all 500 completions ──
@@ -120,42 +122,59 @@ class HighConcurrencyStressTest {
         // ── Phase 3: Verify no inflight leak ──
         assertAllInflightZero();
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertFalse(service.isLeakDetected(),
+            assertFalse(
+                    service.isLeakDetected(),
                     "no leak should be detected on port " + service.getGrpcPort());
         }
 
         // ── Phase 4: Verify error_count == 0 and all 500 completed ──
-        assertEquals(0, totalErrors.get(),
-                "total errors should be 0, got " + totalErrors.get());
-        assertEquals(totalRequests, totalSuccesses.get(),
-                "total successes should be " + totalRequests
-                        + ", got " + totalSuccesses.get());
+        assertEquals(0, totalErrors.get(), "total errors should be 0, got " + totalErrors.get());
+        assertEquals(
+                totalRequests,
+                totalSuccesses.get(),
+                "total successes should be " + totalRequests + ", got " + totalSuccesses.get());
         long completed = totalCompleted();
-        assertEquals(totalRequests, completed,
+        assertEquals(
+                totalRequests,
+                completed,
                 "total completed should be " + totalRequests + ", got " + completed);
 
         // ── Phase 5: Verify TTFT p99 < 1000ms ──
         long totalMs = TimeUnit.NANOSECONDS.toMillis(endNs - startNs);
-        assertTrue(totalMs < 1000,
+        assertTrue(
+                totalMs < 1000,
                 "TTFT p99 (approximated by total completion time) should be < 1000ms, got "
-                        + totalMs + "ms");
+                        + totalMs
+                        + "ms");
 
         // ── Phase 6: Verify load balancing across decode engines ──
         // No single engine should handle > 60% of decode requests
-        long totalDecodeCompleted = decodeServices.stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
-                .sum();
-        assertEquals(totalRequests, totalDecodeCompleted,
-                "total decode completions should equal " + totalRequests
-                        + ", got " + totalDecodeCompleted);
+        long totalDecodeCompleted =
+                decodeServices.stream()
+                        .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                        .sum();
+        assertEquals(
+                totalRequests,
+                totalDecodeCompleted,
+                "total decode completions should equal "
+                        + totalRequests
+                        + ", got "
+                        + totalDecodeCompleted);
 
         double threshold = totalRequests * 0.60;
         for (int i = 0; i < decodeServices.size(); i++) {
             long engineCompleted = decodeServices.get(i).getCompletedCount();
-            assertTrue(engineCompleted <= threshold,
-                    "decode engine " + i + " (port " + decodeServices.get(i).getGrpcPort()
-                            + ") handled " + engineCompleted + " requests ("
-                            + (engineCompleted * 100.0 / totalRequests) + "%), "
+            assertTrue(
+                    engineCompleted <= threshold,
+                    "decode engine "
+                            + i
+                            + " (port "
+                            + decodeServices.get(i).getGrpcPort()
+                            + ") handled "
+                            + engineCompleted
+                            + " requests ("
+                            + (engineCompleted * 100.0 / totalRequests)
+                            + "%), "
                             + "which exceeds 60% threshold");
         }
 
@@ -163,10 +182,12 @@ class HighConcurrencyStressTest {
         JsonNode snapshot = snapshot();
         assertEquals(services.size(), snapshot.size());
         for (JsonNode engine : snapshot) {
-            assertEquals(0, engine.get("inflight").asInt(),
-                    "snapshot inflight should be 0 for port "
-                            + engine.get("port").asInt());
-            assertFalse(engine.get("leak_detected").asBoolean(),
+            assertEquals(
+                    0,
+                    engine.get("inflight").asInt(),
+                    "snapshot inflight should be 0 for port " + engine.get("port").asInt());
+            assertFalse(
+                    engine.get("leak_detected").asBoolean(),
                     "snapshot leak_detected should be false for port "
                             + engine.get("port").asInt());
         }
@@ -177,11 +198,14 @@ class HighConcurrencyStressTest {
     private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
         cluster = MockEngineTestCluster.start(model, BASE_PORT, nPrefill, nDecode, 16);
-        workerPool = Executors.newFixedThreadPool(100, runnable -> {
-            Thread thread = new Thread(runnable, "stress-test-worker");
-            thread.setDaemon(true);
-            return thread;
-        });
+        workerPool =
+                Executors.newFixedThreadPool(
+                        100,
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "stress-test-worker");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
         services = cluster.services();
         prefillServices = cluster.prefills();
         decodeServices = cluster.decodes();
@@ -212,5 +236,4 @@ class HighConcurrencyStressTest {
     private MockPerformanceModel model(String formula) throws Exception {
         return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
-
 }

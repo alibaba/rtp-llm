@@ -15,12 +15,47 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.flexlb.balance.prediction.ArithmeticFormula.Executable;
-import static org.flexlb.balance.prediction.ArithmeticFormulaAst.*;
-import static org.objectweb.asm.Opcodes.*;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.AggregateFuncNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.BinaryNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.ConstantNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.FunctionNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.UnaryNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.VariableNode;
+import static org.flexlb.balance.prediction.ArithmeticFormulaAst.evaluate;
+import static org.objectweb.asm.Opcodes.ACC_FINAL;
+import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
+import static org.objectweb.asm.Opcodes.ACC_SUPER;
+import static org.objectweb.asm.Opcodes.ALOAD;
+import static org.objectweb.asm.Opcodes.ASTORE;
+import static org.objectweb.asm.Opcodes.CHECKCAST;
+import static org.objectweb.asm.Opcodes.DADD;
+import static org.objectweb.asm.Opcodes.DALOAD;
+import static org.objectweb.asm.Opcodes.DASTORE;
+import static org.objectweb.asm.Opcodes.DCONST_0;
+import static org.objectweb.asm.Opcodes.DDIV;
+import static org.objectweb.asm.Opcodes.DLOAD;
+import static org.objectweb.asm.Opcodes.DMUL;
+import static org.objectweb.asm.Opcodes.DNEG;
+import static org.objectweb.asm.Opcodes.DRETURN;
+import static org.objectweb.asm.Opcodes.DSTORE;
+import static org.objectweb.asm.Opcodes.DSUB;
+import static org.objectweb.asm.Opcodes.DUP2;
+import static org.objectweb.asm.Opcodes.GOTO;
+import static org.objectweb.asm.Opcodes.IFEQ;
+import static org.objectweb.asm.Opcodes.IFNE;
+import static org.objectweb.asm.Opcodes.IFNULL;
+import static org.objectweb.asm.Opcodes.INVOKEINTERFACE;
+import static org.objectweb.asm.Opcodes.INVOKESPECIAL;
+import static org.objectweb.asm.Opcodes.INVOKESTATIC;
+import static org.objectweb.asm.Opcodes.IRETURN;
+import static org.objectweb.asm.Opcodes.RETURN;
+import static org.objectweb.asm.Opcodes.V17;
 
 /** JVM backend: fused aggregates and scoped common subexpressions, without reassociation. */
 final class ArithmeticFormulaCompiler {
-    private static final String CLASS_NAME = "org/flexlb/balance/prediction/ArithmeticFormula$Generated";
+    private static final String CLASS_NAME =
+            "org/flexlb/balance/prediction/ArithmeticFormula$Generated";
     private static final String SIGNATURE = "([DLjava/util/List;)D";
     private final MethodVisitor method;
     private int nextLocal = 3; // this, scalar variables, batch items
@@ -31,9 +66,15 @@ final class ArithmeticFormulaCompiler {
 
     static Executable compile(Node root) {
         try {
-            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-            writer.visit(V17, ACC_FINAL | ACC_SUPER, CLASS_NAME, null, "java/lang/Object",
-                    new String[]{Executable.class.getName().replace('.', '/')});
+            ClassWriter writer =
+                    new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+            writer.visit(
+                    V17,
+                    ACC_FINAL | ACC_SUPER,
+                    CLASS_NAME,
+                    null,
+                    "java/lang/Object",
+                    new String[] {Executable.class.getName().replace('.', '/')});
             MethodVisitor init = writer.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
             init.visitCode();
             init.visitVarInsn(ALOAD, 0);
@@ -41,7 +82,8 @@ final class ArithmeticFormulaCompiler {
             init.visitInsn(RETURN);
             init.visitMaxs(0, 0);
             init.visitEnd();
-            MethodVisitor method = writer.visitMethod(ACC_PUBLIC, "evaluate", SIGNATURE, null, null);
+            MethodVisitor method =
+                    writer.visitMethod(ACC_PUBLIC, "evaluate", SIGNATURE, null, null);
             method.visitCode();
             new ArithmeticFormulaCompiler(method).expression(root);
             method.visitInsn(DRETURN);
@@ -49,8 +91,9 @@ final class ArithmeticFormulaCompiler {
             method.visitEnd();
             writer.visitEnd();
             var lookup = MethodHandles.lookup().defineHiddenClass(writer.toByteArray(), true);
-            return (Executable) lookup.findConstructor(lookup.lookupClass(), MethodType.methodType(void.class))
-                    .invoke();
+            return (Executable)
+                    lookup.findConstructor(lookup.lookupClass(), MethodType.methodType(void.class))
+                            .invoke();
         } catch (MethodTooLargeException | ClassTooLargeException tooLarge) {
             // Preserve support for expressions exceeding JVM class/method limits.
             return (vars, items) -> evaluate(root, vars, items);
@@ -62,7 +105,9 @@ final class ArithmeticFormulaCompiler {
 
     interface Incremental {
         int aggregateCount();
+
         void append(double[] item, double[] sums);
+
         double evaluate(double[] batch, double[] sums);
     }
 
@@ -73,15 +118,22 @@ final class ArithmeticFormulaCompiler {
         int index = 0;
         for (var entry : aggregates.entrySet()) entry.setValue(index++);
         try {
-            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-            writer.visit(V17, ACC_FINAL | ACC_SUPER, CLASS_NAME, null, "java/lang/Object",
-                    new String[]{Incremental.class.getName().replace('.', '/')});
+            ClassWriter writer =
+                    new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+            writer.visit(
+                    V17,
+                    ACC_FINAL | ACC_SUPER,
+                    CLASS_NAME,
+                    null,
+                    "java/lang/Object",
+                    new String[] {Incremental.class.getName().replace('.', '/')});
             MethodVisitor init = writer.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
             init.visitCode();
             init.visitVarInsn(ALOAD, 0);
             init.visitMethodInsn(INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
             finish(init, RETURN);
-            MethodVisitor count = writer.visitMethod(ACC_PUBLIC, "aggregateCount", "()I", null, null);
+            MethodVisitor count =
+                    writer.visitMethod(ACC_PUBLIC, "aggregateCount", "()I", null, null);
             count.visitCode();
             count.visitLdcInsn(aggregates.size());
             finish(count, IRETURN);
@@ -101,7 +153,8 @@ final class ArithmeticFormulaCompiler {
             }
             finish(append, RETURN);
 
-            MethodVisitor evaluate = writer.visitMethod(ACC_PUBLIC, "evaluate", "([D[D)D", null, null);
+            MethodVisitor evaluate =
+                    writer.visitMethod(ACC_PUBLIC, "evaluate", "([D[D)D", null, null);
             evaluate.visitCode();
             compiler = new ArithmeticFormulaCompiler(evaluate);
             Scope batch = new Scope(1, -1);
@@ -118,13 +171,15 @@ final class ArithmeticFormulaCompiler {
             finish(evaluate, DRETURN);
             writer.visitEnd();
             var lookup = MethodHandles.lookup().defineHiddenClass(writer.toByteArray(), true);
-            return (Incremental) lookup.findConstructor(lookup.lookupClass(), MethodType.methodType(void.class))
-                    .invoke();
+            return (Incremental)
+                    lookup.findConstructor(lookup.lookupClass(), MethodType.methodType(void.class))
+                            .invoke();
         } catch (MethodTooLargeException | ClassTooLargeException tooLarge) {
             return null;
         } catch (Throwable failure) {
             if (failure instanceof Error error) throw error;
-            throw new IllegalStateException("Cannot compile incremental arithmetic formula", failure);
+            throw new IllegalStateException(
+                    "Cannot compile incremental arithmetic formula", failure);
         }
     }
 
@@ -144,8 +199,8 @@ final class ArithmeticFormulaCompiler {
         emit(root, outer);
     }
 
-    private static void collectAggregates(Node node, Map<AggregateFuncNode, Integer> aggregates,
-                                          Set<Node> visited) {
+    private static void collectAggregates(
+            Node node, Map<AggregateFuncNode, Integer> aggregates, Set<Node> visited) {
         if (!visited.add(node)) return;
         switch (node) {
             // Nested sums belong to this item's scalar scope, not the batch.
@@ -157,20 +212,22 @@ final class ArithmeticFormulaCompiler {
             }
             case FunctionNode function -> {
                 collectAggregates(function.left(), aggregates, visited);
-                if (function.right() != null) collectAggregates(function.right(), aggregates, visited);
+                if (function.right() != null)
+                    collectAggregates(function.right(), aggregates, visited);
             }
-            default -> { }
+            default -> {}
         }
     }
 
     /** One traversal, independent ordered accumulators, shared per-item expressions. */
     private void fuseAggregates(Map<AggregateFuncNode, Integer> aggregates, Scope outer) {
-        aggregates.replaceAll((aggregate, ignored) -> {
-            int slot = nextLocal;
-            nextLocal += 2;
-            outer.locals.put(aggregate, slot);
-            return slot;
-        });
+        aggregates.replaceAll(
+                (aggregate, ignored) -> {
+                    int slot = nextLocal;
+                    nextLocal += 2;
+                    outer.locals.put(aggregate, slot);
+                    return slot;
+                });
         Label scalar = new Label(), end = new Label(), loop = new Label(), done = new Label();
         method.visitVarInsn(ALOAD, outer.items);
         method.visitJumpInsn(IFNULL, scalar);
@@ -183,14 +240,16 @@ final class ArithmeticFormulaCompiler {
         }
         int iterator = nextLocal++, vars = nextLocal++;
         method.visitVarInsn(ALOAD, outer.items);
-        method.visitMethodInsn(INVOKEINTERFACE, "java/util/List", "iterator", "()Ljava/util/Iterator;", true);
+        method.visitMethodInsn(
+                INVOKEINTERFACE, "java/util/List", "iterator", "()Ljava/util/Iterator;", true);
         method.visitVarInsn(ASTORE, iterator);
         method.visitLabel(loop);
         method.visitVarInsn(ALOAD, iterator);
         method.visitMethodInsn(INVOKEINTERFACE, "java/util/Iterator", "hasNext", "()Z", true);
         method.visitJumpInsn(IFEQ, done);
         method.visitVarInsn(ALOAD, iterator);
-        method.visitMethodInsn(INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", true);
+        method.visitMethodInsn(
+                INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", true);
         method.visitTypeInsn(CHECKCAST, "[D");
         method.visitVarInsn(ASTORE, vars);
         Scope itemScope = new Scope(vars, -1);
@@ -235,13 +294,14 @@ final class ArithmeticFormulaCompiler {
                 if (binary.op() == '^') {
                     math("pow", 2);
                 } else {
-                    method.visitInsn(switch (binary.op()) {
-                        case '+' -> DADD;
-                        case '-' -> DSUB;
-                        case '*' -> DMUL;
-                        case '/' -> DDIV;
-                        default -> throw new IllegalStateException("Unknown operator");
-                    });
+                    method.visitInsn(
+                            switch (binary.op()) {
+                                case '+' -> DADD;
+                                case '-' -> DSUB;
+                                case '*' -> DMUL;
+                                case '/' -> DDIV;
+                                default -> throw new IllegalStateException("Unknown operator");
+                            });
                 }
             }
             case FunctionNode function -> {
@@ -272,7 +332,8 @@ final class ArithmeticFormulaCompiler {
     }
 
     private void math(String name, int arity) {
-        method.visitMethodInsn(INVOKESTATIC, "java/lang/Math", name, arity == 1 ? "(D)D" : "(DD)D", false);
+        method.visitMethodInsn(
+                INVOKESTATIC, "java/lang/Math", name, arity == 1 ? "(D)D" : "(DD)D", false);
     }
 
     private static final class Scope {

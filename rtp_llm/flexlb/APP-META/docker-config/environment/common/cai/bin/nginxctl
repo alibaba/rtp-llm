@@ -20,13 +20,13 @@ LSTATUSURL="http://localhost:80/nginx_status"
 
 ULIMIT_MAX_FILES="ulimit -S -n $(ulimit -H -n)"
 
-if [ "x$ULIMIT_MAX_FILES" != "x" ] ; then
+if [ "x$ULIMIT_MAX_FILES" != "x" ]; then
     $ULIMIT_MAX_FILES
 fi
 
 ERROR=0
 
-if [ "x$ARGV" = "x" ] ; then
+if [ "x$ARGV" = "x" ]; then
     echo "$0 {start|stop|restart|reload|configtest|quit|rotate|nginx_status|status|upgrade}"
     exit 0
 fi
@@ -43,102 +43,103 @@ merge_conf() {
     fi
 }
 
-if [ ! -d "$BASE/data" ] ; then
+if [ ! -d "$BASE/data" ]; then
     mkdir $BASE/data
 fi
 
-if [ ! -d "$BASE/logs" ] ; then
+if [ ! -d "$BASE/logs" ]; then
     mkdir $BASE/logs
 fi
 
 case "$ARGV" in
     start)
-    merge_conf
-    echo "$NGINX"
-    $NGINX
-    ERROR=$?
-    if [ $ERROR -eq 0 ] ; then
-        $CURL --silent $LSTATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200' 
-        ERROR=$?
-    fi
-    ;;
-    stop|reload|quit)
-    if [ $ARGV = "reload" ];then
         merge_conf
-    fi
-    echo "$NGINX $ARGV"
-    $NGINX -s $ARGV
-    ERROR=$?
-    ;;
-    restart)
-    if [ -f $NGINX_PID ] ; then
-        echo "$NGINX -s stop"
-        $NGINX -s stop
-        ERROR=$?
-        [ $ERROR -eq 0 ] || exit $ERROR
-        sleep 1
-    fi
-    merge_conf
-    echo "$NGINX"
-    $NGINX
-    ERROR=$?
-    if [ $ERROR -eq 0 ] ; then
-        $CURL --silent $LSTATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200' 
-        ERROR=$?
-    fi
-    ;;
-    rotate)
-    echo "$NGINX -s reopen"
-    $NGINX -s reopen
-    ERROR=$?
-    ;;
-    status)
-    echo 'checking nginx online ...'
-    $CURL --silent $STATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200' > /dev/null
-    ERROR=$?
-    if [ $ERROR -eq 0 ] ; then
-        echo 'nginx online'
-    else
-        echo 'nginx offline'
-    fi
-    ;;
-    nginx_status)
-    echo 'checking nginx working ...'
-    $CURL --silent $LSTATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200' > /dev/null
-    ERROR=$?
-    if [ $ERROR -eq 0 ] ; then
-        echo 'nginx ok'
-    else
-        echo 'nginx failed'
-    fi
-    ;;
-    configtest)
-    merge_conf
-    echo "$NGINX -t"
-    $NGINX -t
-    ERROR=$?
-    ;;
-    upgrade)
-    echo "Nginx upagrading, fork the new master and worker processes."
-    if [ ! -f $NGINX_PID ] ; then
+        echo "$NGINX"
         $NGINX
-        exit $?
-    fi
-    merge_conf
-    kill -USR2 `cat $NGINX_PID`
-    ERROR=$?
-    if [ $ERROR -ne 0 ] ; then
-        echo "Fork failed and check your configure or your $NGINX_PID."
-        exit $ERROR
-    fi
-    sleep 1
-    echo "Done, stop the old master and worker processes gracefully "
-    kill -QUIT `cat $NGINX_PID.oldbin`
-    ERROR=$?
-    ;;
+        ERROR=$?
+        if [ $ERROR -eq 0 ]; then
+            $CURL --silent $LSTATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200'
+            ERROR=$?
+        fi
+        ;;
+    stop | reload | quit)
+        if [ $ARGV = "reload" ]; then
+            merge_conf
+        fi
+        echo "$NGINX $ARGV"
+        $NGINX -s $ARGV
+        ERROR=$?
+        ;;
+    restart)
+        if [ -f $NGINX_PID ]; then
+            echo "$NGINX -s stop"
+            $NGINX -s stop
+            ERROR=$?
+            [ $ERROR -eq 0 ] || exit $ERROR
+            sleep 1
+        fi
+        merge_conf
+        echo "$NGINX"
+        $NGINX
+        ERROR=$?
+        if [ $ERROR -eq 0 ]; then
+            $CURL --silent $LSTATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200'
+            ERROR=$?
+        fi
+        ;;
+    rotate)
+        echo "$NGINX -s reopen"
+        $NGINX -s reopen
+        ERROR=$?
+        ;;
+    status)
+        echo 'checking nginx online ...'
+        $CURL --silent $STATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200' >/dev/null
+        ERROR=$?
+        if [ $ERROR -eq 0 ]; then
+            echo 'nginx online'
+        else
+            echo 'nginx offline'
+        fi
+        ;;
+    nginx_status)
+        echo 'checking nginx working ...'
+        $CURL --silent $LSTATUSURL -H 'Host: status.taobao.com' -I | grep 'HTTP/1.1 200' >/dev/null
+        ERROR=$?
+        if [ $ERROR -eq 0 ]; then
+            echo 'nginx ok'
+        else
+            echo 'nginx failed'
+        fi
+        ;;
+    configtest)
+        merge_conf
+        echo "$NGINX -t"
+        $NGINX -t
+        ERROR=$?
+        ;;
+    upgrade)
+        echo "Nginx upagrading, fork the new master and worker processes."
+        if [ ! -f $NGINX_PID ]; then
+            $NGINX
+            exit $?
+        fi
+        merge_conf
+        kill -USR2 $(cat $NGINX_PID)
+        ERROR=$?
+        if [ $ERROR -ne 0 ]; then
+            echo "Fork failed and check your configure or your $NGINX_PID."
+            exit $ERROR
+        fi
+        sleep 1
+        echo "Done, stop the old master and worker processes gracefully "
+        kill -QUIT $(cat $NGINX_PID.oldbin)
+        ERROR=$?
+        ;;
     *)
-    echo "$0 {start|stop|restart|reload|configtest|quit|rotate|status|nginx_status|upgrade}"
-    ERROR=$?
+        echo "$0 {start|stop|restart|reload|configtest|quit|rotate|status|nginx_status|upgrade}"
+        ERROR=$?
+        ;;
 esac
 
 exit $ERROR

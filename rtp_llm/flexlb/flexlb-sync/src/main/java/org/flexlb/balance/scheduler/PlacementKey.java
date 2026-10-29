@@ -28,11 +28,7 @@ public record PlacementKey(RoleType role, String group, String endpoint) {
         return new PlacementKey(role, null);
     }
 
-    public static PlacementKey exact(
-            RoleType role,
-            String group,
-            String endpoint) {
-        return new PlacementKey(
-                role, group, Objects.requireNonNull(endpoint, "endpoint"));
+    public static PlacementKey exact(RoleType role, String group, String endpoint) {
+        return new PlacementKey(role, group, Objects.requireNonNull(endpoint, "endpoint"));
     }
 }

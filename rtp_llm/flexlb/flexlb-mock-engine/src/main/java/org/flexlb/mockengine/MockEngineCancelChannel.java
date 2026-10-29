@@ -52,10 +52,10 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelAck> cancel(CancelTarget target, long requestId,
-                                               long timeoutMs) {
-        JavaMockEngineCluster.FastRpcService service = target == null
-                ? null : services.get(target.prefillGrpcPort());
+    public CompletableFuture<CancelAck> cancel(
+            CancelTarget target, long requestId, long timeoutMs) {
+        JavaMockEngineCluster.FastRpcService service =
+                target == null ? null : services.get(target.prefillGrpcPort());
         if (service == null) {
             return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
         }
