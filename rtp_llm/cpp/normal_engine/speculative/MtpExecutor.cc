@@ -3057,14 +3057,18 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         exact_joint_device     = properties->major == 10 && (properties->minor == 0 || properties->minor == 3);
     }
 #endif
-    // The compact draft path is only valid for top-p-only batches. Explicit
-    // top-k keeps the full-vocabulary tie and joint-support semantics; an
-    // unfiltered row must retain the full draft distribution.
-    if (has_top_k || !has_top_p) {
+    // The compact draft path prefilters to `force_topk` rows by logit and then
+    // applies top-k and top-p on that width. The retained support is identical
+    // to the full-vocabulary path when every row's explicit top-k is bounded by
+    // the compact width: every candidate then lives inside the prefiltered rows
+    // and both truncations resolve on the same ordering. A row without top-k
+    // (top_ks is 1<<30) or with top_p == 1 can retain mass outside the compact
+    // set, so those batches keep the full-vocabulary path.
+    if (!has_top_p) {
         force_topk = 0;
     } else {
         for (int64_t i = 0; i < batch_size; ++i) {
-            if (std::abs(top_ps[i] - 1.0f) < 1e-7f) {
+            if (std::abs(top_ps[i] - 1.0f) < 1e-7f || top_ks[i] > force_topk) {
                 force_topk = 0;
                 break;
             }

@@ -612,6 +612,12 @@ TEST(DSparkConfidenceSamplerTest, ObservePreservesStochasticTokensExactQAndRngCo
         {"strided_q", false, false, 0, 0},
         {"compact_q", false, false, 3, 0},
         {"compact_q_top_p", false, true, 3, 0},
+        // Compact prefilter combined with an explicit top-k bounded by the
+        // compact width. MtpExecutor::sampleDSparkDraft admits this shape, so
+        // the compact and full-vocabulary paths must agree on the retained
+        // support and on RNG consumption.
+        {"compact_q_top_k", true, false, 4, 0},
+        {"compact_q_top_k_top_p", true, true, 4, 0},
         {"separate_top_k_top_p", true, true, 0, 0},
         {"joint_top_k_top_p", true, true, 0, 4},
     };
