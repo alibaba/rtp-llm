@@ -15,6 +15,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/greedy_top1_renorm.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include <cstddef>
 #include <random>
@@ -448,14 +449,17 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     }();
     torch::Tensor topk_indices;
     torch::Tensor probs_t;
-    if (!fused_greedy_top1) {
-        if (force_topk > 0) {
-            auto selected = torch_ext::deepselect_fp32_topk(params.logits, force_topk);
-            topk_indices  = std::get<1>(selected);
-            probs_t       = torch::softmax(std::get<0>(selected), -1);
-        } else {
-            probs_t = torch::softmax(params.logits, -1);
-            params.logits.copy_(probs_t, true);
+    {
+        RTP_LLM_PROFILE_SCOPE("sampler.greedy(probabilities)");
+        if (!fused_greedy_top1) {
+            if (force_topk > 0) {
+                auto selected = torch_ext::deepselect_fp32_topk(params.logits, force_topk);
+                topk_indices  = std::get<1>(selected);
+                probs_t       = torch::softmax(std::get<0>(selected), -1);
+            } else {
+                probs_t = torch::softmax(params.logits, -1);
+                params.logits.copy_(probs_t, true);
+            }
         }
     }
     auto success = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
@@ -507,11 +511,14 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // of the uniform draws (point-mass q in {0, 1}), and any batch with a
     // single stochastic row materializes exactly as before.
     torch::Tensor seed_t, offset_t;
-    if (!all_top_k_one) {
-        auto seed_offset =
-            makeSamplingSeedOffsetTensors(params.generator, batch_size, max_sampling_rounds, params.sampling_buffers);
-        seed_t   = std::move(seed_offset.first);
-        offset_t = std::move(seed_offset.second);
+    {
+        RTP_LLM_PROFILE_SCOPE("sampler.greedy(seed_offset)");
+        if (!all_top_k_one) {
+            auto seed_offset = makeSamplingSeedOffsetTensors(
+                params.generator, batch_size, max_sampling_rounds, params.sampling_buffers);
+            seed_t   = std::move(seed_offset.first);
+            offset_t = std::move(seed_offset.second);
+        }
     }
 
     // Token-only point-mass mode: when the fused gate holds and the caller
@@ -520,6 +527,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // materialization entirely. The returned flag tells consumers to read the
     // token ids instead of the (unwritten) matrix.
     bool all_probs_point_mass = false;
+    RTP_LLM_PROFILE_SCOPE("sampler.greedy(sample_and_renorm)");
     if (all_top_k_one) {
         if (fused_greedy_top1) {
             // token = first argmax(logits) == argmax(probs) (softmax is
@@ -726,6 +734,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             mask_tensor        = do_sample_gpu.reshape({(int64_t)batch_size, 1}).logical_not();
             selected_logits    = params.logits.masked_select(mask_tensor);
         }
+        RTP_LLM_PROFILE_SCOPE("sampler.greedy(process_logits)");
         processLogits(params, device_tokens, transposed_tokens);
         if (has_not_do_sample) {
             params.logits.masked_scatter_(mask_tensor, selected_logits);
@@ -745,6 +754,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         return GreedyOutput{};
     }
 
+    RTP_LLM_PROFILE_SCOPE("sampler.greedy(flashinfer)");
     return flashinferSampleGreedy(params, transposed_tokens);
 }
 
