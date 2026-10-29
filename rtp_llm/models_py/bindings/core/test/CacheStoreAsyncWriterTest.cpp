@@ -1,4 +1,5 @@
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #define private public
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
@@ -8,7 +9,17 @@
 
 namespace rtp_llm {
 
-class CacheStoreAsyncWriterTest: public ::testing::Test {};
+class CacheStoreAsyncWriterTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        original_core_dump_                          = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
+    }
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = original_core_dump_;
+    }
+    bool original_core_dump_;
+};
 
 TEST_F(CacheStoreAsyncWriterTest, DefersThreadPoolUntilInit) {
     CacheStoreAsyncWriter writer;
@@ -154,6 +165,60 @@ TEST_F(CacheStoreAsyncWriterTest, DoubleWaitAllDoneThrows) {
     writer.init();
     writer.waitAllDone();
     ASSERT_ANY_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, PostProcessingPrecedesDrain) {
+    CacheStoreAsyncWriter writer;
+    writer.init();
+    std::atomic<bool> post_submitted{false};
+    std::atomic<bool> worker_done{false};
+    writer.submit([&]() {
+        while (!post_submitted.load()) {
+            std::this_thread::yield();
+        }
+        worker_done.store(true);
+    });
+    auto value = writer.completeAfter([&]() {
+        post_submitted.store(true);
+        return 42;
+    });
+    EXPECT_EQ(value, 42);
+    EXPECT_TRUE(worker_done.load());
+    writer.init();
+    writer.waitAllDone();
+}
+
+TEST_F(CacheStoreAsyncWriterTest, PostProcessingExceptionDrainsAndPreservesPrimaryError) {
+    CacheStoreAsyncWriter writer;
+    writer.init();
+    std::atomic<bool> done{false};
+    writer.submit([&]() {
+        done.store(true);
+        throw std::runtime_error("worker");
+    });
+    try {
+        writer.completeAfter([]() -> int { throw std::runtime_error("post"); });
+        FAIL() << "expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_STREQ(e.what(), "post");
+    }
+    EXPECT_TRUE(done.load());
+    writer.init();
+    writer.waitAllDone();
+}
+
+TEST_F(CacheStoreAsyncWriterTest, PostProcessingPropagatesBackgroundFailure) {
+    CacheStoreAsyncWriter writer;
+    writer.init();
+    writer.submit([]() { throw std::runtime_error("worker"); });
+    try {
+        writer.completeAfter([]() { return 7; });
+        FAIL() << "expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_STREQ(e.what(), "worker");
+    }
+    writer.init();
+    writer.waitAllDone();
 }
 
 }  // namespace rtp_llm

@@ -68,6 +68,7 @@ def build_indexer_cp_chunk_plan(
     block_size: int,
     device: torch.device,
     owner_block_size: Optional[int] = None,
+    per_req_total_kv_lens_host: Optional[torch.Tensor] = None,
 ) -> IndexerCPChunkPlan:
     """Build per-chunk indexer assembler plan (CPU; no NCCL)."""
     if cp_ctx.cp_size <= 0:
@@ -82,10 +83,35 @@ def build_indexer_cp_chunk_plan(
     actual_lens = cp_actual_owned_kv_lens(
         per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
     ).contiguous()
-    total_local = int(local_lens.sum().item())
-    total_actual = int(actual_lens.sum().item())
+    host_lens = per_req_total_kv_lens_host
+    if host_lens is None and per_req_total_kv_lens.device.type == "cpu":
+        host_lens = per_req_total_kv_lens
+    if host_lens is not None:
+        if (
+            host_lens.device.type != "cpu"
+            or host_lens.shape != per_req_total_kv_lens.shape
+        ):
+            raise ValueError(
+                "CP host lengths must be a matching same-step CPU snapshot"
+            )
+        host_lens = host_lens.to(torch.int64)
+        total_local = int(
+            cp_padded_local_kv_lens(host_lens, cp_ctx.cp_size, owner_bs).sum()
+        )
+        total_actual = int(
+            cp_actual_owned_kv_lens(
+                host_lens, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+            ).sum()
+        )
+    else:
+        total_local = int(local_lens.sum().item())
+        total_actual = int(actual_lens.sum().item())
     restore = build_kv_allgather_restore_indices(
-        per_req, cp_ctx.cp_size, owner_bs, device
+        per_req,
+        cp_ctx.cp_size,
+        owner_bs,
+        device,
+        per_req_total_kv_lens_host=host_lens,
     )
     return IndexerCPChunkPlan(
         cp_ctx=cp_ctx,

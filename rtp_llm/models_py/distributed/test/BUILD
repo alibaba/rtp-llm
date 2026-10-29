@@ -73,3 +73,11 @@ py_test(
     tags = ["manual"],
     timeout = "long",
 )
+
+py_test(
+    name = "cpp_broadcast_metadata_test",
+    srcs = ["cpp_broadcast_metadata_test.py"],
+    deps = ["//rtp_llm/models_py/distributed:collective_torch", "//rtp_llm:testlib"],
+    timeout = "short",
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

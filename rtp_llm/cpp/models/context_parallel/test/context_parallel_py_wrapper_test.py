@@ -168,8 +168,10 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             dtype=torch.float32,
         )
 
-        tokens0, lengths0, hidden0, shuffle0, output0 = cp_test.handle_inputs_with_hidden(
-            total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
+        tokens0, lengths0, hidden0, shuffle0, output0 = (
+            cp_test.handle_inputs_with_hidden(
+                total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
+            )
         )
         self.assertTrue(
             torch.equal(tokens0, torch.tensor([10, 11, 0, 0], dtype=torch.int32))
@@ -191,8 +193,10 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             )
         )
 
-        tokens1, lengths1, hidden1, shuffle1, output1 = cp_test.handle_inputs_with_hidden(
-            total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
+        tokens1, lengths1, hidden1, shuffle1, output1 = (
+            cp_test.handle_inputs_with_hidden(
+                total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
+            )
         )
         self.assertTrue(
             torch.equal(tokens1, torch.tensor([12, 13, 14, 15], dtype=torch.int32))
@@ -527,6 +531,41 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
     def test_multi_stream_cp4_with_padding(self):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
+
+    def test_fixed_shape_selection_empty_unowned_and_strided(self):
+        devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+        for device in devices:
+            for dtype in (torch.float32, torch.float16, torch.bfloat16):
+                for cp_size in (1, 2, 4, 8):
+                    # Both non-contiguous strides and an invalid-for-this-rank
+                    # logical offset: a foreign row must not cause an OOB read.
+                    hidden = torch.arange(56, device=device, dtype=dtype).reshape(
+                        4, 14
+                    )[:, ::2]
+                    hidden[0].fill_(float("nan"))
+                    rows = torch.tensor(
+                        [3, 1, 3, (cp_size - 1) * 4 + 2],
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                    lm = torch.tensor([0, 1, 2, 3, 0], device=device, dtype=torch.int32)
+                    for rank in range(cp_size):
+                        actual = cp_test.compute_local_last_hidden(
+                            hidden, rows, lm, rank, cp_size
+                        )
+                        expected = torch.zeros((5, 7), dtype=dtype)
+                        for i, index in enumerate(rows.cpu()[lm.cpu()].tolist()):
+                            if index // 4 == rank:
+                                expected[i] = hidden[index % 4].cpu()
+                        self.assertTrue(
+                            torch.equal(actual, expected),
+                            (device, dtype, cp_size, rank),
+                        )
+                    empty = torch.empty(0, dtype=torch.int32, device=device)
+                    actual = cp_test.compute_local_last_hidden(
+                        hidden[:0], empty, empty, 0, cp_size
+                    )
+                    self.assertEqual(tuple(actual.shape), (0, 7))
 
     def test_empty_prefill_output_indices(self):
         empty = torch.empty((0,), dtype=torch.int32)

@@ -1163,6 +1163,8 @@ def build_kv_allgather_restore_indices(
     cp_size: int,
     block_size: int,
     device: torch.device,
+    *,
+    per_req_total_kv_lens_host: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute the per-iteration restore index tensor.
 
@@ -1217,9 +1219,27 @@ def build_kv_allgather_restore_indices(
         int(local_per_req.numel()) + 1, dtype=torch.int64, device=device
     )
     cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
-    total_local_kv = int(cu_local_per_req[-1].item())  # per-rank padded local
-
-    total_real = int(total_kv_lens.sum().item())
+    # Reuse host lengths when the caller already owns a same-step CPU plan.
+    # Never introduce a device->host copy just to enable this fast path.
+    host_lens = per_req_total_kv_lens_host
+    if host_lens is None and per_req_total_kv_lens.device.type == "cpu":
+        host_lens = per_req_total_kv_lens
+    if host_lens is not None:
+        if (
+            host_lens.device.type != "cpu"
+            or host_lens.shape != per_req_total_kv_lens.shape
+        ):
+            raise ValueError(
+                "CP host lengths must be a matching same-step CPU snapshot"
+            )
+        host_lens = host_lens.to(torch.int64)
+        total_local_kv = int(
+            cp_padded_local_kv_lens(host_lens, cp_size, block_size).sum()
+        )
+        total_real = int(host_lens.sum())
+    else:
+        total_local_kv = int(cu_local_per_req[-1].item())
+        total_real = int(total_kv_lens.sum().item())
     if total_real == 0:
         return torch.empty(0, dtype=torch.int64, device=device)
 
@@ -1230,6 +1250,7 @@ def build_kv_allgather_restore_indices(
     req_ids = torch.repeat_interleave(
         torch.arange(int(total_kv_lens.numel()), dtype=torch.int64, device=device),
         total_kv_lens,
+        output_size=total_real,
     )
     cu_starts = torch.zeros(
         int(total_kv_lens.numel()), dtype=torch.int64, device=device

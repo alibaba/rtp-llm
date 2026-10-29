@@ -332,6 +332,67 @@ def test_build_plan_rejects_bad_block_size():
     raise AssertionError("expected ValueError")
 
 
+def test_host_plan_cuda_matches_device_plan_without_scalar_readback():
+    if not torch.cuda.is_available():
+        print("SKIP CUDA host-plan comparison: CUDA unavailable")
+        return
+    from unittest.mock import patch
+
+    original_item = torch.Tensor.item
+    original_int = torch.Tensor.__int__
+
+    def checked_item(t, *args, **kwargs):
+        assert not t.is_cuda, "unexpected GPU scalar readback in host plan"
+        return original_item(t, *args, **kwargs)
+
+    def checked_int(t):
+        assert not t.is_cuda, "unexpected GPU integer readback in host plan"
+        return original_int(t)
+
+    for cp_size in (1, 4, 8):
+        for rank in range(cp_size):
+            for block_size in (64, 512):
+                # Repeated shapes with different lengths exercise per-step
+                # freshness as well as zero requests and partial owner blocks.
+                for lens in ([], [0, 0], [1, 65, 513], [0, 511, 1025]):
+                    host = torch.tensor(lens, dtype=torch.int64)
+                    ctx = types.SimpleNamespace(cp_size=cp_size, cp_rank=rank)
+                    device_lens = host.cuda()
+                    with patch.object(torch.Tensor, "item", checked_item), patch.object(
+                        torch.Tensor, "__int__", checked_int
+                    ):
+                        got = A.build_indexer_cp_chunk_plan(
+                            ctx,
+                            device_lens,
+                            64,
+                            torch.device("cuda"),
+                            owner_block_size=block_size,
+                            per_req_total_kv_lens_host=host,
+                        )
+                    ref = A.build_indexer_cp_chunk_plan(
+                        ctx,
+                        device_lens,
+                        64,
+                        torch.device("cuda"),
+                        owner_block_size=block_size,
+                    )
+                    assert got.total_local_T == ref.total_local_T
+                    assert got.total_actual_local_T == ref.total_actual_local_T
+                    for attr in (
+                        "per_req_total_kv_lens",
+                        "per_req_local_kv_lens",
+                        "per_req_actual_local_kv_lens",
+                        "restore_indices",
+                    ):
+                        assert torch.equal(getattr(got, attr), getattr(ref, attr)), (
+                            cp_size,
+                            rank,
+                            block_size,
+                            lens,
+                            attr,
+                        )
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in list(globals().items()):

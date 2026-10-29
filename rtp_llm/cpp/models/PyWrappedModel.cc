@@ -563,8 +563,8 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     std::optional<PyCacheStoreInputs> params;
     if (!inputs.warmup && inputs.pd_separation) {
-        const size_t         decoder_batch_size = inputs.sequence_lengths.size(0);
-        const size_t         context_batch_size = inputs.input_lengths.size(0) - decoder_batch_size;
+        const size_t             decoder_batch_size = inputs.sequence_lengths.size(0);
+        const size_t             context_batch_size = inputs.input_lengths.size(0) - decoder_batch_size;
         std::vector<std::string> cache_keys;
         if (inputs.cache_keys.defined()) {
             auto           ck   = inputs.cache_keys.contiguous();
@@ -677,58 +677,60 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         cache_store_async_writer_->init();
     }
 
-    fusedCopy(d2d_copies_);
+    auto submit_forward_and_post = [&]() -> GptModelOutputs {
+        fusedCopy(d2d_copies_);
 
-    std::vector<PyModelOutputs> py_model_outputs;
-    {
-        py::gil_scoped_acquire gil;
-        py::object             py_forward_method = py_model_.attr("forward_micro_batch");
-        py::object             py_outputs_obj    = py_forward_method(input_list);
-        py_model_outputs                         = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == input_list.size(),
-                            "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
-                            py_model_outputs.size(),
-                            input_list.size());
-
-    if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->waitAllDone();
-    }
-
-    // TODO: merge hidden states in one tensor
-    torch::Tensor hidden_states;
-    if (!micro_batch_plan.enable) {
-        RTP_LLM_CHECK_WITH_INFO(py_model_outputs[0].hidden_states.size(0) == inputs.combo_tokens.size(0),
-                                "py_model_outputs[0].hidden_states.size(0):%d != inputs.combo_tokens.size(0):%d",
-                                py_model_outputs[0].hidden_states.size(0),
-                                inputs.combo_tokens.size(0));
-        hidden_states = py_model_outputs[0].hidden_states;
-    } else {
-        size_t total_tokens = inputs.combo_tokens.size(0);
-        size_t hidden_size  = description_.attention_conf.head_num * description_.attention_conf.size_per_head;
-        hidden_states       = torch::empty({(int64_t)total_tokens, (int64_t)hidden_size},
-                                     runtimeCudaOptions(dataTypeToTorchType(description_.data_type)));
-        int offset          = 0;
-        for (int i = 0; i < py_model_outputs.size(); i++) {
-            RTP_LLM_CHECK_WITH_INFO(
-                offset + py_model_outputs[i].hidden_states.size(0) <= (int)total_tokens,
-                "offset + py_model_outputs[i].hidden_states.size(0):%d > inputs.combo_tokens->shape()[0]:%d",
-                offset + py_model_outputs[i].hidden_states.size(0),
-                total_tokens);
-            auto slice_size = py_model_outputs[i].hidden_states.size(0);
-            hidden_states.slice(0, offset, offset + slice_size).copy_(py_model_outputs[i].hidden_states);
-            offset += slice_size;
+        std::vector<PyModelOutputs> py_model_outputs;
+        {
+            py::gil_scoped_acquire gil;
+            py::object             py_forward_method = py_model_.attr("forward_micro_batch");
+            py::object             py_outputs_obj    = py_forward_method(input_list);
+            py_model_outputs                         = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
         }
-        RTP_LLM_CHECK_WITH_INFO(offset == (int)total_tokens,
-                                "total out hidden size:%d != inputs.combo_tokens->shape()[0]:%d",
-                                offset,
-                                total_tokens);
+
+        RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == input_list.size(),
+                                "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
+                                py_model_outputs.size(),
+                                input_list.size());
+
+        // TODO: merge hidden states in one tensor
+        torch::Tensor hidden_states;
+        if (!micro_batch_plan.enable) {
+            RTP_LLM_CHECK_WITH_INFO(py_model_outputs[0].hidden_states.size(0) == inputs.combo_tokens.size(0),
+                                    "py_model_outputs[0].hidden_states.size(0):%d != inputs.combo_tokens.size(0):%d",
+                                    py_model_outputs[0].hidden_states.size(0),
+                                    inputs.combo_tokens.size(0));
+            hidden_states = py_model_outputs[0].hidden_states;
+        } else {
+            size_t total_tokens = inputs.combo_tokens.size(0);
+            size_t hidden_size  = description_.attention_conf.head_num * description_.attention_conf.size_per_head;
+            hidden_states       = torch::empty({(int64_t)total_tokens, (int64_t)hidden_size},
+                                         runtimeCudaOptions(dataTypeToTorchType(description_.data_type)));
+            int offset          = 0;
+            for (int i = 0; i < py_model_outputs.size(); i++) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    offset + py_model_outputs[i].hidden_states.size(0) <= (int)total_tokens,
+                    "offset + py_model_outputs[i].hidden_states.size(0):%d > inputs.combo_tokens->shape()[0]:%d",
+                    offset + py_model_outputs[i].hidden_states.size(0),
+                    total_tokens);
+                auto slice_size = py_model_outputs[i].hidden_states.size(0);
+                hidden_states.slice(0, offset, offset + slice_size).copy_(py_model_outputs[i].hidden_states);
+                offset += slice_size;
+            }
+            RTP_LLM_CHECK_WITH_INFO(offset == (int)total_tokens,
+                                    "total out hidden size:%d != inputs.combo_tokens->shape()[0]:%d",
+                                    offset,
+                                    total_tokens);
+        }
+
+        RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+
+        return callForwardPostLayers(hidden_states, inputs, false);
+    };
+    if (!inputs.warmup && inputs.pd_separation) {
+        return cache_store_async_writer_->completeAfter(submit_forward_and_post);
     }
-
-    RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-
-    return callForwardPostLayers(hidden_states, inputs, false);
+    return submit_forward_and_post();
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
@@ -927,108 +929,111 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
 
-        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
-        PyModelOutputs py_model_outputs;
-        torch::Tensor  hidden_states;
+        auto submit_forward_and_post = [&]() -> GptModelOutputs {
+            auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
+            PyModelOutputs py_model_outputs;
+            torch::Tensor  hidden_states;
 
-        // Cast the Python object to PyModelOutputs and extract hidden states
-        const bool graph_can_run = enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_);
-        // Fail closed only for the fixed-role MTP sharing instances. NORMAL
-        // models intentionally retain their existing eager fallback, including
-        // draft-extend when its dedicated prefill graph is disabled.
-        const bool fixed_mtp_role = mtp_indexer_role_ != MtpIndexerRole::NORMAL;
-        const bool graph_required =
-            enable_cuda_graph_ && fixed_mtp_role
-            && (!py_model_inputs.attention_inputs.is_prefill || inputs.is_target_verify || inputs.is_draft_extend);
-        RTP_LLM_CHECK_WITH_INFO(
-            !graph_required || graph_can_run,
-            "CUDA graph is required for fixed-role MTP indexer sharing; eager fallback is disabled");
-        if (graph_can_run) {
-            RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
-            DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
-            RTP_LLM_LOG_DEBUG(
-                "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
-                py_model_inputs.attention_inputs.is_target_verify,
-                py_model_inputs.attention_inputs.is_prefill,
-                graph_state_.current_real_graph_bs);
-            py_model_inputs.attention_inputs.is_s_padded = true;
-            py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            hidden_states = py_model_outputs.hidden_states.clone();
-        } else {
-            py::gil_scoped_acquire gil;
-            RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
-            DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
-                              py_model_inputs.attention_inputs.is_target_verify,
-                              py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
-            hidden_states         = py_model_outputs.hidden_states.clone();
-        }
+            // Cast the Python object to PyModelOutputs and extract hidden states
+            const bool graph_can_run = enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_);
+            // Fail closed only for the fixed-role MTP sharing instances. NORMAL
+            // models intentionally retain their existing eager fallback, including
+            // draft-extend when its dedicated prefill graph is disabled.
+            const bool fixed_mtp_role = mtp_indexer_role_ != MtpIndexerRole::NORMAL;
+            const bool graph_required =
+                enable_cuda_graph_ && fixed_mtp_role
+                && (!py_model_inputs.attention_inputs.is_prefill || inputs.is_target_verify || inputs.is_draft_extend);
+            RTP_LLM_CHECK_WITH_INFO(
+                !graph_required || graph_can_run,
+                "CUDA graph is required for fixed-role MTP indexer sharing; eager fallback is disabled");
+            if (graph_can_run) {
+                RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
+                DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
+                RTP_LLM_LOG_DEBUG(
+                    "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
+                    py_model_inputs.attention_inputs.is_target_verify,
+                    py_model_inputs.attention_inputs.is_prefill,
+                    graph_state_.current_real_graph_bs);
+                py_model_inputs.attention_inputs.is_s_padded = true;
+                py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
+                RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
+                hidden_states = py_model_outputs.hidden_states.clone();
+            } else {
+                py::gil_scoped_acquire gil;
+                RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
+                DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
+                RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
+                                  py_model_inputs.attention_inputs.is_target_verify,
+                                  py_model_inputs.attention_inputs.is_prefill);
+                held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+                auto py_model_forward = py_model_.attr("forward");
+                auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
+                py_model_outputs      = outputs.cast<PyModelOutputs>();
+                hidden_states         = py_model_outputs.hidden_states.clone();
+            }
 
-        if (!inputs.warmup && inputs.pd_separation) {
-            cache_store_async_writer_->waitAllDone();
-        }
-
-        RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        // CP exit-gather + strip-padding must only run when there's an
-        // actual CP-split prefill stream present.  A pure-decode batch
-        // (num_prefill_stream == 0) sets empty padding_mask /
-        // restore_indices in handleInputs; handleOutputs would then
-        // index_select([], empty) -> hidden_states = [0, D], which makes
-        // downstream Sampler::forward fail with a narrow OOB.  Detect
-        // this by reusing the standard "has any context stream" test
-        // already used by callForwardPostLayers.
-        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        if (device_props_.enable_prefill_cp && has_context_request) {
-            // REBASE CONFLICT CONTEXT(3a29591e6): new base added the
-            // last-hidden-only CP gather fast path; source branch gathered the
-            // MTP pre-norm hidden buffer before normal CP output handling. Run
-            // the MTP buffer gather first, then keep the new base fast path.
-            torch::Tensor mtp_hidden_states;
-            if (hidden_states.defined() && hidden_states.dim() == 2 && hidden_states.size(0) > 0) {
-                mtp_hidden_states = getMtpTargetHiddenStates(hidden_states.size(0));
+            RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+            // CP exit-gather + strip-padding must only run when there's an
+            // actual CP-split prefill stream present.  A pure-decode batch
+            // (num_prefill_stream == 0) sets empty padding_mask /
+            // restore_indices in handleInputs; handleOutputs would then
+            // index_select([], empty) -> hidden_states = [0, D], which makes
+            // downstream Sampler::forward fail with a narrow OOB.  Detect
+            // this by reusing the standard "has any context stream" test
+            // already used by callForwardPostLayers.
+            const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+            if (device_props_.enable_prefill_cp && has_context_request) {
+                // REBASE CONFLICT CONTEXT(3a29591e6): new base added the
+                // last-hidden-only CP gather fast path; source branch gathered the
+                // MTP pre-norm hidden buffer before normal CP output handling. Run
+                // the MTP buffer gather first, then keep the new base fast path.
+                torch::Tensor mtp_hidden_states;
+                if (hidden_states.defined() && hidden_states.dim() == 2 && hidden_states.size(0) > 0) {
+                    mtp_hidden_states = getMtpTargetHiddenStates(hidden_states.size(0));
+                    if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
+                        RTP_LLM_CHECK_WITH_INFO(mtp_hidden_states.dim() == 2,
+                                                "CP MTP pre-norm hidden states must be 2-D, got dim=%ld",
+                                                mtp_hidden_states.dim());
+                        RTP_LLM_CHECK_WITH_INFO(
+                            mtp_hidden_states.size(0) == hidden_states.size(0),
+                            "CP MTP pre-norm hidden row count mismatch: mtp_rows=%ld, hidden_rows=%ld",
+                            mtp_hidden_states.size(0),
+                            hidden_states.size(0));
+                        context_parallel_processor_->handleOutputs(mtp_hidden_states, inputs, cp_params);
+                    }
+                }
+                // When no consumer needs the full sequence hidden, gather only the
+                // last-token rows lm_head needs instead of all-gathering+restoring the
+                // full [seq, hidden] (the 14 GiB block at the 1M-prefill OOM). The
+                // gather is a small [num_lm, hidden] all-reduce-sum; see
+                // ZigZagProcessor::handleOutputsLastHidden.
+                if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
+                    context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
+                    return forwardPostLayersLastHidden(hidden_states, inputs);
+                }
+                size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+                auto   outputs          = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
                 if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
-                    RTP_LLM_CHECK_WITH_INFO(mtp_hidden_states.dim() == 2,
-                                            "CP MTP pre-norm hidden states must be 2-D, got dim=%ld",
-                                            mtp_hidden_states.dim());
-                    RTP_LLM_CHECK_WITH_INFO(mtp_hidden_states.size(0) == hidden_states.size(0),
-                                            "CP MTP pre-norm hidden row count mismatch: mtp_rows=%ld, hidden_rows=%ld",
-                                            mtp_hidden_states.size(0),
-                                            hidden_states.size(0));
-                    context_parallel_processor_->handleOutputs(mtp_hidden_states, inputs, cp_params);
+                    if (outputs.all_hidden_states.defined()
+                        && outputs.all_hidden_states.size(0) == mtp_hidden_states.size(0)) {
+                        outputs.all_hidden_states = mtp_hidden_states;
+                    } else {
+                        RTP_LLM_LOG_WARNING("[PyWrappedModel] ignored restored CP MTP hidden due to output shape "
+                                            "mismatch: mtp_rows=%ld output_rows=%ld",
+                                            mtp_hidden_states.dim() > 0 ? mtp_hidden_states.size(0) : -1,
+                                            outputs.all_hidden_states.defined() && outputs.all_hidden_states.dim() > 0 ?
+                                                outputs.all_hidden_states.size(0) :
+                                                -1);
+                    }
                 }
+                return outputs;
             }
-            // When no consumer needs the full sequence hidden, gather only the
-            // last-token rows lm_head needs instead of all-gathering+restoring the
-            // full [seq, hidden] (the 14 GiB block at the 1M-prefill OOM). The
-            // gather is a small [num_lm, hidden] all-reduce-sum; see
-            // ZigZagProcessor::handleOutputsLastHidden.
-            if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
-                context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return forwardPostLayersLastHidden(hidden_states, inputs);
-            }
-            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            auto   outputs          = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
-            if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
-                if (outputs.all_hidden_states.defined()
-                    && outputs.all_hidden_states.size(0) == mtp_hidden_states.size(0)) {
-                    outputs.all_hidden_states = mtp_hidden_states;
-                } else {
-                    RTP_LLM_LOG_WARNING("[PyWrappedModel] ignored restored CP MTP hidden due to output shape "
-                                        "mismatch: mtp_rows=%ld output_rows=%ld",
-                                        mtp_hidden_states.dim() > 0 ? mtp_hidden_states.size(0) : -1,
-                                        outputs.all_hidden_states.defined() && outputs.all_hidden_states.dim() > 0 ?
-                                            outputs.all_hidden_states.size(0) :
-                                            -1);
-                }
-            }
-            return outputs;
+            return callForwardPostLayers(hidden_states, inputs, true);
+        };
+        if (!inputs.warmup && inputs.pd_separation) {
+            return cache_store_async_writer_->completeAfter(submit_forward_and_post);
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return submit_forward_and_post();
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

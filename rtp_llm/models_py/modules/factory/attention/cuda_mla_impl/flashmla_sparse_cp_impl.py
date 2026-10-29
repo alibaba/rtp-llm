@@ -638,11 +638,26 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             # at kernel granularity. With bpk > 1 the kernel-granularity
             # version would straddle physical block boundaries inconsistently
             # with what the C++ writer actually placed in each rank's cache.
-            local_lens = cp_padded_local_kv_lens(
-                per_req_total_kv_lens,
-                self.prefill_cp_size,
-                owner_tpb,
-            ).to(torch.int32)
+            # These are the same inputs passed to fill_cp_plan_params above.
+            # Rebuild per forward, never reuse target/draft lengths by shape.
+            host_actual = self.cp_info.prefill_actual_input_lengths_cpu
+            host_prefix = self.attn_inputs.prefix_lengths
+            if host_actual.device.type == "cpu" and host_prefix.device.type == "cpu":
+                plan_lengths = host_actual.to(torch.int64) + host_prefix.to(torch.int64)
+            else:
+                plan_lengths = None
+            cp_ctx = SimpleNamespace(
+                cp_size=self.prefill_cp_size, cp_rank=self.prefill_cp_rank
+            )
+            self.indexer_cp_plan = asm.build_indexer_cp_chunk_plan(
+                cp_ctx=cp_ctx,
+                per_req_total_kv_lens=per_req_total_kv_lens,
+                per_req_total_kv_lens_host=plan_lengths,
+                block_size=self.token_per_block,
+                device=block_table.device,
+                owner_block_size=owner_tpb,
+            )
+            local_lens = self.indexer_cp_plan.per_req_local_kv_lens.to(torch.int32)
             workspace_starts = torch.zeros(
                 int(local_lens.numel()), dtype=torch.int32, device=local_lens.device
             )
@@ -650,12 +665,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 workspace_starts[1:] = torch.cumsum(local_lens[:-1], dim=0).to(
                     torch.int32
                 )
-            restore_indices = build_kv_allgather_restore_indices(
-                per_req_total_kv_lens,
-                self.prefill_cp_size,
-                owner_tpb,
-                block_table.device,
-            )
+            restore_indices = self.indexer_cp_plan.restore_indices
             self.sharded_local_kv_lens = _copy_or_replace_graph_tensor(
                 self.sharded_local_kv_lens,
                 local_lens.contiguous(),
@@ -674,18 +684,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 "CP sparse MLA sharded_kv_restore_indices",
                 self.use_cuda_graph,
             )
-            self.sharded_total_local_kv_len = int(local_lens.sum().item())
+            self.sharded_total_local_kv_len = self.indexer_cp_plan.total_local_T
             # Actual owned local KV lens per request (= cp_actual_owned_kv_lens
             # at owner granularity). Used by _gather_sharded_kv_cache to drive
             # the gather kernel only across rows the compact kernel block_table
             # can actually resolve. Mirrors the indexer side's
             # per_req_actual_local_kv_lens in build_indexer_cp_chunk_plan.
-            actual_local_lens = cp_actual_owned_kv_lens(
-                per_req_total_kv_lens,
-                self.prefill_cp_size,
-                owner_tpb,
-                self.prefill_cp_rank,
-            ).to(torch.int32)
+            actual_local_lens = self.indexer_cp_plan.per_req_actual_local_kv_lens.to(
+                torch.int32
+            )
             actual_workspace_starts = torch.zeros(
                 int(actual_local_lens.numel()),
                 dtype=torch.int32,
@@ -707,16 +714,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 "CP sparse MLA sharded_actual_workspace_starts",
                 self.use_cuda_graph,
             )
-            self.sharded_actual_total_local_kv_len = int(actual_local_lens.sum().item())
-            cp_ctx = SimpleNamespace(
-                cp_size=self.prefill_cp_size, cp_rank=self.prefill_cp_rank
-            )
-            self.indexer_cp_plan = asm.build_indexer_cp_chunk_plan(
-                cp_ctx=cp_ctx,
-                per_req_total_kv_lens=per_req_total_kv_lens,
-                block_size=self.token_per_block,
-                device=block_table.device,
-                owner_block_size=owner_tpb,
+            self.sharded_actual_total_local_kv_len = (
+                self.indexer_cp_plan.total_actual_local_T
             )
             self.indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
                 self.indexer_cp_plan

@@ -110,7 +110,7 @@ torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
     torch_ext::PyContextParallelParams cp_params;
     cp_params.prefill_cp_output_indices = output_indices.contiguous().clone();
 
-    return processor.computeLocalLastHidden(hidden_chunk.contiguous().clone(), inputs, cp_params).cpu().clone();
+    return processor.computeLocalLastHidden(hidden_chunk, inputs, cp_params).cpu().clone();
 }
 
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {

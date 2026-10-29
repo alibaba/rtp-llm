@@ -334,6 +334,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
+        "//rtp_llm/cpp/utils:profiling_scope",
         "@havenask//aios/autil:lock_free",
     ],
     visibility = ["//visibility:public"],

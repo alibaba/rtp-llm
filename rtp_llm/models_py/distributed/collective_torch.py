@@ -381,11 +381,11 @@ def _register_process_groups_to_cpp():
     # The module-level functions have different signatures and semantics (e.g. all_gather
     # allocates a new tensor), so we implement the C++ contract directly here.
 
-    def _ensure_cuda(t: torch.Tensor, device_id: int):
+    def _ensure_cuda(t: torch.Tensor, device_id: int, non_blocking: bool = False):
         """Move CPU tensor to CUDA if needed (NCCL requires CUDA tensors)."""
         if t.is_cuda:
             return t, False
-        return t.to(torch.device("cuda", device_id)), True
+        return t.to(torch.device("cuda", device_id), non_blocking=non_blocking), True
 
     def cpp_broadcast(tensors: List[torch.Tensor], root: int, mode: int) -> None:
         """Broadcast tensors from root rank to all ranks in the group.
@@ -400,7 +400,13 @@ def _register_process_groups_to_cpp():
             return
         device_id = torch.cuda.current_device()
         for t in tensors:
-            gpu_t, was_cpu = _ensure_cuda(t, device_id)
+            # Limit async promotion to TP pinned metadata. The blocking copy
+            # back below retains the source until H2D/broadcast have completed,
+            # and CPU callers cannot observe unfinished received metadata.
+            async_upload = (
+                mode == _CPP_PARALLEL_MODE_TP and not t.is_cuda and t.is_pinned()
+            )
+            gpu_t, was_cpu = _ensure_cuda(t, device_id, non_blocking=async_upload)
             torch.distributed.broadcast(gpu_t, root, group=pg)
             if was_cpu:
                 t.copy_(gpu_t)
