@@ -60,6 +60,13 @@ def try_fp8_up_mix(x, weight, scale, normed, branches):
         return None
     output = x.new_empty((*x.shape[:-1], 2560))
     _fp8_hc_up_mix_kernel[(triton.cdiv(2560, 4) * rows.shape[0],)](
-        rows, weight, scale, normed, output, M=rows.shape[0], BN=4, num_warps=4
+        rows,
+        weight,
+        scale,
+        normed,
+        output,
+        M=rows.shape[0],
+        BN=4,
+        num_warps=1 if rows.shape[0] > 1 else 4,
     )
     return output

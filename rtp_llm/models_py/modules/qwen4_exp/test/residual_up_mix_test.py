@@ -24,7 +24,7 @@ class ResidualUpMixTest(unittest.TestCase):
 
     def test_bf16_logits_gate_product_and_branch_order(self):
         w = torch.randn(10240, 320, device="cuda").to(torch.float8_e4m3fn)
-        for rows in (1, 3, 4):
+        for rows in (1, 2, 3, 4):
             for gain in (0.03125, 0.25, 0.0):
                 x = torch.randn(rows, 320, device="cuda", dtype=torch.bfloat16)
                 normed = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
@@ -39,7 +39,7 @@ class ResidualUpMixTest(unittest.TestCase):
                     self.assertTrue(torch.equal(actual, expected))
 
     def test_complete_hyperconnection(self):
-        for rows in (1, 3, 4):
+        for rows in (1, 2, 3, 4):
             for inject in (False, True):
                 module = residual_norm_fp8_test.ResidualNormFp8Test().module(inject)
                 module.down_projection.role = module.up_projection.role = "DECODE"
