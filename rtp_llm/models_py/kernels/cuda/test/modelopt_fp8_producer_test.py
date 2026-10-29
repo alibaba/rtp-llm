@@ -1,9 +1,11 @@
 """Producer fusion must preserve the original BF16-to-FP8 rounding boundary."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.models_py.kernels.cuda import modelopt_fp8_quant as quant
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.modelopt_fp8_linear import (
     CudaModelOptFp8Linear,
@@ -117,6 +119,60 @@ class ModelOptFp8ProducerTest(unittest.TestCase):
         scales[1, 2560:] = 0.0625
         layer = CudaModelOptFp8Linear(weight, scales)
         self.assertIsNone(layer.forward_with_gate(x, z))
+
+    def test_prequantized_projection_and_scale_eligibility(self):
+        weight = (torch.randn(512, 5120, device="cuda") * 0.1).to(torch.float8_e4m3fn)
+        scales = torch.stack(
+            (
+                torch.linspace(0.01, 0.03, 512, device="cuda"),
+                torch.full((512,), 0.11216518, device="cuda"),
+            )
+        )
+        layer = CudaModelOptFp8Linear(
+            weight, scales, bias=torch.randn(512, device="cuda", dtype=torch.bfloat16)
+        )
+        self.assertIsNotNone(layer.input_scale_for_fusion())
+        for m in [1, 5, 10, 20, 40]:
+            x = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)
+            q = quant.static_fp8_quant_rows(x, layer.input_scale_for_fusion())
+            torch.testing.assert_close(
+                layer.forward_with_prequantized(x, q), layer(x), rtol=0, atol=0
+            )
+        scales[1, 256:] = 0.0625
+        layer = CudaModelOptFp8Linear(weight, scales)
+        self.assertIsNone(layer.input_scale_for_fusion())
+        self.assertIsNone(layer.forward_with_prequantized(x, q))
+
+    def test_gated_projection_trims_backend_padding_before_bias(self):
+        weight = torch.zeros(512, 3072, device="cuda", dtype=torch.float8_e4m3fn)
+        scales = torch.full((2, 512), 0.03125, device="cuda")
+        bias = torch.randn(512, device="cuda", dtype=torch.bfloat16)
+        layer = CudaModelOptFp8Linear(weight, scales, bias=bias)
+        x = torch.randn(3, 3072, device="cuda", dtype=torch.bfloat16)
+        padded = torch.randn(8, 512, device="cuda", dtype=torch.bfloat16)
+        for output in (padded, (padded, None)):
+            with patch.object(layer, "_scaled_projection", return_value=output):
+                actual = layer.forward_with_gate(x, x)
+                self.assertEqual(actual.shape, (3, 512))
+                torch.testing.assert_close(actual, padded[:3] + bias, rtol=0, atol=0)
+
+    def test_ar_norm_fallback_preserves_inputs(self):
+        x = torch.randn(5, 5120, device="cuda", dtype=torch.bfloat16)
+        r = torch.randn_like(x)
+        w = torch.ones(5120, device="cuda", dtype=torch.bfloat16)
+        s = torch.ones(1, device="cuda")
+        proxy = SimpleNamespace(is_supported=lambda tensor: True)
+        before_x, before_r = x.clone(), r.clone()
+        self.assertIsNone(quant.residual_norm_fp8_quant(x, r, w, s, 1e-6))
+        self.assertIsNone(quant.residual_norm_fp8_quant(x, r, w, None, 1e-6, proxy))
+        self.assertIsNone(quant.residual_norm_fp8_quant(x, x, w, s, 1e-6, proxy))
+        self.assertIsNone(
+            quant.residual_norm_fp8_quant(x.float(), r, w, s, 1e-6, proxy)
+        )
+        with patch.object(quant, "_FUSED_PRODUCER_ENABLED", False):
+            self.assertIsNone(quant.residual_norm_fp8_quant(x, r, w, s, 1e-6, proxy))
+        self.assertTrue(torch.equal(x, before_x))
+        self.assertTrue(torch.equal(r, before_r))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Static FP8 projections with the checkpoint's per-projection scales intact."""
 
 import torch
+
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
 from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import (
     gated_fp8_quant_rows,
@@ -102,6 +103,38 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
                 output = output[0]
             outputs.append(output[: x.shape[0]])
         output = outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=-1)
+        if self.bias is not None:
+            output = output + self.bias
+        return output
+
+    def input_scale_for_fusion(self):
+        if len(self.parts) != 1 or self.parts[0][0].shape[0] != 5120:
+            return None
+        return self.parts[0][2]
+
+    def forward_with_prequantized(self, input, quantized):
+        qinput, scale_a = quantized
+        if (
+            len(self.parts) != 1
+            or input.ndim != 2
+            or input.dtype != torch.bfloat16
+            or qinput.shape != input.shape
+            or qinput.device != input.device
+            or qinput.dtype != torch.float8_e4m3fn
+            or not qinput.is_contiguous()
+            or scale_a.shape != (input.shape[0], 1)
+            or scale_a.dtype != torch.float32
+            or scale_a.device != input.device
+            or not scale_a.is_contiguous()
+        ):
+            return None
+        weight, scale, _ = self.parts[0]
+        output = torch._scaled_mm(
+            qinput, weight, scale_a=scale_a, scale_b=scale, out_dtype=input.dtype
+        )
+        if isinstance(output, tuple):
+            output = output[0]
+        output = output[: input.shape[0]]
         if self.bias is not None:
             output = output + self.bias
         return output

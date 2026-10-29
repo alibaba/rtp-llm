@@ -106,14 +106,16 @@ class DenseMLP(nn.Module):
                     "W4A16 FFN unavailable, falling back to the default path"
                 )
 
-    def forward_with_residual_norm(self, x, residual, norm, communicator=None):
+    def forward_with_residual_norm(
+        self, x, residual, norm, communicator=None, *, skip_allreduce=False
+    ):
         if self.w4a16 is not None or not self.is_gated:
             return None
         project = getattr(self.up_proj, "forward_with_residual_norm", None)
         up = project(x, residual, norm, communicator) if project is not None else None
         if up is None:
             return None
-        return self.forward(x, projected_up=up), residual
+        return self.forward(x, skip_allreduce=skip_allreduce, projected_up=up), residual
 
     def forward(
         self, x: torch.Tensor, skip_allreduce: bool = False, *, projected_up=None

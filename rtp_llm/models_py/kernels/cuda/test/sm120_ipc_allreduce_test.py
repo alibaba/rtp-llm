@@ -86,6 +86,69 @@ def _check_fused_norm(comm, rank, cycle):
     return rows
 
 
+def _check_fused_fp8_norm(comm, rank, cycle):
+    from rtp_llm.models_py.kernels.cuda import modelopt_fp8_quant as quant
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
+    from rtp_llm.models_py.modules.base import RMSResNorm
+
+    torch.manual_seed(1548)
+    gamma = (torch.randn(5120, device="cuda") * 0.1 + 1).bfloat16()
+    if cycle:
+        gamma.mul_(100)
+    norm = RMSResNorm(gamma)
+    rows = []
+    with patch.object(quant, "_FUSED_PRODUCER_ENABLED", True):
+        for m in [1, 5, 10, 17, 20, 40, 71, 257, 512]:
+            torch.manual_seed(1548 + rank + m)
+            partials = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)
+            residual = torch.randn_like(partials)
+            if cycle and m == 5:
+                partials.zero_()
+                residual.mul_(1e-20)
+            x, r = partials.clone(), residual.clone()
+            scale = torch.tensor([32.0 if m > 1 else 1e-10], device="cuda")
+
+            def reference():
+                ex, er = partials.clone(), residual.clone()
+                dist.all_reduce(ex)
+                norm(ex, er)
+                eq, es = scaled_fp8_per_tensor_quant(ex, scale)
+                return ex, er, eq, es.reshape(1, 1).expand(m, 1).contiguous()
+
+            def call():
+                x.copy_(partials)
+                r.copy_(residual)
+                return quant.residual_norm_fp8_quant(x, r, gamma, scale, 1e-6, comm)
+
+            def check(actual, expected):
+                ex, er, eq, es = expected
+                aq, ass = actual
+                assert torch.equal(x.view(torch.uint16), ex.view(torch.uint16))
+                assert torch.equal(r.view(torch.uint16), er.view(torch.uint16))
+                assert torch.equal(aq.view(torch.uint8), eq.view(torch.uint8))
+                assert torch.equal(ass.view(torch.int32), es.view(torch.int32))
+
+            expected = reference()
+            check(call(), expected)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = call()
+            for _ in range(10):
+                graph.replay()
+            torch.cuda.synchronize()
+            check(actual, expected)
+            partials.normal_()
+            residual.normal_()
+            scale.fill_(0.03125)
+            expected = reference()
+            graph.replay()
+            torch.cuda.synchronize()
+            check(actual, expected)
+            graph.reset()
+            rows.append(dict(cycle=cycle, m=m, bit_exact=True, graph_update=True))
+    return rows
+
+
 def _worker(rank, port, result_directory):
     torch.cuda.set_device(rank)
     dist.init_process_group(
@@ -105,6 +168,7 @@ def _worker(rank, port, result_directory):
     ct._initialized = True
     rows = []
     fused_norm_rows = []
+    fused_fp8_norm_rows = []
     try:
         for cycle in range(2):
             comm = ipc.Sm120IpcAllReduce(dist.group.WORLD)
@@ -145,6 +209,7 @@ def _worker(rank, port, result_directory):
                     }
                 )
             fused_norm_rows.extend(_check_fused_norm(comm, rank, cycle))
+            fused_fp8_norm_rows.extend(_check_fused_fp8_norm(comm, rank, cycle))
             # Every finite BF16 bit pattern participates in TP2 sums, including subnormals.
             bits = (
                 torch.arange(65536, device="cuda", dtype=torch.int32)
@@ -175,6 +240,7 @@ def _worker(rank, port, result_directory):
             "lifecycle_cycles": 2,
             "fallbacks": True,
             "fused_norm_rows": fused_norm_rows,
+            "fused_fp8_norm_rows": fused_fp8_norm_rows,
         }
     except Exception as error:
         traceback.print_exc()
@@ -239,6 +305,7 @@ class Sm120IpcAllReduceTest(unittest.TestCase):
                     self.assertTrue(result["passed"], result)
                     self.assertEqual(len(result["rows"]), 24)
                     self.assertEqual(len(result["fused_norm_rows"]), 14)
+                    self.assertEqual(len(result["fused_fp8_norm_rows"]), 18)
             finally:
                 for process in processes:
                     if process.is_alive():

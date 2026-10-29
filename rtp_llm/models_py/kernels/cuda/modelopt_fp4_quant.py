@@ -1,6 +1,7 @@
 """Fuse dense SwiGLU and TP2 residual norm producers into NVFP4 quantization."""
 
 import functools
+import hashlib
 import os
 from pathlib import Path
 
@@ -20,9 +21,14 @@ _FUSED_PRODUCER_ENABLED = os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
 def _norm_module():
     from flashinfer.jit import env, gen_jit_spec
 
+    source = Path(__file__).with_name("modelopt_norm_fp4_quant.cu").resolve()
+    # FlashInfer retains Ninja files across temporary runfiles and redeploys.
+    source_id = hashlib.sha256(
+        str(source).encode() + b"\0" + source.read_bytes()
+    ).hexdigest()[:16]
     return gen_jit_spec(
-        "rtp_modelopt_ar_norm_fp4_v1",
-        [Path(__file__).with_name("modelopt_norm_fp4_quant.cu")],
+        f"rtp_modelopt_ar_norm_quant_v2_{source_id}",
+        [source],
         extra_include_paths=[
             str(env.FLASHINFER_CSRC_DIR),
             str(env.FLASHINFER_CSRC_DIR / "nv_internal"),
@@ -40,16 +46,16 @@ def _norm_module():
     ).build_and_load()
 
 
-def residual_norm_fp4_quant(input, residual, weight, scale, eps, communicator=None):
-    """Sum TP2 partials, update BF16 norm/residual and return packed NVFP4."""
+def _residual_norm_supported(input, residual, weight, scale, communicator):
     if (
-        not _FUSED_PRODUCER_ENABLED
-        or communicator is None
+        communicator is None
+        or weight is None
+        or scale is None
         or not input.is_cuda
         or input.ndim != 2
         or input.dtype != torch.bfloat16
         or input.shape[1] != 5120
-        or not (input.shape[0] == 5 or 17 <= input.shape[0] <= 512)
+        or not 0 < input.shape[0] <= 512
         or not input.is_contiguous()
         or input.requires_grad
         or get_sm(input.device) != (12, 0)
@@ -67,11 +73,22 @@ def residual_norm_fp4_quant(input, residual, weight, scale, eps, communicator=No
         or not scale.is_contiguous()
         or not communicator.is_supported(input)
     ):
-        return None
+        return False
     size_bytes = input.numel() * input.element_size()
     if (
         input.data_ptr() < residual.data_ptr() + size_bytes
         and residual.data_ptr() < input.data_ptr() + size_bytes
+    ):
+        return False
+    return True
+
+
+def residual_norm_fp4_quant(input, residual, weight, scale, eps, communicator=None):
+    """Sum TP2 partials, update BF16 norm/residual and return packed NVFP4."""
+    if (
+        not _FUSED_PRODUCER_ENABLED
+        or not _residual_norm_supported(input, residual, weight, scale, communicator)
+        or not (input.shape[0] == 5 or 17 <= input.shape[0] <= 512)
     ):
         return None
     m = input.shape[0]

@@ -840,11 +840,19 @@ class Qwen3NextAttention(CausalAttention):
         return fused_weight, None
 
     def _project_qkv_gate(
-        self, hidden_states: torch.Tensor
+        self, hidden_states: torch.Tensor, quantized_input=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        projected = None
+        if quantized_input is not None:
+            consume = getattr(self.qkv_proj, "forward_with_prequantized", None)
+            if consume is not None:
+                projected = consume(hidden_states, quantized_input)
         if not self._qkv_gate_fused:
-            return self.qkv_proj(hidden_states), self.gate(hidden_states)
-        fused = self.qkv_proj(hidden_states)
+            return (
+                self.qkv_proj(hidden_states) if projected is None else projected,
+                self.gate(hidden_states),
+            )
+        fused = self.qkv_proj(hidden_states) if projected is None else projected
         qkv, gate = torch.split(fused, [self._qkv_size, self._gate_size], dim=-1)
         # FusedRopeKVCache*Op needs packed rows: it writes RoPE'd Q back via data_ptr().
         return qkv.contiguous(), gate
@@ -857,8 +865,9 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
         skip_allreduce: bool = False,
+        quantized_input=None,
     ) -> torch.Tensor:
-        qkv, gate = self._project_qkv_gate(hidden_states)
+        qkv, gate = self._project_qkv_gate(hidden_states, quantized_input)
         return super().forward(
             hidden_states,
             fmha_impl,
@@ -995,7 +1004,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         )
 
     def _input_project(
-        self, hidden_states: torch.Tensor
+        self, hidden_states: torch.Tensor, quantized_input=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the input projection and return (projected_qkvz, projected_ba).
 
@@ -1006,6 +1015,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         if self._qkvz_ba_fused:
             fused = self.in_proj_fused(hidden_states)
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
+        if quantized_input is not None:
+            consume = getattr(self.in_proj_qkvz, "forward_with_prequantized", None)
+            projected = (
+                consume(hidden_states, quantized_input) if consume is not None else None
+            )
+            if projected is not None:
+                return projected, self.in_proj_ba(hidden_states)
         return self.in_proj_qkvz(hidden_states), self.in_proj_ba(hidden_states)
 
     # mixed_qkvz, mixed_ba -> q, k, v, z, b, a
@@ -1226,6 +1242,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata,
         skip_allreduce: bool = False,
+        quantized_input=None,
     ) -> torch.Tensor:
         assert attention_inputs is not None, "attention_inputs is required"
         assert (
@@ -1263,7 +1280,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             b = a = None
         else:
             projected_states_qkvz, projected_states_ba = self._input_project(
-                hidden_states
+                hidden_states, quantized_input
             )
             mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
                 projected_states_qkvz, projected_states_ba
@@ -1386,10 +1403,20 @@ class Qwen3NextDecoderLayer(nn.Module):
             and config.moe_style == 0
             and self.mlp.is_gated
             and parallelism_config.get_attn_tp_size() == 2
+            and parallelism_config.get_ffn_tp_size() == 2
             and getattr(self.mlp.up_proj, "forward_with_residual_norm", None)
             is not None
             and (self.mlp.up_proj.hidden_size, self.mlp.up_proj.output_size)
             == (5120, 17408)
+        )
+        input_projection = (
+            getattr(self.self_attn, "in_proj_qkvz", None)
+            if self.layer_type == HybridAttentionType.LINEAR
+            else self.self_attn.qkv_proj
+        )
+        scale_for_fusion = getattr(input_projection, "input_scale_for_fusion", None)
+        self._fused_input_scale = (
+            scale_for_fusion() if scale_for_fusion is not None else None
         )
 
     def forward(
@@ -1400,8 +1427,28 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        *,
+        input_allreduce_pending: bool = False,
+        defer_ffn_allreduce: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        quantized_input = None
+        if input_allreduce_pending:
+            from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import (
+                residual_norm_fp8_quant,
+            )
+
+            quantized_input = residual_norm_fp8_quant(
+                hidden_states,
+                residual,
+                self.input_layernorm.weight,
+                self._fused_input_scale,
+                self.input_layernorm.variance_epsilon,
+                get_communicator(),
+            )
+            if quantized_input is None:
+                hidden_states = all_reduce(hidden_states, group=Group.TP)
+        if quantized_input is None:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         communicator = get_communicator() if self._fused_ar_norm else None
         defer_allreduce = (
@@ -1417,12 +1464,17 @@ class Qwen3NextDecoderLayer(nn.Module):
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
             skip_allreduce=defer_allreduce,
+            quantized_input=quantized_input,
         )
 
         fused_mlp = getattr(self.mlp, "forward_with_residual_norm", None)
         fused = (
             fused_mlp(
-                hidden_states, residual, self.post_attention_layernorm, communicator
+                hidden_states,
+                residual,
+                self.post_attention_layernorm,
+                communicator,
+                skip_allreduce=defer_ffn_allreduce,
             )
             if defer_allreduce and fused_mlp is not None
             else None
@@ -1433,7 +1485,11 @@ class Qwen3NextDecoderLayer(nn.Module):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-            hidden_states = self.mlp(hidden_states)
+            hidden_states = (
+                self.mlp(hidden_states, skip_allreduce=True)
+                if defer_ffn_allreduce
+                else self.mlp(hidden_states)
+            )
         else:
             hidden_states, residual = fused
 
@@ -1613,6 +1669,14 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        communicator = get_communicator()
+        fuse_input_reduction = (
+            not is_cp
+            and communicator is not None
+            and communicator.is_supported(hidden_states)
+            and 0 < hidden_states.shape[0] <= 512
+        )
+        input_allreduce_pending = False
 
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
@@ -1623,6 +1687,13 @@ class Qwen3NextModel(GptModelBase):
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
                 else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             )
+            # A partial FFN output is consumed only by the immediately next layer.
+            defer_ffn_allreduce = (
+                fuse_input_reduction
+                and decoder_layer._fused_ar_norm
+                and i + 1 < len(self.layers)
+                and self.layers[i + 1]._fused_input_scale is not None
+            )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
@@ -1630,7 +1701,10 @@ class Qwen3NextModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
+                input_allreduce_pending=input_allreduce_pending,
+                defer_ffn_allreduce=defer_ffn_allreduce,
             )
+            input_allreduce_pending = defer_ffn_allreduce
 
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)

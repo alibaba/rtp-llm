@@ -21,7 +21,8 @@ using namespace flashinfer;
 namespace ar = flashinfer::trtllm_allreduce_fusion;
 using Params = ar::AllReduceFusionParams<nv_bfloat16>;
 
-__global__ __launch_bounds__(640) void sm120_ar_norm_fp4(Params params) {
+template<bool Fp8>
+__global__ __launch_bounds__(640) void sm120_ar_norm_quant(Params params) {
     constexpr int width = 5120;
     cudaGridDependencySynchronize();
     ar::IndexHelper<nv_bfloat16> index(params);
@@ -93,31 +94,44 @@ __global__ __launch_bounds__(640) void sm120_ar_norm_fp4(Params params) {
             rounded[j] = nv_bfloat16(added[j] * rms * (0.f + float(gamma[j])));
         }
         rounded.store(static_cast<nv_bfloat16*>(params.norm_out) + idx * 8);
-        tensorrt_llm::kernels::PackedVec<nv_bfloat16, 8> packed;
+        if constexpr (Fp8) {
+            vec_t<float, 8> values;
+            const float     reciprocal = __fdiv_rn(1.f, global_scale < 1.e-9f ? 1.e-9f : global_scale);
 #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            packed.elts[j] = __halves2bfloat162(rounded[j * 2], rounded[j * 2 + 1]);
+            for (int j = 0; j < 8; ++j) {
+                values[j] = fmaxf(-448.f, fminf(float(rounded[j]) * reciprocal, 448.f));
+            }
+            values.cast_store(static_cast<__nv_fp8_e4m3*>(params.quant_out) + idx * 8);
+            if (threadIdx.x == 0)
+                static_cast<float*>(params.scale_out)[token] = global_scale;
+        } else {
+            tensorrt_llm::kernels::PackedVec<nv_bfloat16, 8> packed;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                packed.elts[j] = __halves2bfloat162(rounded[j * 2], rounded[j * 2 + 1]);
+            }
+            auto sf = tensorrt_llm::kernels::cvt_quant_to_fp4_get_sf_out_offset<uint32_t, 16, 2>(
+                token, index.access_id_in_token, width, static_cast<uint32_t*>(params.scale_out));
+            static_cast<uint32_t*>(params.quant_out)[idx] =
+                tensorrt_llm::kernels::cvt_warp_fp16_to_fp4<nv_bfloat16, 16, 8, false>(packed, global_scale, sf);
         }
-        auto sf = tensorrt_llm::kernels::cvt_quant_to_fp4_get_sf_out_offset<uint32_t, 16, 2>(
-            token, index.access_id_in_token, width, static_cast<uint32_t*>(params.scale_out));
-        static_cast<uint32_t*>(params.quant_out)[idx] =
-            tensorrt_llm::kernels::cvt_warp_fp16_to_fp4<nv_bfloat16, 16, 8, false>(packed, global_scale, sf);
         __syncthreads();
     }
     comm.update(params.size * 2);
     cudaTriggerProgrammaticLaunchCompletion();
 }
 
-void ar_norm_fp4(TensorView x,
-                 TensorView r,
-                 TensorView gamma,
-                 TensorView scale,
-                 TensorView q,
-                 TensorView sf,
-                 TensorView norm,
-                 TensorView workspace,
-                 int64_t    rank,
-                 double     eps) {
+template<bool Fp8>
+void ar_norm_quant(TensorView x,
+                   TensorView r,
+                   TensorView gamma,
+                   TensorView scale,
+                   TensorView q,
+                   TensorView sf,
+                   TensorView norm,
+                   TensorView workspace,
+                   int64_t    rank,
+                   double     eps) {
     ffi::CUDADeviceGuard guard(x.device().device_id);
     TVM_FFI_ICHECK_EQ(x.ndim(), 2);
     TVM_FFI_ICHECK_EQ(x.size(1), 5120);
@@ -137,10 +151,16 @@ void ar_norm_fp4(TensorView x,
     TVM_FFI_ICHECK_EQ(scale.dtype().bits, 32);
     TVM_FFI_ICHECK_EQ(q.dtype().code, kDLUInt);
     TVM_FFI_ICHECK_EQ(q.dtype().bits, 8);
-    TVM_FFI_ICHECK_EQ(sf.dtype().code, kDLUInt);
-    TVM_FFI_ICHECK_EQ(sf.dtype().bits, 8);
-    TVM_FFI_ICHECK_EQ(q.numel(), x.size(0) * 2560);
-    TVM_FFI_ICHECK_GE(sf.numel(), (x.size(0) + 127) / 128 * 128 * 320);
+    TVM_FFI_ICHECK_EQ(q.numel(), x.size(0) * (Fp8 ? 5120 : 2560));
+    if constexpr (Fp8) {
+        TVM_FFI_ICHECK_EQ(sf.dtype().code, kDLFloat);
+        TVM_FFI_ICHECK_EQ(sf.dtype().bits, 32);
+        TVM_FFI_ICHECK_EQ(sf.numel(), x.size(0));
+    } else {
+        TVM_FFI_ICHECK_EQ(sf.dtype().code, kDLUInt);
+        TVM_FFI_ICHECK_EQ(sf.dtype().bits, 8);
+        TVM_FFI_ICHECK_GE(sf.numel(), (x.size(0) + 127) / 128 * 128 * 320);
+    }
     TVM_FFI_ICHECK_EQ(workspace.numel(), 7);
     TVM_FFI_ICHECK_EQ(workspace.dtype().code, kDLInt);
     TVM_FFI_ICHECK_EQ(workspace.dtype().bits, 64);
@@ -180,8 +200,35 @@ void ar_norm_fp4(TensorView x,
     attrs[1].val.clusterDim                             = {1, 1, 1};
     config.attrs                                        = attrs;
     config.numAttrs                                     = 2;
-    TVM_FFI_ICHECK_EQ(cudaLaunchKernelEx(&config, sm120_ar_norm_fp4, params), cudaSuccess);
+    TVM_FFI_ICHECK_EQ(cudaLaunchKernelEx(&config, sm120_ar_norm_quant<Fp8>, params), cudaSuccess);
     TVM_FFI_ICHECK_EQ(cudaGetLastError(), cudaSuccess);
+}
+
+void ar_norm_fp4(TensorView x,
+                 TensorView r,
+                 TensorView gamma,
+                 TensorView scale,
+                 TensorView q,
+                 TensorView sf,
+                 TensorView norm,
+                 TensorView workspace,
+                 int64_t    rank,
+                 double     eps) {
+    ar_norm_quant<false>(x, r, gamma, scale, q, sf, norm, workspace, rank, eps);
+}
+
+void ar_norm_fp8(TensorView x,
+                 TensorView r,
+                 TensorView gamma,
+                 TensorView scale,
+                 TensorView q,
+                 TensorView sf,
+                 TensorView norm,
+                 TensorView workspace,
+                 int64_t    rank,
+                 double     eps) {
+    ar_norm_quant<true>(x, r, gamma, scale, q, sf, norm, workspace, rank, eps);
 }
 }  // namespace rtp_llm
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(run, rtp_llm::ar_norm_fp4);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(run_fp8, rtp_llm::ar_norm_fp8);

@@ -5,6 +5,7 @@ import os
 import torch
 import triton as tr
 import triton.language as tl
+
 from rtp_llm.models_py.utils.arch import get_sm
 
 # This fast path is bounded by the shapes/architecture validated against the
@@ -13,6 +14,34 @@ _VALIDATED_WIDTHS = frozenset((3072, 5120, 6144))
 _VALIDATED_SM = (12, 0)
 _FUSED_QUANT_ENABLED = os.getenv("RTP_LLM_MODELOPT_FP8_FUSED_QUANT", "1") == "1"
 _FUSED_PRODUCER_ENABLED = os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+
+
+def residual_norm_fp8_quant(input, residual, weight, scale, eps, communicator=None):
+    """Consume TP2 partials and preserve the BF16 norm before static FP8 quant."""
+    if not _FUSED_PRODUCER_ENABLED:
+        return None
+    from rtp_llm.models_py.kernels.cuda.modelopt_fp4_quant import (
+        _norm_module,
+        _residual_norm_supported,
+    )
+
+    if not _residual_norm_supported(input, residual, weight, scale, communicator):
+        return None
+    q = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    rows = torch.empty((input.shape[0], 1), device=input.device, dtype=torch.float32)
+    _norm_module().run_fp8(
+        input,
+        residual,
+        weight,
+        scale,
+        q.view(torch.uint8),
+        rows,
+        input,
+        communicator.trt_pointers,
+        communicator.rank,
+        eps,
+    )
+    return q, rows
 
 
 @tr.jit
