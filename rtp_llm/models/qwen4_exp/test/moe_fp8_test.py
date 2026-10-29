@@ -96,6 +96,42 @@ class Qwen4MoeFp8Test(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_moe_fp8_manifest(config, self.keys)
 
+    def test_accepts_ignored_layers_exclusion_dialect(self):
+        # ModelOpt-style exports record the same non-expert exclusion list as
+        # "ignored_layers" and omit "modules_to_not_convert" entirely.
+        config = copy.deepcopy(self.config)
+        quant = config["quantization_config"]
+        quant["ignored_layers"] = quant.pop("modules_to_not_convert")
+        validate_moe_fp8_manifest(config, self.keys)
+
+    def test_ignored_layers_fallback_used_when_official_list_empty(self):
+        config = copy.deepcopy(self.config)
+        quant = config["quantization_config"]
+        quant["ignored_layers"] = quant["modules_to_not_convert"]
+        quant["modules_to_not_convert"] = []
+        validate_moe_fp8_manifest(config, self.keys)
+
+    def test_official_exclusions_take_precedence_over_ignored_layers(self):
+        # A non-empty official list validates on its own even when the alias
+        # dialect key is present but empty.
+        config = copy.deepcopy(self.config)
+        config["quantization_config"]["ignored_layers"] = []
+        validate_moe_fp8_manifest(config, self.keys)
+
+    def test_rejects_missing_exclusions_in_both_dialects(self):
+        for change in (
+            {},
+            {"ignored_layers": []},
+        ):
+            with self.subTest(change=change):
+                config = copy.deepcopy(self.config)
+                del config["quantization_config"]["modules_to_not_convert"]
+                config["quantization_config"].update(change)
+                with self.assertRaisesRegex(
+                    ValueError, "explicit non-expert exclusions"
+                ):
+                    validate_moe_fp8_manifest(config, self.keys)
+
     def _checkpoint_tensors(self, scale_dtype=torch.bfloat16):
         tensors = {}
         for name in self.keys:

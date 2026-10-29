@@ -29,7 +29,13 @@ def validate_moe_fp8_manifest(config_json: dict, weight_map: Mapping) -> None:
         or quant.get("act_per_tensor", False)
     ):
         raise ValueError("Qwen4 expert FP8 requires dynamic 128x128 block quantization")
-    if not quant.get("modules_to_not_convert"):
+    # Some FP8 quantizers (e.g. ModelOpt-style internal SFT exports) record the
+    # non-expert exclusion list as "ignored_layers" instead of the official
+    # "modules_to_not_convert"; both name the same BF16 keep-out set. Accept
+    # the alias as a fallback so checkpoints exported by that dialect validate
+    # the same contract. The official key wins when both are present.
+    exclusions = quant.get("modules_to_not_convert") or quant.get("ignored_layers")
+    if not exclusions:
         raise ValueError("Qwen4 expert FP8 requires explicit non-expert exclusions")
     keys = set(weight_map)
     experts = {key for key in keys if _EXPERT_WEIGHT.fullmatch(key)}
