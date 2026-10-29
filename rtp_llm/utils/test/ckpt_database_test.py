@@ -1,7 +1,10 @@
+import json
 import os
+import sys
 import tempfile
+import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from safetensors.torch import save_file
@@ -304,9 +307,11 @@ class PageCacheShedTest(unittest.TestCase):
     def test_threshold_triggers_shed_and_close_sheds_finally(self):
         with tempfile.TemporaryDirectory() as tmp:
             info = ckpt_file_info.CkptFileInfo(file_name=self._write_shard(tmp))
-            with patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", True), patch.object(
-                ckpt_file_info, "_DROP_PAGE_CACHE_THRESHOLD", 1024
-            ), patch.object(info, "_drop_page_cache") as drop:
+            with (
+                patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", True),
+                patch.object(ckpt_file_info, "_DROP_PAGE_CACHE_THRESHOLD", 1024),
+                patch.object(info, "_drop_page_cache") as drop,
+            ):
                 info.load_tensor("w", torch.float32)  # 4KiB > 1KiB threshold
                 self.assertEqual(drop.call_count, 1)
                 info.load_tensor_slice("w", (slice(None),), torch.float32)
@@ -317,9 +322,10 @@ class PageCacheShedTest(unittest.TestCase):
     def test_killswitch_disables_shedding(self):
         with tempfile.TemporaryDirectory() as tmp:
             info = ckpt_file_info.CkptFileInfo(file_name=self._write_shard(tmp))
-            with patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", False), patch.object(
-                info, "_drop_page_cache"
-            ) as drop:
+            with (
+                patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", False),
+                patch.object(info, "_drop_page_cache") as drop,
+            ):
                 info.load_tensor("w", torch.float32)
                 info.load_tensor_slice("w", (slice(None),), torch.float32)
                 info.close_safetensor_handle()
@@ -330,14 +336,212 @@ class PageCacheShedTest(unittest.TestCase):
             self.skipTest("posix_fadvise unavailable on this platform")
         with tempfile.TemporaryDirectory() as tmp:
             info = ckpt_file_info.CkptFileInfo(file_name=self._write_shard(tmp))
-            with patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", True), patch.object(
-                os, "posix_fadvise", side_effect=OSError("EINVAL")
-            ) as fadvise:
+            with (
+                patch.object(ckpt_file_info, "_DROP_PAGE_CACHE", True),
+                patch.object(
+                    os, "posix_fadvise", side_effect=OSError("EINVAL")
+                ) as fadvise,
+            ):
                 info._note_bytes_read(ckpt_file_info._DROP_PAGE_CACHE_THRESHOLD)
                 self.assertTrue(info._fadvise_broken)
                 # Broken stays quiet: no retry, no raise.
                 info._note_bytes_read(ckpt_file_info._DROP_PAGE_CACHE_THRESHOLD)
                 self.assertEqual(fadvise.call_count, 1)
+
+
+class FastSafeTensorsIteratorTest(unittest.TestCase):
+    def setUp(self):
+        self.database = CkptDatabase(None)
+        self.database.pretrain_file_list = [
+            types.SimpleNamespace(
+                file_name=name,
+                get_tensor_names=lambda: ["weight", "expert", "remote", "unused"],
+            )
+            for name in ("b.safetensors", "a.safetensors")
+        ]
+        self.loader = Mock()
+        self.tensor = torch.ones(2)
+        self.loader.iterate_weights.side_effect = lambda: iter(
+            [("weight", self.tensor)]
+        )
+        self.module = types.ModuleType("fastsafetensors")
+        self.module.AutoLoader = Mock(return_value=self.loader)
+        self.module.SingleGroup = Mock(return_value=Mock(rank=Mock(return_value=2)))
+        for patcher in (
+            patch.dict(sys.modules, {"fastsafetensors": self.module}),
+            patch("torch.distributed.is_initialized", return_value=False),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_bounded_broadcast_defaults_are_available_at_loader_construction(self):
+        def construct_loader(*args, **kwargs):
+            self.assertEqual(
+                json.loads(os.environ["FASTSAFETENSORS_CONFIG_JSON"]),
+                {
+                    "max_broadcast_bucket_bytes": 64 * 1024 * 1024,
+                    "max_broadcast_tensor_bytes": 32 * 1024 * 1024,
+                },
+            )
+            return self.loader
+
+        self.module.AutoLoader.side_effect = construct_loader
+        with patch("os.path.isfile", return_value=False):
+            list(self.database.fastsafetensors_weights_iterator("cpu", False))
+
+    def test_explicit_loader_configuration_is_not_overridden(self):
+        for config_env in (
+            {"FASTSAFETENSORS_CONFIG_JSON": '{"num_readers": 2}'},
+            {"FASTSAFETENSORS_CONFIG": "/custom/loader.json"},
+            {"FASTSAFETENSORS_CONFIG_JSON": ""},
+            {"FASTSAFETENSORS_CONFIG": ""},
+        ):
+            with (
+                self.subTest(config_env=config_env),
+                patch.dict(os.environ, config_env, clear=True),
+                patch("os.path.isfile", return_value=False),
+            ):
+                list(self.database.fastsafetensors_weights_iterator("cpu", False))
+                self.assertEqual(dict(os.environ), config_env)
+
+    def test_default_loader_config_file_is_not_overridden(self):
+        with patch("os.path.isfile", return_value=True) as isfile:
+            list(self.database.fastsafetensors_weights_iterator("cpu", False))
+        isfile.assert_called_once_with("fastsafetensors.json")
+        self.assertNotIn("FASTSAFETENSORS_CONFIG_JSON", os.environ)
+
+    def test_auto_loader_arguments_and_close(self):
+        predicate = lambda name: name == "weight"
+        stacked = {"expert": "stacked"}
+        result = list(
+            self.database.fastsafetensors_weights_iterator(
+                "cuda", True, stacked, predicate
+            )
+        )
+        self.module.AutoLoader.assert_called_once()
+        args, kwargs = self.module.AutoLoader.call_args
+        self.assertEqual(
+            args,
+            (self.module.SingleGroup.return_value, ["a.safetensors", "b.safetensors"]),
+        )
+        self.assertEqual(kwargs["device"], "cuda:2")
+        self.assertIs(kwargs["local_copyout_filter"], predicate)
+        self.assertEqual(kwargs["stacked_moe_tensors"], stacked)
+        read_filter = kwargs["tensor_filter"]
+        self.assertTrue(read_filter("weight"))
+        self.assertTrue(read_filter("expert"))
+        self.assertFalse(read_filter("unused"))
+        self.assertFalse(read_filter("remote"))
+        self.assertIs(result[0][1], self.tensor)
+        self.loader.close.assert_called_once_with()
+
+    def test_read_filter_keeps_other_ranks_weights_before_gpu_staging(self):
+        group = object()
+
+        def remote_rank_union(mask, *, op, group):
+            # Sorted source names: expert, remote, unused, weight. Another
+            # rank needs only "remote"; "unused" is needed by neither rank.
+            self.assertEqual(mask.tolist(), [0, 0, 0, 1])
+            mask[1] = 1
+
+        with (
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.distributed.get_backend", return_value="gloo"),
+            patch(
+                "torch.distributed.all_reduce", side_effect=remote_rank_union
+            ) as reduce,
+        ):
+            read_filter = self.database._fastsafetensors_read_filter(
+                lambda name: name == "weight", None, group
+            )
+        reduce.assert_called_once()
+        self.assertIs(reduce.call_args.kwargs["group"], group)
+        self.assertEqual(reduce.call_args.kwargs["op"], torch.distributed.ReduceOp.MAX)
+        self.assertTrue(read_filter("weight"))
+        self.assertTrue(read_filter("remote"))
+        self.assertFalse(read_filter("unused"))
+
+    def test_no_read_filter_without_requested_weights(self):
+        self.assertIsNone(self.database._fastsafetensors_read_filter(None, None, None))
+
+    def test_explicit_nogds_uses_legacy_loader_even_with_auto_loader(self):
+        with (
+            patch.dict(os.environ, {"FASTSAFETENSORS_NOGDS": "1"}),
+            patch.object(
+                self.database,
+                "_legacy_fastsafetensors_weights_iterator",
+                return_value=iter([]),
+            ) as legacy,
+        ):
+            self.assertEqual(
+                list(self.database.fastsafetensors_weights_iterator("cpu", False)), []
+            )
+        legacy.assert_called_once_with("cpu", False, None)
+        self.module.AutoLoader.assert_not_called()
+
+    def test_old_wheel_falls_back_to_legacy_loader(self):
+        del self.module.AutoLoader
+        with patch.object(
+            self.database,
+            "_legacy_fastsafetensors_weights_iterator",
+            return_value=iter([]),
+        ) as legacy:
+            self.assertEqual(
+                list(
+                    self.database.fastsafetensors_weights_iterator(
+                        "cpu", False, {"a": "b"}
+                    )
+                ),
+                [],
+            )
+        legacy.assert_called_once_with("cpu", False, {"a": "b"})
+        self.assertNotIn("FASTSAFETENSORS_CONFIG_JSON", os.environ)
+
+    def test_iteration_error_survives_close_error(self):
+        failure = ValueError("read failed")
+        self.loader.iterate_weights.side_effect = failure
+        self.loader.close.side_effect = RuntimeError("close failed")
+        with self.assertRaises(ValueError) as raised:
+            list(self.database.fastsafetensors_weights_iterator("cpu", False))
+        self.assertIs(raised.exception, failure)
+        self.loader.close.assert_called_once_with()
+
+    def test_early_generator_close_releases_loader(self):
+        iterator = self.database.fastsafetensors_weights_iterator("cpu", False)
+        next(iterator)
+        iterator.close()
+        self.loader.close.assert_called_once_with()
+
+    def test_two_shard_index_preserves_dtype_and_ft_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(
+                {"first": torch.ones(2, dtype=torch.float32)},
+                os.path.join(directory, "a.safetensors"),
+            )
+            save_file(
+                {"second": torch.ones(3, dtype=torch.bfloat16)},
+                os.path.join(directory, "b.safetensors"),
+            )
+            with open(
+                os.path.join(directory, "model.safetensors.index.json"), "w"
+            ) as stream:
+                json.dump(
+                    {
+                        "weight_map": {
+                            "first": "a.safetensors",
+                            "second": "b.safetensors",
+                        },
+                        "is_ft_style_weight": True,
+                        "__env__params__": {"TP_SIZE": 2},
+                    },
+                    stream,
+                )
+            database = CkptDatabase(directory)
+            self.assertEqual(database.get_tensor_type("first"), torch.float32)
+            self.assertEqual(database.get_tensor_type("second"), torch.bfloat16)
+            self.assertTrue(database._is_ft_style)
+            self.assertEqual(database._ft_weight_params, {"TP_SIZE": 2})
 
 
 if __name__ == "__main__":

@@ -4,8 +4,8 @@ opentelemetry-exporter-otlp-proto-http==1.15.0
 
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # Includes official DeepEP main@a56d6156 built against NCCL 2.30.4 and
-# NVSHMEM 3.5.19, plus the RTP FlashInfer 0.6.9 CUDA 13.2 wheels.
-# FlashAttention 3 and nvidia_cutlass_dsl remain deferred.
+# NVSHMEM 3.5.19, plus FlashInfer 0.6.12.
+# FlashAttention 3 remains deferred.
 
 # Core torch stack — wheels mirrored to OSS by us; upstream is
 # https://download.pytorch.org/whl/cu130/.
@@ -18,24 +18,19 @@ nvidia-cuda-cccl==13.2.86
 # Triton 3.6.0 supports CUDA 13.x ptxas natively (no wrapper needed).
 triton==3.6.0
 
-# Use the CUDA 13.2 artifacts from the same RTP FlashInfer build.
-# Pinned to the RTP fork build (not upstream 0.6.9): upstream copies an
-# unpinned CPU scale during FMHA v2 CUDA graph capture; the fork build
-# carries the fix. Regression-covered by the FMHA v2 prefill CUDA-graph
-# unit test (test_trtllm_fmha_v2_prefill_sm12x) and the generation-prefill
-# CUDA-graph smoke case generation_prefill_cuda_graph_sm120 (cuda13/sm12x).
-flashinfer-python==0.6.9+8c4f4dcf
-flashinfer-cubin==0.6.9+8c4f4dcf
+# FlashInfer Python and cubins use the same validated release.
+flashinfer-python @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_python-0.6.12-py3-none-any.whl
+flashinfer-cubin @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_cubin-0.6.12-py3-none-any.whl
 
-# Upstream v1.1.0.post2@e7706faf, rebuilt for torch 2.11+cu130.
-fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue
+# Hadamard transform used by the GLM5 indexer.
+fast-hadamard-transform @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl
 # Upstream v2.8.3.post1@a8aa52b1 with CUTLASS dc481792, rebuilt for CUDA 13.2.
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 
 # Wheels built against torch 2.11+cu130.
-# DeepGEMM 122e18b is CI-built with gcc-toolset-13: opt_glm5 plus SM12x GEMMs.
-deep-gemm==2.8.0+122e18b.cu132
-flash-mla==1.0.0+9241ae3
+# Preserve the GLM5 kernel versions used by the validated inference path.
+deep-gemm @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0+6d6aaad.cu132-cp310-cp310-linux_x86_64.whl
+flash-mla @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0+49e2000.cu132-cp310-cp310-linux_x86_64.whl
 
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
@@ -52,8 +47,8 @@ rtp-kernel==0.1.0+94fd20eb.cu132
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
 # on PyPI but the import is `fast_safetensors`; both wheels installed.
 # Required by --load_method fastsafetensors smoke targets.
-fast-safetensors==0.7.3+torch2.11.cu130
-fastsafetensors==0.1.20+ali
+fast-safetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fast-safetensors/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_x86_64.whl
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_x86_64.whl
 # fast_safetensors rebuilt against torch 2.11+cu130.
 
 # Pin safetensors and tabulate for parity with cu12_9 lock.
@@ -70,3 +65,6 @@ tabulate==0.9.0
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).
 # multimodal video decode (matches deps/requirements_base.txt on main)
 av==16.1.0 ; platform_machine == "x86_64"
+
+nvidia-cutlass-dsl==4.5.0
+nvidia-cutlass-dsl-libs-base==4.5.0

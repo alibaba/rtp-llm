@@ -1037,7 +1037,8 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
 void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                                            GptModelInputs&     model_input,
                                                            TensorHolder&       host_holder) {
-    const size_t batch_size = stream_groups.size();
+    model_input.is_draft_extend = false;
+    const size_t batch_size     = stream_groups.size();
     if (batch_size == 0) {
         model_input.combo_tokens      = emptyInt32OnCuda({0});
         model_input.input_lengths     = emptyInt32OnCuda({0});
@@ -1164,7 +1165,8 @@ bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const Str
 void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups,
                                                                  GptModelInputs&     model_input,
                                                                  TensorHolder&       host_holder) {
-    const size_t batch_size = stream_groups.size();
+    model_input.is_draft_extend = false;
+    const size_t batch_size     = stream_groups.size();
     if (batch_size == 0) {
         return;
     }
@@ -1241,6 +1243,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
                                                                const GptModelOutputs& model_output,
                                                                const SamplerOutput&   sampler_output,
                                                                TensorHolder&          host_holder) {
+    model_input.is_draft_extend    = false;
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
@@ -1268,17 +1271,18 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
 
     const int* sampled_tokens = new_all_token_ids_cpu.data_ptr<int>();
-    int* combo_position_ids =
+    int*       combo_position_ids =
         model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     auto         all_streams            = stream_groups.allStreams();
-    const size_t stream_row_count = std::accumulate(
+    const size_t stream_row_count       = std::accumulate(
         all_streams.begin(), all_streams.end(), size_t{0}, [](size_t count, const GenerateStreamPtr& stream) {
             return count + static_cast<size_t>(stream->nextBatchSize());
         });
     RTP_LLM_CHECK_WITH_INFO(stream_row_count == batch_size,
                             "prefill draft input stream rows %zu != sampler rows %zu",
-                            stream_row_count, batch_size);
+                            stream_row_count,
+                            batch_size);
 
     size_t row_idx = 0;
     int    offset  = 0;
@@ -1291,8 +1295,8 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
             // Middle chunk tail is the next prompt token; other prefill tails use sampled token.
             // Using sampled token at a chunk boundary would build draft KV from the wrong input.
-            const int tail_token = middle_chunk ? stream->nextChunkBoundaryToken() :
-                                                  sampled_tokens[row_idx * token_stride + token_stride - 1];
+            const int tail_token                    = middle_chunk ? stream->nextChunkBoundaryToken() :
+                                                                     sampled_tokens[row_idx * token_stride + token_stride - 1];
             combo_tokens[offset + input_length - 1] = tail_token;
 
             if (combo_position_ids != nullptr) {
@@ -1513,6 +1517,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     model_input.is_target_verify = false;
+    model_input.is_draft_extend  = true;
     if (!useMtpDeviceState()) {
         if (speculative_sampler_output.accept_len_cpu.defined()
             && speculative_sampler_output.accept_len_cpu.is_pinned()) {
@@ -1586,6 +1591,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
     model_input.is_target_verify = false;
+    model_input.is_draft_extend  = true;
     int total_tokens             = (propose_step_ + 1) * batch_size;
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);

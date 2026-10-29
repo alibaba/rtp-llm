@@ -16,10 +16,17 @@ is set.  The default MoE path keeps using ``fp8_fp4_mega_moe`` (see
 ``mega_buf.py`` / ``strategies/mega.py``).
 """
 
-import logging
 import os
 
 import torch
+
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fused_buffer import (
+    _MEGA_FUSED_BUF_CACHE,
+    estimate_mega_moe_fused_symm_buffer_bytes,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fused_buffer import (
+    get_or_create_mega_buf_fused as _get_or_create_mega_fused_buf,
+)
 
 from .mega_buf import _mega_moe_unavailable_reason
 
@@ -27,7 +34,6 @@ from .mega_buf import _mega_moe_unavailable_reason
 # BF16 output staging buffer, and the shared-expert mid-tile scratch. Keyed by
 # the shape parameters so different configs in one process don't collide; in
 # practice there's only ever one entry per process.
-_MEGA_FUSED_BUF_CACHE: dict = {}
 _MEGA_FUSED_OUTPUT_CACHE: dict = {}
 _MEGA_FUSED_MID_CACHE: dict = {}
 
@@ -42,123 +48,6 @@ def mega_moe_fused_requested() -> bool:
     ``fp8_fp4_mega_moe_fused``.
     """
     return os.environ.get(_USE_MEGA_MOE_FUSED_ENV, "0") == "1"
-
-
-def estimate_mega_moe_fused_symm_buffer_bytes(
-    group_size: int,
-    num_experts: int,
-    num_max_tokens_per_rank: int,
-    num_topk: int,
-    hidden: int,
-    intermediate_hidden: int,
-    use_fp8_dispatch: bool = True,
-    activation: str = "swiglu",
-) -> int | None:
-    try:
-        import deep_gemm
-
-        return int(
-            deep_gemm._C.get_symm_buffer_size_for_mega_moe_fused(
-                group_size,
-                num_experts,
-                num_max_tokens_per_rank,
-                num_topk,
-                hidden,
-                intermediate_hidden,
-                use_fp8_dispatch,
-                activation,
-            )[0]
-        )
-    except Exception:
-        return None
-
-
-def _get_or_create_mega_fused_buf(
-    group,
-    num_experts,
-    num_max_tokens_per_rank,
-    num_topk,
-    hidden,
-    intermediate_hidden,
-    use_fp8_dispatch,
-    activation,
-):
-    import deep_gemm
-
-    key = (
-        id(group),
-        num_experts,
-        num_max_tokens_per_rank,
-        num_topk,
-        hidden,
-        intermediate_hidden,
-        bool(use_fp8_dispatch),
-        activation,
-    )
-    buf = _MEGA_FUSED_BUF_CACHE.get(key)
-    if buf is None:
-        try:
-            group_size = int(group.size())
-        except Exception:
-            group_size = 0
-        estimated_bytes = (
-            estimate_mega_moe_fused_symm_buffer_bytes(
-                group_size=group_size,
-                num_experts=num_experts,
-                num_max_tokens_per_rank=num_max_tokens_per_rank,
-                num_topk=num_topk,
-                hidden=hidden,
-                intermediate_hidden=intermediate_hidden,
-                use_fp8_dispatch=use_fp8_dispatch,
-                activation=activation,
-            )
-            if group_size > 0
-            else None
-        )
-        buf = deep_gemm.get_symm_buffer_for_mega_moe_fused(
-            group=group,
-            num_experts=num_experts,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-            num_topk=num_topk,
-            hidden=hidden,
-            intermediate_hidden=intermediate_hidden,
-            use_fp8_dispatch=use_fp8_dispatch,
-            activation=activation,
-        )
-        actual_bytes = None
-        try:
-            actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
-        except Exception:
-            pass
-        if actual_bytes is not None and estimated_bytes is not None:
-            logging.info(
-                "[DSV4 MegaMoEFused] allocated symm buffer: group_size=%d "
-                "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
-                "intermediate=%d actual=%.3f GiB estimated=%.3f GiB",
-                group_size,
-                num_experts,
-                num_max_tokens_per_rank,
-                num_topk,
-                hidden,
-                intermediate_hidden,
-                actual_bytes / (1024**3),
-                estimated_bytes / (1024**3),
-            )
-        elif actual_bytes is not None:
-            logging.info(
-                "[DSV4 MegaMoEFused] allocated symm buffer: group_size=%d "
-                "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
-                "intermediate=%d actual=%.3f GiB",
-                group_size,
-                num_experts,
-                num_max_tokens_per_rank,
-                num_topk,
-                hidden,
-                intermediate_hidden,
-                actual_bytes / (1024**3),
-            )
-        _MEGA_FUSED_BUF_CACHE[key] = buf
-    return buf
 
 
 def _get_or_create_mega_fused_output(

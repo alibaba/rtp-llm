@@ -56,8 +56,17 @@ def ceil_to_ue8m0(x: torch.Tensor):
 def _transform_scale_ue8m0(sf, mn):
     import deep_gemm.utils.layout
 
+    expected_rows = ceil_div(mn, 128)
+    if sf.dim() < 2 or sf.shape[-2] != expected_rows:
+        raise ValueError(
+            f"expected 128-row block scales with {expected_rows} rows, got {tuple(sf.shape)}"
+        )
     if not sf.is_cuda:
         sf = sf.cuda()
+    # Exponent-only UE8M0 values are exactly representable in float32.
+    # DeepGEMM's layout conversion accepts float scales before packing.
+    if sf.dtype == getattr(torch, "float8_e8m0fnu", None):
+        sf = sf.float()
     sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
     sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
     return sf

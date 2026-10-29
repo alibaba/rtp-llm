@@ -75,7 +75,8 @@ static std::once_flag    g_init_flag;
 
 static bool g_enable_comm_overlap = true;
 
-static int64_t g_device_id = 0;
+static int64_t   g_device_id                       = 0;
+thread_local int g_cuda_graph_warmup_forward_depth = 0;
 }  // anonymous namespace
 
 // ============================================================
@@ -92,6 +93,22 @@ bool isRuntimeInitialized() {
 
 bool getEnableCommOverlap() {
     return g_enable_comm_overlap;
+}
+
+void pushCudaGraphWarmupForwardFlag() {
+    ++g_cuda_graph_warmup_forward_depth;
+}
+
+void popCudaGraphWarmupForwardFlag() {
+    if (g_cuda_graph_warmup_forward_depth > 0) {
+        --g_cuda_graph_warmup_forward_depth;
+    }
+}
+
+bool cudaGraphWarmupForwardEnabled() {
+    const char* value       = std::getenv("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD");
+    const bool  env_enabled = value && *value && std::string(value) != "0";
+    return env_enabled || g_cuda_graph_warmup_forward_depth > 0;
 }
 
 int64_t getDeviceId() {
@@ -282,7 +299,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const auto   host_kv_cache_offset  = param.host_kv_cache_offset.accessor<int32_t, 2>();
     const auto   input_lengths_host    = param.input_lengths_host.accessor<int32_t, 1>();
     const auto   prefix_lengths_host   = param.prefix_lengths_host.accessor<int32_t, 1>();
-    const auto   publish_start_tokens = param.publish_start_tokens.accessor<int32_t, 1>();
+    const auto   publish_start_tokens  = param.publish_start_tokens.accessor<int32_t, 1>();
     const auto   request_ids           = param.request_id.accessor<int64_t, 1>();
     const auto   request_pd_separation = param.request_pd_separation.accessor<bool, 1>();
     const auto   cache_keys            = param.cache_keys.accessor<int64_t, 2>();
@@ -337,16 +354,19 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t request_id       = request_ids[context_index];
-        const int publish_start_token = publish_start_tokens[context_index];
+        const int64_t request_id          = request_ids[context_index];
+        const int     publish_start_token = publish_start_tokens[context_index];
         RTP_LLM_CHECK_WITH_INFO(publish_start_token >= 0 && publish_start_token <= prefix_length,
                                 "cache-store tag=%s invalid publish_start_token=%d for prefix_length=%d",
-                                layer_kv.tag.c_str(), publish_start_token, prefix_length);
+                                layer_kv.tag.c_str(),
+                                publish_start_token,
+                                prefix_length);
         const size_t publish_start_block =
             group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks == 0 ?
-                static_cast<size_t>(publish_start_token) / seq_size_per_block : 0;
-        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+                static_cast<size_t>(publish_start_token) / seq_size_per_block :
+                0;
+        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -854,6 +874,7 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
+    m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,
           py::arg("key"),

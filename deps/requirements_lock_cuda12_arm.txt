@@ -622,15 +622,15 @@ exceptiongroup==1.3.0 \
 fast-hadamard-transform==1.0.4.post1 \
     --hash=sha256:b778ac8445b5257ded89c4e8612cd9ac650f446cdf0408e5fdb4319be0c78706
     # via -r internal_source/deps/requirements_cuda12_arm.txt
-fast-safetensors==0.7.3+torch2.1.2.cu121 \
-    --hash=sha256:a031a05cc35a9ffe47b236d92854d3e24de488343102fbbae05b8b77cc8480e4
+fast-safetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fast-safetensors/fast_safetensors-0.7.4.dev0%2Btorch2.9.0.cu129.aone67354779-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:5b3c195ca4ffc4a655ef8f8f1058e4d8806625913c776b8397289502ac172c21
     # via -r internal_source/deps/requirements_cuda12_arm.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
-fastsafetensors==0.1.19rc5+ali \
-    --hash=sha256:681c5772c005032959c66ef24f7a1bd6972f2c7bc90d3d7e9a523d262f2597a1
+fastsafetensors @ https://artlab.alibaba-inc.com/1/pypi/simple/fastsafetensors/fastsafetensors-0.3.4.dev20260908%2Bali.fuseshm.gfb2c381b.aone70048596-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:bb5cd2b7b29fa62525ce28e994d6c74837b4d3a9188f703a56e621d914f2eeb1
     # via -r internal_source/deps/requirements_cuda12_arm.txt
 filelock==3.20.0 \
     --hash=sha256:339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2 \
@@ -3283,8 +3283,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel==0.1.0+47e3c4a4.cu129 \
-    --hash=sha256:03d7a55c3fcf86c2afb71d22a239baab544ddf3e01538d49b49220bad42c0891
+rtp-kernel @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2Bbdafb874.cu129-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:c0ff3da5c09f9ea1c8ebd8b67c450b652a98d99b56acf281742b84bcc4f0acc2
     # via -r internal_source/deps/requirements_cuda12_arm.txt
 safetensors==0.6.2 \
     --hash=sha256:1d2d2b3ce1e2509c68932ca03ab8f20570920cd9754b05063d4368ee52833ecd \
