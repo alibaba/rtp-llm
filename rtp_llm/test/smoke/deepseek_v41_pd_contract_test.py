@@ -17,6 +17,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     compare_generation_logits = True
     prefill_cp_size = 2
     decode_dp_size = 1
+    jit_cache_root: str | None = None
     # Prefill owns request-level historical-cache accounting. Decode has its
     # own cache history and excludes the current request's P/D transfer.
     reuse_field = "prefill_total_reuse_len"
@@ -81,9 +82,17 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                 f" --tp_size {role_size // self.decode_dp_size} --dp_size {self.decode_dp_size}",
             ),
         ):
+            role_jit_env = (
+                {
+                    "TEST_JIT_LOCAL_DIR": f"{self.jit_cache_root}_{role}",
+                }
+                if self.jit_cache_root
+                else {}
+            )
             manager = MagaServerManager(
                 env_args={
                     **common_env,
+                    **role_jit_env,
                     "REMOTE_SERVER_PORT": peer,
                     "MODEL_SERVICE_CONFIG": route.model_dump_json(),
                 },
