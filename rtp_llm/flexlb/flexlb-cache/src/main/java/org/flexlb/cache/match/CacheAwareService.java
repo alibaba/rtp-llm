@@ -17,7 +17,9 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
-/** Unified cache matching and metadata update service. */
+/**
+ * Unified cache matching and metadata update service.
+ */
 @Slf4j
 @Service
 public class CacheAwareService {

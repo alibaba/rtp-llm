@@ -12,7 +12,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 
-/** Routes cache metadata updates to the source that owns the update contract. */
+/**
+ * Routes cache metadata updates to the source that owns the update contract.
+ */
 @Slf4j
 @Component
 public class CacheMetadataUpdateOrchestrator {

@@ -3,11 +3,11 @@ package org.flexlb.mock.grpc;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.Endpoint;
@@ -16,7 +16,7 @@ import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.service.address.WorkerAddressService;
-import org.flexlb.service.grpc.EngineGrpcService;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
 import org.junit.jupiter.api.AfterEach;
@@ -42,7 +42,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -85,22 +84,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private static final String DECODE_DOMAIN = "mock.decode.hosts.address";
     private static final String MODEL_NAME = "mock-model";
 
-    /** Master SYNC_STATUS_INTERVAL default — the production re-pull cadence. */
+    /**
+     * Master SYNC_STATUS_INTERVAL default — the production re-pull cadence.
+     */
     private static final long SYNC_INTERVAL_MS = 20L;
 
     private static final long CONVERGENCE_CAP_MS = 10_000L;
-
-    /**
-     * Upstream's schedule refactor made disappearance eviction
-     * staleness-gated (retireMissingGenerationIfExpired): a worker dropped
-     * from discovery is retired only once its last successful status poll
-     * is older than this threshold — the 15-arg constructor defaults to
-     * 10 s, which would land exactly on Phase 3's 10 s convergence cap.
-     * The 16-arg constructor exists to inject a short staleness so this
-     * test verifies the eviction mechanism without waiting out the
-     * production TTL.
-     */
-    private static final long STATUS_STALE_AFTER_US = 500_000L;
 
     @TempDir Path tempDir;
 
@@ -109,7 +98,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private Path discoveryFile;
     private LocalServiceDiscovery fileServiceDiscovery;
     private WorkerAddressService workerAddressService;
-    private EngineGrpcService engineGrpcService;
+    private WorkerStatusRpcClient workerStatusRpcClient;
     private EngineHealthReporter healthReporter;
     private ScheduledExecutorService syncScheduler;
     private ExecutorService statusCheckExecutor;
@@ -151,7 +140,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         workerAddressService =
                 new WorkerAddressService(
                         healthReporter, modelMetaConfig, fileServiceDiscovery, configService);
-        engineGrpcService = new EngineGrpcService(grpcClient);
+        workerStatusRpcClient = new WorkerStatusRpcClient(grpcClient);
         // Upstream's schedule refactor removed the cache-generation
         // activate/retire gate from the discovery publish path; the cache
         // poll now runs as an independent GrpcCacheStatusCheckRunner whose
@@ -178,15 +167,17 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         workerAddressService,
                         statusCheckExecutor,
                         healthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         EngineSyncRunner decodeSyncRunner =
                 new EngineSyncRunner(
@@ -195,15 +186,17 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         workerAddressService,
                         statusCheckExecutor,
                         healthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.DECODE,
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         syncScheduler =
                 Executors.newSingleThreadScheduledExecutor(
@@ -221,20 +214,27 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
 
     @AfterEach
     void tearDownFileDiscoveryPipeline() {
-        if (syncScheduler != null) {
-            syncScheduler.shutdownNow();
-            syncScheduler = null;
-        }
-        if (statusCheckExecutor != null) {
-            statusCheckExecutor.shutdownNow();
-            statusCheckExecutor = null;
-        }
-        if (workerC != null) {
-            workerC.stop();
-            workerC = null;
-        }
-        if (workerAddressService != null) {
-            workerAddressService.destroy();
+        // Cleanup needs the original workers and status pipeline to stay available.
+        try {
+            if (schedulerRuntime != null) {
+                schedulerRuntime.close();
+            }
+        } finally {
+            if (syncScheduler != null) {
+                syncScheduler.shutdownNow();
+                syncScheduler = null;
+            }
+            if (statusCheckExecutor != null) {
+                statusCheckExecutor.shutdownNow();
+                statusCheckExecutor = null;
+            }
+            if (workerC != null) {
+                workerC.stop();
+                workerC = null;
+            }
+            if (workerAddressService != null) {
+                workerAddressService.destroy();
+            }
         }
     }
 
@@ -381,12 +381,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
      * so additions and evictions are reflected in routing immediately.
      */
     @Override
-    protected DefaultRouter createRouter() {
-        DefaultRouter roundRobin = mock(DefaultRouter.class);
-        when(roundRobin.select(any(BalanceContext.class), any()))
+    protected RequestWorkerSelector createRouter() {
+        RequestWorkerSelector roundRobin = mock(RequestWorkerSelector.class);
+        when(roundRobin.select(any(RequestContext.class), any()))
                 .thenAnswer(
                         inv -> {
-                            BalanceContext ctx = inv.getArgument(0);
+                            RequestContext ctx = inv.getArgument(0);
                             List<String> candidates =
                                     new ArrayList<>(
                                             endpointRegistry.endpointAddressSnapshot(
@@ -413,15 +413,13 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             String[] parts = physicalAddress.split(":");
                             String ip = parts[0];
                             int httpPort = Integer.parseInt(parts[1]);
-                            // admittedRoute() converts this response into the exact pinned
-                            // queue admission the scheduler consumes — including the Decode KV
-                            // reservation (RouteAdmission.reserveQueuedPinned) the batcher
-                            // later marks queued; without it admission would hit NOT_QUEUED ->
-                            // OwnershipLost and the request would never complete.
+                            // admittedRoute() pins the exact worker generations. The scheduler
+                            // reserves Decode capacity before publishing the Prefill queue entry;
+                            // the batcher later acquires a permit against that exact reservation.
                             return admittedRoute(
                                     ctx,
                                     routeResponse(
-                                            ctx.getRequestId(),
+                                            ctx.data().getRequestId(),
                                             ip,
                                             httpPort,
                                             httpPort + 1,
@@ -494,7 +492,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         });
     }
 
-    /** Submit {@code count} requests and wait for every ACK to complete successfully. */
+    /**
+     * Submit {@code count} requests and wait for every ACK to complete successfully.
+     */
     private void drainRequests(int count) throws Exception {
         List<CompletableFuture<Response>> futures = new ArrayList<>(count);
         long firstId = requestIdCounter.getAndAdd(count);

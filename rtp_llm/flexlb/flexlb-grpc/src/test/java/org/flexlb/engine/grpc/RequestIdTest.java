@@ -279,6 +279,27 @@ class RequestIdTest {
         }
     }
 
+    @Test
+    void identityReaderSkipsPayloadAndPreservesTheLastExactInt64() throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        var wire = CodedOutputStream.newInstance(bytes);
+        wire.writeInt64(1, Long.MIN_VALUE);
+        wire.writeByteArray(2, new byte[1024 * 1024]);
+        wire.writeInt64(1, Long.MAX_VALUE);
+        wire.flush();
+        var payload = com.google.protobuf.ByteString.copyFrom(bytes.toByteArray());
+        assertEquals(Long.toString(Long.MAX_VALUE), RequestId.readGenerateInputRequestId(payload));
+        RequestId.requireMatchingGenerateInput(Long.toString(Long.MAX_VALUE), payload);
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> RequestId.requireMatchingGenerateInput("007", payload));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        RequestId.readGenerateInputRequestId(
+                                com.google.protobuf.ByteString.copyFrom(new byte[] {18, 127})));
+    }
+
     private static byte[] oldIntegerId(long id) throws Exception {
         var bytes = new ByteArrayOutputStream();
         var output = CodedOutputStream.newInstance(bytes);

@@ -7,6 +7,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -79,6 +80,7 @@ public class CacheMetricsReporter {
 
     @PostConstruct
     public void init() {
+        monitor = SafeFlexMonitor.wrap(monitor);
         registerCacheMetrics();
         log.info("CacheMetricsReporter initialized and metrics registered");
     }
@@ -325,7 +327,9 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, tags, hitTokens);
     }
 
-    /** Report the outcome of a cache-affinity routing decision. */
+    /**
+     * Report the outcome of a cache-affinity routing decision.
+     */
     public void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
         if (roleType == null || engineIp == null || decision == null) {
             return;

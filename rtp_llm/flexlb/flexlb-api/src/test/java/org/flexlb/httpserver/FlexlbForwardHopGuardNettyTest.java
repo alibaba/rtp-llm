@@ -10,18 +10,18 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RouteService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -46,14 +46,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real Netty boundaries for forwarding guards and exact-owner cancellation. */
+/**
+ * Real Netty boundaries for forwarding guards and exact-owner cancellation.
+ */
 class FlexlbForwardHopGuardNettyTest {
 
     @Test
@@ -80,7 +81,7 @@ class FlexlbForwardHopGuardNettyTest {
             assertTrue(
                     responses.stream()
                             .allMatch(FlexlbScheduleProtocol.FlexlbScheduleResponsePB::getSuccess));
-            verify(node.routeService, times(8)).route(any());
+            verify(node.requestScheduler, times(8)).submit(any());
             node.awaitExecutorIdle();
         }
     }
@@ -109,8 +110,8 @@ class FlexlbForwardHopGuardNettyTest {
             assertEquals(1, second.inboundCalls.get(), "only one forwarded RPC is allowed");
             assertEquals(0, first.rejections.get());
             assertEquals(0, second.rejections.get());
-            verify(first.routeService, times(1)).route(any());
-            verify(second.routeService, never()).route(any());
+            verify(first.requestScheduler, times(1)).submit(any());
+            verify(second.requestScheduler, never()).submit(any());
             first.awaitExecutorIdle();
             second.awaitExecutorIdle();
         }
@@ -129,8 +130,8 @@ class FlexlbForwardHopGuardNettyTest {
             }
             assertEquals(1, first.inboundCalls.get());
             assertEquals(0, closing.inboundCalls.get());
-            verify(first.routeService, times(1)).route(any());
-            verify(closing.routeService, never()).route(any());
+            verify(first.requestScheduler, times(1)).submit(any());
+            verify(closing.requestScheduler, never()).submit(any());
         }
     }
 
@@ -145,8 +146,8 @@ class FlexlbForwardHopGuardNettyTest {
                 var response = client.stub.schedule(request(74_001L));
                 assertTrue(response.getSuccess());
             }
-            verify(first.routeService, times(1)).route(any());
-            verify(dead.routeService, never()).route(any());
+            verify(first.requestScheduler, times(1)).submit(any());
+            verify(dead.requestScheduler, never()).submit(any());
         }
     }
 
@@ -159,7 +160,7 @@ class FlexlbForwardHopGuardNettyTest {
             sender.masterAddress.set(master.httpAddress());
             when(master.consistency.isMaster()).thenReturn(true);
             var admitted = new java.util.concurrent.CountDownLatch(1);
-            when(master.routeService.route(any()))
+            when(master.requestScheduler.submit(any()))
                     .thenAnswer(
                             invocation -> {
                                 admitted.countDown();
@@ -173,8 +174,8 @@ class FlexlbForwardHopGuardNettyTest {
             master.server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             var response = pending.get(8, TimeUnit.SECONDS);
             assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
-            verify(master.routeService, times(1)).route(any());
-            verify(sender.routeService, never()).route(any());
+            verify(master.requestScheduler, times(1)).submit(any());
+            verify(sender.requestScheduler, never()).submit(any());
         }
     }
 
@@ -185,7 +186,7 @@ class FlexlbForwardHopGuardNettyTest {
             var scheduleCalls = new AtomicInteger();
             var cancelCalls = new AtomicInteger();
             Server master =
-                    NettyServerBuilder.forPort(0)
+                    NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
                             .addService(
                                     new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                                         @Override
@@ -228,7 +229,7 @@ class FlexlbForwardHopGuardNettyTest {
                         StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
                 assertEquals(1, scheduleCalls.get());
                 assertEquals(0, cancelCalls.get());
-                verify(sender.routeService, never()).route(any());
+                verify(sender.requestScheduler, never()).submit(any());
             } finally {
                 master.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
             }
@@ -243,14 +244,14 @@ class FlexlbForwardHopGuardNettyTest {
                 Client client = Client.connect(sender.grpcPort())) {
             sender.masterAddress.set(master.httpAddress());
             when(master.consistency.isMaster()).thenReturn(true);
-            when(master.routeService.route(any()))
+            when(master.requestScheduler.submit(any()))
                     .thenReturn(
                             CompletableFuture.completedFuture(
                                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
             var response = client.stub.schedule(request(76_001L));
             assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
-            verify(master.routeService, times(1)).route(any());
-            verify(sender.routeService, never()).route(any());
+            verify(master.requestScheduler, times(1)).submit(any());
+            verify(sender.requestScheduler, never()).submit(any());
         }
     }
 
@@ -260,10 +261,12 @@ class FlexlbForwardHopGuardNettyTest {
         long requestId = 73_001L;
         try (Node originalMaster = Node.start("10.0.0.1");
                 Client client = Client.connect(originalMaster.grpcPort())) {
-            when(originalMaster.routeService.getRequestState(Long.toString(requestId), 0L))
+            when(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                    originalMaster.requestState)
+                            .getRequestState(String.valueOf(requestId), 0L))
                     .thenReturn(requestState(requestId, RequestState.Phase.ACKNOWLEDGED));
-            when(originalMaster.routeService.cancelRequest(
-                            Long.toString(requestId), 0L, CancelReason.CLIENT_CANCELLED))
+            when(originalMaster.requestScheduler.cancel(
+                            String.valueOf(requestId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(requestId, RequestState.Phase.CANCELLED));
 
             originalMaster.isMaster.set(true);
@@ -292,8 +295,8 @@ class FlexlbForwardHopGuardNettyTest {
             assertEquals(
                     FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED,
                     response.getLifecycle().getState());
-            verify(originalMaster.routeService)
-                    .cancelRequest(Long.toString(requestId), 0L, CancelReason.CLIENT_CANCELLED);
+            verify(originalMaster.requestScheduler)
+                    .cancel(String.valueOf(requestId), 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(2, originalMaster.inboundCalls.get());
             originalMaster.awaitExecutorIdle();
         }
@@ -309,11 +312,11 @@ class FlexlbForwardHopGuardNettyTest {
                 Client client = Client.connect(follower.grpcPort())) {
             follower.masterAddress.set(currentMaster.httpAddress());
             currentMaster.isMaster.set(true);
-            when(follower.routeService.cancelRequest(
-                            Long.toString(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED))
+            when(follower.requestScheduler.cancel(
+                            String.valueOf(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(unrelatedLocalId, RequestState.Phase.CANCELLED));
-            when(currentMaster.routeService.cancelRequest(
-                            Long.toString(requestedId), 0L, CancelReason.CLIENT_CANCELLED))
+            when(currentMaster.requestScheduler.cancel(
+                            String.valueOf(requestedId), 0L, CancelReason.CLIENT_CANCELLED))
                     .thenReturn(requestState(requestedId, RequestState.Phase.CANCELLED));
 
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
@@ -328,13 +331,15 @@ class FlexlbForwardHopGuardNettyTest {
 
             assertFalse(response.getFound());
             assertFalse(response.hasLifecycle());
-            verify(follower.routeService)
-                    .cancelRequest(Long.toString(requestedId), 0L, CancelReason.CLIENT_CANCELLED);
-            verify(follower.routeService, never())
-                    .cancelRequest(
-                            Long.toString(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED);
-            verify(currentMaster.routeService, never())
-                    .cancelRequest(anyString(), anyLong(), any(CancelReason.class));
+            verify(follower.requestScheduler)
+                    .cancel(String.valueOf(requestedId), 0L, CancelReason.CLIENT_CANCELLED);
+            verify(follower.requestScheduler, never())
+                    .cancel(String.valueOf(unrelatedLocalId), 0L, CancelReason.CLIENT_CANCELLED);
+            verify(currentMaster.requestScheduler, never())
+                    .cancel(
+                            org.mockito.ArgumentMatchers.anyString(),
+                            anyLong(),
+                            any(CancelReason.class));
             assertEquals(1, follower.inboundCalls.get());
             assertEquals(0, currentMaster.inboundCalls.get());
             follower.awaitExecutorIdle();
@@ -389,8 +394,9 @@ class FlexlbForwardHopGuardNettyTest {
         private final AtomicBoolean isMaster = new AtomicBoolean(false);
         private final AtomicInteger inboundCalls = new AtomicInteger();
         private final AtomicInteger rejections = new AtomicInteger();
-        private final LBStatusConsistencyService consistency;
-        private final RouteService routeService;
+        private final MasterStatusService consistency;
+        private final RequestScheduler requestScheduler;
+        private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
         private final FlexlbGrpcForwarder forwarder;
         private final EventLoopGroup channelEventLoop;
         private final ExecutorService channelExecutor;
@@ -399,21 +405,22 @@ class FlexlbForwardHopGuardNettyTest {
         private final FlexlbServiceImpl service;
 
         private Node(String localIdentity) throws Exception {
-            consistency = mock(LBStatusConsistencyService.class);
+            consistency = mock(MasterStatusService.class);
             when(consistency.isNeedConsistency()).thenReturn(true);
             when(consistency.isMaster()).thenAnswer(invocation -> isMaster.get());
             when(consistency.getLocalHostIp()).thenReturn(localIdentity);
             when(consistency.getMasterHostIpPort()).thenAnswer(invocation -> masterAddress.get());
 
             ConfigService configService = mock(ConfigService.class);
-            var routingConfig = org.flexlb.mock.TestFlexlbConfigs.create();
-            routingConfig.setDispatcher(DispatcherConfig.nonBatch());
-            when(configService.loadBalanceConfig()).thenReturn(routingConfig);
-            routeService = mock(RouteService.class);
+            var config = org.flexlb.mock.TestFlexlbConfigs.create();
+            config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
+            when(configService.loadBalanceConfig()).thenReturn(config);
+            requestScheduler = mock(RequestScheduler.class);
             Response local = new Response();
             local.setSuccess(true);
             local.setCode(200);
-            when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(local));
+            when(requestScheduler.submit(any()))
+                    .thenReturn(CompletableFuture.completedFuture(local));
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
 
             channelEventLoop = new NioEventLoopGroup(1);
@@ -426,13 +433,15 @@ class FlexlbForwardHopGuardNettyTest {
                             channelEventLoop,
                             channelExecutor);
             service =
-                    new FlexlbServiceImpl(
-                            routeService,
+                    FlexlbServiceTestSupport.create(
+                            requestScheduler,
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                    requestState),
                             consistency,
                             healthReporter,
                             forwarder,
                             configService,
-                            mock(BatchSchedulerReporter.class),
+                            mock(DeliveryMetricsReporter.class),
                             mock(ServerScheduleLatencyRecorder.class),
                             mock(RequestSchedulerReporter.class));
 

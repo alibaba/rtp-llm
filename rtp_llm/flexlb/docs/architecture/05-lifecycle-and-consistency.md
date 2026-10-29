@@ -34,14 +34,14 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 
 **上线顺序**（`test` profile 下跳过）：
 
-1. 重置下线标志和预热状态，调用 `LBStatusConsistencyService.start()` 启动主选举。
+1. 重置下线标志和预热状态，调用 `MasterStatusService.start()` 启动主选举。
 2. 等待 3 秒供初始 Worker 同步，然后标记预热完成；等待被中断时恢复线程中断标志，
    预热完成标志仍在 finally 中置位。
 
 **下线顺序**：
 
 1. 置下线标志，使健康检查返回不可用。
-2. 调用 `LBStatusConsistencyService.offline()` 下线并让主。
+2. 调用 `MasterStatusService.offline()` 下线并让主。
 3. 调用 `FlexlbGrpcServer.drain()`，等待没有新 Schedule 请求的静默期；期间仍处理迟到请求。
    静默期由 `grpcServer.shutdownQuietPeriodMs` 控制，默认 5 秒。
 4. 关闭 gRPC 新请求入口，等待已接受的 RPC 完成，再允许 Spring 销毁服务资源。
@@ -102,7 +102,7 @@ Spring `server.port`，再回退 JVM `-Dserver.port` 和默认 7001（假定所�
 - **优雅让主**：`offline()` 置 `markOffline`、关闭 autoRejoin；若自己是 master，释放 latch
   后（多节点时）**每 1s 轮询直到 leader 变成别的 IP 才返回**——pre_stop 会等领导权实际转移。
 
-### LBStatusConsistencyService（Spring 门面，实现 MasterElectService）
+### MasterStatusService（Spring 门面，实现 MasterElectService）
 
 - `handleMasterChange(req)`：`/rtp_llm/notify_master` 的接收端——校验 `roleId` 匹配后
   `refreshMasterHost(true)` 强刷缓存。

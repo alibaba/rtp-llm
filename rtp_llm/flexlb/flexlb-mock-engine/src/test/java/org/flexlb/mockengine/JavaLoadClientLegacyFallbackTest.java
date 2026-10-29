@@ -47,7 +47,9 @@ class JavaLoadClientLegacyFallbackTest {
 
     @TempDir Path tempDir;
 
-    /** Loopback ports with no listener: connects fail fast (RST). */
+    /**
+     * Loopback ports with no listener: connects fail fast (RST).
+     */
     private static final String UNREACHABLE_MASTER = "127.0.0.1:1";
 
     private static final String UNREACHABLE_ENGINE = "127.0.0.1:2";
@@ -85,7 +87,14 @@ class JavaLoadClientLegacyFallbackTest {
                         "",
                         enableFallback,
                         "",
-                        false);
+                        false,
+                        0,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
         return new JavaLoadClient(config);
     }
 
@@ -133,7 +142,7 @@ class JavaLoadClientLegacyFallbackTest {
             tokens.add(i);
         }
         return new JavaLoadClient.TraceRecord(
-                idx, "rid-" + idx, "trace-" + idx, 0L, 64, 8, List.of(), tokens);
+                idx, "rid-" + idx, "trace-" + idx, 0L, 64, 8, List.of(), tokens, 0);
     }
 
     @Test

@@ -1,6 +1,8 @@
 package org.flexlb.dao.pv;
 
-/** One committed scheduling group, independent of engine batch IDs and later delivery outcomes. */
+/**
+ * One committed scheduling group, independent of engine batch IDs and later delivery outcomes.
+ */
 public record DecisionGroup(
         String id,
         String policy,

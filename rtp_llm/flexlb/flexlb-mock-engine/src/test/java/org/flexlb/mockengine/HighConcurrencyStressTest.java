@@ -125,7 +125,7 @@ class HighConcurrencyStressTest {
         assertAllInflightZero();
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on port " + service.getGrpcPort());
         }
 
@@ -152,9 +152,7 @@ class HighConcurrencyStressTest {
         // ── Phase 6: Verify load balancing across decode engines ──
         // No single engine should handle > 60% of decode requests
         long totalDecodeCompleted =
-                decodeServices.stream()
-                        .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
-                        .sum();
+                decodeServices.stream().mapToLong(MockEngineTestSupport::getCompletedCount).sum();
         assertEquals(
                 totalRequests,
                 totalDecodeCompleted,
@@ -165,7 +163,7 @@ class HighConcurrencyStressTest {
 
         double threshold = totalRequests * 0.60;
         for (int i = 0; i < decodeServices.size(); i++) {
-            long engineCompleted = decodeServices.get(i).getCompletedCount();
+            long engineCompleted = MockEngineTestSupport.getCompletedCount(decodeServices.get(i));
             assertTrue(
                     engineCompleted <= threshold,
                     "decode engine "

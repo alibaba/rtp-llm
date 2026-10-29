@@ -2,7 +2,11 @@ package org.flexlb.balance.prediction;
 
 import java.util.Map;
 
-/** Immutable Decode cost expression evaluated against one routing snapshot. */
+import static com.google.common.base.Preconditions.checkArgument;
+
+/**
+ * Immutable Decode cost expression evaluated against one routing snapshot.
+ */
 public final class DecodeCostFormula {
 
     private static final Map<String, Integer> VARIABLES =
@@ -24,9 +28,9 @@ public final class DecodeCostFormula {
     }
 
     public static DecodeCostFormula parse(String expression) {
-        if (expression == null || expression.isBlank()) {
-            throw new IllegalArgumentException("Decode cost expression must not be blank");
-        }
+        checkArgument(
+                expression != null && !expression.isBlank(),
+                "Decode cost expression must not be blank");
         return new DecodeCostFormula(expression, ArithmeticFormula.parse(expression, VARIABLES));
     }
 

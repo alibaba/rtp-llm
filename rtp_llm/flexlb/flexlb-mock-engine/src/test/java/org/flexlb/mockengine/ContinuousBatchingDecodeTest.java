@@ -176,10 +176,10 @@ class ContinuousBatchingDecodeTest {
         assertTrue(tBMs <= 2500, "stream B timeline sanity, got " + tBMs + "ms");
 
         awaitQuiescence(decode, 10_000);
-        assertEquals(2L, decode.getCompletedCount());
-        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(2L, MockEngineTestSupport.getCompletedCount(decode));
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode));
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── Test 2: slot conservation, waiting drain, top-up order ────────────
@@ -224,12 +224,12 @@ class ContinuousBatchingDecodeTest {
         while (System.nanoTime() < deadline) {
             int running = getActiveDecodeRequests(decode);
             int waiting = decodePendingQueueSize(decode);
-            long completed = decode.getCompletedCount();
+            long completed = MockEngineTestSupport.getCompletedCount(decode);
             if ((long) running + waiting + completed != n) {
                 Thread.sleep(50);
                 running = getActiveDecodeRequests(decode);
                 waiting = decodePendingQueueSize(decode);
-                completed = decode.getCompletedCount();
+                completed = MockEngineTestSupport.getCompletedCount(decode);
                 assertEquals(
                         (long) n,
                         (long) running + waiting + completed,
@@ -251,7 +251,7 @@ class ContinuousBatchingDecodeTest {
         }
         assertEquals(
                 (long) n,
-                decode.getCompletedCount(),
+                MockEngineTestSupport.getCompletedCount(decode),
                 "all requests must complete (waiting fully drained)");
         assertEquals(0, getActiveDecodeRequests(decode));
         assertEquals(0, decodePendingQueueSize(decode));
@@ -282,9 +282,9 @@ class ContinuousBatchingDecodeTest {
         }
 
         awaitQuiescence(decode, 10_000);
-        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode));
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── Test 3: a long stream must not block a short one ────────────
@@ -340,10 +340,10 @@ class ContinuousBatchingDecodeTest {
                         + "ms (no-reprice bound 3900ms)");
 
         awaitQuiescence(decode, 10_000);
-        assertEquals(2L, decode.getCompletedCount());
-        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(2L, MockEngineTestSupport.getCompletedCount(decode));
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode));
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── Test 4: cancel a running stream → immediate top-up ────────────
@@ -399,17 +399,22 @@ class ContinuousBatchingDecodeTest {
         }
 
         awaitQuiescence(decode, 10_000);
-        assertEquals(4L, decode.getCompletedCount(), "exactly the four survivors complete");
+        assertEquals(
+                4L,
+                MockEngineTestSupport.getCompletedCount(decode),
+                "exactly the four survivors complete");
         assertEquals(0, getActiveDecodeRequests(decode));
         assertEquals(0, decodePendingQueueSize(decode));
-        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode));
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── Model / service helpers ────────────
 
-    /** Curve [[1,100],[2,200]] with sleep_scale 1.0 and no jitter. */
+    /**
+     * Curve [[1,100],[2,200]] with sleep_scale 1.0 and no jitter.
+     */
     private MockPerformanceModel twoPointCurveModel() throws Exception {
         return model(List.of(List.of(1, 100.0), List.of(2, 200.0)));
     }
@@ -512,7 +517,7 @@ class ContinuousBatchingDecodeTest {
                         + " activeDecode="
                         + getActiveDecodeRequests(service)
                         + " kv="
-                        + service.getActiveKvTokens());
+                        + MockEngineTestSupport.getActiveKvTokens(service));
     }
 
     // ──────────── Reflection helpers ────────────

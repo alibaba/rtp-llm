@@ -1,13 +1,10 @@
 import com.sun.management.ThreadMXBean;
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 
 import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
@@ -19,9 +16,9 @@ import java.util.Locale;
 import java.util.Random;
 import java.util.function.DoubleSupplier;
 
-import static org.mockito.Mockito.mock;
-
-/** Forked benchmark of whole prefix selection and five-candidate frozen queue projection. */
+/**
+ * Forked benchmark of whole prefix selection and five-candidate frozen queue projection.
+ */
 public class PlanningBench {
     static volatile double sink;
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
@@ -30,7 +27,7 @@ public class PlanningBench {
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq);
     static FormulaPredictor model;
-    static RouteProjection.DeliveryProjection policy;
+    static org.flexlb.config.DispatcherConfig.Type policy;
 
     static GroupPlanner.Constraints constraints(int size) {
         return new GroupPlanner.Constraints(size, 1_000_000, 2_000_000, 700, 700);
@@ -41,7 +38,9 @@ public class PlanningBench {
         var items = new ArrayList<GroupPlanner.Item>();
         for (int i = 0; i < count; i++) {
             long compute = 100 + random.nextInt(4096), hit = random.nextInt(4096);
-            items.add(new GroupPlanner.Item(i, 0, i, 1000, 61_000, compute + hit, hit));
+            items.add(
+                    new GroupPlanner.Item(
+                            String.valueOf(i), 0, i, 1000, 61_000, compute + hit, hit));
         }
         return items;
     }
@@ -50,9 +49,8 @@ public class PlanningBench {
         // INCREMENTAL_BEGIN
         var batch = model.newBatchPrediction();
         var selected =
-                GroupPlanner.selectWithPrediction(
+                GroupPlanner.FIXED_WINDOW.select(
                         items,
-                        GroupPlanner.itemAccess(),
                         constraints(size),
                         (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));
         // INCREMENTAL_END
@@ -87,15 +85,7 @@ public class PlanningBench {
 
     public static void main(String[] args) throws Exception {
         model = new FormulaPredictor(Files.readString(Path.of(args[0])));
-        policy =
-                new BatchDeliveryStrategy(
-                                () ->
-                                        CapacityBoundary.Attempt.rejected(
-                                                CapacityBoundary.OWNERSHIP_LOST),
-                                () -> 1L,
-                                mock(RequestRegistry.class),
-                                mock(DeliveryMetrics.class))
-                        .projectionPolicy();
+        policy = org.flexlb.config.DispatcherConfig.Type.BATCH;
         for (int size : new int[] {1, 8, 32, 64}) {
             var inputs = new ArrayList<List<GroupPlanner.Item>>();
             for (int i = 0; i < 64; i++) inputs.add(items(size, i));
@@ -103,19 +93,26 @@ public class PlanningBench {
             bench("select_" + size, () -> select(inputs.get(index[0]++ & 63), size));
         }
         for (int depth : new int[] {0, 32, 128, 512}) {
-            var endpoints = new ArrayList<RouteProjection.Inputs>();
+            var endpoints = new ArrayList<RequestTimeEstimation.Inputs>();
             for (int i = 0; i < 5; i++) {
                 endpoints.add(
-                        new RouteProjection.Inputs(
+                        new RequestTimeEstimation.Inputs(
                                 new QueueSnapshot(
-                                        1000, true, ORDER, constraints(64), items(depth, i), null),
-                                new WorkSnapshot(1000, List.of(), List.of(), 0)));
+                                        1000,
+                                        true,
+                                        org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,
+                                        ORDER,
+                                        constraints(64),
+                                        items(depth, i),
+                                        null),
+                                new WorkSnapshot(1000, List.of(), List.of(), 0),
+                                0L));
             }
-            var probes = new ArrayList<RouteProjection.Probe>();
+            var probes = new ArrayList<RequestTimeEstimationTestSupport.Probe>();
             for (int i = 0; i < 64; i++)
                 probes.add(
-                        new RouteProjection.Probe(
-                                99999, 0, 1000, 61_000, 1024 + i * 32, i * 8, i * 8));
+                        new RequestTimeEstimationTestSupport.Probe(
+                                "99999", 0, 1000, 61_000, 1024 + i * 32, i * 8, i * 8));
             int[] index = {0};
             bench(
                     "fleet5_depth_" + depth,
@@ -123,8 +120,10 @@ public class PlanningBench {
                         var probe = probes.get(index[0]++ & 63);
                         double total = 0;
                         for (var endpoint : endpoints) {
-                            var candidate = RouteProjection.project(endpoint, probe, model, policy);
-                            total += candidate.requiredProjectedTtftMs();
+                            var candidate =
+                                    RequestTimeEstimationTestSupport.project(
+                                            endpoint, probe, model, policy);
+                            total += candidate.projectedTtftMsValue();
                         }
                         return total;
                     });

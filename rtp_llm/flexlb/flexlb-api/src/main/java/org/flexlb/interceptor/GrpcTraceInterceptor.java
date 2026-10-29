@@ -119,7 +119,9 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
         return "rtp_llm.flexlb." + snakeName;
     }
 
-    /** Records the terminating status the handler passes to close(). */
+    /**
+     * Records the terminating status the handler passes to close().
+     */
     private static final class StatusCapturingCall<ReqT, RespT>
             extends ForwardingServerCall.SimpleForwardingServerCall<ReqT, RespT> {
         private final AtomicReference<Status> observedStatus;

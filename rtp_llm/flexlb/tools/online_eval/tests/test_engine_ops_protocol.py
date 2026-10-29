@@ -14,7 +14,8 @@ class EngineOpsProtocolTest(unittest.TestCase):
 
     def test_master_control_plane_uses_string_request_ids(self):
         schedule = self.ops.build_schedule_request(123)
-        self.assertEqual("123", schedule.request_id)
+        self.assertEqual(123, schedule.request_id)
+        self.assertEqual("123", schedule.request_id_str)
 
         stub = Mock()
         with patch.object(
@@ -24,7 +25,8 @@ class EngineOpsProtocolTest(unittest.TestCase):
         ):
             self.ops.cancel(123)
         cancel = stub.Cancel.call_args.args[0]
-        self.assertEqual("123", cancel.request_id)
+        self.assertEqual(123, cancel.request_id)
+        self.assertEqual("123", cancel.request_id_str)
 
     def test_role_addresses_dual_write_legacy_enum_and_string(self):
         response = self.ops.schedule_pb2.FlexlbScheduleResponsePB()

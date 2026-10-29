@@ -2,7 +2,7 @@ package org.flexlb.service.grace;
 
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.KvcmCacheMatchingConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.engine.grpc.client.KvcmGrpcClient;
 import org.flexlb.engine.grpc.client.KvcmLeaderResolver;
 import org.flexlb.engine.grpc.client.KvcmMetaServiceClient;
@@ -30,6 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -39,7 +40,7 @@ import static org.mockito.Mockito.when;
 class ApplicationLifecycleTest {
     @Test
     void contextCloseDrainsTransportBeforeDestroyingServingResources() throws Exception {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         var draining = new CountDownLatch(1);
         var complete = new CountDownLatch(1);
@@ -76,12 +77,12 @@ class ApplicationLifecycleTest {
             closing.get(3, TimeUnit.SECONDS);
         }
         assertTrue(destroyed.get());
-        assertTrue(lifecycle.shutdownCompletedSuccessfully());
+        verify(grpc).drain();
     }
 
     @Test
     void childContextCloseDoesNotStopTheServingContext() {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         try (var context = new AnnotationConfigApplicationContext();
                 var child = new AnnotationConfigApplicationContext()) {
@@ -106,8 +107,7 @@ class ApplicationLifecycleTest {
     void springCanWireProductionConstructor() {
         try (var context = new AnnotationConfigApplicationContext()) {
             context.setAllowCircularReferences(false);
-            context.registerBean(
-                    LBStatusConsistencyService.class, () -> mock(LBStatusConsistencyService.class));
+            context.registerBean(MasterStatusService.class, () -> mock(MasterStatusService.class));
             context.registerBean(
                     CacheMatchConfiguration.class,
                     () -> {
@@ -151,7 +151,7 @@ class ApplicationLifecycleTest {
 
     @Test
     void normalServiceDoesNotDrainAndRepeatedOfflineIsIdempotent() {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
         var reporter = mock(GracefulLifecycleReporter.class);
         var environment = mock(Environment.class);
@@ -171,12 +171,16 @@ class ApplicationLifecycleTest {
         assertTrue(warmupState.isWarmupFinished());
         verify(consistency).offline();
         verify(grpc).drain();
-        verify(reporter).reportShutdownComplete(anyLong());
+        verify(reporter)
+                .reportDuration(
+                        org.mockito.ArgumentMatchers.eq(
+                                GracefulLifecycleReporter.Event.SHUTDOWN_COMPLETE),
+                        anyLong());
     }
 
     @Test
     void repeatedOnlineResetsSharedWarmupStateUntilSynchronizationCompletes() {
-        var consistency = mock(LBStatusConsistencyService.class);
+        var consistency = mock(MasterStatusService.class);
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
         var warmupState = new ApplicationWarmupState();

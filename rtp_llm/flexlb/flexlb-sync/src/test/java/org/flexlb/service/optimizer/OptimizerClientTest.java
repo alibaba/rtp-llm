@@ -43,7 +43,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -60,7 +59,7 @@ class OptimizerClientTest {
     void metricFailureDoesNotEscapeSkippedOrFailedQueries(boolean stopped) {
         doThrow(new IllegalStateException("metrics unavailable"))
                 .when(monitor)
-                .report(anyString(), any(), eq(1.0));
+                .report(org.mockito.ArgumentMatchers.anyString(), any(), eq(1.0));
         if (stopped) {
             client.shutdown();
         }
@@ -235,7 +234,8 @@ class OptimizerClientTest {
         client.traceQuery(traceRequest(List.of(1L)), selectedWorker());
 
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
-        verify(workerMetadataResolver, never()).resolveNamespace(any(), anyString(), anyLong());
+        verify(workerMetadataResolver, never())
+                .resolveNamespace(any(), org.mockito.ArgumentMatchers.anyString(), anyLong());
         verify(addressResolver, never()).start();
         verify(monitor)
                 .report(
@@ -381,11 +381,11 @@ class OptimizerClientTest {
     }
 
     private static Request traceRequest(List<Long> blockCacheKeys) {
-        Request request = new Request();
-        request.setRequestId("1");
-        request.setBlockCacheKeys(blockCacheKeys);
-        request.setBlockSize(16L);
-        request.setSeqLen(64L);
+        Request request = Request.builder().build();
+        request = request.toBuilder().requestId("1").build();
+        request = request.toBuilder().blockCacheKeys(blockCacheKeys).build();
+        request = request.toBuilder().blockSize(16L).build();
+        request = request.toBuilder().seqLen(64L).build();
         return request;
     }
 

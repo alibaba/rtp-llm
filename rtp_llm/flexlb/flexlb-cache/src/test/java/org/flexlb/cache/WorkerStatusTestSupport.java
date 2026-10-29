@@ -32,11 +32,11 @@ public final class WorkerStatusTestSupport {
                 WorkerStatus.createDiscovered(role, "default", ip, port, port + 1, "");
         publishObservation(workerStatus, role, alive, cacheMatchRollbackBlocks);
         if (cacheStatus != null) {
-            workerStatus.lock.lock();
+            workerStatus.cacheMutationLock.lock();
             try {
                 workerStatus.publishCacheStatus(cacheStatus);
             } finally {
-                workerStatus.lock.unlock();
+                workerStatus.cacheMutationLock.unlock();
             }
         }
         return workerStatus;
@@ -57,7 +57,8 @@ public final class WorkerStatusTestSupport {
         workerStatus.lock.lock();
         try {
             WorkerStatus.StatusObservation observation =
-                    workerStatus.freezeStatusResponse(response);
+                    org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
+                            workerStatus, response);
             WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(alive);

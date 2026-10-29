@@ -121,9 +121,9 @@ class ConfigServiceTest {
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isFixedWindowDecision());
         assertEquals(3600000L, config.queueScheduler().getQueueTimeoutMs());
-        assertEquals(8, config.fixedWindowDecision().getMaxRequests());
-        assertEquals(300L, config.fixedWindowDecision().getMaxCollectionWaitMs());
-        assertNull(config.fixedWindowDecision().getMaxPredictedExecutionMs());
+        assertEquals(8, config.decisionPolicy().getMaxRequests());
+        assertEquals(300L, config.decisionPolicy().getMaxCollectionWaitMs());
+        assertNull(config.decisionPolicy().getMaxPredictedExecutionMs());
         assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
         var prefill = config.getRouter().getRoles().getPrefill();
         assertEquals(
@@ -142,7 +142,6 @@ class ConfigServiceTest {
         var health = config.getWorkerRegistry().getHealth();
         assertEquals(20L, health.getStatusPollIntervalMs());
         assertEquals(5000L, health.getStatusRpcTimeoutMs());
-        assertEquals(10000L, health.getStatusStaleAfterMs());
         assertEquals(3000L, health.getCleanupIntervalMs());
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());
@@ -177,8 +176,8 @@ class ConfigServiceTest {
     }
 
     @Test
-    void rejects_removed_legacy_environment_variables() {
-        ConfigValidationException error =
+    void legacy_environment_is_rejected_with_migration_instructions() {
+        var failure =
                 assertThrows(
                         ConfigValidationException.class,
                         () ->
@@ -191,12 +190,9 @@ class ConfigServiceTest {
                                                 "DEFAULT_SCHEDULE_MODE",
                                                 "QUEUE",
                                                 "FLEXLB_MONITOR_MODE",
-                                                "all",
-                                                "FLEXLB_MONITOR_METRIC_WHITELIST",
-                                                "app.flexlb")));
-        assertTrue(
-                error.getMessage().contains("Removed legacy FlexLB environment variables"),
-                error.getMessage());
+                                                "all")));
+        assertTrue(failure.getMessage().contains("FLEXLB_CONFIG"));
+        assertTrue(failure.getMessage().contains("CACHE_STATUS_MAX_INTERVAL_MS"));
     }
 
     @Test
@@ -257,8 +253,8 @@ class ConfigServiceTest {
         assertEquals(60, config.priorityOrdering().getDefaultPriority());
         assertTrue(
                 config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
-        assertEquals(12, config.fixedWindowDecision().getMaxRequests());
-        assertEquals(90L, config.fixedWindowDecision().getMaxPredictedExecutionMs());
+        assertEquals(12, config.decisionPolicy().getMaxRequests());
+        assertEquals(90L, config.decisionPolicy().getMaxPredictedExecutionMs());
         assertEquals(4, config.getDispatcher().getMaxInflightPerPrefillWorker());
         assertEquals(
                 25L,
@@ -427,7 +423,7 @@ class ConfigServiceTest {
         var allStages = java.util.EnumSet.allOf(VictimStage.class);
         assertEquals(allStages, new PreemptionConfig().getAllowedVictimStages());
         assertEquals(
-                allStages, QueueOrderingConfig.priority().getPreemption().getAllowedVictimStages());
+                allStages, ConfigTestSupport.priority().getPreemption().getAllowedVictimStages());
         for (String ordering :
                 new String[] {
                     "{\"type\":\"PRIORITY\"}",
@@ -455,7 +451,8 @@ class ConfigServiceTest {
             assertFalse(config.allowsPreemption(VictimStage.DECODE_ENGINE_OWNED));
         }
         FlexlbConfig fifo = ConfigTestFixtures.parse("{}");
-        assertTrue(fifo.queueScheduler().getOrdering().preemptionPolicy().isEmpty());
+        assertTrue(
+                ConfigTestSupport.preemptionPolicy(fifo.queueScheduler().getOrdering()).isEmpty());
         for (VictimStage stage : allStages) {
             assertFalse(fifo.allowsPreemption(stage));
         }
@@ -725,5 +722,28 @@ class ConfigServiceTest {
                 assertThrows(
                         ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch));
         assertTrue(error.getMessage().contains(field), error.getMessage());
+    }
+
+    @Test
+    void rejects_removed_legacy_environment_variables() {
+        ConfigValidationException error =
+                assertThrows(
+                        ConfigValidationException.class,
+                        () ->
+                                new ConfigService(
+                                        Map.of(
+                                                ConfigService.FLEXLB_CONFIG_ENV,
+                                                ConfigTestFixtures.REQUIRED,
+                                                "CACHE_STATUS_MAX_INTERVAL_MS",
+                                                "100",
+                                                "DEFAULT_SCHEDULE_MODE",
+                                                "QUEUE",
+                                                "FLEXLB_MONITOR_MODE",
+                                                "all",
+                                                "FLEXLB_MONITOR_METRIC_WHITELIST",
+                                                "app.flexlb")));
+        assertTrue(
+                error.getMessage().contains("Removed legacy FlexLB environment variables"),
+                error.getMessage());
     }
 }

@@ -11,24 +11,41 @@ package org.flexlb.enums;
  */
 public enum DecodeTaskPhase {
 
-    /** Still owned exclusively by the Master queue; Engine cannot have seen it. */
+    /**
+     * Placement resources reserved locally; no delivery has been published.
+     */
+    LOCAL_RESERVED,
+
+    /**
+     * Still owned exclusively by the Master queue; Engine cannot have seen it.
+     */
     MASTER_QUEUED_NOT_DISPATCHED,
 
-    /** Dispatch started or is in flight; original Prefill must handle Cancel. */
+    /**
+     * Dispatch started or is in flight; original Prefill must handle Cancel.
+     */
     ENGINE_MAY_HAVE_SEEN,
 
-    /** Engine accepted the request and allocated KV, but has not started it. */
+    /**
+     * Engine accepted the request and allocated KV, but has not started it.
+     */
     ACCEPTED_NOT_RUNNING,
 
-    /** Engine is running the request. Eviction requires Cancel and release confirmation. */
+    /**
+     * Engine is running the request. Eviction requires Cancel and release confirmation.
+     */
     RUNNING;
 
-    /** Whether eviction must go through the original Prefill Cancel owner. */
+    /**
+     * Whether eviction must go through the original Prefill Cancel owner.
+     */
     public boolean requiresEngineCancel() {
         return this == ENGINE_MAY_HAVE_SEEN || this == ACCEPTED_NOT_RUNNING || this == RUNNING;
     }
 
-    /** Whether the phase is represented by Engine WorkerStatus. */
+    /**
+     * Whether the phase is represented by Engine WorkerStatus.
+     */
     public boolean isEngineConfirmed() {
         return this == ACCEPTED_NOT_RUNNING || this == RUNNING;
     }

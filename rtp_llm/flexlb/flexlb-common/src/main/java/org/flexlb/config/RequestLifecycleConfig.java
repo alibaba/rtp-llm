@@ -3,7 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Request inactivity and post-decision Engine visibility are separate deadlines. */
+/**
+ * Request inactivity and post-decision Engine visibility are separate deadlines.
+ */
 @Getter
 @Setter
 public final class RequestLifecycleConfig {
@@ -14,7 +16,9 @@ public final class RequestLifecycleConfig {
     @Getter
     @Setter
     public static final class RequestConfig {
-        /** Maximum silence since registration or the latest matching Engine request status. */
+        /**
+         * Maximum silence since registration or the latest matching Engine request status.
+         */
         private Long timeoutMs;
     }
 

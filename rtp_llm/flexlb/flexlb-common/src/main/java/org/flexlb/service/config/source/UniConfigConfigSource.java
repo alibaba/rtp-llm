@@ -22,7 +22,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-/** Fetches raw configuration documents from the local Turbo UniConfig agent. */
+/**
+ * Fetches raw configuration documents from the local Turbo UniConfig agent.
+ */
 @Slf4j
 @Component
 final class UniConfigConfigSource implements ConfigSource {

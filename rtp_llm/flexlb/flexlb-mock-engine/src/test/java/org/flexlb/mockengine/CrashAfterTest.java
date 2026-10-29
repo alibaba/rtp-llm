@@ -120,7 +120,7 @@ class CrashAfterTest {
 
             // Arm the crash on the 3rd EnqueueBatch and deliver it.
             httpPost(
-                    controlServer.getPort(),
+                    MockEngineTestSupport.controlPort(controlServer),
                     "/inject",
                     "{\"port\":"
                             + prefillPort
@@ -166,7 +166,7 @@ class CrashAfterTest {
 
             // The 4th in-process request sees the stopped rejection: empty ack.
             EngineRpcService.EnqueueBatchResponsePB fourth =
-                    enqueue(prefill, batch(3004, slot(0, input(4, 10))));
+                    enqueue(prefill, batch(3004, slot(0, input("4", 10))));
             assertEquals(0, fourth.getSuccessesCount());
             assertEquals(0, fourth.getErrorsCount());
 
@@ -180,7 +180,10 @@ class CrashAfterTest {
 
             // Recovery: /start_engine rebuilds the gRPC server on CLEAN state
             // (also disarms the fault config and resets the enqueue counter).
-            httpPost(controlServer.getPort(), "/start_engine", "{\"port\":" + prefillPort + "}");
+            httpPost(
+                    MockEngineTestSupport.controlPort(controlServer),
+                    "/start_engine",
+                    "{\"port\":" + prefillPort + "}");
             assertFalse(prefill.isStopped(), "engine must run again after /start_engine");
             assertEquals(
                     0,
@@ -196,7 +199,7 @@ class CrashAfterTest {
 
             // Fresh traffic flows — through the rebuilt port too.
             EngineRpcService.EnqueueBatchResponsePB after =
-                    enqueue(prefill, batch(3999, slot(0, input(99, 10))));
+                    enqueue(prefill, batch(3999, slot(0, input("99", 10))));
             assertEquals(1, after.getSuccessesCount(), "enqueue must succeed after recovery");
             assertTrue(portServesGrpc(prefillPort), "rebuilt gRPC port must serve traffic");
         } finally {
@@ -234,13 +237,13 @@ class CrashAfterTest {
 
             // Arm + trigger while both 300ms executions are still running.
             httpPost(
-                    controlServer.getPort(),
+                    MockEngineTestSupport.controlPort(controlServer),
                     "/inject",
                     "{\"port\":"
                             + prefillPort
                             + ",\"type\":\"crash_after\",\"enabled\":true,\"n\":3}");
             EngineRpcService.EnqueueBatchResponsePB crashAck =
-                    enqueue(prefill, batch(4003, slot(0, input(3, 10))));
+                    enqueue(prefill, batch(4003, slot(0, input("3", 10))));
             assertEquals(0, crashAck.getSuccessesCount());
             assertTrue(prefill.isStopped());
 
@@ -427,7 +430,9 @@ class CrashAfterTest {
         throw new IllegalStateException("no bindable port after 20 attempts");
     }
 
-    /** True when the port refuses a REAL gRPC call (UNAVAILABLE / refused). */
+    /**
+     * True when the port refuses a REAL gRPC call (UNAVAILABLE / refused).
+     */
     private static boolean portRefusesGrpc(int port) {
         ManagedChannel channel =
                 ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();
@@ -444,7 +449,9 @@ class CrashAfterTest {
         }
     }
 
-    /** True when the port serves a REAL gRPC call. */
+    /**
+     * True when the port serves a REAL gRPC call.
+     */
     private static boolean portServesGrpc(int port) {
         ManagedChannel channel =
                 ManagedChannelBuilder.forAddress("127.0.0.1", port).usePlaintext().build();

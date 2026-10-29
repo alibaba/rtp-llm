@@ -2,7 +2,9 @@ package org.flexlb.dao.optimizer;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 
-/** Error codes defined by the optimizer protocol. */
+/**
+ * Error codes defined by the optimizer protocol.
+ */
 public enum OptimizerErrorCode {
     UNSPECIFIED,
     OK,

@@ -32,10 +32,15 @@ class DeploymentIdentityConsistencyTest {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         when(identity.getDeploymentId()).thenReturn(deploymentId);
         ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
+        var node =
+                new ZookeeperMasterElectService.LocalNodeIdentity(
+                        "127.0.0.1", "7001", identity.getDeploymentId());
+        when(electionService.localNodeIdentity()).thenReturn(node);
 
-        LBStatusConsistencyService service =
-                new LBStatusConsistencyService(
+        MasterStatusService service =
+                new MasterStatusService(
                         electionService, mock(Environment.class), configService(true), identity);
+        org.mockito.Mockito.clearInvocations(electionService);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(deploymentId);
 
@@ -51,9 +56,14 @@ class DeploymentIdentityConsistencyTest {
     void disabledConsistencyRejectsMasterChangeNotifications(String notifiedRoleId) {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
-        LBStatusConsistencyService service =
-                new LBStatusConsistencyService(
+        when(electionService.localNodeIdentity())
+                .thenReturn(
+                        new ZookeeperMasterElectService.LocalNodeIdentity(
+                                "127.0.0.1", "7001", null));
+        MasterStatusService service =
+                new MasterStatusService(
                         electionService, mock(Environment.class), configService(false), identity);
+        org.mockito.Mockito.clearInvocations(electionService);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(notifiedRoleId);
 
@@ -70,9 +80,14 @@ class DeploymentIdentityConsistencyTest {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
         when(identity.getDeploymentId()).thenReturn("current-deployment");
         ZookeeperMasterElectService electionService = mock(ZookeeperMasterElectService.class);
-        LBStatusConsistencyService service =
-                new LBStatusConsistencyService(
+        var node =
+                new ZookeeperMasterElectService.LocalNodeIdentity(
+                        "127.0.0.1", "7001", identity.getDeploymentId());
+        when(electionService.localNodeIdentity()).thenReturn(node);
+        MasterStatusService service =
+                new MasterStatusService(
                         electionService, mock(Environment.class), configService(true), identity);
+        org.mockito.Mockito.clearInvocations(electionService);
         MasterChangeNotifyReq request = new MasterChangeNotifyReq();
         request.setRoleId(notifiedRoleId);
 
@@ -96,6 +111,8 @@ class DeploymentIdentityConsistencyTest {
                         configService(false),
                         identity);
 
+        ReflectionTestUtils.setField(
+                service, "consistencyConfig", new ZookeeperConsistencyConfig());
         ReflectionTestUtils.invokeMethod(service, "initializeRoleId");
 
         assertThat(ReflectionTestUtils.getField(service, "roleId")).isEqualTo(deploymentId);
@@ -105,11 +122,13 @@ class DeploymentIdentityConsistencyTest {
     void disabledConsistencyDoesNotRequireDeploymentIdentity() {
         DeploymentIdentity identity = mock(DeploymentIdentity.class);
 
-        new LBStatusConsistencyService(
-                mock(ZookeeperMasterElectService.class),
-                mock(Environment.class),
-                configService(false),
-                identity);
+        var electionService = mock(ZookeeperMasterElectService.class);
+        when(electionService.localNodeIdentity())
+                .thenReturn(
+                        new ZookeeperMasterElectService.LocalNodeIdentity(
+                                "127.0.0.1", "7001", null));
+        new MasterStatusService(
+                electionService, mock(Environment.class), configService(false), identity);
 
         verifyNoInteractions(identity);
     }
@@ -128,9 +147,9 @@ class DeploymentIdentityConsistencyTest {
         try (AnnotationConfigApplicationContext context =
                 new AnnotationConfigApplicationContext()) {
             context.registerBean(
-                    LBStatusConsistencyService.class,
+                    MasterStatusService.class,
                     () ->
-                            new LBStatusConsistencyService(
+                            new MasterStatusService(
                                     electionService,
                                     mock(Environment.class),
                                     configService(true),

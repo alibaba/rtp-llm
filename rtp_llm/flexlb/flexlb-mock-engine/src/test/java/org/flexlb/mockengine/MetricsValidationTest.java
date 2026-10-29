@@ -51,12 +51,16 @@ class MetricsValidationTest {
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final int BASE_PORT = 62800;
 
-    /** Pattern: {@code metric_name{engine_name="...",role="...",grpc_port="12345",engine_ip="..."} value} */
+    /**
+     * Pattern: {@code metric_name{engine_name="...",role="...",grpc_port="12345",engine_ip="..."} value}
+     */
     private static final Pattern PER_ENGINE_METRIC_PATTERN =
             Pattern.compile(
                     "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
-    /** Pattern: {@code metric_name{role="prefill"} value} */
+    /**
+     * Pattern: {@code metric_name{role="prefill"} value}
+     */
     private static final Pattern ROLE_METRIC_PATTERN =
             Pattern.compile("(\\w+)\\{role=\"(\\w+)\"\\}\\s+(\\d+)");
 
@@ -272,14 +276,16 @@ class MetricsValidationTest {
         try (MockEngineTestCluster cluster =
                 MockEngineTestCluster.start(model, BASE_PORT + 100, 1, 1)) {
             JavaMockEngineCluster.FastRpcService prefill = cluster.prefill(0);
-            long spb = prefill.getSeqSizePerBlock();
+            long spb = MockEngineTestSupport.getSeqSizePerBlock(prefill);
 
             // Idle baseline: pool-derived availability, no keys.
             JsonNode idle = engineByPort(cluster, prefill.getGrpcPort());
             long idleAvailable = idle.get("available_kv_tokens").asLong();
             assertEquals(0, idle.get("cache_keys").asInt());
             assertEquals(
-                    Math.min(prefill.getTotalKvTokens(), (long) prefill.getCacheBlocks() * spb),
+                    Math.min(
+                            MockEngineTestSupport.getTotalKvTokens(prefill),
+                            (long) MockEngineTestSupport.getCacheBlocks(prefill) * spb),
                     idleAvailable,
                     "idle availability = min(total, pool blocks x spb)");
 

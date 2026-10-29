@@ -33,13 +33,19 @@ public class WorkerHost {
      */
     private final int httpServerPort;
 
-    /** Per-engine gRPC port for worker control RPCs. */
+    /**
+     * Per-engine gRPC port for worker control RPCs.
+     */
     private final int workerStatusPort;
 
-    /** Logical engine index behind the shared frontend. */
+    /**
+     * Logical engine index behind the shared frontend.
+     */
     private final int engineIndex;
 
-    /** Expected number of logical engines for this physical frontend. */
+    /**
+     * Expected number of logical engines for this physical frontend.
+     */
     private final int multiEngineNum;
 
     @Getter(AccessLevel.NONE)
@@ -55,7 +61,9 @@ public class WorkerHost {
      */
     private final String group;
 
-    /** Deployment name reported by service discovery. */
+    /**
+     * Deployment name reported by service discovery.
+     */
     private final String deploymentName;
 
     /**
@@ -160,7 +168,9 @@ public class WorkerHost {
         return workerIdentity.getPhysicalIpPort();
     }
 
-    /** Returns the physical frontend address in {@code ip:port} format. */
+    /**
+     * Returns the physical frontend address in {@code ip:port} format.
+     */
     public String getPhysicalIpPort() {
         return workerIdentity.getPhysicalIpPort();
     }
@@ -193,7 +203,9 @@ public class WorkerHost {
         return new WorkerHost(ip, port);
     }
 
-    /** Create a discovered host while preserving the site reported by the discovery service. */
+    /**
+     * Create a discovered host while preserving the site reported by the discovery service.
+     */
     public static WorkerHost of(String ip, int port, String site) {
         return new WorkerHost(ip, port, site);
     }

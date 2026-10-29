@@ -1,12 +1,13 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -15,7 +16,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -26,7 +26,7 @@ class EncoderEndpointTest {
     @Test
     @SuppressWarnings("unchecked")
     void retirementWaitsForRegistrationAlreadyInsideTheGenerationGate() throws Exception {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
+        PlacementAvailability events = mock(PlacementAvailability.class);
         EncoderEndpoint endpoint = endpoint(events);
         assertTrue(endpoint.trackSelectedRequest("Aa", 10));
         ConcurrentMap<String, Object> requests =
@@ -81,9 +81,8 @@ class EncoderEndpointTest {
             endpoint.close();
 
             assertFalse(endpoint.trackSelectedRequest("late-request", 30));
-            verify(events, never())
-                    .onEncoderGenerationRetired(
-                            eq(endpoint), org.mockito.ArgumentMatchers.anyList());
+            verify((RequestRepository) ReflectionTestUtils.getField(endpoint, "requests"), never())
+                    .findActive(org.mockito.ArgumentMatchers.anyString(), eq(RequestPhase.ENCODER));
         } finally {
             releaseMapEntry.countDown();
             mapWriter.join(2_000);
@@ -94,16 +93,15 @@ class EncoderEndpointTest {
         endpoint.awaitRetirement();
         assertEquals(null, error.get());
         assertEquals(0, endpoint.pendingEncoderRequestCount());
-        verify(events)
-                .onEncoderGenerationRetired(
-                        eq(endpoint),
-                        argThat(ids -> ids.size() == 2 && ids.containsAll(List.of("Aa", "BB"))));
-        verify(events).onEncoderCapacityChanged();
+        var repository = (RequestRepository) ReflectionTestUtils.getField(endpoint, "requests");
+        verify(repository).findActive("Aa", RequestPhase.ENCODER);
+        verify(repository).findActive("BB", RequestPhase.ENCODER);
+        verify(events).changed(eq(endpoint.getStatus()), eq(endpoint.ipPort()));
     }
 
     @Test
     void closingSeveralPendingRequestsNotifiesCapacityOnce() {
-        EndpointEventProjector events = mock(EndpointEventProjector.class);
+        PlacementAvailability events = mock(PlacementAvailability.class);
         EncoderEndpoint endpoint = endpoint(events);
         assertTrue(endpoint.trackSelectedRequest("request-1", 10));
         assertTrue(endpoint.trackSelectedRequest("request-2", 20));
@@ -114,13 +112,14 @@ class EncoderEndpointTest {
 
         assertEquals(0, endpoint.pendingEncoderRequestCount());
         assertFalse(endpoint.trackSelectedRequest("request-3", 30));
-        verify(events).onEncoderCapacityChanged();
+        verify(events).changed(eq(endpoint.getStatus()), eq(endpoint.ipPort()));
     }
 
-    private static EncoderEndpoint endpoint(EndpointEventProjector events) {
+    private static EncoderEndpoint endpoint(PlacementAvailability events) {
         return new EncoderEndpoint(
                 WorkerStatus.createDiscovered(
                         RoleType.ENCODER, "default", "127.0.0.1", 8001, 8002, ""),
+                mock(RequestRepository.class),
                 events);
     }
 }

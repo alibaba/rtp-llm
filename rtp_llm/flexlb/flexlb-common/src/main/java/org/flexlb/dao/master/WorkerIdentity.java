@@ -22,19 +22,29 @@ import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SE
 @ToString
 public final class WorkerIdentity {
 
-    /** Raw host IP, without a port or engine index. */
+    /**
+     * Raw host IP, without a port or engine index.
+     */
     private final String ip;
 
-    /** Raw shared frontend port. */
+    /**
+     * Raw shared frontend port.
+     */
     private final int port;
 
-    /** Raw logical engine index behind the shared frontend. */
+    /**
+     * Raw logical engine index behind the shared frontend.
+     */
     private final int engineIndex;
 
-    /** Shared physical frontend identity in {@code ip:port} format. */
+    /**
+     * Shared physical frontend identity in {@code ip:port} format.
+     */
     private final String physicalIpPort;
 
-    /** Routable/cache identity in {@code ip:port@engineIndex} format. */
+    /**
+     * Routable/cache identity in {@code ip:port@engineIndex} format.
+     */
     private final String logicalIpPort;
 
     public WorkerIdentity(String ip, int port, int engineIndex) {

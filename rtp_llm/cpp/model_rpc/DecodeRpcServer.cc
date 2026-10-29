@@ -64,6 +64,22 @@ namespace rtp_llm {
 
 namespace {
 
+bool readFailureWasCancelled(const DecodeGenerateContext& context) {
+    if (context.server_context == nullptr) {
+        return false;
+    }
+    // Read completion and cancellation notification use separate completion-queue operations.
+    // Bound the observation wait so an ordinary client half-close still reports a read failure.
+    const auto observation_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+    while (!context.isRequestCancelled()) {
+        if (std::chrono::steady_clock::now() >= observation_deadline) {
+            return context.isRequestCancelled();
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return true;
+}
+
 // gRPC delivers propose probs/hidden as pageable CPU tensors. Pinning them
 // before the H2D copy lets cudaMemcpyAsync run on the DMA engine instead of
 // falling back to a staged synchronous copy on the handler thread. Pinning is
@@ -322,7 +338,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     decode_context.time_info.updateRequestBegineTime();
     auto& allocate_request = decode_context.allocate_request;
     if (!decode_context.rpc_context.grpc_stream->Read(&allocate_request)) {
-        const bool cancelled        = decode_context.isRequestCancelled();
+        const bool cancelled        = readFailureWasCancelled(decode_context);
         decode_context.error_status = generateRequestReadFailureStatus(cancelled);
         const auto peer = decode_context.server_context != nullptr ? decode_context.server_context->peer() : "unknown";
         RTP_LLM_LOG_WARNING(
@@ -554,7 +570,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
     if (!grpc_stream->Read(&generate_request)) {
-        const bool cancelled        = decode_context.isRequestCancelled();
+        const bool cancelled        = readFailureWasCancelled(decode_context);
         decode_context.error_status = generateRequestReadFailureStatus(cancelled);
         RTP_LLM_LOG_WARNING("request [%s] read generate request failed, cancelled [%d], grpc status code [%d]",
                             decode_context.request_key.c_str(),
@@ -704,6 +720,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     RTP_LLM_LOG_DEBUG(
         "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
+    decode_context.stream_enqueued = true;
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
         pollStreamOutput(decode_context.server_context,
@@ -812,10 +829,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*                              generate_stream = decode_context.getStream().get();
-    auto&                              cache_keys      = generate_stream->cacheKeys(0);
-    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    auto*       generate_stream = decode_context.getStream().get();
+    auto&       cache_keys      = generate_stream->cacheKeys(0);
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -1473,9 +1490,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1543,19 +1560,28 @@ GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB&
     return blocks;
 }
 
-// Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
-// inflight entry immediately instead of waiting for the 300s TTL eviction. finishTask() removes the
-// running entry first, so the fallback dequeue in ~GenerateContext() becomes a no-op afterwards and
-// no duplicate report is produced. NOTE: never call this from functions driven by EXECUTE_WITH_RETRY
-// (e.g. allocateResource), only from final failure points after retries are exhausted.
+// Publish terminal evidence only after the exact stream's resources have been released.
+// Call at final failure points, after allocation retries have ended.
 void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_context,
                                             int64_t                error_code,
                                             const std::string&     error_message) {
     if (decode_context.request_id == 0 || decode_context.early_finish_reported) {
         return;
     }
+    auto& stream = decode_context.getStream();
+    if (stream) {
+        stream->reportError(static_cast<ErrorCode>(error_code), error_message);
+        if (decode_context.stream_enqueued) {
+            // The engine owns completion after enqueue. Retain the exact stream
+            // until RuntimeMeta observes scheduler completion and resource release.
+            meta_->dequeue(decode_context.request_id, stream);
+            decode_context.early_finish_reported = true;
+            return;
+        }
+        decode_context.finishUnscheduledStream();
+        stream->releaseResource();
+    }
     decode_context.early_finish_reported = true;
-    auto& stream                         = decode_context.getStream();
     meta_->finishTask(decode_context.request_id,
                       stream ? stream->inputLength() : 0,
                       /*prefix_length=*/0,
@@ -1647,7 +1673,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

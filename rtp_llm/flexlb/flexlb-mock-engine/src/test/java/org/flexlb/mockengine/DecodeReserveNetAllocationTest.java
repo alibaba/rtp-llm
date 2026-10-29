@@ -111,7 +111,10 @@ class DecodeReserveNetAllocationTest {
                         decode, shape(dModel, 900L, 3 * SPB, 26, List.of(1L, 2L, 3L)), -1, null));
         awaitDecodeQuiescence(decode, 30_000);
         assertEquals(0, cache.heldBlocks(), "the seeding stream completed and released its holds");
-        assertEquals(3, cache.lruKeyBlocks(), "the 3 prefix keys are parked in the decode LRU");
+        assertEquals(
+                3,
+                MockEngineTestSupport.lruKeyBlocks(cache),
+                "the 3 prefix keys are parked in the decode LRU");
 
         // Reserve: rid 901 — 5-block total demand, 3-block prefix overlap,
         // routed to the D engine through role_addrs (Phase 1.6).
@@ -221,7 +224,9 @@ class DecodeReserveNetAllocationTest {
 
     // ─────────────── helpers ───────────────
 
-    /** EnqueueBatch input carrying BOTH the block keys and the decode role_addr. */
+    /**
+     * EnqueueBatch input carrying BOTH the block keys and the decode role_addr.
+     */
     private static EngineRpcService.GenerateInputPB reserveInput(
             long requestId, int inputTokens, List<Long> blockKeys, int decodePort) {
         EngineRpcService.GenerateInputPB base =
@@ -308,7 +313,9 @@ class DecodeReserveNetAllocationTest {
         return (MockLruBlockCache) field.get(service);
     }
 
-    /** Waits until the engine reports {@code expected} running decode streams. */
+    /**
+     * Waits until the engine reports {@code expected} running decode streams.
+     */
     private static void awaitRunningDecode(
             JavaMockEngineCluster.FastRpcService service, int expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);

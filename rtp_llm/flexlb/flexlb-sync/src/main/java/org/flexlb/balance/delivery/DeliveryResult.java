@@ -1,15 +1,17 @@
 package org.flexlb.balance.delivery;
 
-/** Transport result for one exact delivery claim. */
+import static com.google.common.base.Preconditions.checkArgument;
+
+/**
+ * Transport result for one exact delivery claim.
+ */
 public record DeliveryResult(Status status, Throwable cause) {
 
     public DeliveryResult {
-        if (status == null) {
-            throw new IllegalArgumentException("delivery status is required");
-        }
-        if ((status == Status.DELIVERED) == (cause != null)) {
-            throw new IllegalArgumentException("only unsuccessful delivery requires a cause");
-        }
+        checkArgument(status != null, "delivery status is required");
+        checkArgument(
+                (status == Status.DELIVERED) != (cause != null),
+                "only unsuccessful delivery requires a cause");
     }
 
     public static DeliveryResult delivered() {
@@ -24,10 +26,6 @@ public record DeliveryResult(Status status, Throwable cause) {
         return new DeliveryResult(Status.PREFILL_REJECTED, cause);
     }
 
-    public static DeliveryResult timedOut(Throwable cause) {
-        return new DeliveryResult(Status.TIMED_OUT, cause);
-    }
-
     public static DeliveryResult uncertain(Throwable cause) {
         return new DeliveryResult(Status.UNCERTAIN, cause);
     }
@@ -38,11 +36,14 @@ public record DeliveryResult(Status status, Throwable cause) {
 
     public enum Status {
         DELIVERED,
-        /** Local failure before RPC invocation; no remote work was started by this claim. */
+        /**
+         * Local failure before RPC invocation; no remote work was started by this claim.
+         */
         NOT_SENT,
-        /** Final per-member EnqueueBatch error; Decode may already own resources. */
+        /**
+         * Final per-member EnqueueBatch error; Decode may already own resources.
+         */
         PREFILL_REJECTED,
-        TIMED_OUT,
         UNCERTAIN
     }
 }

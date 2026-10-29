@@ -12,7 +12,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.zip.CRC32;
 
-/** First-match request-to-worker-group selector. */
+/**
+ * First-match request-to-worker-group selector.
+ */
 @Getter
 @Setter
 public final class TrafficPolicyConfig {

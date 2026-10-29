@@ -30,7 +30,7 @@ class JsonUtilsTest {
                 JsonUtils.toFormattedString(payload));
         assertEquals(
                 "{\"name\":\"test\",\"at\":\"2026-09-13T12:30:00\",\"empty\":{}}",
-                JsonUtils.toString(payload));
+                JsonUtils.toStringOrEmpty(payload));
     }
 
     @Test

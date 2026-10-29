@@ -55,12 +55,16 @@ class CacheKeyHitMetricsTest {
     private static final int BASE_PORT = 64100;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value} */
+    /**
+     * {@code metric_name{engine_name=...,role=...,grpc_port="N",...} value}
+     */
     private static final Pattern PER_ENGINE_METRIC_PATTERN =
             Pattern.compile(
                     "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
-    /** {@code metric_name{role="..."} value} */
+    /**
+     * {@code metric_name{role="..."} value}
+     */
     private static final Pattern ROLE_METRIC_PATTERN =
             Pattern.compile("(\\w+)\\{role=\"(\\w+)\"\\}\\s+(\\d+)");
 
@@ -278,7 +282,7 @@ class CacheKeyHitMetricsTest {
 
     private int controlPort() {
         assertNotNull(controlServer, "control server must be running");
-        return controlServer.getPort();
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 
     /** Wait until the engine reports {@code expectedCompleted} completions —
@@ -288,12 +292,13 @@ class CacheKeyHitMetricsTest {
             JavaMockEngineCluster.FastRpcService service, long expectedCompleted)
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (System.nanoTime() < deadline && service.getCompletedCount() < expectedCompleted) {
+        while (System.nanoTime() < deadline
+                && MockEngineTestSupport.getCompletedCount(service) < expectedCompleted) {
             Thread.sleep(5);
         }
         assertEquals(
                 expectedCompleted,
-                service.getCompletedCount(),
+                MockEngineTestSupport.getCompletedCount(service),
                 "the prefill request must complete (keys parked in the LRU)");
     }
 

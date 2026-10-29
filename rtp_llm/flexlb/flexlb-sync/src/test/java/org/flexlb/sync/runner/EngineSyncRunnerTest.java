@@ -13,9 +13,8 @@ import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.service.address.WorkerAddressService;
-import org.flexlb.service.grpc.EngineGrpcService;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -33,7 +32,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.LongAdder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -53,9 +51,7 @@ class EngineSyncRunnerTest {
 
     private final String modelName = "test-model";
 
-    @Mock private EndpointRegistry endpointRegistry;
-
-    private WorkerDirectory workerDirectory;
+    private EndpointRegistry endpointRegistry;
 
     @Mock private WorkerAddressService workerAddressService;
 
@@ -63,7 +59,7 @@ class EngineSyncRunnerTest {
 
     @Mock private EngineHealthReporter engineHealthReporter;
 
-    @Mock private EngineGrpcService engineGrpcService;
+    @Mock private WorkerStatusRpcClient workerStatusRpcClient;
 
     private final RoleType roleType = RoleType.PREFILL;
 
@@ -73,24 +69,23 @@ class EngineSyncRunnerTest {
 
     private final long syncRequestTimeoutMs = 5000L;
 
-    @Mock private LongAdder syncCount;
+    private final long syncCount = 0L;
 
     private final long syncEngineStatusInterval = 20L;
-    private static final long STATUS_STALE_AFTER_US = 10_000_000L;
 
     private EngineSyncRunner engineSyncRunner;
 
     @BeforeEach
     void setUp() {
-        workerDirectory = new WorkerDirectory(endpointRegistry);
+        endpointRegistry = RunnerTestSupport.endpointRegistry(Mockito.mock(ConfigService.class));
         engineSyncRunner =
                 new EngineSyncRunner(
                         modelName,
-                        workerDirectory,
+                        endpointRegistry,
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         roleType,
                         cacheAwareService,
                         cacheIntervalService,
@@ -98,7 +93,9 @@ class EngineSyncRunnerTest {
                         syncCount,
                         syncEngineStatusInterval,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
     }
 
     @Test
@@ -115,11 +112,11 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runnerWithEmptyDirectory =
                 new EngineSyncRunner(
                         modelName,
-                        new WorkerDirectory(endpointRegistry),
+                        endpointRegistry,
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         roleType,
                         cacheAwareService,
                         cacheIntervalService,
@@ -127,7 +124,9 @@ class EngineSyncRunnerTest {
                         syncCount,
                         syncEngineStatusInterval,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         // Execute
         runnerWithEmptyDirectory.run();
@@ -137,18 +136,18 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void should_start_new_worker_expiration_window_at_discovery_time() {
+    void should_initialize_poll_health_at_discovery_time() {
         String ipPort = "127.0.0.1:8080@0";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
-                        workerDirectory,
+                        endpointRegistry,
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.VIT,
                         cacheAwareService,
                         cacheIntervalService,
@@ -156,17 +155,30 @@ class EngineSyncRunnerTest {
                         syncCount,
                         syncEngineStatusInterval,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         runner.run();
 
         assertTrue(
-                workerDirectory
+                endpointRegistry
                                 .statusSnapshot(RoleType.VIT)
                                 .get(ipPort)
                                 .pollHealth()
                                 .lastSuccessfulPollUs()
                         > 0);
+    }
+
+    @Test
+    void malformedDiscoveryAddressDoesNotStarveLaterWorkers() {
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(WorkerHost.of("", 8080), WorkerHost.of("127.0.0.1", 8080)));
+
+        engineSyncRunner.run();
+
+        assertNotNull(endpointRegistry.statusSnapshot(roleType).get("127.0.0.1:8080@0"));
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
     }
 
     @Test
@@ -179,11 +191,11 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
-                        workerDirectory,
+                        endpointRegistry,
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
@@ -191,11 +203,13 @@ class EngineSyncRunnerTest {
                         syncCount,
                         syncEngineStatusInterval,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         runner.run();
 
-        WorkerStatus status = workerDirectory.statusSnapshot(RoleType.PREFILL).get(ipPort);
+        WorkerStatus status = endpointRegistry.statusSnapshot(RoleType.PREFILL).get(ipPort);
         WorkerStatus.PollLease statusLease = status.tryBeginStatusPoll();
         WorkerStatus.PollLease cacheLease = status.tryBeginCachePoll();
         assertNotNull(statusLease);
@@ -210,16 +224,12 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        EndpointRegistry directory = registry;
         String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status =
                 Mockito.spy(
                         RunnerTestSupport.discovered(
                                 RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site"));
-        when(status.pollHealth())
-                .thenReturn(
-                        new WorkerStatus.PollHealth(
-                                System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true));
         discover(directory, status);
         RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, status);
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -232,7 +242,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
@@ -240,11 +250,14 @@ class EngineSyncRunnerTest {
                         syncCount,
                         syncEngineStatusInterval,
                         false,
-                        1_000_000L);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
         runner.run();
 
         assertFalse(status.isActiveGeneration());
-        assertFalse(directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort));
+        RunnerTestSupport.awaitCondition(
+                () -> !directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort));
         assertNull(registry.get(RoleType.PREFILL, ipPort));
         registry.close();
     }
@@ -279,7 +292,7 @@ class EngineSyncRunnerTest {
                                 }
                                 return List.of();
                             });
-            WorkerDirectory directory = new WorkerDirectory(registry);
+            EndpointRegistry directory = registry;
             String ipPort = host.getLogicalIpPort();
             WorkerStatus status =
                     Mockito.spy(
@@ -307,7 +320,7 @@ class EngineSyncRunnerTest {
                             addresses,
                             statusCheckExecutor,
                             engineHealthReporter,
-                            engineGrpcService,
+                            workerStatusRpcClient,
                             RoleType.PREFILL,
                             cacheAwareService,
                             cacheIntervalService,
@@ -315,7 +328,9 @@ class EngineSyncRunnerTest {
                             syncCount,
                             syncEngineStatusInterval,
                             false,
-                            1_000_000L);
+                            false,
+                            statusCheckExecutor,
+                            statusCheckExecutor);
 
             runner.run();
 
@@ -343,7 +358,7 @@ class EngineSyncRunnerTest {
                 .when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        EndpointRegistry directory = registry;
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
@@ -351,7 +366,7 @@ class EngineSyncRunnerTest {
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
@@ -359,7 +374,9 @@ class EngineSyncRunnerTest {
                         syncCount,
                         syncEngineStatusInterval,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));
 
@@ -392,13 +409,27 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void failedDiscoveryTelemetryStillReplacesTopologyGeneration() {
+        Mockito.doThrow(new IllegalStateException("monitor unavailable"))
+                .when(engineHealthReporter)
+                .reportRawServiceDiscoveryHostCount(modelName, roleType, 1);
+
+        assertTopologyReplacement("group-a", "group-b", true);
+
+        verify(engineHealthReporter, times(2))
+                .reportRawServiceDiscoveryHostCount(modelName, roleType, 1);
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+    }
+
+    @Test
     void should_not_publish_running_load_variance_from_one_observation() {
-        EndpointRegistry registry = Mockito.mock(EndpointRegistry.class);
+        EndpointRegistry registry =
+                Mockito.spy(RunnerTestSupport.endpointRegistry(Mockito.mock(ConfigService.class)));
         WorkerEndpoint firstEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
         WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        EndpointRegistry directory = registry;
         discover(directory, first);
         discover(directory, second);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -406,12 +437,14 @@ class EngineSyncRunnerTest {
                         List.of(
                                 WorkerHost.of(first.getIp(), first.getPort()),
                                 WorkerHost.of(second.getIp(), second.getPort())));
-        when(registry.get(RoleType.PREFILL, first.getLogicalIpPort(), first))
-                .thenReturn(firstEndpoint);
-        when(registry.get(RoleType.PREFILL, second.getLogicalIpPort(), second))
-                .thenReturn(secondEndpoint);
-        when(firstEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(10L));
-        when(secondEndpoint.getLoadMetric()).thenReturn(OptionalLong.empty());
+        Mockito.doReturn(firstEndpoint)
+                .when(registry)
+                .get(RoleType.PREFILL, first.getLogicalIpPort(), first);
+        Mockito.doReturn(secondEndpoint)
+                .when(registry)
+                .get(RoleType.PREFILL, second.getLogicalIpPort(), second);
+        when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
+        when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.empty());
 
         EngineSyncRunner runner = varianceRunner(directory);
 
@@ -423,12 +456,13 @@ class EngineSyncRunnerTest {
 
     @Test
     void should_publish_running_load_variance_from_two_observations() {
-        EndpointRegistry registry = Mockito.mock(EndpointRegistry.class);
+        EndpointRegistry registry =
+                Mockito.spy(RunnerTestSupport.endpointRegistry(Mockito.mock(ConfigService.class)));
         WorkerEndpoint firstEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
         WorkerStatus second = varianceStatus("127.0.0.2", 61002, 20.0);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        EndpointRegistry directory = registry;
         discover(directory, first);
         discover(directory, second);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -436,12 +470,14 @@ class EngineSyncRunnerTest {
                         List.of(
                                 WorkerHost.of(first.getIp(), first.getPort()),
                                 WorkerHost.of(second.getIp(), second.getPort())));
-        when(registry.get(RoleType.PREFILL, first.getLogicalIpPort(), first))
-                .thenReturn(firstEndpoint);
-        when(registry.get(RoleType.PREFILL, second.getLogicalIpPort(), second))
-                .thenReturn(secondEndpoint);
-        when(firstEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(10L));
-        when(secondEndpoint.getLoadMetric()).thenReturn(OptionalLong.of(30L));
+        Mockito.doReturn(firstEndpoint)
+                .when(registry)
+                .get(RoleType.PREFILL, first.getLogicalIpPort(), first);
+        Mockito.doReturn(secondEndpoint)
+                .when(registry)
+                .get(RoleType.PREFILL, second.getLogicalIpPort(), second);
+        when(firstEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(10L));
+        when(secondEndpoint.tryGetLoadMetric()).thenReturn(OptionalLong.of(30L));
 
         EngineSyncRunner runner = varianceRunner(directory);
 
@@ -450,14 +486,14 @@ class EngineSyncRunnerTest {
         verify(engineHealthReporter).reportRunningLoadVariance(RoleType.PREFILL.toString(), 200.0);
     }
 
-    private EngineSyncRunner varianceRunner(WorkerDirectory directory) {
+    private EngineSyncRunner varianceRunner(EndpointRegistry directory) {
         return new EngineSyncRunner(
                 modelName,
                 directory,
                 workerAddressService,
                 statusCheckExecutor,
                 engineHealthReporter,
-                engineGrpcService,
+                workerStatusRpcClient,
                 RoleType.PREFILL,
                 cacheAwareService,
                 cacheIntervalService,
@@ -465,15 +501,22 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
-                STATUS_STALE_AFTER_US);
+                false,
+                statusCheckExecutor,
+                statusCheckExecutor);
     }
 
     private void assertTopologyReplacement(String oldGroup, String newGroup) {
+        assertTopologyReplacement(oldGroup, newGroup, false);
+    }
+
+    private void assertTopologyReplacement(
+            String oldGroup, String newGroup, boolean failureReportingThrows) {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
-        WorkerDirectory directory = new WorkerDirectory(registry);
+        EndpointRegistry directory = registry;
         String ipPort = "127.0.0.1:61000@0";
         WorkerStatus oldStatus =
                 RunnerTestSupport.discovered(
@@ -483,17 +526,32 @@ class EngineSyncRunnerTest {
         RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, oldStatus);
         WorkerHost replacement =
                 new WorkerHost("127.0.0.1", 61000, 61001, 61005, "site-b", newGroup);
-        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
-                .thenReturn(List.of(replacement));
+        WorkerAddressService addresses = workerAddressService;
+        if (failureReportingThrows) {
+            var modelConfig = Mockito.mock(org.flexlb.config.ModelMetaConfig.class);
+            var endpoint = new org.flexlb.dao.route.Endpoint();
+            endpoint.setAddress("replacement-service");
+            when(modelConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
+                    .thenReturn(
+                            List.of(org.apache.commons.lang3.tuple.Pair.of(newGroup, endpoint)));
+            var discovery = Mockito.mock(org.flexlb.discovery.ServiceDiscovery.class);
+            when(discovery.getHosts(endpoint)).thenReturn(List.of(replacement));
+            addresses =
+                    new WorkerAddressService(
+                            engineHealthReporter, modelConfig, discovery, configService);
+        } else {
+            when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                    .thenReturn(List.of(replacement));
+        }
 
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
                         directory,
-                        workerAddressService,
+                        addresses,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
@@ -501,7 +559,9 @@ class EngineSyncRunnerTest {
                         syncCount,
                         syncEngineStatusInterval,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        false,
+                        statusCheckExecutor,
+                        statusCheckExecutor);
         try {
             // First discovery pass retires the old topology generation: it
             // detaches the endpoint, marks the status RETIRING, and removes the
@@ -510,9 +570,8 @@ class EngineSyncRunnerTest {
             // the RETIRING holder, so no routable identity exists yet.
             runner.run();
 
-            assertFalse(
-                    directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort),
-                    "old generation is retired and removed; replacement is deferred");
+            RunnerTestSupport.awaitCondition(
+                    () -> !directory.statusSnapshot(RoleType.PREFILL).containsKey(ipPort));
             assertNull(
                     registry.get(RoleType.PREFILL, ipPort),
                     "old endpoint is detached immediately and replacement is unpublished");
@@ -531,6 +590,9 @@ class EngineSyncRunnerTest {
                     registry.get(RoleType.PREFILL, ipPort),
                     "replacement endpoint is unpublished before its first status commit");
         } finally {
+            if (failureReportingThrows) {
+                addresses.destroy();
+            }
             registry.close();
         }
     }
@@ -546,7 +608,7 @@ class EngineSyncRunnerTest {
         return status;
     }
 
-    private static void discover(WorkerDirectory directory, WorkerStatus status) {
+    private static void discover(EndpointRegistry directory, WorkerStatus status) {
         directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 
@@ -555,16 +617,17 @@ class EngineSyncRunnerTest {
         WorkerHost host = new WorkerHost("127.0.0.1", 8080, 8081, 8085, 18081, "", "", "");
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(host));
-        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+        when(workerStatusRpcClient.getWorkerStatusAsync(
+                        any(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(new java.util.concurrent.CompletableFuture<>());
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
-                        workerDirectory,
+                        endpointRegistry,
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
@@ -573,19 +636,20 @@ class EngineSyncRunnerTest {
                         syncEngineStatusInterval,
                         false,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         runner.run();
 
         ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
         verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
         submittedTasks.getAllValues().get(0).run();
-        verify(engineGrpcService)
+        verify(workerStatusRpcClient)
                 .getWorkerStatusAsync(
                         "127.0.0.1", 18081, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
         assertEquals(
                 8081,
-                workerDirectory
+                endpointRegistry
                         .statusSnapshot(RoleType.PREFILL)
                         .get("127.0.0.1:8080@0")
                         .getGrpcPort());
@@ -596,7 +660,8 @@ class EngineSyncRunnerTest {
         WorkerHost host = new WorkerHost("127.0.0.1", 8080);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(host));
-        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+        when(workerStatusRpcClient.getWorkerStatusAsync(
+                        any(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(new java.util.concurrent.CompletableFuture<>());
 
         engineSyncRunner.run();
@@ -604,11 +669,11 @@ class EngineSyncRunnerTest {
         ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
         verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
         submittedTasks.getAllValues().get(0).run();
-        verify(engineGrpcService)
+        verify(workerStatusRpcClient)
                 .getWorkerStatusAsync(
                         "127.0.0.1", 8081, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
         WorkerStatus status =
-                workerDirectory.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:8080@0");
+                endpointRegistry.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:8080@0");
         assertNotNull(status);
         assertEquals(0, status.getEngineIndex());
         assertEquals(1, status.getMultiEngineNum());
@@ -619,20 +684,21 @@ class EngineSyncRunnerTest {
         WorkerHost host = new WorkerHost("127.0.0.1", 8080, 8081, 8085, 18082, "", "", "", 1, 2);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(host));
-        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+        when(workerStatusRpcClient.getWorkerStatusAsync(
+                        any(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(new java.util.concurrent.CompletableFuture<>());
 
         engineSyncRunner.run();
 
         WorkerStatus status =
-                workerDirectory.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:8080@1");
+                endpointRegistry.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:8080@1");
         assertNotNull(status);
         assertEquals(1, status.getEngineIndex());
         assertEquals(2, status.getMultiEngineNum());
         ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
         verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
         submittedTasks.getAllValues().get(0).run();
-        verify(engineGrpcService)
+        verify(workerStatusRpcClient)
                 .getWorkerStatusAsync(
                         "127.0.0.1", 18082, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
     }
@@ -644,11 +710,11 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner =
                 new EngineSyncRunner(
                         modelName,
-                        workerDirectory,
+                        endpointRegistry,
                         workerAddressService,
                         statusCheckExecutor,
                         engineHealthReporter,
-                        engineGrpcService,
+                        workerStatusRpcClient,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
@@ -657,7 +723,8 @@ class EngineSyncRunnerTest {
                         syncEngineStatusInterval,
                         true,
                         false,
-                        STATUS_STALE_AFTER_US);
+                        statusCheckExecutor,
+                        statusCheckExecutor);
 
         runner.run();
 

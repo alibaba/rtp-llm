@@ -1,7 +1,9 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RequestPhase;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,7 +20,8 @@ public final class EncoderEndpoint extends WorkerEndpoint {
 
     private record RequestObservation(boolean seenInWorker, long estimatedUncachedTokens) {}
 
-    private final EndpointEventProjector endpointEvents;
+    private final RequestRepository requests;
+    private final PlacementAvailability availability;
     private final ConcurrentMap<String, RequestObservation> requestObservations =
             new ConcurrentHashMap<>();
     private final AtomicInteger pendingRequestCount = new AtomicInteger();
@@ -26,9 +29,11 @@ public final class EncoderEndpoint extends WorkerEndpoint {
     /**
      * Bind an Encoder worker generation to its request lifecycle projector.
      */
-    public EncoderEndpoint(WorkerStatus status, EndpointEventProjector endpointEvents) {
+    public EncoderEndpoint(
+            WorkerStatus status, RequestRepository requests, PlacementAvailability availability) {
         super(status);
-        this.endpointEvents = endpointEvents;
+        this.requests = requests;
+        this.availability = availability;
     }
 
     /**
@@ -60,7 +65,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
      */
     public void forgetRequest(String requestId) {
         if (removeRequestObservation(requestId)) {
-            endpointEvents.onEncoderCapacityChanged();
+            availability.changed(getStatus(), ipPort());
         }
     }
 
@@ -105,7 +110,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
+    public StatusChange applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
         if (!observation.alive()) {
@@ -116,7 +121,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public Runnable observeStatusHeartbeat(
+    public StatusChange applyStatusHeartbeat(
             WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         if (observation.owner() != ws) {
@@ -126,7 +131,7 @@ public final class EncoderEndpoint extends WorkerEndpoint {
         return projectStatus(observation, false);
     }
 
-    private Runnable projectStatus(
+    private StatusChange projectStatus(
             WorkerStatus.StatusObservation observation, boolean includeFinished) {
         List<WorkerStatus.TaskObservation> running = new ArrayList<>();
         List<WorkerStatus.TaskObservation> finished = new ArrayList<>();
@@ -142,7 +147,29 @@ public final class EncoderEndpoint extends WorkerEndpoint {
                 }
             }
         }
-        return () -> endpointEvents.onEncoderStatus(this, running, finished);
+        return new StatusChange.Encoder(running, finished);
+    }
+
+    @Override
+    public void publishStatus(StatusChange change) {
+        if (!(change instanceof StatusChange.Encoder encoder)) {
+            super.publishStatus(change);
+            return;
+        }
+        for (var task : encoder.active()) {
+            publishTask(task, false);
+        }
+        for (var task : encoder.finished()) {
+            publishTask(task, true);
+        }
+        availability.changed(getStatus(), ipPort());
+    }
+
+    private void publishTask(WorkerStatus.TaskObservation task, boolean finished) {
+        var context = requests.findActive(task.requestId(), RequestPhase.ENCODER);
+        if (context != null) {
+            context.data().getScheduler().onEncoderStatus(context, this, task, finished);
+        }
     }
 
     private boolean markObserved(String requestId) {
@@ -163,7 +190,12 @@ public final class EncoderEndpoint extends WorkerEndpoint {
         for (String requestId : requestIds) {
             removeRequestObservation(requestId);
         }
-        endpointEvents.onEncoderGenerationRetired(this, requestIds);
-        endpointEvents.onEncoderCapacityChanged();
+        for (String requestId : requestIds) {
+            var context = requests.findActive(requestId, RequestPhase.ENCODER);
+            if (context != null) {
+                context.data().getScheduler().onEncoderRetired(context, this);
+            }
+        }
+        availability.changed(getStatus(), ipPort());
     }
 }

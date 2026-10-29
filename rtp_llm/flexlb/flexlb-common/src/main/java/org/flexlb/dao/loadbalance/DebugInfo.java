@@ -28,7 +28,9 @@ public class DebugInfo {
     @JsonProperty("hit_cache_len")
     private long hitCacheLen;
 
-    /** Return an independent copy, or null when the source is null. */
+    /**
+     * Return an independent copy, or null when the source is null.
+     */
     public static DebugInfo copyOf(DebugInfo source) {
         if (source == null) {
             return null;

@@ -39,7 +39,9 @@ public record CacheHitComparisonResult(
         CachePrediction localSyncPrediction,
         CachePrediction localStandbyPrediction) {
 
-    /** Routing/PV identity in {@code ip:port@engineIndex} format. */
+    /**
+     * Routing/PV identity in {@code ip:port@engineIndex} format.
+     */
     @JsonProperty("worker")
     public String worker() {
         return workerIdentity == null ? null : workerIdentity.getLogicalIpPort();

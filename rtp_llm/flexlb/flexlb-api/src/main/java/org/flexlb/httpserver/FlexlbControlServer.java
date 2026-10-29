@@ -4,7 +4,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.cache.domain.CacheMatchFailoverRequest;
 import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.transport.GeneralHttpNettyService;
@@ -34,13 +34,13 @@ public class FlexlbControlServer {
     private static final String CACHE_MATCH_FAILOVER_PATH = "/flexlb/cache_match/failover";
 
     private final GeneralHttpNettyService generalHttpNettyService;
-    private final LBStatusConsistencyService lbStatusConsistencyService;
+    private final MasterStatusService lbStatusConsistencyService;
     private final CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
     private final FlexlbLogManager flexlbLogManager;
 
     public FlexlbControlServer(
             GeneralHttpNettyService generalHttpNettyService,
-            LBStatusConsistencyService lbStatusConsistencyService,
+            MasterStatusService lbStatusConsistencyService,
             CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator,
             FlexlbLogManager flexlbLogManager) {
         this.generalHttpNettyService = generalHttpNettyService;

@@ -11,6 +11,28 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class WorkerStatusRoleWireTest {
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void cacheMetadataDoesNotOverlapRequestCleanupCapability(boolean supportsCleanup)
+            throws Exception {
+        var bytes = new java.io.ByteArrayOutputStream();
+        var wire = com.google.protobuf.CodedOutputStream.newInstance(bytes);
+        wire.writeInt64(23, 32L);
+        wire.writeInt32(24, 1);
+        wire.writeEnum(25, 2);
+        wire.writeInt32(26, 2);
+        if (supportsCleanup) {
+            wire.writeBool(28, true);
+        }
+        wire.flush();
+        var status = EngineRpcService.WorkerStatusPB.parseFrom(bytes.toByteArray());
+        assertEquals(32L, status.getBlockSize());
+        assertEquals(1, status.getBlockHashLookaheadTokens());
+        assertEquals(2, status.getKvCacheGroupModeValue());
+        assertEquals(2, status.getCacheMatchRollbackBlocks());
+        assertEquals(supportsCleanup, status.getSupportsRequestCleanup());
+    }
+
     // 使用 DashLLM model_rpc_service_pb2.WorkerStatusPB.SerializeToString() 生成，
     // 覆盖双写、旧字符串和仅枚举，避免用 FlexLB 自己的 writer 验证自己。
     @ParameterizedTest

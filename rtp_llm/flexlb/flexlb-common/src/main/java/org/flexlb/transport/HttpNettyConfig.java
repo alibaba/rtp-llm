@@ -70,7 +70,6 @@ public class HttpNettyConfig {
                                                 defaultEventExecutorGroup,
                                                 "inboundHandler",
                                                 handler);
-                                handler.channelEnhance(ch);
                             }
                         });
         return handler;
@@ -115,7 +114,6 @@ public class HttpNettyConfig {
                                                 defaultEventExecutorGroup,
                                                 "inboundHandler",
                                                 handler);
-                                handler.channelEnhance(ch);
                             }
                         });
         return handler;

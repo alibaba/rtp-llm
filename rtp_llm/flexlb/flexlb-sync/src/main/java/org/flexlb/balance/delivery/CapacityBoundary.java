@@ -1,8 +1,10 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 
 import java.util.Objects;
+
+import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * Materialized result of crossing one delivery-admission boundary.
@@ -11,8 +13,8 @@ import java.util.Objects;
  */
 public record CapacityBoundary(
         Status status,
-        Availability availability,
-        RouteProjection.AdmissionBlockSemantics projectionSemantics,
+        Resource resource,
+        RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics,
         Throwable cause) {
 
     public static final CapacityBoundary OWNERSHIP_LOST =
@@ -22,31 +24,28 @@ public record CapacityBoundary(
         Objects.requireNonNull(status, "status");
         boolean unavailable = status == Status.UNAVAILABLE;
         boolean failed = status == Status.FAILED;
-        if (unavailable != (availability != null)
-                || failed != (cause != null)
-                || (!unavailable && (availability != null || projectionSemantics != null))) {
-            throw new IllegalArgumentException(
-                    "capacity boundary status requires its exact payload");
-        }
+        checkArgument(
+                unavailable == (resource != null)
+                        && failed == (cause != null)
+                        && (unavailable || projectionSemantics == null),
+                "capacity boundary status requires its exact payload");
     }
 
     public static CapacityBoundary unavailable(
-            Availability availability,
-            RouteProjection.AdmissionBlockSemantics projectionSemantics) {
+            Resource resource, RequestTimeEstimation.AdmissionBlockSemantics projectionSemantics) {
         return new CapacityBoundary(
                 Status.UNAVAILABLE,
-                Objects.requireNonNull(availability, "availability"),
+                Objects.requireNonNull(resource, "resource"),
                 Objects.requireNonNull(projectionSemantics, "projectionSemantics"),
                 null);
     }
 
-    /** Park delivery without restricting publication into the worker queue. */
-    public static CapacityBoundary deliveryUnavailable(Availability availability) {
+    /**
+     * Park delivery without restricting publication into the worker queue.
+     */
+    public static CapacityBoundary deliveryUnavailable(Resource resource) {
         return new CapacityBoundary(
-                Status.UNAVAILABLE,
-                Objects.requireNonNull(availability, "availability"),
-                null,
-                null);
+                Status.UNAVAILABLE, Objects.requireNonNull(resource, "resource"), null, null);
     }
 
     public static CapacityBoundary failed(Throwable cause) {
@@ -65,26 +64,28 @@ public record CapacityBoundary(
     }
 
     /**
-     * Non-blocking wake capability for the exact unavailable admission.
-     * Implementations must not acquire endpoint mutation locks while queried.
+     * Shared capacity failure descriptions for direct admission and queued delivery.
      */
-    public interface Availability {
+    @lombok.Getter
+    @lombok.RequiredArgsConstructor
+    public enum Resource {
+        DISPATCH_EXECUTOR("DELIVERY_CAPACITY_BATCH_ADMISSION"),
+        PREFILL_BATCH("Prefill batch capacity exhausted"),
+        PREFILL_REQUEST("Prefill request capacity exhausted"),
+        DECODE_ENGINE("DELIVERY_CAPACITY_DECODE_ENGINE");
 
-        boolean isAvailable();
-
-        void addListener(Runnable listener);
-
-        void removeListener(Runnable listener);
+        private final String description;
     }
 
-    /** Either an accepted capability/value or one fully materialized boundary. */
+    /**
+     * Either an accepted capability/value or one fully materialized boundary.
+     */
     public record Attempt<T>(T value, CapacityBoundary boundary) {
 
         public Attempt {
-            if ((value == null) == (boundary == null)) {
-                throw new IllegalArgumentException(
-                        "capacity attempt requires exactly one value or boundary");
-            }
+            checkArgument(
+                    (value == null) != (boundary == null),
+                    "capacity attempt requires exactly one value or boundary");
         }
 
         public static <T> Attempt<T> accepted(T value) {

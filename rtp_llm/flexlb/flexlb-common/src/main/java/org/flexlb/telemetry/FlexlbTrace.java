@@ -4,7 +4,6 @@ import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanBuilder;
-import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
@@ -97,7 +96,9 @@ public final class FlexlbTrace {
 
     private FlexlbTrace() {}
 
-    /** 完整初始化成功后注入 Provider；null 表示关闭。 */
+    /**
+     * 完整初始化成功后注入 Provider；null 表示关闭。
+     */
     public static void configure(OpenTelemetry sdk, String scopeVersion) {
         enabled = false;
         tracer =
@@ -111,12 +112,15 @@ public final class FlexlbTrace {
         return enabled;
     }
 
-    /** Only explicit admission/validation codes imply a business rejection. */
+    /**
+     * Only explicit admission/validation codes imply a business rejection.
+     */
     public static String scheduleFailureType(int code) {
         if (code == StatusEnum.INTERNAL_ERROR.getCode()) {
             return "FLEXLB_INTERNAL_ERROR";
         }
         if (code == StrategyErrorType.INVALID_REQUEST.getErrorCode()
+                || code == StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode()
                 || code == StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED.getErrorCode()
                 || code == StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode()
                 || code == StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
@@ -130,10 +134,6 @@ public final class FlexlbTrace {
         return start(name, parent, SpanKind.SERVER);
     }
 
-    public static Span startInternal(String name, Context parent) {
-        return start(name, parent, SpanKind.INTERNAL);
-    }
-
     public static Span startClient(String name, Context parent) {
         return start(name, parent, SpanKind.CLIENT);
     }
@@ -144,18 +144,6 @@ public final class FlexlbTrace {
             return !enabled || span == null ? base : span.storeInContext(base);
         } catch (Throwable ignored) {
             return fallback == null ? Context.current() : fallback;
-        }
-    }
-
-    public static SpanContext spanContext(Context context) {
-        try {
-            if (context == null) {
-                return null;
-            }
-            SpanContext spanContext = Span.fromContext(context).getSpanContext();
-            return spanContext.isValid() ? spanContext : null;
-        } catch (Throwable ignored) {
-            return null;
         }
     }
 
@@ -208,10 +196,6 @@ public final class FlexlbTrace {
             setScheduleAttribute(
                     context, key, TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
         }
-    }
-
-    public static void finish(Span span) {
-        finish(span, null);
     }
 
     public static void finish(Span span, Throwable error) {
@@ -289,7 +273,9 @@ public final class FlexlbTrace {
         }
     }
 
-    /** Marks an already-created span from an asynchronous scheduling callback. */
+    /**
+     * Marks an already-created span from an asynchronous scheduling callback.
+     */
     public static void markBusinessError(Context context, long code, String type) {
         if (!enabled) {
             return;

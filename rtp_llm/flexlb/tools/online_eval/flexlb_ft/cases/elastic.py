@@ -600,8 +600,7 @@ def elastic_concurrent_ops(ctx: CaseContext):
 # queueTimeout (Java default 1h) — that is a silent hour-long loss.
 
 PENDING_DRAIN_TERMINAL_S = 40.0
-# Master accounting cleanup cap: stale window (statusStaleAfterMs=10s +
-# 3s cleaner period) + generous margin, but far below queueTimeout (1h).
+# Master accounting cleanup cap after discovery removal, including endpoint drain.
 PENDING_DRAIN_CLEAN_S = 50.0
 # Wave shaping: serial sends at ~30x the 10ms FIXED_WINDOW collection
 # window so every request forms its own batch — a fast burst collapses

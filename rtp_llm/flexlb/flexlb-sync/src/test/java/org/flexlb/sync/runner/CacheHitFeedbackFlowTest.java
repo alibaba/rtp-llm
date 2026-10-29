@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -21,11 +22,9 @@ import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
@@ -34,9 +33,8 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.metric.FlexMonitor;
-import org.flexlb.service.grpc.EngineGrpcService;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,7 +60,6 @@ import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -78,7 +75,7 @@ class CacheHitFeedbackFlowTest {
             mock(LocalStandbyCacheMatchProvider.class);
     private final CacheMatchFailoverManager failover = mock(CacheMatchFailoverManager.class);
     private EndpointRegistry registry;
-    private WorkerDirectory directory;
+    private EndpointRegistry directory;
     private WorkerStatus worker;
     private CacheAwareService cache;
     private CacheMetricsReporter cacheMetrics;
@@ -89,7 +86,7 @@ class CacheHitFeedbackFlowTest {
     @BeforeEach
     void setUp() {
         config = new FlexlbConfig();
-        config.setDispatcher(DispatcherConfig.nonBatch());
+        config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
         config.getRouter()
                 .getRoles()
                 .getPrefill()
@@ -100,16 +97,8 @@ class CacheHitFeedbackFlowTest {
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         ConfigService configs = mock(ConfigService.class);
         when(configs.loadBalanceConfig()).thenReturn(config);
-        registry =
-                new EndpointRegistry(
-                        configs,
-                        RunnerTestSupport.eventSink(),
-                        mock(org.flexlb.service.monitor.BatchSchedulerReporter.class),
-                        new org.flexlb.balance.scheduler.RouteDeliveryStrategy(
-                                mock(org.flexlb.balance.scheduler.RequestRegistry.class),
-                                mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
-                        new org.flexlb.balance.scheduler.PlacementAvailability());
-        directory = new WorkerDirectory(registry);
+        registry = RunnerTestSupport.endpointRegistry(configs);
+        directory = registry;
         worker =
                 RunnerTestSupport.discovered(
                         RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
@@ -131,7 +120,12 @@ class CacheHitFeedbackFlowTest {
                                         1,
                                         100)));
         KvcmCacheMatchProvider kvcm = mock(KvcmCacheMatchProvider.class);
-        when(kvcm.findMatchingEngines(anyString(), anyList(), anyLong(), any(), anyString()))
+        when(kvcm.findMatchingEngines(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyList(),
+                        anyLong(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(Map.of(worker.getLogicalIpPort(), new HostCacheMatch(2, 6)));
         when(failover.activeSource()).thenReturn(CacheMatchSource.KVCM);
         var query =
@@ -209,7 +203,10 @@ class CacheHitFeedbackFlowTest {
         verify(monitor, times(1)).report(eq(CACHE_HIT_COMPARISON_INPUT_TOKENS), any(), eq(1000.0));
         verify(cacheMetrics, times(1))
                 .reportLocalStandbyPrediction(
-                        eq(RoleType.PREFILL), anyString(), eq(300L), eq(1000L));
+                        eq(RoleType.PREFILL),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        eq(300L),
+                        eq(1000L));
         JsonNode status = events("prefill_worker_status").getFirst();
         assertEquals(1, events("prefill_worker_status").size());
         assertEquals(200, status.path("hbmLocalMatchTokens").asLong());
@@ -243,7 +240,12 @@ class CacheHitFeedbackFlowTest {
     @Test
     void fallbackReportsStandbyWithoutPretendingItIsKvcm() throws Exception {
         when(failover.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
-        when(standby.findMatchingEngines(anyString(), anyList(), anyLong(), any(), anyString()))
+        when(standby.findMatchingEngines(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyList(),
+                        anyLong(),
+                        any(),
+                        org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)));
         select("1003");
         poll(worker, task("1003", true, 0), true, 2);
@@ -269,7 +271,8 @@ class CacheHitFeedbackFlowTest {
         assertFalse(event.hasNonNull("localStandbyPrediction"));
         verify(monitor).report(eq(CACHE_HIT_COMPARISON_DELTA_TOKENS), any(), eq(100.0));
         verify(cacheMetrics, never())
-                .reportLocalStandbyPrediction(any(), anyString(), anyLong(), anyLong());
+                .reportLocalStandbyPrediction(
+                        any(), org.mockito.ArgumentMatchers.anyString(), anyLong(), anyLong());
     }
 
     @Test
@@ -367,20 +370,29 @@ class CacheHitFeedbackFlowTest {
     }
 
     private void select(String requestId) {
-        Request request = new Request();
-        request.setRequestId(requestId);
-        request.setSeqLen(1000);
-        request.setBlockSize(100);
-        request.setBlockCacheKeys(List.of(1L));
-        request.setBlockSize(100);
-        request.setBlockCacheKeys(List.of(1L));
-        BalanceContext context = new BalanceContext(config);
+        Request request = Request.builder().build();
+        request = request.toBuilder().requestId(requestId).build();
+        request = request.toBuilder().seqLen(1000).build();
+        request = request.toBuilder().blockSize(100).build();
+        request = request.toBuilder().blockCacheKeys(List.of(1L)).build();
+        request = request.toBuilder().blockSize(100).build();
+        request = request.toBuilder().blockCacheKeys(List.of(1L)).build();
+        RequestData context = new RequestData(config);
         context.setRequest(request);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
-        var selected = strategy.select(context, RoleType.PREFILL, "group");
-        assertEquals(PlacementResult.Status.SUCCESS, selected.status());
-        selected.value().close();
+        try (var route =
+                new org.flexlb.balance.scheduler.RequestRoute(
+                        new org.flexlb.balance.scheduler.RequestContext(context))) {
+            var selected =
+                    strategy.select(
+                            context.getRequest(),
+                            context.getSchedulingMetadata(),
+                            RoleType.PREFILL,
+                            "group",
+                            route);
+            assertEquals(PlacementResult.Status.SUCCESS, selected.status());
+        }
     }
 
     private void publish(WorkerStatus status) {
@@ -390,7 +402,9 @@ class CacheHitFeedbackFlowTest {
             registry.publishPreparedEndpoint(
                     status.getLogicalIpPort(),
                     status,
-                    status.prepareNewStatus(status.freezeStatusResponse(value)));
+                    status.prepareNewStatus(
+                            org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
+                                    status, value)));
             status.recordSuccessfulPoll(true);
         } finally {
             status.lock.unlock();
@@ -439,17 +453,18 @@ class CacheHitFeedbackFlowTest {
 
     private void poll(
             WorkerStatus status, EngineRpcService.TaskInfoPB task, boolean finished, long version) {
-        EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+        WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
+        when(grpc.getWorkerStatusAsync(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyInt(),
+                        anyLong(),
+                        anyLong(),
+                        any()))
                 .thenReturn(CompletableFuture.completedFuture(response(task, finished, version)));
         var lease = status.tryBeginStatusPoll();
         assertNotNull(lease);
         new GrpcWorkerStatusRunner(
                         "model",
-                        status.getLogicalIpPort(),
-                        "test",
-                        RoleType.PREFILL,
-                        "group",
                         status,
                         lease,
                         directory,

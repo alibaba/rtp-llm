@@ -29,7 +29,6 @@ import static org.flexlb.constant.NacosConfigConstants.NACOS_DATA_ID;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_GROUP;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_SERVER_ADDR;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -47,7 +46,10 @@ class ConfigSourceSelectionTest {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         String deploymentId = "dash_pd:ea118_RTX_PRO_5000_72GB:master";
-        when(client.getConfig(anyString(), eq(DEFAULT_NACOS_GROUP), eq(3000L)))
+        when(client.getConfig(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        eq(DEFAULT_NACOS_GROUP),
+                        eq(3000L)))
                 .thenAnswer(
                         invocation ->
                                 "legacy-role".equals(invocation.getArgument(0))
@@ -97,7 +99,11 @@ class ConfigSourceSelectionTest {
         }
         verify(client).getConfig(deploymentId, DEFAULT_NACOS_GROUP, 3000L);
         verify(client, never()).getConfig("legacy-role", DEFAULT_NACOS_GROUP, 3000L);
-        verify(client, never()).addListener(anyString(), anyString(), any(Listener.class));
+        verify(client, never())
+                .addListener(
+                        org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        any(Listener.class));
         verify(client).shutDown();
     }
 

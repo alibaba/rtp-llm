@@ -64,7 +64,13 @@ class LoadClientPriorityTest {
                         false,
                         "",
                         true,
-                        priority);
+                        priority,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
         return new JavaLoadClient(config);
     }
 
@@ -142,8 +148,6 @@ class LoadClientPriorityTest {
 
     @Test
     void forcePriorityPinsEveryRecord() throws Exception {
-        // Bottom constructor carries the FORCE_PRIORITY knob (fromEnv reads
-        // the env); the 35-param convenience overload forwards 0 = disabled.
         JavaLoadClient.Config config =
                 new JavaLoadClient.Config(
                         "trace.jsonl",
@@ -181,7 +185,9 @@ class LoadClientPriorityTest {
                         50,
                         "replay",
                         0.0,
-                        true);
+                        0.0,
+                        true,
+                        List.of());
         JavaLoadClient client = new JavaLoadClient(config);
 
         ObjectNode withField =

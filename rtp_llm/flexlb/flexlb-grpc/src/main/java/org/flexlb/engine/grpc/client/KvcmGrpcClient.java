@@ -37,7 +37,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-/** High-level KVCM cache matching client. */
+/**
+ * High-level KVCM cache matching client.
+ */
 @Slf4j
 @Component
 public class KvcmGrpcClient {

@@ -140,7 +140,7 @@ class CodeReviewFixTest {
                 "activeDecodeRequests should be 1 after scheduling");
         assertEquals(
                 kvBudgetTokens,
-                decode.getActiveKvTokens(),
+                MockEngineTestSupport.getActiveKvTokens(decode),
                 "activeKvTokens should be " + kvBudgetTokens + " after scheduling");
         assertEquals(1, decode.getInflightCount(), "pendingRequests should be 1 after scheduling");
         assertEquals(
@@ -156,10 +156,15 @@ class CodeReviewFixTest {
                 0,
                 getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 0 after cancel");
-        assertEquals(0, decode.getActiveKvTokens(), "activeKvTokens should be 0 after cancel");
+        assertEquals(
+                0,
+                MockEngineTestSupport.getActiveKvTokens(decode),
+                "activeKvTokens should be 0 after cancel");
         assertEquals(0, decode.getInflightCount(), "pendingRequests should be 0 after cancel");
         assertEquals(0, decode.getRunningCount(), "runningTasks should be empty after cancel");
-        assertFalse(decode.isLeakDetected(), "no leak should be detected after cancel");
+        assertFalse(
+                MockEngineTestSupport.isLeakDetected(decode),
+                "no leak should be detected after cancel");
     }
 
     // ──────────── Test 2: cancelled request not forwarded to decode ────────────
@@ -209,11 +214,11 @@ class CodeReviewFixTest {
                 "decode runningTasks should be empty — request must not be forwarded");
         assertEquals(
                 0,
-                decode.getActiveKvTokens(),
+                MockEngineTestSupport.getActiveKvTokens(decode),
                 "decode activeKvTokens should be 0 — request must not be forwarded");
         assertEquals(
                 0,
-                decode.getAcceptedCount(),
+                MockEngineTestSupport.getAcceptedCount(decode),
                 "decode acceptedCount should be 0 — request must not be forwarded");
 
         // Prefill engine should also be clean.
@@ -225,8 +230,12 @@ class CodeReviewFixTest {
                 0,
                 prefill.getRunningCount(),
                 "prefill runningTasks should be empty after completion");
-        assertFalse(prefill.isLeakDetected(), "no leak should be detected on prefill engine");
-        assertFalse(decode.isLeakDetected(), "no leak should be detected on decode engine");
+        assertFalse(
+                MockEngineTestSupport.isLeakDetected(prefill),
+                "no leak should be detected on prefill engine");
+        assertFalse(
+                MockEngineTestSupport.isLeakDetected(decode),
+                "no leak should be detected on decode engine");
     }
 
     // ──────────── Test 3: putIfAbsent atomic under concurrency ────────────
@@ -291,7 +300,7 @@ class CodeReviewFixTest {
                         + " (putIfAbsent must reject duplicates)");
         assertEquals(
                 kvBudgetTokens,
-                decode.getActiveKvTokens(),
+                MockEngineTestSupport.getActiveKvTokens(decode),
                 "activeKvTokens should be "
                         + kvBudgetTokens
                         + ", not "
@@ -315,11 +324,15 @@ class CodeReviewFixTest {
                 0,
                 getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 0 after completion");
-        assertEquals(0, decode.getActiveKvTokens(), "activeKvTokens should be 0 after completion");
+        assertEquals(
+                0,
+                MockEngineTestSupport.getActiveKvTokens(decode),
+                "activeKvTokens should be 0 after completion");
         assertEquals(0, decode.getInflightCount(), "pendingRequests should be 0 after completion");
         assertEquals(0, decode.getRunningCount(), "runningTasks should be empty after completion");
         assertFalse(
-                decode.isLeakDetected(), "no leak should be detected after concurrent scheduling");
+                MockEngineTestSupport.isLeakDetected(decode),
+                "no leak should be detected after concurrent scheduling");
     }
 
     // ──────────── Cluster setup ────────────

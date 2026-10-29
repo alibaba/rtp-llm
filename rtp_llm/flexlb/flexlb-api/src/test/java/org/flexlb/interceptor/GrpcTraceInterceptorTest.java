@@ -322,7 +322,9 @@ class GrpcTraceInterceptorTest {
         assertEquals("INTERNAL", span.getStatus().getDescription());
     }
 
-    /** No close observed: the synthetic cancellation is the documented fallback. */
+    /**
+     * No close observed: the synthetic cancellation is the documented fallback.
+     */
     @Test
     void cancelWithoutCloseFallsBackToCancellation() {
         Terminals t = intercept();
@@ -356,7 +358,9 @@ class GrpcTraceInterceptorTest {
         assertEquals("UNAVAILABLE", stringAttr(span, "error.type"));
     }
 
-    /** Repeated notifications must not export the span twice. */
+    /**
+     * Repeated notifications must not export the span twice.
+     */
     @Test
     void repeatedTerminalNotificationsEndTheSpanOnce() {
         Terminals t = intercept();

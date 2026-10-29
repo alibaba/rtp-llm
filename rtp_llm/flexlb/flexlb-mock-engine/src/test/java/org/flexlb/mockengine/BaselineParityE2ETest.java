@@ -18,7 +18,6 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -40,13 +39,10 @@ class BaselineParityE2ETest {
     void singlePlannerWithPriorityDisabledPreservesFifoBatchDecisions() throws Exception {
         // autoTpm=false：批队列用 FIFO 序（构造时冻结），全部开关保持默认关闭
         try (AutoTpmE2EHarness h = singlePlannerHarness()) {
-            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
-            h.fixedWindowDecision().setMaxRequests(2);
-            h.config.getDispatcher().setMaxInflightPerPrefillWorker(1);
             h.startAutoPump(10);
 
             // 预热首笔调度与引擎调用，并从测量记录中排除。
-            h.scheduler.submit(h.context(1999, 50)).get(10, TimeUnit.SECONDS);
+            h.scheduler.submit(h.context("1999", 50)).get(10, TimeUnit.SECONDS);
             AutoTpmE2EHarness.await(
                     () -> !h.engineArrivalOrder.isEmpty(),
                     5_000,
@@ -65,7 +61,7 @@ class BaselineParityE2ETest {
                     submissionOrder.add(requestId);
                     priorityByRid.put(requestId, priority);
                     submitNanos.put(requestId, System.nanoTime());
-                    futures.add(h.scheduler.submit(h.context(requestId, priority)));
+                    futures.add(h.scheduler.submit(h.context(String.valueOf(requestId), priority)));
                 }
             }
             int total = PER_PRIORITY * PRIORITIES.length;
@@ -95,14 +91,15 @@ class BaselineParityE2ETest {
                     "engine arrivals must contain every measured request and no unexpected request");
 
             // RequestSchedulerTestRuntime supplies incrementing batch IDs. This
-            // fixture has one Prefill and one WorkerBatcher, so BatchDeliveryStrategy
+            // fixture has one Prefill and one PrefillQueueRunner, so DeliveryDispatcher
             // assigns them in decision order before committing and submitting to
             // the asynchronous dispatcher. Preserve request order within each batch;
             // ordering RPC batches by ID removes only dispatch-thread arrival races.
             ArgumentCaptor<EnqueueBatchRequestPB> batches =
                     ArgumentCaptor.forClass(EnqueueBatchRequestPB.class);
             verify(h.grpcClient, atLeastOnce())
-                    .batchEnqueueAsync(anyString(), anyInt(), batches.capture());
+                    .batchEnqueueAsync(
+                            org.mockito.ArgumentMatchers.anyString(), anyInt(), batches.capture());
             List<Long> decisionOrder =
                     batches.getAllValues().stream()
                             .sorted(Comparator.comparingLong(EnqueueBatchRequestPB::getBatchId))
@@ -118,8 +115,11 @@ class BaselineParityE2ETest {
 
             // 无任何抢占痕迹
             verify(h.requestReporter, never())
-                    .reportVictim(anyInt(), anyInt(), anyString(), anyString());
-            verify(h.requestReporter, never()).reportPriorityPreempt(anyString());
+                    .reportVictim(
+                            anyInt(),
+                            anyInt(),
+                            org.mockito.ArgumentMatchers.anyString(),
+                            org.mockito.ArgumentMatchers.anyString());
 
             // 对照数据：三档平均调度延迟应该同量级（仅输出，不做脆断言）
             Map<Integer, Double> avgLatencyMs = new HashMap<>();
@@ -146,7 +146,13 @@ class BaselineParityE2ETest {
         String previous = System.getProperty("flexlb.queue.planner.threads");
         try {
             System.setProperty("flexlb.queue.planner.threads", "1");
-            return new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false);
+            var config = new org.flexlb.config.FlexlbConfig();
+            var decision = config.decisionPolicy();
+            decision.setMaxCollectionWaitMs(5);
+            decision.setMaxRequests(2);
+            config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+            return new AutoTpmE2EHarness(
+                    BASE_PORT, 1, 1, "5", 1.0, false, false, decision, false, config);
         } finally {
             if (previous == null) {
                 System.clearProperty("flexlb.queue.planner.threads");

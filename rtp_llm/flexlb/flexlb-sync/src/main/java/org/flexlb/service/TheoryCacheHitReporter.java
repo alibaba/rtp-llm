@@ -1,11 +1,11 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.cache.match.theory.RecentCacheKeyWindow;
 import org.flexlb.cache.match.theory.TheoryCacheKeyHistory;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -70,7 +70,7 @@ public class TheoryCacheHitReporter {
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
 
-    public void report(BalanceContext balanceContext) {
+    public void report(RequestData balanceContext) {
         if (balanceContext == null) {
             return;
         }
@@ -91,7 +91,7 @@ public class TheoryCacheHitReporter {
         }
     }
 
-    private void reportRequest(BalanceContext balanceContext) {
+    private void reportRequest(RequestData balanceContext) {
         FlexlbConfig config = configService.loadBalanceConfig();
         if (!config.getObservability().getCacheHit().getRecentKeyWindow().isWriteEnabled()) {
             return;
@@ -130,6 +130,9 @@ public class TheoryCacheHitReporter {
         if (hitKeyCount <= 0L || inputTokens <= 0L || cacheKeyBlockSize <= 0L) {
             return 0L;
         }
+        if (hitKeyCount > inputTokens / cacheKeyBlockSize) {
+            return inputTokens;
+        }
         long hitTokens = hitKeyCount * cacheKeyBlockSize;
         if (hitTokens < 0L) {
             return inputTokens;
@@ -150,7 +153,7 @@ public class TheoryCacheHitReporter {
     }
 
     private void logTrace(
-            BalanceContext balanceContext,
+            RequestData balanceContext,
             RecentCacheKeyWindow.Snapshot snapshot,
             long hitTokens,
             long inputTokens) {
@@ -180,7 +183,7 @@ public class TheoryCacheHitReporter {
     }
 
     private static String formatTheoryLogLine(
-            BalanceContext balanceContext, long hitTokens, long inputTokens) {
+            RequestData balanceContext, long hitTokens, long inputTokens) {
         Request request = balanceContext.getRequest();
         long nowMs = System.currentTimeMillis();
         return String.format(

@@ -94,7 +94,9 @@ public class ModelMetaConfig {
         return serviceId;
     }
 
-    /** Immutable request topology; live endpoint occupancy never changes it. */
+    /**
+     * Immutable request topology; live endpoint occupancy never changes it.
+     */
     public List<RoleType> requiredRoles() {
         return requiredRoles;
     }
@@ -103,7 +105,9 @@ public class ModelMetaConfig {
         return modelName;
     }
 
-    /** Return a fresh structural list for the single configured service. */
+    /**
+     * Return a fresh structural list for the single configured service.
+     */
     public List<Pair<String, Endpoint>> endpointsWithGroup(
             String requestedModelName, RoleType role) {
         if (requestedModelName == null || role == null) {

@@ -276,6 +276,9 @@ gRPC Schedule 在读取请求 ID 前创建基础上下文，记录入口时间�
 PV 顶层与嵌套 `response` 的成功标识、错误码和错误消息表达同一终态；准入拒绝原因仅在
 确有准入拒绝时记录，成功、取消、超时和其他无准入拒绝原因的结果省略该字段。
 
+PV 成功记录使用 INFO，失败记录使用 ERROR。对应级别关闭时跳过记录构造和 JSON 序列化，
+请求耗时仍然完成记录。
+
 `totalUs` 是入口到记录 PV 前的单调时钟耗时；`arrivalMs` 是服务入口时间减调用方
 `requestTimeMs`，受两端时钟偏差影响。gRPC 路径记录收到的
 `requestMessageBytes`（gRPC 接收的未压缩 protobuf 字节数，不含帧头）。transport tracer
@@ -286,7 +289,7 @@ PV 顶层与嵌套 `response` 的成功标识、错误码和错误消息表达�
 路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
 终态读取依赖处理链的完成发布，不与写入并发；字段记录和角色 Map 操作不使用同步锁。
 PV 读取时创建不可变 `RoutingTelemetry` 快照，选路中的次数与原因读取不创建快照。
-WorkerBatcher 的 `decisionGroup` 独立发布，包含提交组 ID、policy、dispatcher、
+PrefillQueueRunner 的 `decisionGroup` 独立发布，包含提交组 ID、policy、dispatcher、
 worker、committedSize、reason、提交时间及请求等待时长；提交组大小不等于保证交付数量，
 Engine 的 `batchId` 标识交付批次。
 
@@ -340,8 +343,8 @@ Block Size 保留 `app.cache.block.size{role}`：同一角色的 Worker 共享�
 该指标不增加 engineIp 标签；大盘按 BIZ_NAME 与 role 展示，删除旧 model 筛选。
 
 既有 WorkerStatus/cache 的轮询成功周期、RPC 耗时、运行队列时间、任务列表大小、cache key 数
-和 KV 容量指标保留裸 IP 的 `engineIp` 标签。同 IP 多实例使用相同标签上报，Gauge 是逐样本值，
-不表示 IP 合计。缓存预测对照使用实际 WorkerStatus 的实例数选择精确身份：单 Engine 为
+和 KV 容量指标使用 WorkerStatus 的 metric identity，Gauge 是每个逻辑 worker 的逐样本值。
+缓存预测对照同样使用实际 WorkerStatus 的实例数选择精确身份：单 Engine 为
 `ip:port`，多 Engine 为 `ip:port@engineIndex`；PV 和路由/cache 内部继续使用完整 logical identity。
 对照的绝对 Token 差值不依赖分母，输入 Token 数缺失或非正时仍可记录；Counter 和比例仅在
 输入 Token 数为正时报告，不能将绝对差值的样本数量当作加权命中率的分母。
@@ -373,12 +376,39 @@ provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 `whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。
 忙碌线程、排队数、总线程数、最大线程数使用 GAUGE，scrape 读取最近一次上报的快照，
 最多滞后 2 秒；不能用这些快照捕获短于采样间隔的峰值。瞬时指标保留原名。
-拒绝任务数使用 `grpc.server.executor.caller.runs` COUNTER。每次拒绝发生时直接上报 1，
-由监控 provider 累加，不维护本地累计值或上次上报位置。初始化及每 2 秒上报 0，
-使没有拒绝事件时指标仍可查询；零上报不增加计数。Master 重启后计数重新开始。拒绝数包含队列或线程饱和、
-线程池关闭后提交触发的拒绝。保留 `grpc.server.executor.caller.runs` 上报名，
-面板显示“任务拒绝数”，使用 `increase(...[1m])` 查看窗口拒绝数。
+拒绝数保留 `grpc.server.executor.caller.runs` COUNTER 名称，统计 receiving 容量、字节预算
+或执行器饱和导致的 RPC 入口拒绝。每 2 秒将本地累计数的新增长度上报给 provider，
+重复采样不重复计数，初始化上报 0；面板用 `increase(...[1m])` 查看窗口拒绝数。
+已接收 RPC 的传输回调在执行器饱和或关闭时仍执行收尾，CallerRuns 不计为业务拒绝。
+Cancel 使用独立的控制执行器和 receiving 预算，避免大 Schedule payload 占满取消入口。
+receiving 的活动数、超时、拒绝和字节预算每秒上报，其中累计总数使用 Gauge，查询时取差分。
 已初始化的空闲线程池持续上报忙碌线程数和排队任务数为 0，总线程数仍包含空闲线程。
+
+`grpcServer.receiveBudgetBytes` 为 0 时，在 gRPC 服务启动时按 JVM 的最大 Direct 内存
+的四分之一计算接收预算。每个 HEADERS 先预留 8 MiB，并为 body 留出同样大小的空间；
+总接收槽位为 `min(1024, floor(budgetBytes / 16 MiB))`，再划出独立的 Cancel 槽位。
+这是逻辑线上字节预留，不表示已经分配或钉住这些 Direct 内存，也不包含调度器中已受理请求的内存。
+`maxReceivingRequests` 和 `maxReceivingControlRequests` 为 0 时使用默认划分；显式设置的
+两类槽位之和仍不能超过预算允许的总数。默认值示例：
+
+| JVM 最大 Direct 内存 | 逻辑接收预算 | Schedule 槽位 | Cancel 槽位 |
+| -------------------- | ------------ | ------------- | ----------- |
+| 8 GiB                | 2 GiB        | 120           | 8           |
+| 32 GiB               | 8 GiB        | 504           | 8           |
+| 64 GiB               | 16 GiB       | 1016          | 8           |
+
+`receiveTimeoutMs` 默认 30000 ms，只覆盖 HEADERS 到解码 half-close；half-close 后释放
+接收额度并停止 watchdog，不限制已经受理的调度排队时间。调度队列为空也可能因接收槽位或
+字节预留耗尽而返回 `RESOURCE_EXHAUSTED`。评估容量时须同时记录堆和 Direct 上限，不能仅用
+`-Xmx` 或调度队列长度判断入口余量。
+
+`tools/run_queue_performance.sh` 对 750P/750D 的两种 dispatcher 分别发送 3000/10000 QPS。
+启动预热按实际接收槽位分批，覆盖全部 128 种请求模板，总请求数按 Prefill 数量乘以 16 设置；随后保留满速
+预热和独立的 10 秒正式测量。满速预热只对明确的接收容量拒绝最多重试两次，每次核实成功请求的
+Engine 完成反馈、接收额度、watchdog 和调度资源都已清理，并使用新的请求 ID。正式测量不重试，
+任何请求失败仍使测试失败；吞吐至少达到目标的 98%，客户端、delivery wait 和 batch wait 的
+P99 不超过 50 ms，服务端 P99 小于 50 ms。报告应保留每个内存预算下的失败结果，较大预算通过
+不能作为较小预算通过的证据。
 
 `JvmGcMetricsReporter` 接收 JVM 的 GC 通知，每次记录一次回收和本次暂停毫秒数，
 通过 `FlexMonitor` 的 PRECISE COUNTER 上报 `app.jvm.gc.collection.count` 与
@@ -428,7 +458,7 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 初始化及周期采样对这两个 stage 报告 0，尚未发生异常时也能显示已初始化的计数。
 这些异常保留 request_id 日志供定位，指标标签不包含请求 ID 或错误文本。
 旧 `auto_tpm.inflight_settle_miss.count{kind}` 随独立 inflight 台账的清理路径一起停用：
-当前注册、资源跟踪和结束记录由同一个 RequestSlot 保持，迟到或重复回调无需找回旧台账。
+当前注册、资源跟踪和结束记录由同一个 RequestContext 保持，迟到或重复回调无需找回旧台账。
 它不映射为抢占目标校验失败。旧竞态告警应退役，另启用新的生命周期异常增量告警。
 
 上报器分布在 common、grpc、cache、sync 模块。新增指标应复用现有 reporter ownership，
@@ -457,7 +487,7 @@ N=1 沿用 discovery 的 legacy gRPC port，因而兼容未配置 `worker_status
 
 逻辑 worker identity 为 `ip:http_port@engineIndex`，包括 N=1 的 `@0`。
 Encoder、step、阶段耗时及缓存预测对照的 `engineIp` 在 N=1 使用 physical
-`ip:http_port`，在 N>1 使用完整 logical identity `ip:http_port@engineIndex`；上述兼容指标保留裸 IP。
+`ip:http_port`，在 N>1 使用完整 logical identity `ip:http_port@engineIndex`；通用 WorkerStatus/cache 指标也使用此规则。
 网络连接仍使用
 物理地址。schedule 在 N=1 时省略 `engine_index`，内部 identity 仍保留 index 0。
 

@@ -5,12 +5,13 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.constant.ZkMasterEvent;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -22,7 +23,6 @@ import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -119,7 +119,7 @@ public class EngineHealthReporter {
 
     private final EngineGrpcClient engineGrpcClient;
 
-    private final WorkerDirectory workerDirectory;
+    private final EndpointRegistry workerDirectory;
 
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
 
@@ -129,8 +129,8 @@ public class EngineHealthReporter {
             CacheMetricsReporter cacheMetricsReporter,
             EngineGrpcClient engineGrpcClient,
             LoopResources serverLoopResources,
-            WorkerDirectory workerDirectory) {
-        this.monitor = monitor;
+            EndpointRegistry workerDirectory) {
+        this.monitor = org.flexlb.metric.SafeFlexMonitor.wrap(monitor);
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
         this.workerDirectory = workerDirectory;
@@ -349,15 +349,15 @@ public class EngineHealthReporter {
         monitor.report(
                 ENGINE_PREFILL_WORKER_NUMBER,
                 tags,
-                workerDirectory.discoveredCount(RoleType.PREFILL));
+                workerDirectory.counts(RoleType.PREFILL).discovered());
         monitor.report(
                 ENGINE_DECODE_WORKER_NUMBER,
                 tags,
-                workerDirectory.discoveredCount(RoleType.DECODE));
+                workerDirectory.counts(RoleType.DECODE).discovered());
         monitor.report(
                 ENGINE_ENCODER_WORKER_NUMBER,
                 tags,
-                workerDirectory.discoveredCount(RoleType.ENCODER));
+                workerDirectory.counts(RoleType.ENCODER).discovered());
 
         reportThreadPoolInfo(
                 ENGINE_BALANCING_THREAD_POOL_INFO,
@@ -450,7 +450,7 @@ public class EngineHealthReporter {
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
-    public void reportRequestPayload(BalanceContext context) {
+    public void reportRequestPayload(RequestData context) {
         if (context == null) {
             return;
         }
@@ -571,7 +571,7 @@ public class EngineHealthReporter {
             reportWorkerMetric(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, workerStatus, pollIntervalUs);
         }
         if (ep != null) {
-            ep.getLoadMetric()
+            ep.tryGetLoadMetric()
                     .ifPresent(
                             value ->
                                     reportWorkerMetric(
@@ -639,7 +639,10 @@ public class EngineHealthReporter {
         monitor.report(
                 metric,
                 FlexMetricTags.of(
-                        "engineIp", valueOrEmpty(worker.getIp()), "role", worker.getRole().name()),
+                        "engineIp",
+                        valueOrEmpty(worker.getMetricIpPort()),
+                        "role",
+                        worker.getRole().name()),
                 value);
     }
 
@@ -647,7 +650,7 @@ public class EngineHealthReporter {
         return value == null ? "" : value;
     }
 
-    public void reportBalancingService(BalanceContext ctx) {
+    public void reportBalancingService(RequestData ctx) {
         if (ctx == null || ctx.getResponse() == null) {
             return;
         }
@@ -693,7 +696,7 @@ public class EngineHealthReporter {
         }
     }
 
-    private static String selectionReason(BalanceContext context, RoleType roleType) {
+    private static String selectionReason(RequestData context, RoleType roleType) {
         String selectionReason = context.selectionReason(roleType);
         return selectionReason == null ? "UNKNOWN" : selectionReason;
     }
@@ -775,7 +778,9 @@ public class EngineHealthReporter {
                 roleType, ipIndex, hitTokens, inputTokens, hitRatio);
     }
 
-    /** Report request-level estimates captured when a Prefill worker is selected. */
+    /**
+     * Report request-level estimates captured when a Prefill worker is selected.
+     */
     public void reportPrefillSelectedEstimates(
             RoleType roleType,
             String engineIp,
@@ -789,7 +794,9 @@ public class EngineHealthReporter {
         monitor.report(PREFILL_SELECTED_EXECUTION_TIME_MS, tags, executionTimeMs);
     }
 
-    /** Delegate a cache-affinity routing decision to the cache metric reporter. */
+    /**
+     * Delegate a cache-affinity routing decision to the cache metric reporter.
+     */
     public void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
         cacheMetricsReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
     }
@@ -903,7 +910,7 @@ public class EngineHealthReporter {
         cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(roleType, hitTokens);
     }
 
-    public void reportArriveDelayTime(BalanceContext ctx) {
+    public void reportArriveDelayTime(RequestData ctx) {
         if (ctx.getRequest().getRequestTimeMs() == 0) {
             return;
         }

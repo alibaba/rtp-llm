@@ -2,6 +2,8 @@ package org.flexlb.engine.grpc;
 
 import org.flexlb.dao.route.RoleType;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Bidirectional converter between {@link RoleType} (domain enum) and
  * {@link EngineRpcService.RoleTypePB} (proto-generated enum).
@@ -43,7 +45,9 @@ public final class RoleTypeProtoConverter {
         };
     }
 
-    /** Read RoleAddrPB across dsv4 and dual-write schemas. */
+    /**
+     * Read RoleAddrPB across dsv4 and dual-write schemas.
+     */
     public static RoleType fromRoleAddr(EngineRpcService.RoleAddrPB addr) {
         RoleType resolved = null;
         if (!addr.getRoleStr().isEmpty()) {
@@ -59,7 +63,9 @@ public final class RoleTypeProtoConverter {
         return resolved != null ? resolved : RoleType.PDFUSION;
     }
 
-    /** Read WorkerStatusPB across the legacy string and typed enum schemas. */
+    /**
+     * Read WorkerStatusPB across the legacy string and typed enum schemas.
+     */
     public static RoleType fromWorkerStatus(EngineRpcService.WorkerStatusPB status) {
         RoleType resolved = null;
         if (status.getRoleType() != EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION) {
@@ -80,22 +86,17 @@ public final class RoleTypeProtoConverter {
     }
 
     private static RoleType requireKnown(RoleType role, String source) {
-        if (role == null) {
-            throw new IllegalArgumentException("unknown RoleAddrPB " + source);
-        }
+        checkArgument(role != null, "unknown RoleAddrPB %s", source);
         return role;
     }
 
     private static RoleType merge(RoleType resolved, RoleType candidate, String source) {
-        if (resolved != null && resolved != candidate) {
-            throw new IllegalArgumentException(
-                    "conflicting RoleAddrPB role from "
-                            + source
-                            + ": resolved="
-                            + resolved
-                            + ", candidate="
-                            + candidate);
-        }
+        checkArgument(
+                resolved == null || resolved == candidate,
+                "conflicting RoleAddrPB role from %s: resolved=%s, candidate=%s",
+                source,
+                resolved,
+                candidate);
         return candidate;
     }
 

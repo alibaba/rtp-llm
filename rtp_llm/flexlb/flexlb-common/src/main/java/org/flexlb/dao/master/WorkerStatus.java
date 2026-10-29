@@ -6,12 +6,15 @@ import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 /**
  * One service-discovery generation of an Engine worker.
@@ -23,8 +26,8 @@ import java.util.concurrent.locks.ReentrantLock;
  *   <li>{@link TopologySnapshot}: discovery-owned address and placement data;</li>
  *   <li>{@link CommittedWorkerStatus}: stable Engine fields and both cursors
  *       from one successfully reduced, strictly newer status response;</li>
- *   <li>{@link PollHealth}: transport health from status polling, independent
- *       from Engine state and endpoint routability;</li>
+ *   <li>{@link PollHealth}: health reported by status polling, independent
+ *       from local status application;</li>
  *   <li>cache status and poll coordination, which have independent writers.</li>
  * </ul>
  *
@@ -37,14 +40,63 @@ import java.util.concurrent.locks.ReentrantLock;
 public class WorkerStatus {
 
     private static final AtomicLong NEXT_GENERATION_ID = new AtomicLong();
+    private static final long MAX_CONSECUTIVE_WORKER_FAILURES = 3L;
 
-    /** Serializes lifecycle transitions for this generation. */
+    /**
+     * Serializes lifecycle transitions for this generation.
+     */
     public final transient ReentrantLock lock = new ReentrantLock();
 
     private final long generationId = NEXT_GENERATION_ID.incrementAndGet();
 
-    /** Set under {@link #lock}; read lock-free by poll gates. */
+    /**
+     * Set under {@link #lock}; read lock-free by poll gates.
+     */
     private volatile boolean retiring;
+
+    private final Object healthGate = new Object();
+    private final EndpointTrace trace = new EndpointTrace();
+
+    @JsonIgnore
+    public EndpointTrace trace() {
+        return trace;
+    }
+
+    public EndpointTrace.Snapshot getSyncTrace() {
+        return trace.snapshot();
+    }
+
+    private volatile RetirementReason retirementReason;
+
+    /**
+     * Serializes cache-index writes and exact-generation cleanup.
+     */
+    public final transient ReentrantLock cacheMutationLock = new ReentrantLock();
+
+    public enum RetirementReason {
+        DISCOVERY_REMOVED,
+        CONSECUTIVE_WORKER_FAILURES
+    }
+
+    public RetirementReason retirementReason() {
+        return retirementReason;
+    }
+
+    public void markRemovedFromDiscovery() {
+        synchronized (healthGate) {
+            if (!retiring && retirementReason == null) {
+                retirementReason = RetirementReason.DISCOVERY_REMOVED;
+                trace.recordUnavailable(
+                        retirementReason.name(),
+                        pollHealth.get().lastSuccessfulPollUs(),
+                        pollHealth.get().consecutiveWorkerFailures());
+            }
+        }
+    }
+
+    public boolean isAvailableForScheduling() {
+        return !retiring && retirementReason == null;
+    }
 
     public record TopologySnapshot(
             String group,
@@ -54,14 +106,38 @@ public class WorkerStatus {
             String site,
             String deploymentName,
             int engineIndex,
-            int multiEngineNum) {
+            int multiEngineNum,
+            int workerStatusPort) {
+
+        public TopologySnapshot(
+                String group,
+                String ip,
+                int port,
+                int grpcPort,
+                String site,
+                String deploymentName,
+                int engineIndex,
+                int multiEngineNum) {
+            this(
+                    group,
+                    ip,
+                    port,
+                    grpcPort,
+                    site,
+                    deploymentName,
+                    engineIndex,
+                    multiEngineNum,
+                    grpcPort);
+        }
 
         public TopologySnapshot(String group, String ip, int port, int grpcPort, String site) {
             this(group, ip, port, grpcPort, site, null, 0, 1);
         }
     }
 
-    /** Deeply immutable copy of the task fields reported by one status RPC. */
+    /**
+     * Deeply immutable copy of the task fields reported by one status RPC.
+     */
     public record TaskObservation(
             String requestId,
             long prefixLength,
@@ -79,51 +155,14 @@ public class WorkerStatus {
             PriorityPreemptionProgress priorityPreemptionProgress,
             TaskTelemetry telemetry) {
 
-        /** A pending observation that reports only priority cancellation progress. */
+        /**
+         * A pending observation that reports only priority cancellation progress.
+         */
         @JsonIgnore
         public boolean isPriorityCancelOverlayOnly() {
             return (priorityPreemptionProgress == PriorityPreemptionProgress.CANCELING
                             || priorityPreemptionProgress == PriorityPreemptionProgress.CANCELED)
                     && phase == TaskPhase.PENDING;
-        }
-
-        private static TaskObservation copyOf(TaskInfo task) {
-            return new TaskObservation(
-                    task.getRequestId(),
-                    task.getPrefixLength(),
-                    task.getPrefillTime(),
-                    task.getInputLength(),
-                    task.getWaitingTime(),
-                    task.getIterateCount(),
-                    task.getEndTimeMs(),
-                    task.getDpRank(),
-                    task.getErrorCode(),
-                    task.getErrorMessage(),
-                    task.getBatchId(),
-                    task.getPhase(),
-                    task.getExecutionTimeMs(),
-                    task.getPriorityPreemptionProgress(),
-                    new TaskTelemetry(
-                            task.isPrefixLengthValid(),
-                            task.getRequestReceivedTimeMs(),
-                            task.getInputQueueEnqueueTimeMs(),
-                            task.getInputQueueDrainTimeMs(),
-                            task.getWaitingEnteredTimeMs(),
-                            task.getRunningEnteredTimeMs(),
-                            task.getRemoteKvWaitMs(),
-                            task.getFirstTokenTimeMs(),
-                            task.getHbmLocalMatchTokens(),
-                            task.getRemoteKvAddedMatchTokens(),
-                            task.getFirstPrefillStepId(),
-                            task.getLastPrefillStepId(),
-                            task.getPrefillStepCount(),
-                            task.getPrefillNonfinalChunkTokensMin(),
-                            task.getPrefillNonfinalChunkTokensMax(),
-                            task.getCompletedPrefillTokens(),
-                            task.getRemainingPrefillTokens() < 0
-                                    ? null
-                                    : task.getRemainingPrefillTokens(),
-                            task.getLastCompletedPrefillStepId()));
         }
     }
 
@@ -276,32 +315,36 @@ public class WorkerStatus {
      */
     public record AppliedStatusCursor(long statusVersion, long latestFinishedTaskVersion) {}
 
-    /** The single public value for one successfully committed status round. */
+    /**
+     * The single public value for one successfully committed status round.
+     */
     public record CommittedWorkerStatus(EngineObservation fields, AppliedStatusCursor cursor) {}
 
     /**
-     * Status-poll transport health. It is never consulted for routing: the
-     * endpoint registry and the endpoint generation gate own routability.
+     * Valid worker-reported health. Transport and local processing failures
+     * do not supply evidence that a worker is dead.
      */
     public record PollHealth(
             long lastSuccessfulPollUs,
             long successfulPollIntervalUs,
-            long consecutiveTransportFailures,
+            long consecutiveWorkerFailures,
             boolean reportedAlive) {
 
         public PollHealth {
-            if (lastSuccessfulPollUs < 0L
-                    || successfulPollIntervalUs < 0L
-                    || consecutiveTransportFailures < 0L) {
-                throw new IllegalArgumentException("poll health counters must be non-negative");
-            }
+            checkArgument(
+                    lastSuccessfulPollUs >= 0L
+                            && successfulPollIntervalUs >= 0L
+                            && consecutiveWorkerFailures >= 0L,
+                    "poll health counters must be non-negative");
         }
     }
 
     public record CacheIndexSnapshot(
             CacheStatus cacheStatus, boolean indexInitialized, long indexedVersion) {}
 
-    /** One deeply frozen RPC observation shared by every status reducer. */
+    /**
+     * One deeply frozen RPC observation shared by every status reducer.
+     */
     public static final class StatusObservation {
         private final WorkerStatus owner;
         private final EngineObservation engine;
@@ -325,7 +368,9 @@ public class WorkerStatus {
             this.finishedTasks = finishedTasks;
         }
 
-        /** Exact service-discovery generation which issued this observation. */
+        /**
+         * Exact service-discovery generation which issued this observation.
+         */
         public WorkerStatus owner() {
             return owner;
         }
@@ -360,14 +405,6 @@ public class WorkerStatus {
         public Map<String, TaskObservation> finishedTasks() {
             return finishedTasks;
         }
-
-        public long runningQueryLen() {
-            return engine.runningQueryLen();
-        }
-
-        public long waitingQueryLen() {
-            return engine.waitingQueryLen();
-        }
     }
 
     /**
@@ -401,17 +438,22 @@ public class WorkerStatus {
 
     private final AtomicReference<PollHealth> pollHealth;
 
-    /** Cache polling is independent from worker-status polling. */
+    /**
+     * Cache polling is independent from worker-status polling.
+     */
     private final AtomicReference<CacheIndexSnapshot> cacheIndexSnapshot =
             new AtomicReference<>(new CacheIndexSnapshot(null, false, -1L));
 
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
+    private final AtomicLong lastCachePollCycle = new AtomicLong(Long.MIN_VALUE);
 
     private final AtomicReference<PollLease> statusPollLease = new AtomicReference<>();
+    private final AtomicReference<PollLease> statusApplication = new AtomicReference<>();
     private final AtomicReference<PollLease> cachePollLease = new AtomicReference<>();
 
     private enum PollKind {
         STATUS,
+        APPLICATION,
         CACHE
     }
 
@@ -424,8 +466,20 @@ public class WorkerStatus {
         private final WorkerStatus owner;
         private final PollKind kind;
         private final AtomicReference<PollLease> slot;
+        private final EndpointTrace.Poll trace;
 
-        private PollLease(WorkerStatus owner, PollKind kind, AtomicReference<PollLease> slot) {
+        public EndpointTrace.Poll trace() {
+            return trace;
+        }
+
+        private boolean resultRecorded; // Guarded by owner.healthGate.
+
+        private PollLease(
+                WorkerStatus owner,
+                PollKind kind,
+                AtomicReference<PollLease> slot,
+                EndpointTrace.Poll trace) {
+            this.trace = trace;
             this.owner = owner;
             this.kind = kind;
             this.slot = slot;
@@ -433,7 +487,12 @@ public class WorkerStatus {
 
         @Override
         public void close() {
-            slot.compareAndSet(this, null);
+            if (slot.compareAndSet(this, null)) {
+                trace.record(
+                        kind == PollKind.APPLICATION
+                                ? EndpointTrace.Stage.CALLBACK_ENDED
+                                : EndpointTrace.Stage.LEASE_RELEASED);
+            }
         }
     }
 
@@ -448,11 +507,13 @@ public class WorkerStatus {
                 new AtomicReference<>(
                         new CommittedWorkerStatus(
                                 initialStatus, new AppliedStatusCursor(-1L, -1L)));
-        long discoveredAtUs = System.nanoTime() / 1000;
+        long discoveredAtUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         pollHealth = new AtomicReference<>(new PollHealth(discoveredAtUs, 0L, 0L, false));
     }
 
-    /** Create one fully initialized service-discovery generation. */
+    /**
+     * Create one fully initialized service-discovery generation.
+     */
     public static WorkerStatus createDiscovered(
             RoleType role, String group, String ip, int port, int grpcPort, String site) {
         return createDiscovered(role, group, ip, port, grpcPort, site, null);
@@ -479,9 +540,33 @@ public class WorkerStatus {
             String deploymentName,
             int engineIndex,
             int multiEngineNum) {
+        return createDiscovered(
+                role,
+                group,
+                ip,
+                port,
+                grpcPort,
+                site,
+                deploymentName,
+                engineIndex,
+                multiEngineNum,
+                grpcPort);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName,
+            int engineIndex,
+            int multiEngineNum,
+            int workerStatusPort) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
-        if (port <= 0 || grpcPort <= 0) {
+        if (port <= 0 || grpcPort <= 0 || workerStatusPort <= 0) {
             throw new IllegalArgumentException("worker ports must be positive");
         }
         if (engineIndex < 0 || multiEngineNum <= 0 || engineIndex >= multiEngineNum) {
@@ -496,7 +581,8 @@ public class WorkerStatus {
                         site,
                         deploymentName,
                         engineIndex,
-                        multiEngineNum),
+                        multiEngineNum,
+                        workerStatusPort),
                 new EngineObservation(
                         role, null, 0L, 0L, Map.of(), 0.0, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
     }
@@ -523,46 +609,8 @@ public class WorkerStatus {
     }
 
     /**
-     * Deep-freeze one RPC response. Finished tasks remain response-local and
-     * are never copied into the committed Engine observation.
+     * Bind an already immutable protocol conversion to this exact generation.
      */
-    public StatusObservation freezeStatusResponse(WorkerStatusResponse response) {
-        Objects.requireNonNull(response, "response");
-        Map<String, TaskObservation> runningTasks = freezeTaskMap(response.getRunningTaskInfo());
-        Map<String, TaskObservation> finishedTasks = freezeTaskMap(response.getFinishedTaskInfo());
-        EngineObservation engine =
-                new EngineObservation(
-                        response.getRole(),
-                        response.getAvailableConcurrency(),
-                        response.getAvailableKvCacheTokens(),
-                        response.getTotalKvCacheTokens(),
-                        runningTasks,
-                        response.getStepLatencyMs(),
-                        response.getIterateCount(),
-                        response.getDpSize(),
-                        response.getTpSize(),
-                        response.getDpRank(),
-                        response.getCacheStatus() == null
-                                ? 0L
-                                : response.getCacheStatus().getBlockSize(),
-                        response.getBlockHashLookaheadTokens(),
-                        response.getCacheMatchRollbackBlocks(),
-                        response.getKvCacheGroupMode(),
-                        response.getMaxSeqLen(),
-                        response.getMaxBatchTokensSize(),
-                        response.getRunningQueryLen(),
-                        response.getWaitingQueryLen(),
-                        response.getLastStepMetrics());
-        return new StatusObservation(
-                this,
-                engine,
-                response.isAlive(),
-                response.getStatusVersion(),
-                response.getLatestFinishedVersion(),
-                finishedTasks);
-    }
-
-    /** Bind an already immutable protocol conversion to this exact generation. */
     public StatusObservation bindStatusObservation(
             EngineObservation engine,
             boolean reportedAlive,
@@ -580,14 +628,15 @@ public class WorkerStatus {
                         : Map.copyOf(finishedTasks));
     }
 
-    /** Bind a strictly newer frozen observation to the current commit holder. */
+    /**
+     * Bind a strictly newer frozen observation to the current commit holder.
+     */
     public PreparedStatus prepareNewStatus(StatusObservation observation) {
         requireGenerationLock();
         requireActiveGeneration();
-        if (observation.owner != this) {
-            throw new IllegalArgumentException(
-                    "status observation belongs to another worker generation");
-        }
+        checkArgument(
+                observation.owner == this,
+                "status observation belongs to another worker generation");
         CommittedWorkerStatus current = committedStatus.get();
         Long responseVersion = observation.statusVersion();
         if (responseVersion == null
@@ -615,10 +664,9 @@ public class WorkerStatus {
     public void publishPreparedStatus(PreparedStatus prepared) {
         requireGenerationLock();
         requireActiveGeneration();
-        if (prepared.observation.owner != this) {
-            throw new IllegalArgumentException(
-                    "prepared status belongs to another worker generation");
-        }
+        checkArgument(
+                prepared.observation.owner == this,
+                "prepared status belongs to another worker generation");
         Long responseVersion = prepared.observation.statusVersion();
         if (responseVersion == null
                 || responseVersion <= 0L
@@ -629,59 +677,99 @@ public class WorkerStatus {
                             + ", response="
                             + responseVersion);
         }
-        if (!committedStatus.compareAndSet(prepared.baseCommitted, prepared.nextCommitted)) {
-            throw new IllegalStateException(
-                    "prepared status is stale or has already been published");
-        }
+        checkState(
+                committedStatus.compareAndSet(prepared.baseCommitted, prepared.nextCommitted),
+                "prepared status is stale or has already been published");
     }
 
-    /** Record one validated status response independently from Engine state. */
+    /**
+     * Record a validated response for a status transaction.
+     */
     public PollHealth recordSuccessfulPoll(boolean reportedAlive) {
         requireGenerationLock();
         requireActiveGeneration();
-        long nowUs = System.nanoTime() / 1000;
-        return pollHealth.updateAndGet(
-                current ->
-                        new PollHealth(
-                                nowUs, nowUs - current.lastSuccessfulPollUs(), 0L, reportedAlive));
+        synchronized (healthGate) {
+            return updatePollHealth(reportedAlive);
+        }
     }
 
-    /** Record a transport failure without rewriting reported Engine state. */
-    public PollHealth recordTransportFailure() {
-        requireGenerationLock();
-        requireActiveGeneration();
-        return pollHealth.updateAndGet(
-                current ->
-                        new PollHealth(
-                                current.lastSuccessfulPollUs(),
-                                current.successfulPollIntervalUs(),
-                                current.consecutiveTransportFailures() == Long.MAX_VALUE
-                                        ? Long.MAX_VALUE
-                                        : current.consecutiveTransportFailures() + 1L,
-                                current.reportedAlive()));
+    /**
+     * The RPC owner records health before any local conversion or application.
+     */
+    public void recordStatusRpcResult(PollLease lease, boolean valid, boolean alive) {
+        synchronized (healthGate) {
+            if (lease == null
+                    || statusPollLease.get() != lease
+                    || lease.resultRecorded
+                    || retiring
+                    || retirementReason != null) {
+                return;
+            }
+            lease.resultRecorded = true;
+            if (valid) {
+                updatePollHealth(alive);
+                lease.trace.record(EndpointTrace.Stage.STATUS_HEALTH_UPDATED);
+            }
+        }
+    }
+
+    private PollHealth updatePollHealth(boolean alive) {
+        PollHealth previous = pollHealth.get();
+        long failures =
+                alive
+                        ? 0L
+                        : Math.min(
+                                MAX_CONSECUTIVE_WORKER_FAILURES,
+                                previous.consecutiveWorkerFailures() + 1L);
+        long nowUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
+        PollHealth next =
+                new PollHealth(
+                        nowUs,
+                        Math.max(0L, nowUs - previous.lastSuccessfulPollUs()),
+                        failures,
+                        alive);
+        pollHealth.set(next);
+        if (failures == MAX_CONSECUTIVE_WORKER_FAILURES && retirementReason == null) {
+            retirementReason = RetirementReason.CONSECUTIVE_WORKER_FAILURES;
+            trace.recordUnavailable(
+                    retirementReason.name(), previous.lastSuccessfulPollUs(), failures);
+        }
+        return next;
+    }
+
+    /**
+     * One local application may outlive its RPC; later RPCs still update health.
+     */
+    public PollLease tryBeginStatusApplication(PollLease rpcLease) {
+        synchronized (healthGate) {
+            requireStatusPollLease(rpcLease);
+            if (retiring) {
+                return null;
+            }
+            PollLease lease =
+                    new PollLease(this, PollKind.APPLICATION, statusApplication, rpcLease.trace);
+            return statusApplication.compareAndSet(null, lease) ? lease : null;
+        }
     }
 
     public void requireGenerationLock() {
-        if (!lock.isHeldByCurrentThread()) {
-            throw new IllegalStateException("status transaction requires generation lock");
-        }
+        checkState(lock.isHeldByCurrentThread(), "status transaction requires generation lock");
     }
 
-    /** Reject any new publication or ownership after retirement starts. */
+    /**
+     * Reject any new publication or ownership after retirement starts.
+     */
     public void requireActiveGeneration() {
         requireGenerationLock();
-        if (retiring) {
-            throw new IllegalStateException("WorkerStatus generation is retiring: " + generationId);
-        }
+        checkState(!retiring, "WorkerStatus generation is retiring: %s", generationId);
     }
 
-    /** Require an operation to target the one retiring generation. */
+    /**
+     * Require an operation to target the one retiring generation.
+     */
     public void requireRetiringGeneration() {
         requireGenerationLock();
-        if (!retiring) {
-            throw new IllegalStateException(
-                    "WorkerStatus generation is not retiring: " + generationId);
-        }
+        checkState(retiring, "WorkerStatus generation is not retiring: %s", generationId);
     }
 
     /**
@@ -693,11 +781,14 @@ public class WorkerStatus {
      */
     public boolean beginRetirementAfterEndpointGateClosed() {
         requireGenerationLock();
-        if (retiring) {
-            return false;
+        synchronized (healthGate) {
+            if (retiring) {
+                return false;
+            }
+            retiring = true;
+            trace.record(EndpointTrace.Stage.GENERATION_RETIRING);
+            return true;
         }
-        retiring = true;
-        return true;
     }
 
     @JsonIgnore
@@ -712,7 +803,9 @@ public class WorkerStatus {
                 : Math.max(current.latestFinishedTaskVersion(), responseFinishedVersion);
     }
 
-    /** Atomically refresh discovery-owned placement labels for this generation. */
+    /**
+     * Atomically refresh discovery-owned placement labels for this generation.
+     */
     public void updateDiscoveryLabels(String site, String group) {
         updateDiscoveryLabels(site, group, topology.get().deploymentName());
     }
@@ -730,7 +823,8 @@ public class WorkerStatus {
                                 site,
                                 deploymentName,
                                 current.engineIndex(),
-                                current.multiEngineNum()));
+                                current.multiEngineNum(),
+                                current.workerStatusPort()));
     }
 
     public RoleType getRole() {
@@ -751,6 +845,10 @@ public class WorkerStatus {
 
     public int getGrpcPort() {
         return topology.get().grpcPort();
+    }
+
+    public int getWorkerStatusPort() {
+        return topology.get().workerStatusPort();
     }
 
     public String getDeploymentName() {
@@ -786,9 +884,12 @@ public class WorkerStatus {
         return cacheIndexSnapshot.get();
     }
 
+    public void requireCacheMutationLock() {
+        checkState(cacheMutationLock.isHeldByCurrentThread(), "cache mutation requires cache lock");
+    }
+
     public void publishCacheStatus(CacheStatus cacheStatus) {
-        requireGenerationLock();
-        requireActiveGeneration();
+        requireCacheMutationLock();
         CacheStatus next = Objects.requireNonNull(cacheStatus, "cacheStatus");
         cacheIndexSnapshot.updateAndGet(
                 current ->
@@ -796,23 +897,29 @@ public class WorkerStatus {
                                 next, current.indexInitialized(), current.indexedVersion()));
     }
 
-    public long getCacheIndexedVersion() {
-        return cacheIndexSnapshot.get().indexedVersion();
-    }
-
     public void publishCacheIndexedVersion(long version) {
-        requireGenerationLock();
-        requireActiveGeneration();
+        requireCacheMutationLock();
         CacheIndexSnapshot current = cacheIndexSnapshot.get();
-        if (current.cacheStatus() == null || current.cacheStatus().getVersion() != version) {
-            throw new IllegalStateException(
-                    "indexed cache version must match current cache status");
-        }
+        checkState(
+                current.cacheStatus() != null && current.cacheStatus().getVersion() == version,
+                "indexed cache version must match current cache status");
         cacheIndexSnapshot.set(new CacheIndexSnapshot(current.cacheStatus(), true, version));
     }
 
+    /**
+     * Preserve cache cadence when a coalesced discovery cycle crosses a due tick.
+     */
+    public boolean shouldPollCache(long cycleId, long intervalCycles) {
+        checkArgument(intervalCycles > 0L, "cache poll interval must be positive");
+        long previous = lastCachePollCycle.getAndAccumulate(cycleId, Math::max);
+        return cycleId >= previous
+                && (cycleId % intervalCycles == 0L
+                        || previous != Long.MIN_VALUE
+                                && cycleId / intervalCycles > previous / intervalCycles);
+    }
+
     public long recordSuccessfulCachePoll() {
-        long nowUs = System.nanoTime() / 1000;
+        long nowUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         long previousUs = cacheLastUpdateTime.getAndSet(nowUs);
         return previousUs <= 0L ? 0L : Math.max(0L, nowUs - previousUs);
     }
@@ -849,12 +956,16 @@ public class WorkerStatus {
         return committedStatus.get().fields().kvCacheGroupMode();
     }
 
-    /** Model-level maximum sequence length reported by the Engine. */
+    /**
+     * Model-level maximum sequence length reported by the Engine.
+     */
     public long getMaxSeqLen() {
         return committedStatus.get().fields().maxSeqLen();
     }
 
-    /** Strict aggregate context-token limit for an Engine batch/group. */
+    /**
+     * Strict aggregate context-token limit for an Engine batch/group.
+     */
     public long getMaxBatchTokensSize() {
         return committedStatus.get().fields().maxBatchTokensSize();
     }
@@ -867,17 +978,31 @@ public class WorkerStatus {
         return pollHealth.get().reportedAlive();
     }
 
-    /** Acquire the one in-flight status-poll slot for this generation. */
+    /**
+     * Acquire the one in-flight status-poll slot for this generation.
+     */
     public PollLease tryBeginStatusPoll() {
-        lock.lock();
-        try {
-            if (retiring) {
+        return tryBeginStatusPoll(0L);
+    }
+
+    public PollLease tryBeginStatusPoll(long cycle) {
+        synchronized (healthGate) {
+            if (retiring || retirementReason != null) {
                 return null;
             }
-            PollLease lease = new PollLease(this, PollKind.STATUS, statusPollLease);
-            return statusPollLease.compareAndSet(null, lease) ? lease : null;
-        } finally {
-            lock.unlock();
+            PollLease current = statusPollLease.get();
+            if (current != null) {
+                current.trace.skippedBusy();
+                return null;
+            }
+            PollLease lease =
+                    new PollLease(
+                            this,
+                            PollKind.STATUS,
+                            statusPollLease,
+                            trace.beginPoll("STATUS", cycle));
+            statusPollLease.set(lease);
+            return lease;
         }
     }
 
@@ -885,17 +1010,28 @@ public class WorkerStatus {
         requirePollLease(lease, PollKind.STATUS, statusPollLease);
     }
 
-    /** Acquire the independent cache-poll slot for this generation. */
+    /**
+     * Acquire the independent cache-poll slot for this generation.
+     */
     public PollLease tryBeginCachePoll() {
-        lock.lock();
-        try {
-            if (retiring) {
+        return tryBeginCachePoll(0L);
+    }
+
+    public PollLease tryBeginCachePoll(long cycle) {
+        synchronized (healthGate) {
+            if (retiring || retirementReason != null) {
                 return null;
             }
-            PollLease lease = new PollLease(this, PollKind.CACHE, cachePollLease);
-            return cachePollLease.compareAndSet(null, lease) ? lease : null;
-        } finally {
-            lock.unlock();
+            PollLease current = cachePollLease.get();
+            if (current != null) {
+                current.trace.skippedBusy();
+                return null;
+            }
+            PollLease lease =
+                    new PollLease(
+                            this, PollKind.CACHE, cachePollLease, trace.beginPoll("CACHE", cycle));
+            cachePollLease.set(lease);
+            return lease;
         }
     }
 
@@ -916,7 +1052,9 @@ public class WorkerStatus {
         }
     }
 
-    /** Get the HTTP IP:PORT address. */
+    /**
+     * Get the HTTP IP:PORT address.
+     */
     public String getIpPort() {
         return workerIdentity.getPhysicalIpPort();
     }
@@ -944,19 +1082,6 @@ public class WorkerStatus {
 
     public int getMultiEngineNum() {
         return topology.get().multiEngineNum();
-    }
-
-    private static Map<String, TaskObservation> freezeTaskMap(Map<String, TaskInfo> tasks) {
-        if (tasks == null || tasks.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, TaskObservation> frozen = new HashMap<>(tasks.size());
-        for (Map.Entry<String, TaskInfo> entry : tasks.entrySet()) {
-            if (entry.getKey() != null && entry.getValue() != null) {
-                frozen.put(entry.getKey(), TaskObservation.copyOf(entry.getValue()));
-            }
-        }
-        return Map.copyOf(frozen);
     }
 
     @Override

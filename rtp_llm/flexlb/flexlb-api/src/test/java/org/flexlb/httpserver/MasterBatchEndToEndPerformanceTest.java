@@ -10,30 +10,28 @@ import io.grpc.Drainable;
 import io.grpc.KnownLength;
 import io.grpc.ManagedChannel;
 import io.grpc.MethodDescriptor;
+import io.grpc.Status;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.ClientCalls;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
-import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.DeliveryDispatcherTestFactory;
+import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.EncoderStrategy;
-import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.balance.strategy.VitWorkerSelector;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DecisionPolicyConfig;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.consistency.MasterElectService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.consistency.MasterStatusView;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -48,12 +46,9 @@ import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RouteService;
-import org.flexlb.service.TheoryCacheHitReporter;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -69,6 +64,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.mock.env.MockEnvironment;
+import org.springframework.test.util.ReflectionTestUtils;
 import reactor.netty.resources.LoopResources;
 
 import java.io.BufferedReader;
@@ -76,6 +72,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.management.ManagementFactory;
 import java.math.BigInteger;
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -103,7 +100,6 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -112,11 +108,11 @@ import static org.mockito.Mockito.withSettings;
  * Loopback end-to-end regression for the Master scheduling delivery path.
  *
  * <p>The exercised path is:
- * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> RouteService
- * -> RequestScheduler -> WorkerBatcher. BATCH continues through EngineGrpcClient
+ * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> AbstractRequestScheduler
+ * -> AbstractRequestScheduler -> PrefillQueueRunner. BATCH continues through EngineGrpcClient
  * to a Netty mock engine; NON_BATCH publishes the route decision to the frontend.
  * The worker capacities are fixed by the fixture, while worker selection uses the
- * production DefaultRouter with cost-based Prefill and Decode selection.
+ * production RequestWorkerSelector with cost-based Prefill and Decode selection.
  */
 @Tag("performance-regression")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -124,7 +120,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private static final int WARMUP_REQUESTS = 64;
 
-    /** Per-request schedule deadline; a stalled Master fails fast instead of hanging. */
+    /**
+     * Per-request schedule deadline; a stalled Master fails fast instead of hanging.
+     */
     private static final long REQUEST_DEADLINE_SECONDS = 20L;
 
     private static final int REAL_REQUEST_TEMPLATE_COUNT = 128;
@@ -192,8 +190,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             parseTargetQps(
                     System.getProperty(
                             "flexlb.perf.engine-matrix-target-qps", "1000,2000,5000,10000"));
-    private static final MasterElectService STANDALONE_MASTER_ELECT_SERVICE =
-            new MasterElectService() {
+    private static final MasterStatusView STANDALONE_MASTER_ELECT_SERVICE =
+            new MasterStatusView() {
                 @Override
                 public boolean isNeedConsistency() {
                     return false;
@@ -309,28 +307,36 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         cfg.getGrpcServer().setExecutorQueueSize(Math.max(4096, REQUEST_COUNT));
         DecisionPolicyConfig decision =
                 DECISION_MODE == DecisionPolicyConfig.Type.SINGLE
-                        ? DecisionPolicyConfig.single()
+                        ? ConfigTestSupport.single()
                         : new DecisionPolicyConfig();
         if (DECISION_MODE == DecisionPolicyConfig.Type.FIXED_WINDOW) {
             decision.setMaxCollectionWaitMs(10L);
             decision.setMaxRequests(16);
+            decision.setMaxPredictedExecutionMs(
+                    Long.getLong("flexlb.perf.max-predicted-execution-ms"));
         }
         cfg.queueScheduler().setDecision(decision);
         if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
-            cfg.setDispatcher(DispatcherConfig.nonBatch());
+            cfg.setDispatcher(ConfigTestSupport.nonBatch());
             cfg.getDispatcher().setMaxInflightPerPrefillWorker(64);
         }
         return cfg;
     }
 
     @Override
-    protected WorkerDirectory createWorkerDirectory() {
-        return new WorkerDirectory(endpointRegistry);
+    protected org.flexlb.config.ConfigService createConfigService() {
+        // Fleet-wide window reads use the production snapshot getter without mock invocation locks.
+        var service = new org.flexlb.config.ConfigService();
+        ReflectionTestUtils.setField(
+                service,
+                "currentFlexlbConfig",
+                new java.util.concurrent.atomic.AtomicReference<>(config));
+        return service;
     }
 
     @Override
-    protected BatchSchedulerReporter createBatchSchedulerReporter() {
-        return new CountingBatchSchedulerReporter(dispatchReasonCounts, deliveryWaitHistogram);
+    protected DeliveryMetricsReporter createDeliveryMetricsReporter() {
+        return new CountingDeliveryMetricsReporter(dispatchReasonCounts, deliveryWaitHistogram);
     }
 
     @Override
@@ -339,51 +345,60 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     @Override
-    protected DefaultBatchDispatcher createDispatcher() {
-        return DefaultBatchDispatcherTestFactory.create(
-                grpcClient, configService,
-                DISPATCH_THREADS, DISPATCH_QUEUE_CAPACITY);
+    protected DeliveryDispatcher createDispatcher() {
+        return DeliveryDispatcherTestFactory.create(
+                grpcClient, configService, reporter, DISPATCH_THREADS, DISPATCH_QUEUE_CAPACITY);
     }
 
     @Override
-    protected DefaultRouter createRouter() {
-        CacheAwareService cache = mock(CacheAwareService.class, withSettings().stubOnly());
-        when(cache.findMatchingEngines(any()))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.KVCM));
-        CostBasedPrefillStrategy prefillSelector =
-                new CostBasedPrefillStrategy(
-                        engineWorkerStatus,
-                        cache,
-                        mock(EngineHealthReporter.class, withSettings().stubOnly()));
+    protected RequestWorkerSelector createRouter() {
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class, withSettings().stubOnly());
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
-        return new DefaultRouter(
+        when(modelMeta.getServiceRoutes()).thenReturn(List.of());
+        CacheMetricsReporter cacheMetrics = createNoOpCacheMetricsReporter();
+        var cacheConfiguration = new org.flexlb.config.CacheMatchConfiguration(modelMeta, config);
+        var comparison =
+                new org.flexlb.cache.match.localstandby.LocalStandbyComparisonService(
+                        cacheConfiguration, null, cacheMetrics);
+        CacheAwareService cache =
+                new CacheAwareService(cacheMetrics, null, comparison, null) {
+                    @Override
+                    public org.flexlb.cache.domain.CacheMatchResult findMatchingEngines(
+                            org.flexlb.cache.domain.CacheMatchQuery query) {
+                        return org.flexlb.cache.domain.CacheMatchResult.empty(
+                                org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC);
+                    }
+                };
+        // Real reporters avoid Mockito invocation locks on the concurrent routing path.
+        CostBasedPrefillStrategy prefillSelector =
+                new CostBasedPrefillStrategy(
+                        engineWorkerStatus, cache, createNoOpEngineHealthReporter());
+        return new RequestWorkerSelector(
                 prefillSelector,
-                new DecodeSelector(engineWorkerStatus),
-                new RandomStrategy(engineWorkerStatus),
-                mock(EncoderStrategy.class),
-                configService,
+                new DecodeSelector(
+                        engineWorkerStatus,
+                        configService,
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(configService)),
+                new VitWorkerSelector(engineWorkerStatus),
                 modelMeta);
     }
 
     @BeforeEach
     void startMasterGrpcServer() throws Exception {
         publishDecodeCapacity(1_000_000_000L, 2_000_000_000L);
-        observeAcceptedBatches(mockPrefillWorker);
+        registerAcceptedBatchCallback(mockPrefillWorker);
         simulatedStatusThread =
                 new Thread(this::applySimulatedCompletions, "flexlb-perf-engine-status");
         simulatedStatusThread.setDaemon(true);
         simulatedStatusThread.start();
 
-        RouteService routeService =
-                new RouteService(
-                        scheduler, mock(TheoryCacheHitReporter.class, withSettings().stubOnly()));
-
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();
         FlexlbServiceImpl service =
                 new FlexlbServiceImpl(
-                        routeService,
+                        scheduler,
+                        requestRegistry(),
                         STANDALONE_MASTER_ELECT_SERVICE,
                         engineHealthReporter,
                         mock(FlexlbGrpcForwarder.class, withSettings().stubOnly()),
@@ -405,10 +420,21 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         configService,
                         environment,
                         masterServerEventLoopGroup,
-                        NoOpFlexMonitor.getInstance(),
+                        new io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
                         new GrpcServerTimingInterceptor(),
                         new GrpcQosHeaderInterceptor());
         masterServer.start();
+        long maxDirectBytes = io.netty.util.internal.PlatformDependent.maxDirectMemory();
+        GrpcReceivingBudget.Limits receiving =
+                GrpcReceivingBudget.resolve(config.getGrpcServer(), maxDirectBytes);
+        System.out.printf(
+                "FlexLB receiving limits: max_heap_bytes=%d max_direct_bytes=%d "
+                        + "schedule_calls=%d control_calls=%d wire_budget_bytes=%d%n",
+                Runtime.getRuntime().maxMemory(),
+                maxDirectBytes,
+                receiving.scheduleCalls(),
+                receiving.controlCalls(),
+                receiving.budgetBytes());
 
         if (MASTER_CLIENT_CHANNELS <= 0) {
             throw new IllegalArgumentException(
@@ -442,13 +468,17 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         masterChannels = List.copyOf(channels);
     }
 
+    private static CacheMetricsReporter createNoOpCacheMetricsReporter() {
+        CacheMetricsReporter metrics = new CacheMetricsReporter();
+        ReflectionTestUtils.setField(metrics, "monitor", new NoOpFlexMonitor());
+        return metrics;
+    }
+
     private EngineHealthReporter createNoOpEngineHealthReporter() {
-        CacheMetricsReporter constructorOnlyCacheMetricsReporter =
-                mock(CacheMetricsReporter.class, withSettings().stubOnly());
         LoopResources constructorOnlyLoopResources = useNative -> grpcClientEventLoopGroup();
         return new EngineHealthReporter(
                 new NoOpFlexMonitor(),
-                constructorOnlyCacheMetricsReporter,
+                createNoOpCacheMetricsReporter(),
                 grpcClient,
                 constructorOnlyLoopResources,
                 engineWorkerStatus);
@@ -569,7 +599,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         int processors = Runtime.getRuntime().availableProcessors();
         long defaultMinimumQps = Math.min(5_000L, Math.max(500L, processors * 250L));
         long minimumQps = Long.getLong("flexlb.perf.min-e2e-qps", defaultMinimumQps);
-        long maximumServerP99Ms = Long.getLong("flexlb.perf.max-e2e-server-p99-ms", 250L);
+        long maximumServerP99Ms = Long.getLong("flexlb.perf.max-e2e-server-p99-ms", 50L);
         assertTrue(
                 result.qps() >= minimumQps,
                 () ->
@@ -583,10 +613,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                                 "Master completion throughput %.1f QPS is below floor %d QPS",
                                 masterQps, minimumQps));
         assertTrue(
-                serverP99Ms <= maximumServerP99Ms,
+                serverP99Ms < maximumServerP99Ms,
                 () ->
                         String.format(
-                                "Master server P99 %d ms exceeds ceiling %d ms",
+                                "Master server P99 %d ms must be below %d ms",
                                 serverP99Ms, maximumServerP99Ms));
     }
 
@@ -603,11 +633,41 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "engine-scale perf must exercise the configured decision mode");
         boolean fixedWindowDecision = decisionMode == DecisionPolicyConfig.Type.FIXED_WINDOW;
         provisionPrefillEndpoints(prefillEngineCount);
-        while (endpointRegistry.getEndpointCount(RoleType.DECODE) < decodeEngineCount) {
-            addLogicalDecodeEndpoint(endpointRegistry.getEndpointCount(RoleType.DECODE));
+        while (endpointRegistry.counts(RoleType.DECODE).published() < decodeEngineCount) {
+            addLogicalDecodeEndpoint(endpointRegistry.counts(RoleType.DECODE).published());
         }
-        assertEquals(prefillEngineCount, endpointRegistry.getEndpointCount(RoleType.PREFILL));
-        assertEquals(decodeEngineCount, endpointRegistry.getEndpointCount(RoleType.DECODE));
+        assertEquals(prefillEngineCount, endpointRegistry.counts(RoleType.PREFILL).published());
+        assertEquals(decodeEngineCount, endpointRegistry.counts(RoleType.DECODE).published());
+
+        // Bootstrap cold transports and protobuf classes within the actual receiving limit.
+        // A full-rate cold start can exhaust HEADERS admission before body callbacks run;
+        // steady-state warmup and measurement below must still accept every offered request.
+        int bootstrapRequests =
+                Math.max(
+                        REAL_REQUEST_TEMPLATE_COUNT,
+                        prefillEngineCount * ENGINE_MATRIX_WARMUP_REQUESTS_PER_PREFILL);
+        int bootstrapBatchSize =
+                Math.min(
+                        WARMUP_REQUESTS,
+                        GrpcReceivingBudget.resolve(
+                                        config.getGrpcServer(),
+                                        io.netty.util.internal.PlatformDependent.maxDirectMemory())
+                                .scheduleCalls());
+        long bootstrapFirstRequestId =
+                (1L << 60) + 100_000_000L + prefillEngineCount * 10_000L + targetQps;
+        for (int issued = 0; issued < bootstrapRequests; issued += bootstrapBatchSize) {
+            TrafficResult bootstrap =
+                    runTraffic(
+                            Math.min(bootstrapBatchSize, bootstrapRequests - issued),
+                            bootstrapFirstRequestId + issued,
+                            0,
+                            issued);
+            assertSuccessful(bootstrap);
+        }
+        awaitCompletionCount(bootstrapRequests);
+        awaitDeliveryWaitCount(bootstrapRequests);
+        awaitSimulatedCompletions();
+        resetMeasurementState();
 
         int warmupRequests =
                 Math.max(
@@ -617,14 +677,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                                 targetQps * ENGINE_MATRIX_WARMUP_MS / 1_000));
         // Exercise the same nine-byte request-id decoding path in warmup and measurement.
         // Switching varint widths at measurement start deoptimizes the hot protobuf parser.
-        TrafficResult warmup =
-                runTraffic(
-                        warmupRequests,
-                        (1L << 60) + 50_000_000L + prefillEngineCount * 10_000L + targetQps,
-                        targetQps);
-        assertSuccessful(warmup);
-        awaitCompletionCount(warmupRequests);
-        awaitDeliveryWaitCount(warmupRequests);
+        runWarmup(
+                warmupRequests,
+                (1L << 60) + 50_000_000L + prefillEngineCount * 10_000L + targetQps,
+                targetQps);
         resetMeasurementState();
 
         double minimumQpsRatio =
@@ -633,7 +689,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         double maximumClientP99Ms =
                 Double.parseDouble(
                         System.getProperty("flexlb.perf.engine-matrix-max-client-p99-ms", "250"));
-        long maximumServerP99Ms = Long.getLong("flexlb.perf.engine-matrix-max-server-p99-ms", 250L);
+        long maximumServerP99Ms = Long.getLong("flexlb.perf.engine-matrix-max-server-p99-ms", 50L);
         long maximumBatchWaitP99Ms =
                 Long.getLong("flexlb.perf.engine-matrix-max-batch-wait-p99-ms", 50L);
 
@@ -783,33 +839,33 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         if (fixedWindowDecision) {
             double sparseWindowArrivalsPerPrefill =
                     targetQps
-                            * config.fixedWindowDecision().getMaxCollectionWaitMs()
+                            * config.decisionPolicy().getMaxCollectionWaitMs()
                             / 1_000.0
                             / prefillEngineCount;
             if (sparseWindowArrivalsPerPrefill < 0.5) {
                 double minimumObservedWindowMs =
-                        config.fixedWindowDecision().getMaxCollectionWaitMs() * 0.5;
+                        config.decisionPolicy().getMaxCollectionWaitMs() * 0.5;
                 assertTrue(
                         result.p50Ms() >= minimumObservedWindowMs,
                         () ->
                                 String.format(
                                         "client E2E P50 %.3f ms did not observe the %d ms fixed window",
                                         result.p50Ms(),
-                                        config.fixedWindowDecision().getMaxCollectionWaitMs()));
+                                        config.decisionPolicy().getMaxCollectionWaitMs()));
                 assertTrue(
                         deliveryWait.p50() >= minimumObservedWindowMs,
                         () ->
                                 String.format(
                                         "delivery wait P50 %d ms did not observe the %d ms fixed window",
                                         deliveryWait.p50(),
-                                        config.fixedWindowDecision().getMaxCollectionWaitMs()));
+                                        config.decisionPolicy().getMaxCollectionWaitMs()));
             }
         }
         assertTrue(
-                serverP99Ms <= maximumServerP99Ms,
+                serverP99Ms < maximumServerP99Ms,
                 () ->
                         String.format(
-                                "Master server P99 %d ms exceeds ceiling %d ms",
+                                "Master server P99 %d ms must be below %d ms",
                                 serverP99Ms, maximumServerP99Ms));
         assertTrue(
                 deliveryWait.p99() <= maximumBatchWaitP99Ms,
@@ -855,12 +911,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         "2k QPS queueing scenario must observe non-zero batch wait");
                 double arrivalsPerWindowPerPrefill =
                         targetQps
-                                * config.fixedWindowDecision().getMaxCollectionWaitMs()
+                                * config.decisionPolicy().getMaxCollectionWaitMs()
                                 / 1_000.0
                                 / prefillEngineCount;
                 double expectedBatchSize =
                         Math.min(
-                                config.fixedWindowDecision().getMaxRequests(),
+                                config.decisionPolicy().getMaxRequests(),
                                 arrivalsPerWindowPerPrefill);
                 double minimumAverageBatchSize = Math.max(1.0, expectedBatchSize * 0.8);
                 assertTrue(
@@ -964,13 +1020,64 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return targetQpsValues;
     }
 
+    private void runWarmup(int requestCount, long firstRequestId, int targetQps) throws Exception {
+        int maximumAttempts = 3;
+        for (int attempt = 0; attempt < maximumAttempts; attempt++) {
+            try {
+                TrafficResult warmup =
+                        runTraffic(
+                                requestCount,
+                                firstRequestId + (long) attempt * requestCount,
+                                targetQps);
+                assertSuccessful(warmup);
+                awaitCompletionCount(requestCount);
+                awaitDeliveryWaitCount(requestCount);
+                awaitSimulatedCompletions();
+                return;
+            } catch (ReceivingCapacityException capacity) {
+                // Only explicit pre-admission receiving rejection is retryable, and only here.
+                // Every measurement below still sends each request once and fails on any error.
+                awaitCompletionCount(capacity.successfulRequests);
+                awaitDeliveryWaitCount(capacity.successfulRequests);
+                awaitSimulatedCompletions();
+                if (attempt + 1 == maximumAttempts) throw capacity;
+                System.out.printf(
+                        "FlexLB warmup receiving capacity full: successful=%d rejected=%d "
+                                + "retry=%d/%d target_qps=%d%n",
+                        capacity.successfulRequests,
+                        requestCount - capacity.successfulRequests,
+                        attempt + 1,
+                        maximumAttempts - 1,
+                        targetQps);
+                resetMeasurementState();
+            }
+        }
+    }
+
+    private static final class ReceivingCapacityException extends Exception {
+        private final long successfulRequests;
+
+        private ReceivingCapacityException(Exception cause, long successfulRequests) {
+            super("receiving capacity exhausted during offered traffic", cause);
+            this.successfulRequests = successfulRequests;
+        }
+    }
+
+    private static boolean isReceivingCapacityFailure(CompletableFuture<TimedResponse> future) {
+        Throwable failure = future.handle((response, error) -> error).join();
+        Status status = Status.fromThrowable(failure);
+        return status.getCode() == Status.Code.RESOURCE_EXHAUSTED
+                && ("receiving budget full".equals(status.getDescription())
+                        || "receiving byte budget full".equals(status.getDescription()));
+    }
+
     private TrafficResult runTraffic(int requestCount, long firstRequestId) throws Exception {
         return runTraffic(requestCount, firstRequestId, 0);
     }
 
     private void provisionPrefillEndpoints(int required) throws IOException {
-        while (endpointRegistry.getEndpointCount(RoleType.PREFILL) < required) {
-            int additionalIndex = endpointRegistry.getEndpointCount(RoleType.PREFILL) - 1;
+        while (endpointRegistry.counts(RoleType.PREFILL).published() < required) {
+            int additionalIndex = endpointRegistry.counts(RoleType.PREFILL).published() - 1;
             if (DELIVERY_MODE == DeliveryMode.BATCH) {
                 int grpcPort =
                         ENGINE_MATRIX_FIRST_PREFILL_GRPC_PORT == 0
@@ -978,7 +1085,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                                 : ENGINE_MATRIX_FIRST_PREFILL_GRPC_PORT + additionalIndex * 2;
                 MockPrefillWorker worker =
                         addPrefillWorker(MockWorkerBehavior.builder().build(), grpcPort);
-                observeAcceptedBatches(worker);
+                registerAcceptedBatchCallback(worker);
             } else {
                 addLogicalPrefillEndpoint(additionalIndex + 1);
             }
@@ -987,15 +1094,23 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private TrafficResult runTraffic(int requestCount, long firstRequestId, int targetQps)
             throws Exception {
+        return runTraffic(requestCount, firstRequestId, targetQps, 0);
+    }
+
+    private TrafficResult runTraffic(
+            int requestCount, long firstRequestId, int targetQps, int templateOffset)
+            throws Exception {
         byte[][] serializedRequests = new byte[requestCount][];
         List<CompletableFuture<TimedResponse>> futures = new ArrayList<>(requestCount);
         for (int index = 0; index < requestCount; index++) {
             // Keep only the real wire payload once the measured window starts.
             serializedRequests[index] =
-                    scheduleRequest(firstRequestId + index, index).toByteArray();
+                    scheduleRequest(firstRequestId + index, templateOffset + index).toByteArray();
             futures.add(new CompletableFuture<>());
         }
 
+        long trafficStartEpochMs = System.currentTimeMillis();
+        long trafficStartUptimeMs = ManagementFactory.getRuntimeMXBean().getUptime();
         long trafficStartNanos = System.nanoTime();
         long nextIssueNanos = trafficStartNanos;
         long pacingLagNanos = 0L;
@@ -1011,7 +1126,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             issueRequest(
                     futures.get(index),
                     serializedRequests[index],
-                    index,
+                    templateOffset + index,
                     firstRequestId + index,
                     targetQps > 0 ? nextIssueNanos : issueStartedNanos);
             long issueCompletedNanos = System.nanoTime();
@@ -1049,9 +1164,19 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     completed,
                     successful,
                     completed - successful,
-                    scheduler.getTrackedRequestCount(),
-                    scheduler.getQueuedRequestCount(),
+                    requestRegistry().liveRequestCount(),
+                    requestRegistry().pendingDeliveryRequestCount(),
                     receivedEngineRequestCount());
+            GrpcReceivingGuard receiving = receivingGuard();
+            System.out.printf(
+                    "FlexLB receiving after traffic failure: active=%d bytes=%d "
+                            + "control_active=%d timers=%d rejected=%d timed_out=%d%n",
+                    receiving.receiving(),
+                    receiving.receivingBytes(),
+                    receiving.controlReceiving(),
+                    receiving.pendingTimers(),
+                    receiving.rejected(),
+                    receiving.timedOut());
             for (int index = 0; index < futures.size(); index++) {
                 CompletableFuture<TimedResponse> future = futures.get(index);
                 if (!future.isCompletedExceptionally() && !future.isCancelled()) {
@@ -1060,11 +1185,35 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 long requestId = firstRequestId + index;
                 System.out.printf(
                         "FlexLB Master exceptional request: request_id=%d state=%s%n",
-                        requestId, scheduler.getRequestState(Long.toString(requestId), 0L));
+                        requestId,
+                        requestRegistry().getRequestState(String.valueOf(requestId), 0L));
+            }
+            if (statusFailure == null
+                    && completed == requestCount
+                    && successful < completed
+                    && futures.stream()
+                            .filter(future -> !future.isCompletedExceptionally())
+                            .allMatch(future -> future.join().response().getSuccess())
+                    && futures.stream()
+                            .filter(CompletableFuture::isCompletedExceptionally)
+                            .allMatch(
+                                    MasterBatchEndToEndPerformanceTest
+                                            ::isReceivingCapacityFailure)) {
+                throw new ReceivingCapacityException(failure, successful);
             }
             throw failure;
         }
         long elapsedNanos = System.nanoTime() - trafficStartNanos;
+        System.out.printf(
+                "FlexLB traffic window: first_request_id=%d requests=%d target_qps=%d "
+                        + "start_epoch_ms=%d start_uptime_ms=%d end_epoch_ms=%d end_uptime_ms=%d%n",
+                firstRequestId,
+                requestCount,
+                targetQps,
+                trafficStartEpochMs,
+                trafficStartUptimeMs,
+                System.currentTimeMillis(),
+                ManagementFactory.getRuntimeMXBean().getUptime());
         System.out.printf(
                 "FlexLB offered traffic: requests=%d target_qps=%d offered_qps=%.1f "
                         + "pacing_lag_avg_us=%.3f issue_call_avg_us=%.3f%n",
@@ -1141,7 +1290,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    private void observeAcceptedBatches(MockPrefillWorker worker) {
+    private void registerAcceptedBatchCallback(MockPrefillWorker worker) {
         worker.getRpcService()
                 .onAcceptedBatch(
                         batch -> {
@@ -1192,7 +1341,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         });
     }
 
-    /** Validate BATCH routes; NON_BATCH models frontend delivery after Schedule returns. */
+    /**
+     * Validate BATCH routes; NON_BATCH models frontend delivery after Schedule returns.
+     */
     private void trackCompletedRoute(
             long requestId,
             int requestIndex,
@@ -1245,7 +1396,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return RoleType.DECODE.getCode().equals(role) ? RoleType.DECODE : null;
     }
 
-    /** Apply per-worker terminal deltas through the production endpoint/lifecycle transaction. */
+    /**
+     * Apply per-worker terminal deltas through the production endpoint/lifecycle transaction.
+     */
     private void applySimulatedCompletions() {
         try {
             while (!Thread.currentThread().isInterrupted()) {
@@ -1258,7 +1411,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     for (var target : route.accepted().addresses().entrySet()) {
                         RoleType role = target.getKey();
                         String address = target.getValue();
-                        WorkerEndpoint endpoint = endpointRegistry.get(role, address);
+                        WorkerEndpoint endpoint =
+                                endpointRegistry.get(role, logicalWorkerIpPort(address));
                         assertTrue(
                                 endpoint != null,
                                 "completed route must retain its actual worker endpoint: "
@@ -1304,13 +1458,17 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         applyWorkerStatusResponse(status, response);
     }
 
+    private GrpcReceivingGuard receivingGuard() {
+        return (GrpcReceivingGuard) ReflectionTestUtils.getField(masterServer, "receivingGuard");
+    }
+
     private void awaitSimulatedCompletions() throws InterruptedException {
         long expected = simulatedResponseCount.get();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while ((simulatedCompletionCount.get() < expected
                         || !acceptedRequests.isEmpty()
                         || !simulatedCompletions.isEmpty()
-                        || scheduler.getTrackedRequestCount() != 0)
+                        || requestRegistry().liveRequestCount() != 0)
                 && simulatedStatusFailure.get() == null
                 && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1);
@@ -1327,25 +1485,39 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         assertTrue(simulatedCompletions.isEmpty(), "terminal projection queue must be drained");
         assertEquals(
                 0,
-                scheduler.getTrackedRequestCount(),
+                requestRegistry().liveRequestCount(),
                 "request lifecycle registry must be drained");
+        GrpcReceivingGuard receiving = receivingGuard();
+        assertEquals(0, receiving.receiving(), "Schedule receiving permits must be released");
+        assertEquals(0L, receiving.receivingBytes(), "Schedule receiving bytes must be released");
+        assertEquals(0, receiving.controlReceiving(), "Cancel receiving permits must be released");
+        assertEquals(
+                0L, receiving.controlReceivingBytes(), "Cancel receiving bytes must be released");
+        assertEquals(0, receiving.pendingTimers(), "receiving watchdogs must be removed");
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
             PrefillEndpoint endpoint =
                     (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
-            assertEquals(0, endpoint.getInflightBatchCount(), address + " retained batch credits");
             assertEquals(
                     0,
-                    endpoint.getLocallyOwnedRequestCount(),
+                    endpoint.ownership.stats().batchCount(),
+                    address + " retained batch credits");
+            assertEquals(
+                    0,
+                    endpoint.ownership.stats().locallyOwnedRequests(),
                     address + " retained Prefill ownership");
             assertEquals(
-                    0L, endpoint.observedRequestCount(), address + " retained Prefill requests");
+                    0L,
+                    endpoint.ownership
+                            .admissionSummary(0, endpoint.requestLimit)
+                            .occupiedRequests(),
+                    address + " retained Prefill requests");
         }
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.DECODE)) {
             DecodeEndpoint endpoint =
                     (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, address);
-            DecodeEndpoint.LayeredAdmissionView view = endpoint.resourceSnapshot();
-            assertTrue(view.reserved().isEmpty(), address + " retained Decode reservations");
-            assertTrue(view.confirmed().isEmpty(), address + " retained Decode ownership");
+            DecodeResources.ResourceSnapshot view = endpoint.resourceSnapshot();
+            assertTrue(view.reservedCount() == 0, address + " retained Decode reservations");
+            assertTrue(view.confirmedCount() == 0, address + " retained Decode ownership");
             assertEquals(
                     0, view.activeDispatchPermits(), address + " retained Decode delivery permits");
         }
@@ -1515,7 +1687,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         long acknowledgedRequests = 0L;
         for (int index = 0; index < requestCount; index++) {
             String requestId = Long.toString(firstRequestId + index);
-            ResponseTiming timing = timings.get(requestId);
+            ResponseTiming timing = timings.get(String.valueOf(requestId));
             if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
                 assertEquals(
                         0L,
@@ -1961,13 +2133,16 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private record ResponseTiming(
             long batchDispatchedNanos, long ackAtNanos, long completedNanos) {}
 
-    /** Retains request identities to audit stage denominators without changing production telemetry. */
+    /**
+     * Retains request identities to audit stage denominators without changing production telemetry.
+     */
     private static final class CompletionCoverageRecorder extends ServerScheduleLatencyRecorder {
         private final Map<String, ResponseTiming> responseTimings = new ConcurrentHashMap<>();
         private final AtomicLong duplicateResponses = new AtomicLong();
 
         @Override
-        public void recordCompletion(BalanceContext context, long responseCompletedNanos) {
+        public void recordCompletion(
+                org.flexlb.balance.scheduler.RequestData context, long responseCompletedNanos) {
             ResponseTiming timing =
                     new ResponseTiming(
                             context.getBatchDispatchedNanos(),
@@ -2034,11 +2209,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             int maxNewTokens,
             String model) {}
 
-    private static final class CountingBatchSchedulerReporter extends BatchSchedulerReporter {
+    private static final class CountingDeliveryMetricsReporter extends DeliveryMetricsReporter {
         private final Map<String, LongAdder> dispatchReasonCounts;
         private final MillisecondHistogram deliveryWaitHistogram;
 
-        private CountingBatchSchedulerReporter(
+        private CountingDeliveryMetricsReporter(
                 Map<String, LongAdder> dispatchReasonCounts,
                 MillisecondHistogram deliveryWaitHistogram) {
             super(new NoOpFlexMonitor());

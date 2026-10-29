@@ -17,7 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Lost EnqueueBatch ACKs remain pending until request inactivity expires their local accounting. */
+/**
+ * Lost EnqueueBatch ACKs remain pending until request inactivity expires their local accounting.
+ */
 class GrpcTimeoutTest extends FlexLBMockTestBase {
 
     @Override
@@ -50,19 +52,21 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertTrue(
                 mockPrefillWorker.getEnqueueCount() >= 1,
                 "the worker records EnqueueBatch before delaying its ACK");
-        assertEquals(1, getPrefillEndpoint().getInflightBatchCount());
-        assertEquals(1, getPrefillEndpoint().getLocallyOwnedRequestCount());
-        assertEquals(1, getDecodeEndpoint().getInflightCount());
+        assertEquals(1, getPrefillEndpoint().ownership.stats().batchCount());
+        assertEquals(1, getPrefillEndpoint().ownership.stats().locallyOwnedRequests());
+        assertEquals(1, getDecodeEndpoint().resourceSnapshot().reservedCount());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
 
         Response expired = future.get(5, TimeUnit.SECONDS);
         assertFalse(expired.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
-        assertEquals(0, scheduler.getTrackedRequestCount());
-        assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
-        assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());
-        assertEquals(0, getDecodeEndpoint().getInflightCount());
+        org.flexlb.mock.InflightAssertions.assertResourcesReleasedWithin(
+                getPrefillEndpoint(), getDecodeEndpoint(), 3_000L);
+        assertEquals(0, requestRegistry().liveRequestCount());
+        assertEquals(0, getPrefillEndpoint().ownership.stats().batchCount());
+        assertEquals(0, getPrefillEndpoint().ownership.stats().locallyOwnedRequests());
+        assertEquals(0, getDecodeEndpoint().resourceSnapshot().reservedCount());
 
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         Response recovered = submitRequest(10002).get(5, TimeUnit.SECONDS);

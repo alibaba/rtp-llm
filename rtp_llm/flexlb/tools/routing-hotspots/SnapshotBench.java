@@ -1,22 +1,22 @@
 import com.sun.management.ThreadMXBean;
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
-import org.flexlb.balance.scheduler.RequestRegistry;
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.PrefillQueueRunner;
+import org.flexlb.balance.scheduler.QueueExecutionSettings;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.balance.scheduler.WorkerBatcher;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
@@ -31,24 +31,30 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.locks.ReentrantLock;
 
-/** Same source on both revisions; includes real WorkerBatcher snapshot capture. */
+import static org.mockito.Mockito.mock;
+
+/** Same source on both revisions; includes real PrefillQueueRunner snapshot capture. */
 public class SnapshotBench {
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
     static volatile long sink;
     static FormulaPredictor model;
-    static BatchDeliveryStrategy strategy;
-    static RequestRegistry registry;
-    static final RouteProjection.Probe PROBE =
-            new RouteProjection.Probe(Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
+    static DeliveryDispatcher strategy;
+    static final RequestTimeEstimationTestSupport.Probe PROBE =
+            new RequestTimeEstimationTestSupport.Probe(
+                    Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
-    record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
+    record Endpoint(
+            PrefillEndpoint endpoint,
+            PrefillState state,
+            PrefillState.QueueGuard lock,
+            RequestRoute member) {
         void changeMembership() {
             lock.lock();
             try {
-                if (!runtime.ownedState().terminalizeActiveUnderLock(member)
-                        || !runtime.ownedState().enqueueActiveUnderLock(member, 0)) {
+                if (state.updateQueue(PrefillState.QueueChange.REMOVE, member, 0) != member
+                        || state.updateQueue(PrefillState.QueueChange.ENQUEUE, member, 0)
+                                != member) {
                     throw new AssertionError("membership update failed");
                 }
             } finally {
@@ -59,16 +65,14 @@ public class SnapshotBench {
 
     record Sample(long ns, long cpu, long bytes, long checksum) {}
 
-    static ScheduledRequest request(FlexlbConfig config, long id, int priority, long tokens) {
-        var request = new Request();
-        request.setRequestId(id);
-        request.setSeqLen(tokens);
-        request.setPriority(priority);
-        var context = new BalanceContext(config);
-        context.setRequest(request);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-        return new ScheduledRequest(
-                context, new CompletableFuture<>(), null, null, null, null, null, null, 1L);
+    static RequestRoute request(FlexlbConfig config, long id, int priority, long tokens) {
+        var request = Request.builder().requestId(id).seqLen(tokens).rawPriority(priority).build();
+        var context = new RequestContext(config);
+        context.data().setRequest(request);
+        context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
+        context.data().setFuture(new CompletableFuture<>());
+        return org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
+                context, null, null, null, null, null, null, 1L);
     }
 
     static FlexlbConfig config() {
@@ -84,29 +88,56 @@ public class SnapshotBench {
     static Endpoint endpoint(int depth, int seed) throws Exception {
         var config = config();
         // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
-        var runtime =
-                new WorkerBatcher(
-                        "bench-" + seed,
-                        null,
+        var constructor =
+                PrefillEndpoint.class.getDeclaredConstructor(
+                        WorkerStatus.class,
+                        FlexlbConfig.class,
+                        DeliveryDispatcher.class,
+                        DeliveryMetricsReporter.class,
+                        PlacementAvailability.class);
+        constructor.setAccessible(true);
+        var endpoint =
+                constructor.newInstance(
+                        WorkerStatus.createDiscovered(
+                                RoleType.PREFILL, null, "127.0.0.1", 8080, 9090, null),
                         config,
                         strategy,
-                        new EndpointEventProjector(registry));
-        Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
-        lockField.setAccessible(true);
-        var lock = (ReentrantLock) lockField.get(runtime);
+                        mock(DeliveryMetricsReporter.class),
+                        new PlacementAvailability());
+        var state = endpoint.ownership;
+        var lock = state.queueGuard();
+        var enableQueue =
+                PrefillState.class.getDeclaredMethod("enableQueueLocked", Comparator.class);
+        enableQueue.setAccessible(true);
+        lock.lock();
+        try {
+            enableQueue.invoke(state, PrefillQueueRunner.PRIORITY_QUEUE_ORDER);
+        } finally {
+            lock.unlock();
+        }
+        var worker =
+                new PrefillQueueRunner(
+                        endpoint.ipPort(),
+                        endpoint,
+                        QueueExecutionSettings.capture(config),
+                        strategy,
+                        state);
+        Field batcherField = PrefillEndpoint.class.getDeclaredField("queueRunner");
+        batcherField.setAccessible(true);
+        batcherField.set(endpoint, worker);
         var random = new Random(seed);
-        ScheduledRequest last = null;
+        RequestRoute last = null;
         lock.lock();
         try {
             for (int i = 0; i < depth; i++) {
                 last = request(config, i, 1 + i % 4, 100 + random.nextInt(4096));
-                if (!runtime.ownedState().enqueueActiveUnderLock(last, 0))
+                if (state.updateQueue(PrefillState.QueueChange.ENQUEUE, last, 0) != last)
                     throw new AssertionError();
             }
         } finally {
             lock.unlock();
         }
-        return new Endpoint(runtime, lock, last);
+        return new Endpoint(endpoint, state, lock, last);
     }
 
     static Sample read(List<Endpoint> endpoints, boolean project, int repetitions) {
@@ -115,13 +146,13 @@ public class SnapshotBench {
         long started = System.nanoTime(), checksum = 0;
         for (int i = 0; i < repetitions; i++) {
             for (var endpoint : endpoints) {
-                var inputs = endpoint.runtime.captureRouteProjectionInputs();
+                var inputs = endpoint.endpoint.captureRouteProjectionInputs();
                 checksum += inputs.queue().activeItems().size();
                 if (project)
                     checksum +=
-                            RouteProjection.project(
-                                            inputs, PROBE, model, strategy.projectionPolicy())
-                                    .requiredProjectedTtftMs();
+                            RequestTimeEstimationTestSupport.project(
+                                            inputs, PROBE, model, strategy.mode())
+                                    .projectedTtftMsValue();
             }
         }
         return new Sample(
@@ -156,7 +187,8 @@ public class SnapshotBench {
                 long cpu = 0, bytes = 0, checksum = 0, operations = 0;
                 do {
                     for (var endpoint : endpoints) {
-                        if (mode.equals("status")) endpoint.runtime.signalSchedulingInputsChanged();
+                        if (mode.equals("status"))
+                            endpoint.endpoint.signal(PrefillEndpoint.Signal.INPUT);
                         if (mode.equals("membership")) endpoint.changeMembership();
                     }
                     var gate = new CountDownLatch(1);
@@ -201,10 +233,10 @@ public class SnapshotBench {
         var index =
                 PrefillActiveIndex.ordered(
                         depth,
-                        Comparator.comparingInt(ScheduledRequest::priority)
+                        Comparator.comparingInt(RequestRoute::priority)
                                 .reversed()
-                                .thenComparingLong(ScheduledRequest::enqueueSeq));
-        var members = new ArrayList<ScheduledRequest>();
+                                .thenComparingLong(RequestRoute::enqueueSeq));
+        var members = new ArrayList<RequestRoute>();
         for (int i = 0; i < depth; i++) {
             var item = request(config, i, i % 4, 100);
             members.add(item);
@@ -235,19 +267,10 @@ public class SnapshotBench {
 
     static void initialize(Path formula) throws Exception {
         model = new FormulaPredictor(Files.readString(formula));
-        var constructor = ConfigService.class.getDeclaredConstructor(String.class);
-        constructor.setAccessible(true);
-        var service =
-                constructor.newInstance(
-                        "{\"requestLifecycle\":{\"request\":{\"timeoutMs\":60000},\"decision\":{\"lifetime\":2.0}}}");
-        var reporter = new BatchSchedulerReporter(null);
-        registry = new RequestRegistry(service, reporter, new RequestSchedulerReporter(null));
-        strategy =
-                new BatchDeliveryStrategy(
-                        () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                        () -> 1L,
-                        registry,
-                        new DeliveryMetrics(reporter));
+        var reporter = new DeliveryMetricsReporter(null);
+        var service = mock(org.flexlb.config.ConfigService.class);
+        org.mockito.Mockito.when(service.loadBalanceConfig()).thenReturn(config());
+        strategy = new DeliveryDispatcher(null, service, reporter);
     }
 
     public static void main(String[] args) throws Exception {

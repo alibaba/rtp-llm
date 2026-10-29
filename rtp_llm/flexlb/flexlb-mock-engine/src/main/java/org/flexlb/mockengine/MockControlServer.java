@@ -57,7 +57,9 @@ final class MockControlServer {
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
 
-    /** Runtime scale-out/in backend for /add_engine + /remove_engine; null disables them. */
+    /**
+     * Runtime scale-out/in backend for /add_engine + /remove_engine; null disables them.
+     */
     private final DynamicEngineManager engineManager;
 
     MockControlServer(
@@ -118,13 +120,11 @@ final class MockControlServer {
         httpServer.stop(0);
     }
 
-    int getPort() {
-        return httpServer.getAddress().getPort();
-    }
-
     // ────────────────── Dual addressing (Python compat) ──────────────────
 
-    /** Carries an HTTP error status + message back to the handler wrapper. */
+    /**
+     * Carries an HTTP error status + message back to the handler wrapper.
+     */
     private static final class ApiException extends Exception {
         final int status;
         final Map<String, Object> response;
@@ -322,7 +322,7 @@ final class MockControlServer {
                             // ── Cancel-RPC fault family (RPC-layer failures simulated
                             // BEFORE the engine cancel state machine is touched — no
                             // fences, no terminal records; the gRPC Cancel handler and the
-                            // in-process MockEngineCancelChannel run the same gate) ──
+                            // in-process test cancel adapter run the same gate) ──
                             case "cancel_no_respond" -> builder.cancelNoRespond(enabled);
                             case "cancel_error" -> builder.cancelError(enabled);
                             case "cancel_unexpected_status" ->
@@ -355,7 +355,9 @@ final class MockControlServer {
                 });
     }
 
-    /** Read a JSON array of integers into a Long list (status_suppress_rids). */
+    /**
+     * Read a JSON array of integers into a Long list (status_suppress_rids).
+     */
     private static List<Long> readLongList(JsonNode node) {
         List<Long> values = new ArrayList<>();
         if (node != null && node.isArray()) {
@@ -599,7 +601,7 @@ final class MockControlServer {
      * Test-only cancel injection (C1-②, accepted-eviction 8429 wiring): POST
      * {@code {"engine"|"port": ..., "request_id": ...}} drives the same
      * three-branch {@link JavaMockEngineCluster.FastRpcService#cancelRequest}
-     * contract as the in-process MockEngineCancelChannel — on the found branch
+     * contract as the in-process test cancel adapter — on the found branch
      * the request is removed and the CANCELLED completion surfaces in the next
      * WorkerStatus finished list (iron rule 4: WorkerStatus stays the sole
      * release-confirmation source). Response: {@code {status, found, phase,
@@ -628,15 +630,14 @@ final class MockControlServer {
                     }
                     long requestId = parseRequestId(body.get("request_id"));
                     // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as
-                    // the gRPC Cancel handler and the in-process MockEngineCancelChannel:
+                    // the gRPC Cancel handler and the in-process test cancel adapter:
                     // the arrival is counted once, the armed fault short-circuits
                     // BEFORE cancelRequest so the engine cancel state machine is never
                     // touched (production semantics "RPC failed = engine state
                     // unchanged": no fences, no terminal records, no census branch).
                     JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
                     if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
-                        // cancel_no_respond over HTTP: outlive HttpMockEngineCancel
-                        // Channel's 500ms REQUEST_TIMEOUT (750ms > 500ms) so the
+                        // Outlive the HTTP test client's 500ms timeout (750ms > 500ms) so the
                         // client future times out, then answer 504. The cached
                         // thread pool keeps other control-plane requests responsive.
                         try {
@@ -856,7 +857,9 @@ final class MockControlServer {
         }
     }
 
-    /** One body for the caller that drove a teardown and for one that joined it. */
+    /**
+     * One body for the caller that drove a teardown and for one that joined it.
+     */
     private static Map<String, Object> removalResponse(DynamicEngineManager.RemovedEngine removed) {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("status", "ok");
@@ -871,7 +874,9 @@ final class MockControlServer {
         return response;
     }
 
-    /** Dual-addressed lookup of an outcome this control plane already detached. */
+    /**
+     * Dual-addressed lookup of an outcome this control plane already detached.
+     */
     private DynamicEngineManager.RemovedEngine detachedRemoval(JsonNode body) {
         if (engineManager == null) {
             return null;
@@ -916,7 +921,9 @@ final class MockControlServer {
         sendText(exchange, 200, sb.toString());
     }
 
-    /** Services sorted by gRPC port for deterministic output (Python lists engines in creation order). */
+    /**
+     * Services sorted by gRPC port for deterministic output (Python lists engines in creation order).
+     */
     private List<JavaMockEngineCluster.FastRpcService> orderedServices() {
         List<JavaMockEngineCluster.FastRpcService> ordered = new ArrayList<>(services.values());
         ordered.sort(

@@ -9,7 +9,9 @@ package org.flexlb.balance.prediction;
  */
 public interface PrefillTimePredictor {
 
-    /** Capture the immutable model used by one scheduling operation. */
+    /**
+     * Capture the immutable model used by one scheduling operation.
+     */
     Evaluator evaluator();
 
     interface Evaluator {
@@ -25,10 +27,14 @@ public interface PrefillTimePredictor {
             return this;
         }
 
-        /** Estimate one request from its input and cache-hit token counts. */
+        /**
+         * Estimate one request from its input and cache-hit token counts.
+         */
         long estimateMs(long totalTokens, long hitTokens);
 
-        /** Fresh state for one append-only planning operation on this immutable model. */
+        /**
+         * Fresh state for one append-only planning operation on this immutable model.
+         */
         default BatchPrediction newBatchPrediction() {
             java.util.List<PrefillBatchFeatures.Item> items = new java.util.ArrayList<>();
             return (seqLen, hitCache) -> {
@@ -37,11 +43,15 @@ public interface PrefillTimePredictor {
             };
         }
 
-        /** Estimate one payload-free batch. */
+        /**
+         * Estimate one payload-free batch.
+         */
         double predictBatchMs(PrefillBatchFeatures features);
     }
 
-    /** Not shared or reused after a membership/model change; result retains fractional milliseconds. */
+    /**
+     * Not shared or reused after a membership/model change; result retains fractional milliseconds.
+     */
     @FunctionalInterface
     interface BatchPrediction {
         double append(long seqLen, long hitCache);

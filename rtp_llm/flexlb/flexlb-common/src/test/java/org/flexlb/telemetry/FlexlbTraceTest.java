@@ -76,7 +76,6 @@ class FlexlbTraceTest {
             Context context = Context.root().with(owner);
             assertNull(FlexlbTrace.startServer("server", context));
             assertNull(FlexlbTrace.startClient("client", context));
-            assertNull(FlexlbTrace.startInternal("internal", context));
             assertEquals(context, FlexlbTrace.withSpan(Span.getInvalid(), context));
             FlexlbTrace.setRequestAttributes(owner, "42");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");
@@ -207,7 +206,9 @@ class FlexlbTraceTest {
         FlexlbTrace.markBusinessError(poisoned, 8402, "FLEXLB_BUSINESS_REJECTED");
     }
 
-    /** Same contract for the terminal path, including the marker-map access. */
+    /**
+     * Same contract for the terminal path, including the marker-map access.
+     */
     @Test
     void finishSwallowsAThrowingSpan() {
         FlexlbTrace.finish(new ThrowingSpan(), null);

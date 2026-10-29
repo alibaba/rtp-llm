@@ -11,14 +11,18 @@ import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import org.flexlb.dao.master.WorkerIdentity;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.CommonUtils;
 
 import java.util.List;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
-    /** Exact ViT endpoint generation retained across routing and status copies. */
+    /**
+     * Exact ViT endpoint generation retained across routing and status copies.
+     */
     @JsonProperty("worker_generation")
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private long workerGeneration;
@@ -95,6 +99,24 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
+    public static ServerStatus forWorker(
+            RoleType role,
+            String requestId,
+            WorkerStatus.TopologySnapshot topology,
+            WorkerStatus.EngineObservation observation) {
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setRole(role);
+        result.setRequestId(requestId);
+        result.setGroup(topology.group());
+        result.setServerIp(topology.ip());
+        result.setHttpPort(topology.port());
+        result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+        result.setDpRank(observation.dpRank());
+        result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
+        return result;
+    }
+
     /**
      * Returns an independent copy, or null when the source is null.
      * The ViT generation remains part of the copied selection identity.
@@ -142,7 +164,9 @@ public class ServerStatus {
         refreshWorkerIdentity();
     }
 
-    /** Returns the logical worker count used to derive the schedule response. */
+    /**
+     * Returns the logical worker count used to derive the schedule response.
+     */
     @JsonIgnore
     public int getRoutingMultiEngineNum() {
         return routingMultiEngineNum;

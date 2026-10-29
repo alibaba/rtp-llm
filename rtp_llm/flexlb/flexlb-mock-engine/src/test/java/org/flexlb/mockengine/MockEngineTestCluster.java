@@ -14,7 +14,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
-/** Lifecycle fixture for the standard in-process prefill/decode test cluster. */
+/**
+ * Lifecycle fixture for the standard in-process prefill/decode test cluster.
+ */
 final class MockEngineTestCluster implements AutoCloseable {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -165,7 +167,7 @@ final class MockEngineTestCluster implements AutoCloseable {
         if (controlServer == null) {
             throw new IllegalStateException("control server was not requested");
         }
-        return controlServer.getPort();
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 
     JsonNode snapshot() throws IOException, InterruptedException {
@@ -174,9 +176,7 @@ final class MockEngineTestCluster implements AutoCloseable {
     }
 
     long totalCompleted() {
-        return services.values().stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
-                .sum();
+        return services.values().stream().mapToLong(MockEngineTestSupport::getCompletedCount).sum();
     }
 
     void enqueueBatch(

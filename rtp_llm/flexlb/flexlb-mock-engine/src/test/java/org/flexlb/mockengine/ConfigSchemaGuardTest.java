@@ -4,7 +4,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-/** Shipped master/performance fixtures must parse against the strict current schema. */
+/**
+ * Shipped master/performance fixtures must parse against the strict current schema.
+ */
 class ConfigSchemaGuardTest {
 
     private static final String[] MASTERS = {

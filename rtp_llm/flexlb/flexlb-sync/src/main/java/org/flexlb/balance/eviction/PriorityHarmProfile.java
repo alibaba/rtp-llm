@@ -5,6 +5,8 @@ import org.flexlb.util.PriorityNormalizer;
 import java.math.BigInteger;
 import java.util.Arrays;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Exact, overflow-free priority harm of an eviction plan.
  *
@@ -33,7 +35,9 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         return new Builder();
     }
 
-    /** Add two profiles without losing precision. */
+    /**
+     * Add two profiles without losing precision.
+     */
     public PriorityHarmProfile plus(PriorityHarmProfile other) {
         BigInteger[] sum = new BigInteger[PriorityNormalizer.MAX_PRIORITY + 1];
         for (int priority = PriorityNormalizer.MIN_PRIORITY;
@@ -46,6 +50,28 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
             }
         }
         return new PriorityHarmProfile(sum);
+    }
+
+    /**
+     * Diagnostic scalar derived from exact weighted harm; plan ordering stays lexicographic.
+     */
+    public long totalCost() {
+        BigInteger cost = BigInteger.ZERO;
+        BigInteger maximum = BigInteger.valueOf(Long.MAX_VALUE);
+        for (int priority = PriorityNormalizer.MIN_PRIORITY;
+                priority <= PriorityNormalizer.MAX_PRIORITY;
+                priority++) {
+            if (harmByPriority[priority] != null) {
+                cost =
+                        cost.add(
+                                harmByPriority[priority].multiply(
+                                        BigInteger.valueOf(PriorityCostFunction.f(priority))));
+                if (cost.compareTo(maximum) >= 0) {
+                    return Long.MAX_VALUE;
+                }
+            }
+        }
+        return cost.longValueExact();
     }
 
     /**
@@ -83,19 +109,9 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         return value == null ? BigInteger.ZERO : value;
     }
 
-    private static void requireValidPriority(int priority) {
-        if (!PriorityNormalizer.isValid(priority)) {
-            throw new IllegalArgumentException(
-                    "priority must be in ["
-                            + PriorityNormalizer.MIN_PRIORITY
-                            + ", "
-                            + PriorityNormalizer.MAX_PRIORITY
-                            + "]: "
-                            + priority);
-        }
-    }
-
-    /** Mutable accumulator used only while one immutable plan is built. */
+    /**
+     * Mutable accumulator used only while one immutable plan is built.
+     */
     public static final class Builder {
 
         private final BigInteger[] harmByPriority =
@@ -104,7 +120,14 @@ public final class PriorityHarmProfile implements Comparable<PriorityHarmProfile
         private Builder() {}
 
         public Builder add(int priority, BigInteger harm) {
-            requireValidPriority(priority);
+            checkArgument(
+                    PriorityNormalizer.isValid(priority),
+                    "priority must be in ["
+                            + PriorityNormalizer.MIN_PRIORITY
+                            + ", "
+                            + PriorityNormalizer.MAX_PRIORITY
+                            + "]: %s",
+                    priority);
             if (harm.signum() < 0) {
                 throw new IllegalArgumentException("harm must be non-negative: " + harm);
             }

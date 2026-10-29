@@ -33,7 +33,7 @@
     <jacoco.version>0.8.15</jacoco.version>
     <jacocoArgLine />
     <spring-boot.version>2.7.18</spring-boot.version>
-    <grpc.version>1.65.0</grpc.version>
+    <grpc.version>1.65.1</grpc.version>
     <protoc.version>3.25.1</protoc.version>
     <protobuf.version>3.25.1</protobuf.version>
     <curator.version>5.4.0</curator.version>
@@ -261,6 +261,26 @@
   <build>
     <plugins>
       <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.3.0</version>
+        <executions>
+          <execution>
+            <id>shared-test-fixtures</id>
+            <phase>generate-test-sources</phase>
+            <goals>
+              <goal>add-test-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source
+                >${project.basedir}/../flexlb-common/src/testFixtures/java</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <configuration>
@@ -440,7 +460,7 @@
                 <id>default-test</id>
                 <configuration combine.self="override">
                   <includes>
-                    <include>**/WorkerBatcherPerformanceTest.java</include>
+                    <include>**/PrefillQueueRunnerPerformanceTest.java</include>
                   </includes>
                   <groups>performance-regression</groups>
                   <forkCount>1</forkCount>
@@ -460,6 +480,7 @@
       <id>api-performance-regression</id>
       <properties>
         <flexlb.perf.heap>2g</flexlb.perf.heap>
+        <flexlb.perf.jvm-args />
       </properties>
       <build>
         <plugins>
@@ -487,6 +508,7 @@
                                     -->
                   <argLine>
                                         -Xms${flexlb.perf.heap} -Xmx${flexlb.perf.heap}
+                                        ${flexlb.perf.jvm-args}
                                         --add-modules ALL-SYSTEM
                                         --add-opens java.base/java.lang=ALL-UNNAMED
                                         --add-opens java.base/java.lang.invoke=ALL-UNNAMED
@@ -547,6 +569,7 @@
                 <includes>
                   <include>src/main/java/**/*.java</include>
                   <include>src/test/java/**/*.java</include>
+                  <include>src/testFixtures/java/**/*.java</include>
                   <include>tools/**/*.java</include>
                 </includes>
                 <googleJavaFormat>

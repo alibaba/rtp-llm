@@ -33,6 +33,116 @@ for variant, directory in [("before", baseline), ("after", root)]:
     destination.mkdir(exist_ok=True)
     runtime = classpath.replace(str(root), str(directory))
     (destination / "classpath.txt").write_text(runtime)
+    verification_source = verification.read_text()
+    planner_source = (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java"
+    )
+    if "interface ItemAccess<" in planner_source.read_text():
+        # Keep the workload identical when comparing across the planner API change.
+        verification_source = verification_source.replace(
+            "GroupPlanner.selectWithPrediction(items, limits,",
+            "GroupPlanner.selectWithPrediction(items, GroupPlanner.itemAccess(), limits,",
+        )
+    if "String dispatchReason(" not in planner_source.read_text():
+        verification_source = verification_source.replace(
+            "GroupPlanner.dispatchReason(selection, limits, 1000)",
+            "GroupPlanner.evaluateReadiness(selection, limits, 1000).reason()",
+        )
+    benchmark_source = source.read_text()
+    if not re.search(r"record Item\(\s*String\b", planner_source.read_text()):
+        benchmark_source = benchmark_source.replace(
+            ".requestId(String.valueOf(id))", ".requestId(id)"
+        ).replace("String.valueOf(Long.MAX_VALUE)", "Long.MAX_VALUE")
+        verification_source = (
+            verification_source.replace(
+                "String.valueOf(trial % 13 == 0 ? i % 19 : i)",
+                "trial % 13 == 0 ? i % 19 : i",
+            )
+            .replace('"9999", WorkSnapshot.Phase', "9999, WorkSnapshot.Phase")
+            .replace('trial % 50 == 0 ? "1" : "999999"', "trial % 50 == 0 ? 1 : 999999")
+        )
+    if not (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PrefillQueueRunner.java"
+    ).exists():
+        benchmark_source = benchmark_source.replace(
+            "PrefillQueueRunner", "WorkerBatcher"
+        ).replace('"queueRunner"', '"batcher"')
+    if not (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/projection/RequestTimeEstimation.java"
+    ).exists():
+        benchmark_source, verification_source = (
+            body.replace("RequestTimeEstimation", "RouteProjection")
+            for body in (benchmark_source, verification_source)
+        )
+    delivery_source = (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java"
+    )
+    if delivery_source.exists():
+        # Adapt only the delivery API; use the same workload on both revisions.
+        benchmark_source = benchmark_source.replace(
+            "DeliveryDispatcher", "DeliveryStrategy"
+        ).replace(
+            "strategy = new DeliveryStrategy(null, service, reporter);",
+            "strategy = new BatchDeliveryStrategy(() -> null, () -> 1L, reporter, "
+            "new org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity(0L, 90L), 2);",
+        )
+        benchmark_source = benchmark_source.replace(
+            "org.flexlb.balance.projection.RouteProjection.forDelivery(strategy.mode())",
+            "strategy.projectionPolicy()",
+        )
+        verification_source = verification_source.replace(
+            "RouteProjection.forDelivery(SnapshotBench.strategy.mode())",
+            "SnapshotBench.strategy.projectionPolicy()",
+        ).replace(
+            "RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.NON_BATCH)",
+            "new org.flexlb.balance.scheduler.RouteDeliveryStrategy("
+            "new DeliveryMetricsReporter(null), "
+            "new org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity(0L, 90L)).projectionPolicy()",
+        )
+    if (
+        delivery_source.exists()
+        and "AdmissionCapacity capacity" not in delivery_source.read_text()
+    ):
+        shared_capacity = ", new org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity(0L, 90L)"
+        benchmark_source = benchmark_source.replace(shared_capacity + ", 2)", ")")
+        verification_source = verification_source.replace(shared_capacity + ")", ")")
+    request_source = (
+        directory
+        / "flexlb-common/src/main/java/org/flexlb/dao/loadbalance/Request.java"
+    )
+    if "@Builder" not in request_source.read_text():
+        benchmark_source = benchmark_source.replace(
+            "var request = Request.builder()\n"
+            "                .requestId(id)\n"
+            "                .seqLen(tokens)\n"
+            "                .rawPriority(priority).build();",
+            "var request = new Request();\n"
+            "        request.setRequestId(id);\n"
+            "        request.setSeqLen(tokens);\n"
+            "        request.setPriority(priority);",
+        )
+    compatible_verification = destination / verification.name
+    compatible_verification.write_text(verification_source)
+    fixture_source = (
+        directory
+        / "flexlb-sync/src/test/java/org/flexlb/balance/scheduler/SchedulingTestConfig.java"
+    )
+    if "RequestContext freezeInputs(" in fixture_source.read_text():
+        benchmark_source = benchmark_source.replace(
+            "SchedulingTestConfig.createRoute(context,",
+            "SchedulingTestConfig.createRoute(SchedulingTestConfig.freezeInputs(context),",
+        )
+    if "RequestRoute createRoute(" not in fixture_source.read_text():
+        benchmark_source = benchmark_source.replace(
+            "org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(",
+            "RequestRoute.create(",
+        )
+    compatible_benchmark = destination / source.name
+    compatible_benchmark.write_text(benchmark_source)
     subprocess.run(
         [
             str(java / "javac"),
@@ -41,8 +151,8 @@ for variant, directory in [("before", baseline), ("after", root)]:
             runtime,
             "-d",
             str(destination),
-            str(source),
-            str(verification),
+            str(compatible_benchmark),
+            str(compatible_verification),
         ],
         check=True,
     )

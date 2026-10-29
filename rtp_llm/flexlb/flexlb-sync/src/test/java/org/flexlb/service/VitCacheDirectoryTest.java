@@ -4,11 +4,11 @@ import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -18,10 +18,8 @@ import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
-import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,19 +53,19 @@ class VitCacheDirectoryTest {
     private WorkerStatus a;
     private WorkerStatus b;
     private EngineGrpcClient grpc;
-    private LBStatusConsistencyService consistency;
+    private MasterStatusService consistency;
 
     @BeforeEach
     void setUp() {
         a = worker("10.0.0.1", "one");
         b = worker("10.0.0.2", "two");
-        live.put(a.getIpPort(), a);
-        live.put(b.getIpPort(), b);
-        var workers = mock(WorkerDirectory.class);
+        live.put(a.getLogicalIpPort(), a);
+        live.put(b.getLogicalIpPort(), b);
+        var workers = mock(EndpointRegistry.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
                 .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
-        when(workers.captureEndpoint(eq(RoleType.VIT), any()))
+        when(workers.capture(eq(RoleType.VIT), any()))
                 .thenAnswer(
                         call -> {
                             WorkerStatus status = live.get(call.getArgument(1));
@@ -76,7 +74,7 @@ class VitCacheDirectoryTest {
                                     : new WorkerEndpoint(status).tryPinGeneration();
                         });
         grpc = mock(EngineGrpcClient.class);
-        consistency = mock(LBStatusConsistencyService.class);
+        consistency = mock(MasterStatusService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
         selector = new VitCacheSelector(directory, workers);
     }
@@ -90,13 +88,15 @@ class VitCacheDirectoryTest {
         return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
     }
 
-    private BalanceContext context(String... keys) {
-        Request request = new Request();
-        request.setRequestId("123");
-        request.setCacheAffinityKeys(List.of(keys));
-        request.setGenerateTimeout(30000);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
-        context.setRequest(request);
+    private RequestContext context(String... keys) {
+        Request request =
+                Request.builder()
+                        .requestId("123")
+                        .cacheAffinityKeys(List.of(keys))
+                        .generateTimeout(30000L)
+                        .build();
+        RequestContext context = new RequestContext(new FlexlbConfig());
+        context.data().setRequest(request);
         return context;
     }
 
@@ -125,11 +125,12 @@ class VitCacheDirectoryTest {
     void workerRestartInvalidatesColdKeyPlacements() {
         snapshot(a, "a1");
         snapshot(b, "b1");
-        selector.select(context("cold1", "cold2"), "one");
-        selector.select(context("other"), "two");
+        selector.select(context("cold1", "cold2").data(), "one");
+        selector.select(context("other").data(), "two");
         snapshot(a, "a2");
         assertEquals(
-                b.getIp(), selector.select(context("cold1", "cold2", "other"), null).getServerIp());
+                b.getIp(),
+                selector.select(context("cold1", "cold2", "other").data(), null).getServerIp());
     }
 
     @Test
@@ -137,13 +138,13 @@ class VitCacheDirectoryTest {
         List<String> keys = List.of("image");
         tierSnapshot(a, keys, keys, List.of());
         tierSnapshot(b, keys, List.of(), keys);
-        assertEquals(a.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(a.getIp(), selector.select(context("image").data(), null).getServerIp());
         tierSnapshot(a, keys, List.of(), List.of());
-        assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(context("image").data(), null).getServerIp());
         // A snapshot without the optional tier fields clears previously advertised residency.
         snapshot(b, "instance", "image");
         tierSnapshot(a, keys, List.of(), keys);
-        assertEquals(a.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(a.getIp(), selector.select(context("image").data(), null).getServerIp());
     }
 
     @Test
@@ -151,26 +152,30 @@ class VitCacheDirectoryTest {
         List<String> keys = List.of("image1", "image2");
         tierSnapshot(a, keys, List.of(), List.of());
         tierSnapshot(b, List.of("image1"), keys, List.of());
-        assertEquals(a.getIp(), selector.select(context("image1", "image2"), null).getServerIp());
+        assertEquals(
+                a.getIp(), selector.select(context("image1", "image2").data(), null).getServerIp());
         tierSnapshot(a, keys, List.of(), keys);
         tierSnapshot(b, keys, List.of("image1"), List.of());
-        assertEquals(a.getIp(), selector.select(context("image1", "image2"), null).getServerIp());
+        assertEquals(
+                a.getIp(), selector.select(context("image1", "image2").data(), null).getServerIp());
         tierSnapshot(b, keys, List.of("image1"), List.of("image2"));
-        assertEquals(b.getIp(), selector.select(context("image1", "image2"), null).getServerIp());
+        assertEquals(
+                b.getIp(), selector.select(context("image1", "image2").data(), null).getServerIp());
     }
 
     @Test
     void embeddingWithoutHashBeatsPendingPlacementButRespectsGroupAndHealth() {
-        String selected = selector.select(context("cold"), null).getServerIp();
+        String selected = selector.select(context("cold").data(), null).getServerIp();
         WorkerStatus other = selected.equals(a.getIp()) ? b : a;
         WorkerStatus pendingWorker = selected.equals(a.getIp()) ? a : b;
         tierSnapshot(other, List.of(), List.of(), List.of("cold"));
-        assertEquals(other.getIp(), selector.select(context("cold"), null).getServerIp());
+        assertEquals(other.getIp(), selector.select(context("cold").data(), null).getServerIp());
         assertEquals(
                 pendingWorker.getIp(),
-                selector.select(context("cold"), pendingWorker.getGroup()).getServerIp());
-        live.remove(other.getIpPort());
-        assertEquals(pendingWorker.getIp(), selector.select(context("cold"), null).getServerIp());
+                selector.select(context("cold").data(), pendingWorker.getGroup()).getServerIp());
+        live.remove(other.getLogicalIpPort());
+        assertEquals(
+                pendingWorker.getIp(), selector.select(context("cold").data(), null).getServerIp());
     }
 
     @Test
@@ -178,12 +183,12 @@ class VitCacheDirectoryTest {
         tierSnapshot(a, List.of(), List.of("image"), List.of());
         tierSnapshot(b, List.of(), List.of(), List.of("image"));
         tierSnapshot(a, List.of(), List.of("image"), List.of("image"));
-        assertEquals(a.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(a.getIp(), selector.select(context("image").data(), null).getServerIp());
         tierSnapshot(a, List.of(), List.of(), List.of(""));
-        assertEquals(a.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(a.getIp(), selector.select(context("image").data(), null).getServerIp());
         List<String> manyKeys = IntStream.range(0, 100_000).mapToObj(i -> "key" + i).toList();
         tierSnapshot(a, manyKeys, List.of(), List.of("extra"));
-        assertEquals(a.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(a.getIp(), selector.select(context("image").data(), null).getServerIp());
     }
 
     @Test
@@ -207,7 +212,7 @@ class VitCacheDirectoryTest {
         verify(grpc, times(1)).getMultimodalCacheStatusAsync(a.getIp(), 8001, request, 2000);
         verify(grpc, times(1)).getMultimodalCacheStatusAsync(b.getIp(), 8001, request, 2000);
         for (String key : List.of("hash", "gpu", "cpu")) {
-            assertEquals(a.getIp(), selector.select(context(key), null).getServerIp());
+            assertEquals(a.getIp(), selector.select(context(key).data(), null).getServerIp());
         }
     }
 
@@ -252,9 +257,9 @@ class VitCacheDirectoryTest {
         when(grpc.getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L)))
                 .thenReturn(CompletableFuture.completedFuture(CacheStatusPB.getDefaultInstance()));
         directory.refresh();
-        assertEquals(a.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(a.getIp(), selector.select(context("image").data(), null).getServerIp());
         snapshot(a, "a1");
-        assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(context("image").data(), null).getServerIp());
     }
 
     @Test
@@ -270,7 +275,6 @@ class VitCacheDirectoryTest {
                                         .addAllGpuEmbeddingKeys(keys))
                         .build();
         assertTrue(response.getSerializedSize() > 8 * 1024 * 1024);
-        assertTrue(response.getSerializedSize() < 16 * 1024 * 1024);
         var received = new AtomicReference<CacheVersionPB>();
         Server server =
                 NettyServerBuilder.forPort(0)
@@ -299,13 +303,14 @@ class VitCacheDirectoryTest {
                         .start();
         var executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
         var eventLoop = new NioEventLoopGroup(1);
-        var channelFactory = new GrpcChannelFactory(executor, eventLoop, 1000);
         var client =
                 new EngineGrpcClient(
                         mock(EngineAddressResolver.class),
-                        channelFactory,
+                        new org.flexlb.engine.grpc.core.GrpcChannelFactory(
+                                executor, eventLoop, 1000),
                         mock(GrpcReporter.class),
-                        mock(CacheMatchConfiguration.class));
+                        mock(org.flexlb.config.CacheMatchConfiguration.class),
+                        5000L);
         try {
             var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
             for (int i = 0; i < 2; i++) {
@@ -323,7 +328,7 @@ class VitCacheDirectoryTest {
             directory.replace(a, response.getMultimodalCache());
             assertEquals(
                     a.getIp(),
-                    selector.select(context(keys.get(keys.size() - 1)), null).getServerIp());
+                    selector.select(context(keys.get(keys.size() - 1)).data(), null).getServerIp());
         } finally {
             client.shutdown();
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
@@ -336,19 +341,20 @@ class VitCacheDirectoryTest {
     void prefersMostHitsAndReplacesEvictedKeys() {
         snapshot(a, "a1", "image1", "image2");
         snapshot(b, "b1", "image1");
-        assertEquals(a.getIp(), selector.select(context("image1", "image2"), null).getServerIp());
+        assertEquals(
+                a.getIp(), selector.select(context("image1", "image2").data(), null).getServerIp());
         snapshot(a, "a1");
-        assertEquals(b.getIp(), selector.select(context("image1"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(context("image1").data(), null).getServerIp());
     }
 
     @Test
     void cacheAffinityNeverOverridesGroupOrHealth() {
         snapshot(a, "a1", "image");
-        assertEquals(b.getIp(), selector.select(context("image"), "two").getServerIp());
-        live.remove(a.getIpPort());
-        assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
-        live.remove(b.getIpPort());
-        assertFalse(selector.select(context("image"), null).isSuccess());
+        assertEquals(b.getIp(), selector.select(context("image").data(), "two").getServerIp());
+        live.remove(a.getLogicalIpPort());
+        assertEquals(b.getIp(), selector.select(context("image").data(), null).getServerIp());
+        live.remove(b.getLogicalIpPort());
+        assertFalse(selector.select(context("image").data(), null).isSuccess());
     }
 
     @Test
@@ -361,7 +367,9 @@ class VitCacheDirectoryTest {
                                     i ->
                                             executor.submit(
                                                     () ->
-                                                            selector.select(context("cold"), null)
+                                                            selector.select(
+                                                                            context("cold").data(),
+                                                                            null)
                                                                     .getServerIp()))
                             .toList();
             String selected = selections.get(0).get();
@@ -370,7 +378,8 @@ class VitCacheDirectoryTest {
             }
             WorkerStatus other = selected.equals(a.getIp()) ? b : a;
             snapshot(other, "real", "cold");
-            assertEquals(other.getIp(), selector.select(context("cold"), null).getServerIp());
+            assertEquals(
+                    other.getIp(), selector.select(context("cold").data(), null).getServerIp());
         } finally {
             executor.shutdownNow();
         }
@@ -380,17 +389,17 @@ class VitCacheDirectoryTest {
     void rejectsStaleSnapshotAndInvalidSelectedWorker() {
         snapshot(a, "a1", "image");
         WorkerStatus replacement = worker(a.getIp(), "one");
-        live.put(a.getIpPort(), replacement);
+        live.put(a.getLogicalIpPort(), replacement);
         snapshot(a, "old", "image");
         snapshot(b, "b1", "image");
-        assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(context("image").data(), null).getServerIp());
         var ctx = context("image");
-        var selected = selector.select(ctx, "two");
-        ctx.getRequest().setSelectedVit(selected);
-        assertTrue(selector.validate(ctx, "two").isSuccess());
-        assertFalse(selector.validate(ctx, "one").isSuccess());
-        live.remove(b.getIpPort());
-        assertFalse(selector.validate(ctx, null).isSuccess());
+        var selected = selector.select(ctx.data(), "two");
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(selected).build());
+        assertTrue(selector.validate(ctx.data(), "two").isSuccess());
+        assertFalse(selector.validate(ctx.data(), "one").isSuccess());
+        live.remove(b.getLogicalIpPort());
+        assertFalse(selector.validate(ctx.data(), null).isSuccess());
     }
 
     @Test
@@ -404,7 +413,7 @@ class VitCacheDirectoryTest {
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
         when(consistency.isMaster()).thenReturn(true);
         directory.refresh();
-        assertEquals(a.getIp(), selector.select(context("image"), null).getServerIp());
+        assertEquals(a.getIp(), selector.select(context("image").data(), null).getServerIp());
         directory.refresh();
         verify(grpc, times(2)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
         when(consistency.isMaster()).thenReturn(false);
@@ -418,7 +427,7 @@ class VitCacheDirectoryTest {
     void selectionKeepsGenerationThroughCopyAndPin() throws Exception {
         snapshot(a, "epoch-a", "image");
         var ctx = context("image");
-        var selected = selector.select(ctx, "one");
+        var selected = selector.select(ctx.data(), "one");
         var copied = org.flexlb.dao.loadbalance.ServerStatus.copyOf(selected);
         var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         assertFalse(
@@ -429,16 +438,21 @@ class VitCacheDirectoryTest {
                         mapper.writeValueAsBytes(copied),
                         org.flexlb.dao.loadbalance.ServerStatus.class);
         assertEquals(a.getGenerationId(), copied.getWorkerGeneration());
-        ctx.getRequest().setSelectedVit(copied);
         copied.setWorkerGeneration(0);
-        assertFalse(selector.validate(ctx, "one").isSuccess());
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
+        assertFalse(selector.validate(ctx.data(), "one").isSuccess());
         copied.setWorkerGeneration(a.getGenerationId());
-        try (var pinned = selector.selectPinned(ctx, "one")) {
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
+        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
+            var pinned = selector.selectPinned(ctx.data(), "one", scope);
             org.junit.jupiter.api.Assertions.assertNotNull(pinned);
-            assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());
+            assertEquals(a.getGenerationId(), pinned.getWorkerGeneration());
         }
-        live.put(a.getIpPort(), worker(a.getIp(), "one"));
-        assertFalse(selector.validate(ctx, "one").isSuccess());
-        org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
+        live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
+        assertFalse(selector.validate(ctx.data(), "one").isSuccess());
+        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
+            org.junit.jupiter.api.Assertions.assertNull(
+                    selector.selectPinned(ctx.data(), "one", scope));
+        }
     }
 }

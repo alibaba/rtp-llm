@@ -15,19 +15,24 @@ import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,14 +64,14 @@ class WorkerAddressServiceTest {
     }
 
     @Test
-    void firstDiscoveryWithoutCacheReturnsNoWorkers() {
+    void firstEmptyDiscoveryHasNoWorkersButFailureIsNotAnEmptySnapshot() {
         Endpoint endpoint = endpoint("vip");
         configure(endpoint);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of())
                 .thenThrow(new IllegalStateException("unreachable"));
         assertTrue(refresh().isEmpty());
-        assertTrue(refresh().isEmpty());
+        Assertions.assertThrows(IllegalStateException.class, this::refresh);
     }
 
     @Test
@@ -353,6 +358,113 @@ class WorkerAddressServiceTest {
 
     private List<WorkerHost> refresh() {
         return workerAddressService.getEngineWorkerList("model", RoleType.PREFILL);
+    }
+
+    @Test
+    void saturatedDiscoveryPoolDoesNotRunDiscoveryOnTheCaller() throws Exception {
+        when(modelMetaConfig.endpointsWithGroup("model", RoleType.PREFILL))
+                .thenReturn(List.of(Pair.of("group", endpoint("address"))));
+        CountDownLatch release = new CountDownLatch(1);
+        ThreadPoolExecutor executor =
+                (ThreadPoolExecutor)
+                        ReflectionTestUtils.getField(
+                                workerAddressService, "serviceDiscoveryExecutor");
+        executor.setMaximumPoolSize(executor.getCorePoolSize());
+        CountDownLatch occupied = new CountDownLatch(executor.getCorePoolSize());
+        Runnable blocker =
+                () -> {
+                    occupied.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                };
+        Mockito.lenient()
+                .when(serviceDiscovery.getHosts(endpoint("address")))
+                .thenAnswer(
+                        call -> {
+                            release.await();
+                            return List.of(
+                                    new WorkerHost("127.0.0.1", 8080, 8081, 8082, "site", "group"));
+                        });
+        try {
+            for (int i = 0; i < executor.getCorePoolSize(); i++) {
+                executor.execute(blocker);
+            }
+            Assertions.assertTrue(occupied.await(2, TimeUnit.SECONDS));
+            while (executor.getQueue().offer(blocker)) {}
+            Assertions.assertTimeoutPreemptively(
+                    Duration.ofSeconds(2),
+                    () ->
+                            Assertions.assertThrows(
+                                    IllegalStateException.class,
+                                    () ->
+                                            workerAddressService.getEngineWorkerList(
+                                                    "model", RoleType.PREFILL)));
+            Mockito.verify(serviceDiscovery, Mockito.never()).getHosts(endpoint("address"));
+        } finally {
+            executor.getQueue().clear();
+            release.countDown();
+        }
+    }
+
+    @Test
+    void interruptedDiscoveryCancelsWorkEvenWhenFailureReportingThrows() throws Exception {
+        when(modelMetaConfig.endpointsWithGroup("model", RoleType.PREFILL))
+                .thenReturn(List.of(Pair.of("group", endpoint("address"))));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch exited = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(serviceDiscovery.getHosts(endpoint("address")))
+                .thenAnswer(
+                        call -> {
+                            entered.countDown();
+                            try {
+                                release.await();
+                                return List.of();
+                            } finally {
+                                exited.countDown();
+                            }
+                        });
+        RuntimeException telemetryFailure = new IllegalStateException("telemetry failed");
+        Mockito.doThrow(telemetryFailure)
+                .when(engineHealthReporter)
+                .reportStatusCheckerFail(
+                        org.flexlb.enums.BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        AtomicReference<Throwable> result = new AtomicReference<>();
+        AtomicBoolean interrupted = new AtomicBoolean();
+        Thread caller =
+                new Thread(
+                        () -> {
+                            try {
+                                workerAddressService.getEngineWorkerList("model", RoleType.PREFILL);
+                            } catch (Throwable failure) {
+                                result.set(failure);
+                            } finally {
+                                interrupted.set(Thread.currentThread().isInterrupted());
+                            }
+                        });
+        try {
+            caller.start();
+            Assertions.assertTrue(entered.await(2, TimeUnit.SECONDS));
+            caller.interrupt();
+            caller.join(2000);
+            Assertions.assertFalse(caller.isAlive());
+            Assertions.assertAll(
+                    () ->
+                            Assertions.assertInstanceOf(
+                                    InterruptedException.class, result.get().getCause()),
+                    () -> Assertions.assertTrue(interrupted.get()),
+                    () ->
+                            Assertions.assertTrue(
+                                    exited.await(2, TimeUnit.SECONDS),
+                                    "discovery must receive cancellation"));
+        } finally {
+            release.countDown();
+            caller.interrupt();
+            caller.join(2000);
+        }
     }
 
     private static Endpoint endpoint(String address) {

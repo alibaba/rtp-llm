@@ -1,13 +1,16 @@
 package org.flexlb.httpserver;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
@@ -19,8 +22,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
+import org.flexlb.sync.synchronizer.WorkerStatusSynchronizer;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
@@ -51,28 +53,28 @@ public class HttpLoadBalanceServer {
     private static final String SCHEDULER_SNAPSHOT_PREFIX = "scheduler-snapshot-";
     private static final int MAX_SNAPSHOT_FILES = 10;
 
-    private final LBStatusConsistencyService lbStatusConsistencyService;
+    private final MasterStatusService lbStatusConsistencyService;
     private final ConfigService configService;
     private final RequestScheduler requestScheduler;
     private final EndpointRegistry endpointRegistry;
-    private final WorkerDirectory workerDirectory;
-    private final MasterEngineSynchronizer masterEngineSynchronizer;
+    private final RequestRepository requests;
+    private final WorkerStatusSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
     public HttpLoadBalanceServer(
-            LBStatusConsistencyService lbStatusConsistencyService,
+            MasterStatusService lbStatusConsistencyService,
             ConfigService configService,
             RequestScheduler requestScheduler,
             EndpointRegistry endpointRegistry,
-            WorkerDirectory workerDirectory,
+            RequestRepository requests,
             @org.springframework.beans.factory.annotation.Autowired(required = false)
-                    MasterEngineSynchronizer masterEngineSynchronizer,
+                    WorkerStatusSynchronizer masterEngineSynchronizer,
             ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.requestScheduler = requestScheduler;
         this.endpointRegistry = endpointRegistry;
-        this.workerDirectory = workerDirectory;
+        this.requests = requests;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
     }
@@ -157,7 +159,7 @@ public class HttpLoadBalanceServer {
     private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
         Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
         for (RoleType role : RoleType.values()) {
-            Map<String, WorkerStatus> statusMap = workerDirectory.statusSnapshot(role);
+            Map<String, WorkerStatus> statusMap = endpointRegistry.statusSnapshot(role);
             if (statusMap.isEmpty()) {
                 continue;
             }
@@ -181,7 +183,12 @@ public class HttpLoadBalanceServer {
                                     Response result = new Response();
                                     result.setRealMasterHost(
                                             lbStatusConsistencyService.getMasterHostIpPort());
-                                    result.setQueueLength(requestScheduler.getQueuedRequestCount());
+                                    result.setQueueLength(requests.pendingDeliveryRequestCount());
+                                    result.setRequiresGenerateInput(
+                                            configService
+                                                    .loadBalanceConfig()
+                                                    .getDispatcher()
+                                                    .requiresGenerateInput());
                                     result.setCode(200);
                                     result.setSuccess(true);
                                     result.setWorkerSummary(buildWorkerSummary());
@@ -246,7 +253,7 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            List<RequestState> snapshot = requestScheduler.snapshotActiveRequests();
+            List<RequestState> snapshot = requests.snapshotActiveRequests();
             QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
@@ -288,13 +295,19 @@ public class HttpLoadBalanceServer {
         }
     }
 
+    private AbstractRequestScheduler.PlacementCounts placementCounts() {
+        return requestScheduler instanceof AbstractRequestScheduler scheduler
+                ? scheduler.placementCounts()
+                : new AbstractRequestScheduler.PlacementCounts(0, 0);
+    }
+
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            int trackedRequests = requestScheduler.getTrackedRequestCount();
+            int trackedRequests = requests.liveRequestCount();
             result.put("scheduler_tracked", trackedRequests);
             result.put("scheduler_inflight", trackedRequests);
-            result.put("scheduler_blocked", requestScheduler.getBlockedRequestCount());
+            result.put("scheduler_blocked", placementCounts().blocked());
             result.put(
                     "decode_max_engine_requests",
                     configService
@@ -306,17 +319,17 @@ public class HttpLoadBalanceServer {
                             .getMaxEngineRequests());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
-            for (Map.Entry<String, PrefillEndpoint> entry :
-                    endpointRegistry.snapshotPrefillEndpoints().entrySet()) {
-                PrefillEndpoint endpoint = entry.getValue();
+            for (var entry : endpointRegistry.endpointSnapshot(RoleType.PREFILL).entrySet()) {
+                PrefillEndpoint endpoint = (PrefillEndpoint) entry.getValue();
+                var ownership = endpoint.ownership.stats();
                 WorkerStatus.CacheIndexSnapshot cacheIndex =
                         endpoint.getStatus().cacheIndexSnapshot();
                 CacheStatus cacheStatus = cacheIndex.cacheStatus();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_batches", endpoint.getInflightBatchCount());
-                ep.put("inflight_requests", endpoint.getLocallyOwnedRequestCount());
-                ep.put("inflight_route_requests", endpoint.getIndividuallyTrackedRequestCount());
+                ep.put("inflight_batches", ownership.batchCount());
+                ep.put("inflight_requests", ownership.locallyOwnedRequests());
+                ep.put("inflight_route_requests", ownership.individuallyOwnedRequests());
                 ep.put("cache_version", cacheStatus == null ? -1L : cacheStatus.getVersion());
                 ep.put("cache_indexed", cacheIndex.indexInitialized());
                 ep.put("cache_indexed_version", cacheIndex.indexedVersion());
@@ -326,27 +339,39 @@ public class HttpLoadBalanceServer {
             result.put("prefill_endpoints", prefillList);
 
             List<Map<String, Object>> decodeList = new ArrayList<>();
-            for (Map.Entry<String, DecodeEndpoint> entry :
-                    endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
-                DecodeEndpoint.LayeredAdmissionView view = entry.getValue().resourceSnapshot();
+            for (var entry : endpointRegistry.endpointSnapshot(RoleType.DECODE).entrySet()) {
+                DecodeResources.ResourceSnapshot view =
+                        ((DecodeEndpoint) entry.getValue()).resourceSnapshot();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("reserved_total", view.reserved().size());
+                ep.put("reserved_total", view.reservedCount());
                 ep.put("master_queued", view.queuedCount());
                 ep.put(
                         "engine_may_have_seen",
-                        Math.max(0, view.reserved().size() - view.queuedCount()));
+                        Math.max(0, view.reservedCount() - view.queuedCount()));
                 ep.put("confirmed_accepted", view.acceptedCount());
                 ep.put("confirmed_running", view.runningCount());
                 ep.put("total_load", view.routing().totalLoad());
                 ep.put("engine_load", view.routing().engineLoad());
                 ep.put("active_dispatch_permits", view.activeDispatchPermits());
                 ep.put("engine_capacity_used", view.engineCapacityUsed());
-                ep.put("engine_facing_kv_used", view.routing().engineFacingKvUsed());
-                ep.put("engine_facing_kv_available", view.routing().engineFacingKvAvailable());
+                ep.put("engine_facing_kv_used", view.routing().dispatchUsage().expectedKvUsed());
+                ep.put(
+                        "engine_facing_kv_available",
+                        view.routing().dispatchUsage().hardKvAvailable());
                 ep.put("total_kv", view.routing().totalKv());
-                ep.put("inflight_hard_kv", view.routing().inputKvReserved());
-                ep.put("inflight_expected_kv", view.routing().inputAndMaxOutputKvReserved());
+                ep.put("inflight_hard_kv", view.routing().inflightHardKv());
+                ep.put(
+                        "inflight_expected_kv",
+                        Math.max(
+                                0L,
+                                view.routing().placementUsage().expectedKvUsed()
+                                        - Math.max(
+                                                0L,
+                                                view.routing().totalKv()
+                                                        - view.routing()
+                                                                .placementUsage()
+                                                                .availableKvTokens())));
                 decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);

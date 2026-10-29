@@ -21,6 +21,7 @@ public class TheoryCacheKeyHistory {
     private final WorkerStatusProvider workerStatusProvider;
     private final long historyDurationMs;
     private final long configuredMaxKeyOccurrences;
+    private final boolean writeEnabled;
     private RecentCacheKeyWindow historyWindow;
 
     public TheoryCacheKeyHistory(
@@ -33,6 +34,7 @@ public class TheoryCacheKeyHistory {
                         .getCacheHit()
                         .getRecentKeyWindow();
         this.historyDurationMs = historyConfig.getDurationMs();
+        this.writeEnabled = historyConfig.isWriteEnabled();
         this.configuredMaxKeyOccurrences =
                 Math.min(Integer.MAX_VALUE - 8L, historyConfig.getMaxKeyOccurrences());
     }
@@ -42,6 +44,9 @@ public class TheoryCacheKeyHistory {
      * History capacity and duration stay fixed until the Master restarts.
      */
     public RecentCacheKeyWindow.Snapshot record(List<Long> cacheKeys) {
+        if (!writeEnabled) {
+            return null;
+        }
         if (historyWindow == null) {
             OptionalLong estimatedHistoryCapacity = estimateHistoryCapacity();
             if (estimatedHistoryCapacity.isEmpty()) {

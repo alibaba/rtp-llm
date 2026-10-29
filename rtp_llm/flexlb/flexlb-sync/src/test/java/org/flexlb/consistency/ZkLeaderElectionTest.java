@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.core.env.Environment;
+import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Mono;
 
 import java.io.IOException;
@@ -37,7 +38,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -46,13 +46,12 @@ import static org.mockito.Mockito.when;
  * {@link TestingServer}) drives the production
  * {@link ZookeeperMasterElectService} election code.
  *
- * <p>Construction note: {@code ZookeeperMasterElectService}'s constructor runs
- * {@code init()}. The mocked configuration uses the default no-consistency
- * mode, so {@code init()}
- * return before resolving the deployment identity or contacting ZooKeeper. The test then uses
- * the production {@code @Setter} hooks (including the package-private
- * {@code setClient}/{@code setLeaderSelector} reachable from this same
- * package) to bind a real Curator client and a real {@link LeaderSelector}
+ * <p>Construction note: {@code ZookeeperMasterElectService}'s constructor reads
+ * {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} from the environment. In the plain test
+ * JVM that variable is unset, so the default
+ * {@code LBConsistencyConfig} (needConsistency=false) makes construction
+ * return before touching {@code HIPPO_ROLE} or ZooKeeper. The test then uses
+ * reflection in its fixture to bind a real Curator client and a real {@link LeaderSelector}
  * fighting over the production lock path
  * {@code /master_lb_leader/{roleId}} under the production
  * {@code whale-master} namespace.</p>
@@ -216,7 +215,9 @@ class ZkLeaderElectionTest {
     // helpers
     // ------------------------------------------------------------------
 
-    /** An elector service bound to a live curator client + leader selector. */
+    /**
+     * An elector service bound to a live curator client + leader selector.
+     */
     private record BoundElector(
             ZookeeperMasterElectService service,
             CuratorFramework client,
@@ -236,12 +237,13 @@ class ZkLeaderElectionTest {
 
     /**
      * Builds the production service with mocked auxiliary dependencies. The
-     * constructor's {@code init()} no-ops because the test JVM has no
+     * constructor leaves election disabled because the test JVM has no
      * {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} env var (needConsistency=false).
      */
     private ZookeeperMasterElectService newElectService(String localIp) {
         GeneralHttpNettyService httpService = mock(GeneralHttpNettyService.class);
-        when(httpService.request(any(), any(), anyString(), any())).thenReturn(Mono.empty());
+        when(httpService.request(any(), any(), org.mockito.ArgumentMatchers.anyString(), any()))
+                .thenReturn(Mono.empty());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         Environment environment = mock(Environment.class);
         ConfigService configService = mock(ConfigService.class);
@@ -255,13 +257,19 @@ class ZkLeaderElectionTest {
                         environment,
                         configService,
                         deploymentIdentity);
-        service.setRoleId(ROLE_ID);
-        service.setLocalIp(localIp);
-        service.setPort(18_080);
+        ReflectionTestUtils.setField(
+                service,
+                "localNode",
+                new ZookeeperMasterElectService.LocalNodeIdentity(localIp, "18080", ROLE_ID));
+        ReflectionTestUtils.setField(service, "port", 18_080);
+        ReflectionTestUtils.setField(service, "localIp", localIp);
+        ReflectionTestUtils.setField(service, "roleId", ROLE_ID);
         return service;
     }
 
-    /** Creates a fresh curator client + auto-requeue selector and starts election. */
+    /**
+     * Creates a fresh curator client + auto-requeue selector and starts election.
+     */
     private BoundElector bindAndStart(ZookeeperMasterElectService service, String localIp) {
         CuratorFramework client =
                 CuratorFrameworkFactory.builder()
@@ -280,8 +288,8 @@ class ZkLeaderElectionTest {
         selector.setId(localIp);
         // Production calls autoRequeue: losers re-enter the queue automatically.
         selector.autoRequeue();
-        service.setClient(client);
-        service.setLeaderSelector(selector);
+        ReflectionTestUtils.setField(service, "client", client);
+        ReflectionTestUtils.setField(service, "leaderSelector", selector);
 
         BoundElector bound = new BoundElector(service, client, selector, localIp);
         perTestResources.add(bound);
@@ -289,7 +297,9 @@ class ZkLeaderElectionTest {
         return bound;
     }
 
-    /** Mode-1 style hard death: selector first (stops its worker threads), then client. */
+    /**
+     * Mode-1 style hard death: selector first (stops its worker threads), then client.
+     */
     private void killElector(BoundElector elector) {
         perTestResources.remove(elector);
         elector.close();

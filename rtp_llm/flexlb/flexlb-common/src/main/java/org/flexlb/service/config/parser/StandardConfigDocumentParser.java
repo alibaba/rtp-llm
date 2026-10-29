@@ -4,7 +4,9 @@ import org.flexlb.config.ConfigSchemaVersion;
 import org.flexlb.service.config.NormalizedConfig;
 import org.springframework.stereotype.Component;
 
-/** Parses a document that already follows the current configuration contract. */
+/**
+ * Parses a document that already follows the current configuration contract.
+ */
 @Component
 public final class StandardConfigDocumentParser implements ConfigDocumentParser {
 

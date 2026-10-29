@@ -58,7 +58,7 @@ class CacheMetadataUpdateOrchestratorTest {
     @Test
     void routesSuccessfulRequestMetadataToLocalStandby() {
         when(configuration.isLocalStandbyEnabled()).thenReturn(true);
-        Request request = new Request();
+        Request request = Request.builder().build();
         List<ServerStatus> selectedWorkers = List.of(new ServerStatus());
 
         orchestrator().updateFromRoutedRequest(request, selectedWorkers);
@@ -70,7 +70,8 @@ class CacheMetadataUpdateOrchestratorTest {
     void ignoresRequestMetadataWhenLocalStandbyIsDisabled() {
         when(configuration.isLocalStandbyEnabled()).thenReturn(false);
 
-        orchestrator().updateFromRoutedRequest(new Request(), List.of(new ServerStatus()));
+        orchestrator()
+                .updateFromRoutedRequest(Request.builder().build(), List.of(new ServerStatus()));
 
         verifyNoInteractions(localStandbyProvider);
     }

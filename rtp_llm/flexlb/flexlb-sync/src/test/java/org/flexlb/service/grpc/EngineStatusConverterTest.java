@@ -78,8 +78,8 @@ class EngineStatusConverterTest {
         assertEquals(TaskPhase.PENDING, activeTasks.get("legacy-waiting").phase());
         assertEquals(TaskPhase.RUNNING, activeTasks.get("legacy-running").phase());
         assertEquals(Set.of("finished"), observation.finishedTasks().keySet());
-        assertEquals(2, observation.runningQueryLen());
-        assertEquals(4, observation.waitingQueryLen());
+        assertEquals(2, observation.engine().runningQueryLen());
+        assertEquals(4, observation.engine().waitingQueryLen());
     }
 
     @Test

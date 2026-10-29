@@ -2,13 +2,14 @@ package org.flexlb.service.monitor;
 
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.constant.ZkMasterEvent;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -24,7 +25,6 @@ import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,7 +59,7 @@ class EngineHealthReporterTest {
     private final CacheMetricsReporter cacheMetricsReporter = mock(CacheMetricsReporter.class);
     private final EngineGrpcClient engineGrpcClient = mock(EngineGrpcClient.class);
     private final LoopResources loopResources = mock(LoopResources.class);
-    private final WorkerDirectory workerDirectory = mock(WorkerDirectory.class);
+    private final EndpointRegistry workerDirectory = mock(EndpointRegistry.class);
 
     private EngineHealthReporter reporter;
 
@@ -263,7 +263,7 @@ class EngineHealthReporterTest {
         verify(monitor)
                 .report(
                         MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS,
-                        FlexMetricTags.of("engineIp", "10.0.0.1", "role", "ENCODER"),
+                        FlexMetricTags.of("engineIp", "10.0.0.1:8080", "role", "ENCODER"),
                         1000.0);
     }
 
@@ -286,12 +286,12 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldReportRequestPayloadMetricsWithoutResponse() {
-        BalanceContext context = new BalanceContext();
+        RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
         context.setSuccess(false);
-        Request request = new Request();
-        request.setSeqLen(512L);
-        request.setCacheKeyBlockSize(1024L);
-        request.setBlockSize(2048L);
+        Request request = Request.builder().build();
+        request = request.toBuilder().seqLen(512L).build();
+        request = request.toBuilder().cacheKeyBlockSize(1024L).build();
+        request = request.toBuilder().blockSize(2048L).build();
         context.setRequest(request);
         context.setRequestMessageBytes(8192L);
 
@@ -313,7 +313,7 @@ class EngineHealthReporterTest {
         response.setSuccess(true);
         response.setCode(200);
         response.setServerStatus(List.of(serverStatus));
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        RequestData context = new RequestData(new FlexlbConfig());
         context.recordSelectionReason(RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL");
         context.setResponse(response);
 
@@ -346,7 +346,7 @@ class EngineHealthReporterTest {
         response.setSuccess(true);
         response.setCode(200);
         response.setServerStatus(Arrays.asList(null, new ServerStatus(), selectedWorker));
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        RequestData context = new RequestData(new FlexlbConfig());
         context.setResponse(response);
 
         reporter.reportBalancingService(context);
@@ -378,7 +378,7 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldSkipUnknownRequestPayloadMetrics() {
-        reporter.reportRequestPayload(new BalanceContext());
+        reporter.reportRequestPayload(new RequestData(new org.flexlb.config.FlexlbConfig()));
 
         verify(monitor, never())
                 .report(
@@ -620,7 +620,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags =
                 FlexMetricTags.of(
-                        "engineIp", "10.0.0.1",
+                        "engineIp", "10.0.0.1:8080",
                         "role", "PREFILL");
         verify(monitor).report(MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE, expectedTags, 3.0);
         verify(monitor).report(MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE, expectedTags, 4.0);
@@ -660,12 +660,12 @@ class EngineHealthReporterTest {
         verify(monitor)
                 .report(
                         MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS,
-                        FlexMetricTags.of("engineIp", "10.0.0.1", "role", "ENCODER"),
+                        FlexMetricTags.of("engineIp", "10.0.0.1:8080", "role", "ENCODER"),
                         800.0);
     }
 
     @Test
-    void shouldKeepBareIpForMultiEngineWorkerTaskCounts() {
+    void shouldSeparateLogicalMultiEngineWorkerTaskCounts() {
         WorkerStatus workerStatus =
                 WorkerStatus.createDiscovered(
                         RoleType.PREFILL, null, "10.0.0.1", 8080, 8081, null, null, 1, 2);
@@ -674,7 +674,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags =
                 FlexMetricTags.of(
-                        "engineIp", "10.0.0.1",
+                        "engineIp", "10.0.0.1:8080@1",
                         "role", "PREFILL");
         verify(monitor).report(MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE, expectedTags, 3.0);
     }
@@ -687,7 +687,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags =
                 FlexMetricTags.of(
-                        "engineIp", "10.0.0.1",
+                        "engineIp", "10.0.0.1:8080",
                         "role", "PREFILL");
         verify(monitor).report(MetricConstant.CACHE_USED_KV_CACHE_TOKENS, expectedTags, 200.0);
         verify(monitor).report(MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS, expectedTags, 800.0);
@@ -931,7 +931,7 @@ class EngineHealthReporterTest {
 
         FlexMetricTags expectedTags =
                 FlexMetricTags.of(
-                        "engineIp", "10.0.0.1",
+                        "engineIp", "10.0.0.1:8080",
                         "role", "PREFILL");
         verify(monitor).report(MetricConstant.CACHE_KEY_SIZE, expectedTags, 7.0);
     }
@@ -1318,10 +1318,17 @@ class EngineHealthReporterTest {
         workerStatus.lock.lock();
         try {
             if (cacheStatus != null) {
-                workerStatus.publishCacheStatus(cacheStatus);
+                workerStatus.cacheMutationLock.lock();
+                try {
+                    workerStatus.publishCacheStatus(cacheStatus);
+                } finally {
+                    workerStatus.cacheMutationLock.unlock();
+                }
             }
             WorkerStatus.PreparedStatus prepared =
-                    workerStatus.prepareNewStatus(workerStatus.freezeStatusResponse(response));
+                    workerStatus.prepareNewStatus(
+                            org.flexlb.dao.master.WorkerStatusTestSupport.freezeStatusResponse(
+                                    workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
             workerStatus.recordSuccessfulPoll(true);
         } finally {

@@ -1,18 +1,16 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.EvictionManager;
+import org.flexlb.balance.eviction.DecodeAdmission;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.EncoderStrategy;
-import org.flexlb.balance.strategy.RandomStrategy;
+import org.flexlb.balance.strategy.VitWorkerSelector;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.TrafficPolicyConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -20,9 +18,9 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,7 +42,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -53,51 +50,34 @@ import static org.mockito.Mockito.when;
 class EncoderSchedulingIntegrationTest {
 
     private ConfigService configService;
-    private WorkerDirectory directory;
-    private RequestRegistry requests;
-    private RequestScheduler scheduler;
+    private EndpointRegistry directory;
+    private RequestRepository requests;
+    private AbstractRequestScheduler scheduler;
+    private PlacementAvailability availability = new PlacementAvailability();
+    private final java.util.List<SchedulerRuntime> runtimes = new java.util.ArrayList<>();
 
     @BeforeEach
     void setUp() {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
+        config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
         configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        directory = mock(WorkerDirectory.class);
-        requests =
-                new RequestRegistry(
-                        configService,
-                        mock(BatchSchedulerReporter.class),
-                        mock(RequestSchedulerReporter.class));
+        directory = mock(EndpointRegistry.class);
+        requests = new RequestRepository();
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
-        DefaultRouter router =
-                new DefaultRouter(
+        RequestWorkerSelector router =
+                new RequestWorkerSelector(
                         mock(CostBasedPrefillStrategy.class),
                         mock(DecodeSelector.class),
-                        mock(RandomStrategy.class),
-                        new EncoderStrategy(directory),
-                        configService,
+                        mock(VitWorkerSelector.class),
                         model);
-        scheduler =
-                new RequestScheduler(
-                        configService,
-                        router,
-                        mock(EndpointRegistry.class),
-                        mock(BatchSchedulerReporter.class),
-                        mock(EvictionManager.class),
-                        requests,
-                        new PlacementAvailability());
+        scheduler = createScheduler(router);
     }
 
     @AfterEach
     void tearDown() {
-        scheduler.closePlacement();
-        if (requests.closeAdmissionAndAwaitMutations()) {
-            requests.closeOutstandingAndTerminalize();
-            requests.closeExpiration();
-            requests.closePublisher();
-        }
+        runtimes.forEach(SchedulerRuntime::shutdown);
     }
 
     @Test
@@ -110,21 +90,19 @@ class EncoderSchedulingIntegrationTest {
 
         assertEquals(
                 "first",
-                scheduler
-                        .submit(context(1, 100, 0L))
+                submit(context(1, 100, 0L))
                         .get(2, TimeUnit.SECONDS)
                         .getServerStatus()
                         .getFirst()
                         .getServerIp());
         assertEquals(
                 "second",
-                scheduler
-                        .submit(context(2, 100, 0L))
+                submit(context(2, 100, 0L))
                         .get(2, TimeUnit.SECONDS)
                         .getServerStatus()
                         .getFirst()
                         .getServerIp());
-        CompletableFuture<Response> waiting = scheduler.submit(context(3, 100, 0L));
+        CompletableFuture<Response> waiting = submit(context(3, 100, 0L));
         assertFalse(waiting.isDone());
 
         WorkerStatus.TaskObservation finished = task("1", 100);
@@ -136,7 +114,7 @@ class EncoderSchedulingIntegrationTest {
         when(observation.alive()).thenReturn(true);
         when(observation.activeTasks()).thenReturn(Map.of());
         when(observation.finishedTasks()).thenReturn(Map.of("1", finished));
-        first.applyPreparedStatus(status, prepared).run();
+        first.publishStatus(first.applyPreparedStatus(status, prepared));
 
         assertEquals(
                 "first",
@@ -153,15 +131,14 @@ class EncoderSchedulingIntegrationTest {
 
         assertEquals(
                 "open",
-                scheduler
-                        .submit(context(4, 100, 0L))
+                submit(context(4, 100, 0L))
                         .get(2, TimeUnit.SECONDS)
                         .getServerStatus()
                         .getFirst()
                         .getServerIp());
-        CompletableFuture<Response> waiting = scheduler.submit(context(5, 100, 0L));
+        CompletableFuture<Response> waiting = submit(context(5, 100, 0L));
         assertFalse(waiting.isDone());
-        scheduler.cancelRequest("5", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+        scheduler.cancel("5", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 waiting.get(2, TimeUnit.SECONDS).getCode());
@@ -173,13 +150,13 @@ class EncoderSchedulingIntegrationTest {
         EncoderEndpoint encoder = worker("encoder", 8001, true, "group", 0, Map.of(), 1, 0);
         when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("encoder"));
 
-        CompletableFuture<Response> waiting = scheduler.submit(context(10, 100, 0L));
+        CompletableFuture<Response> waiting = submit(context(10, 100, 0L));
         assertFalse(waiting.isDone());
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (scheduler.getBlockedRequestCount() == 0 && System.nanoTime() < deadline) {
+        while (scheduler.placementCounts().blocked() == 0 && System.nanoTime() < deadline) {
             Thread.sleep(10L);
         }
-        assertEquals(1, scheduler.getBlockedRequestCount());
+        assertEquals(1, scheduler.placementCounts().blocked());
 
         WorkerStatus status = encoder.getStatus();
         WorkerStatus.EngineObservation engine = status.committedEngineObservation();
@@ -187,7 +164,7 @@ class EncoderSchedulingIntegrationTest {
         WorkerStatus.StatusObservation observation = mock(WorkerStatus.StatusObservation.class);
         when(observation.owner()).thenReturn(status);
         when(observation.activeTasks()).thenReturn(Map.of());
-        encoder.observeStatusHeartbeat(status, observation).run();
+        encoder.publishStatus(encoder.applyStatusHeartbeat(status, observation));
 
         assertEquals(
                 "encoder",
@@ -199,11 +176,11 @@ class EncoderSchedulingIntegrationTest {
         useEncoderQueue(1);
         worker("busy", 8001, true, "group", 0, Map.of(), 1, 0);
         when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("busy"));
-        BalanceContext context = context(7, 100, 0L);
+        RequestData context = context(7, 100, 0L);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(50, System.currentTimeMillis() + 300L));
 
-        Response response = scheduler.submit(context).get(2, TimeUnit.SECONDS);
+        Response response = submit(context).get(2, TimeUnit.SECONDS);
 
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
     }
@@ -213,13 +190,14 @@ class EncoderSchedulingIntegrationTest {
         useEncoderQueue(1);
         EncoderQueueCoordinator queue =
                 (EncoderQueueCoordinator) ReflectionTestUtils.getField(scheduler, "encoderQueue");
-        BalanceContext context = mock(BalanceContext.class);
+        RequestData context = mock(RequestData.class);
         when(context.getRequestId()).thenReturn("expired-without-slot");
         when(context.getPriority()).thenReturn(50);
+        when(context.getFuture()).thenReturn(new CompletableFuture<>());
         when(context.requestExpired(anyLong())).thenReturn(true);
         CompletableFuture<Response> pending = new CompletableFuture<>();
 
-        assertTrue(queue.offer(context, pending));
+        assertTrue(queue.offer(new RequestContext(context)));
 
         assertTimeoutPreemptively(
                 Duration.ofSeconds(2),
@@ -233,37 +211,20 @@ class EncoderSchedulingIntegrationTest {
 
     @Test
     void rejectedEncoderEntryIsRemovedWhenItsRequestSlotIsMissing() {
-        DefaultRouter router = mock(DefaultRouter.class);
-        RequestRegistry registry = mock(RequestRegistry.class);
-        BalanceContext context = mock(BalanceContext.class);
-        when(context.getRequestId()).thenReturn("rejected-without-slot");
-        when(context.getPriority()).thenReturn(50);
-        when(router.selectEncoder(context))
-                .thenReturn(
-                        PlacementResult.rejected(
-                                Response.error(StrategyErrorType.REQUEST_CANCELLED)));
-        CompletableFuture<Response> pending = new CompletableFuture<>();
-        EncoderQueueCoordinator queue = new EncoderQueueCoordinator(router, registry, false);
-        try {
-            assertTrue(queue.offer(context, pending));
-            assertTimeoutPreemptively(
-                    Duration.ofSeconds(2),
-                    () -> {
-                        while (queue.size() != 0) {
-                            Thread.sleep(5L);
-                        }
-                    });
-
-            verify(router).selectEncoder(context);
-            verify(registry)
-                    .publishDecisionResponseAsync(
-                            eq("rejected-without-slot"), eq(pending),
-                            org.mockito.ArgumentMatchers.any(Response.class),
-                                    eq(RequestPhase.ENCODER));
-            assertFalse(pending.isDone());
-        } finally {
-            queue.close();
-        }
+        useEncoderQueue(1);
+        var queue =
+                (EncoderQueueCoordinator) ReflectionTestUtils.getField(scheduler, "encoderQueue");
+        var data = context(99, 100, 0L);
+        data.setFuture(new CompletableFuture<>());
+        assertTrue(queue.offer(new RequestContext(data)));
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(2),
+                () -> {
+                    while (queue.size() != 0) {
+                        Thread.sleep(5L);
+                    }
+                });
+        assertFalse(data.getFuture().isDone());
     }
 
     @Test
@@ -271,10 +232,10 @@ class EncoderSchedulingIntegrationTest {
         useEncoderQueue(1);
         worker("busy", 8001, true, "group", 0, Map.of(), 1, 0);
         when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("busy"));
-        CompletableFuture<Response> waiting = scheduler.submit(context(8, 100, 0L));
+        CompletableFuture<Response> waiting = submit(context(8, 100, 0L));
         assertFalse(waiting.isDone());
 
-        scheduler.closePlacement();
+        scheduler.closeAllPlacement();
 
         assertEquals(
                 StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
@@ -283,42 +244,32 @@ class EncoderSchedulingIntegrationTest {
 
     @Test
     void queueDoesNotStartWithoutConfiguredEncoderRole() {
-        scheduler.closePlacement();
+        scheduler.closeAllPlacement();
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useNonBatchDispatcher(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
-        DefaultRouter router =
-                new DefaultRouter(
+        RequestWorkerSelector router =
+                new RequestWorkerSelector(
                         mock(CostBasedPrefillStrategy.class),
                         mock(DecodeSelector.class),
-                        mock(RandomStrategy.class),
-                        new EncoderStrategy(directory),
-                        configService,
+                        mock(VitWorkerSelector.class),
                         model);
-        scheduler =
-                new RequestScheduler(
-                        configService,
-                        router,
-                        mock(EndpointRegistry.class),
-                        mock(BatchSchedulerReporter.class),
-                        mock(EvictionManager.class),
-                        requests,
-                        new PlacementAvailability());
+        scheduler = createScheduler(router);
 
         assertNull(ReflectionTestUtils.getField(scheduler, "encoderQueue"));
-        BalanceContext encoderRequest = context(6, 100, 0L);
+        RequestData encoderRequest = context(6, 100, 0L);
         encoderRequest.setRequestPhase(RequestPhase.ENCODER);
         assertEquals(
                 StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                scheduler.submit(encoderRequest).join().getCode());
-        assertNull(requests.requestSlot("6", RequestPhase.ENCODER));
+                submit(encoderRequest).join().getCode());
+        assertNull(requests.findActive("6", RequestPhase.ENCODER));
     }
 
     private void useEncoderQueue(int maxInflight) {
-        scheduler.closePlacement();
+        scheduler.closeAllPlacement();
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useNonBatchDispatcher(config);
@@ -326,23 +277,13 @@ class EncoderSchedulingIntegrationTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
-        DefaultRouter router =
-                new DefaultRouter(
+        RequestWorkerSelector router =
+                new RequestWorkerSelector(
                         mock(CostBasedPrefillStrategy.class),
                         mock(DecodeSelector.class),
-                        mock(RandomStrategy.class),
-                        new EncoderStrategy(directory),
-                        configService,
+                        mock(VitWorkerSelector.class),
                         model);
-        scheduler =
-                new RequestScheduler(
-                        configService,
-                        router,
-                        mock(EndpointRegistry.class),
-                        mock(BatchSchedulerReporter.class),
-                        mock(EvictionManager.class),
-                        requests,
-                        new PlacementAvailability());
+        scheduler = createScheduler(router);
     }
 
     @Test
@@ -368,13 +309,13 @@ class EncoderSchedulingIntegrationTest {
         when(directory.endpointAddressSnapshot(RoleType.ENCODER))
                 .thenReturn(List.of("long", "short"));
 
-        Response response = scheduler.submit(context(1, 800, 200L)).join();
+        Response response = submit(context(1, 800, 200L)).join();
 
         assertTrue(response.isSuccess());
         assertEquals("short", response.getServerStatus().getFirst().getServerIp());
         assertEquals(
                 RequestPhase.ENCODER,
-                requests.requestSlot("1", RequestPhase.ENCODER).requestPhase());
+                requests.findActive("1", RequestPhase.ENCODER).data().getRequestPhase());
     }
 
     @Test
@@ -386,30 +327,15 @@ class EncoderSchedulingIntegrationTest {
 
         assertEquals(
                 "idle",
-                scheduler
-                        .submit(context(2, 800, null))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+                submit(context(2, 800, null)).join().getServerStatus().getFirst().getServerIp());
         assertEquals(1, idle.pendingEncoderRequestCount());
         assertEquals(
                 "idle",
-                scheduler
-                        .submit(context(3, 800, null))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+                submit(context(3, 800, null)).join().getServerStatus().getFirst().getServerIp());
         assertEquals(2, idle.pendingEncoderRequestCount());
         assertEquals(
                 "busy",
-                scheduler
-                        .submit(context(6, 800, null))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+                submit(context(6, 800, null)).join().getServerStatus().getFirst().getServerIp());
     }
 
     @Test
@@ -419,7 +345,7 @@ class EncoderSchedulingIntegrationTest {
         when(directory.endpointAddressSnapshot(RoleType.ENCODER))
                 .thenReturn(List.of("busy", "idle"));
 
-        Response response = scheduler.submit(context(4, 800, 800L)).join();
+        Response response = submit(context(4, 800, 800L)).join();
 
         assertTrue(response.isSuccess());
         assertEquals("idle", response.getServerStatus().getFirst().getServerIp());
@@ -434,21 +360,11 @@ class EncoderSchedulingIntegrationTest {
 
         assertEquals(
                 "encoder",
-                scheduler
-                        .submit(context(7, 1000, 200L))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+                submit(context(7, 1000, 200L)).join().getServerStatus().getFirst().getServerIp());
         assertEquals(800L, encoder.inflightUncachedTokenEstimate());
         assertEquals(
                 "other",
-                scheduler
-                        .submit(context(8, 1000, 200L))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+                submit(context(8, 1000, 200L)).join().getServerStatus().getFirst().getServerIp());
 
         WorkerStatus status = encoder.getStatus();
         WorkerStatus.EngineObservation engine = status.committedEngineObservation();
@@ -459,18 +375,13 @@ class EncoderSchedulingIntegrationTest {
         WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
         when(running.owner()).thenReturn(status);
         when(running.activeTasks()).thenReturn(Map.of("7", actual));
-        encoder.observeStatusHeartbeat(status, running).run();
+        encoder.publishStatus(encoder.applyStatusHeartbeat(status, running));
 
         assertEquals(0, encoder.pendingEncoderRequestCount());
         assertEquals(100L, encoder.inflightUncachedTokenEstimate());
         assertEquals(
                 "encoder",
-                scheduler
-                        .submit(context(9, 1000, 200L))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+                submit(context(9, 1000, 200L)).join().getServerStatus().getFirst().getServerIp());
     }
 
     @Test
@@ -480,17 +391,50 @@ class EncoderSchedulingIntegrationTest {
         when(directory.endpointAddressSnapshot(RoleType.ENCODER))
                 .thenReturn(List.of("dead", "foreign"));
 
-        BalanceContext context = context(5, 800, 0L);
+        RequestData context = context(5, 800, 0L);
         TrafficPolicyConfig groupSelector = mock(TrafficPolicyConfig.class);
         context.getConfig().getRouter().setGroupSelector(groupSelector);
         when(groupSelector.resolveTargetGroup(context.getRequest()))
                 .thenReturn(Optional.of("group"));
-        Response response = scheduler.submit(context).join();
+        Response response = submit(context).join();
 
         assertEquals(StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(), response.getCode());
+        assertEquals(RequestPhase.ENCODER, context.getRequestPhase());
         assertEquals(
-                RequestPhase.ENCODER,
-                requests.requestSlot("5", RequestPhase.ENCODER).requestPhase());
+                RequestState.Phase.FAILED,
+                requests.getRequestState("5", 0L, RequestPhase.ENCODER).state());
+        assertNull(requests.findActive("5", RequestPhase.ENCODER));
+    }
+
+    private AbstractRequestScheduler createScheduler(RequestWorkerSelector router) {
+        ReflectionTestUtils.setField(router, "encoderSelector", new EncoderStrategy(directory));
+        var reporter = mock(DeliveryMetricsReporter.class);
+        var runtime =
+                new SchedulerRuntime(
+                        requests,
+                        directory,
+                        reporter,
+                        mock(RequestSchedulerReporter.class),
+                        SchedulerTestSupport.dispatcher(),
+                        configService,
+                        mock(EngineGrpcClient.class));
+        runtimes.add(runtime);
+        var owner =
+                PlacementConfiguration.create(
+                        runtime,
+                        configService.loadBalanceConfig(),
+                        router,
+                        reporter,
+                        mock(DecodeAdmission.class),
+                        availability,
+                        new PlacementConfiguration().decodeAdmissionCapacity(configService),
+                        mock(org.flexlb.service.TheoryCacheHitReporter.class));
+        runtime.registerScheduler(owner);
+        return owner;
+    }
+
+    private CompletableFuture<Response> submit(RequestData data) {
+        return scheduler.submit(new RequestContext(data));
     }
 
     private EncoderEndpoint worker(
@@ -504,7 +448,10 @@ class EncoderSchedulingIntegrationTest {
             long waiting) {
         WorkerStatus status = mock(WorkerStatus.class);
         WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
+        when(status.getRole()).thenReturn(RoleType.ENCODER);
+        when(status.isActiveGeneration()).thenReturn(true);
         when(status.isAlive()).thenReturn(alive);
+        when(status.isAvailableForScheduling()).thenReturn(alive);
         when(status.getGenerationId()).thenReturn(1L);
         when(status.getIp()).thenReturn(ip);
         when(status.getPort()).thenReturn(port);
@@ -516,9 +463,8 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.runningQueryLen()).thenReturn(running);
         when(engine.waitingQueryLen()).thenReturn(waiting);
-        EncoderEndpoint endpoint =
-                new EncoderEndpoint(status, new EndpointEventProjector(requests));
-        when(directory.captureEndpoint(eq(RoleType.ENCODER), eq(ip)))
+        EncoderEndpoint endpoint = new EncoderEndpoint(status, requests, availability);
+        when(directory.capture(eq(RoleType.ENCODER), eq(ip)))
                 .thenAnswer(invocation -> endpoint.tryPinGeneration());
         return endpoint;
     }
@@ -529,13 +475,13 @@ class EncoderSchedulingIntegrationTest {
         return task;
     }
 
-    private BalanceContext context(long requestId, long seqLen, Long hitLen) {
-        Request request = new Request();
-        request.setRequestId(Long.toString(requestId));
-        request.setSeqLen(seqLen);
-        request.setEncoderCacheHitLen(hitLen);
-        request.setMaxNewTokens(16);
-        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
+    private RequestData context(long requestId, long seqLen, Long hitLen) {
+        Request request = Request.builder().build();
+        request = request.toBuilder().requestId(Long.toString(requestId)).build();
+        request = request.toBuilder().seqLen(seqLen).build();
+        request = request.toBuilder().encoderCacheHitLen(hitLen).build();
+        request = request.toBuilder().maxNewTokens(16).build();
+        RequestData context = new RequestData(configService.loadBalanceConfig());
         context.setRequest(request);
         context.setRequestedRoles(Set.of(RoleType.ENCODER));
         context.setSchedulingMetadata(

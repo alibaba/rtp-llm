@@ -1,11 +1,15 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RequestTimeEstimation;
 
 import java.util.Arrays;
 
-/** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
+import static com.google.common.base.Preconditions.checkArgument;
+
+/**
+ * Reusable columns for modeled Prefill candidates from one fleet snapshot.
+ */
 final class PrefillCandidateSet {
 
     private static final int INITIAL_CAPACITY = 16;
@@ -16,16 +20,23 @@ final class PrefillCandidateSet {
     private long[] cacheHitTokens = new long[0];
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
+    private String[] admissionBlocks = new String[0];
     private int size;
+    boolean inUse;
     long minimumTtftRank;
     boolean hasKnownTtft;
     long maximumCacheHit;
     long maximumRoutingCacheMatchTokens;
 
     void reset(int expectedCapacity) {
+        clear();
+        ensureCapacity(expectedCapacity);
+    }
+
+    void clear() {
         Arrays.fill(endpointAddresses, 0, size, null);
         Arrays.fill(endpoints, 0, size, null);
-        ensureCapacity(expectedCapacity);
+        Arrays.fill(admissionBlocks, 0, size, null);
         size = 0;
         minimumTtftRank = Long.MAX_VALUE;
         hasKnownTtft = false;
@@ -36,11 +47,11 @@ final class PrefillCandidateSet {
     void addCandidate(
             String address,
             PrefillEndpoint endpoint,
-            RouteProjection.CandidateView candidate,
+            RequestTimeEstimation.CandidateView candidate,
             long ownershipVersion) {
-        if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
-            throw new IllegalArgumentException("candidate requires available capacity");
-        }
+        checkArgument(
+                candidate.selectable() || candidate.engineWorkUnmodeled(),
+                "candidate requires available capacity");
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;
         endpoints[size] = endpoint;
@@ -55,6 +66,14 @@ final class PrefillCandidateSet {
         maximumRoutingCacheMatchTokens =
                 Math.max(maximumRoutingCacheMatchTokens, routingCacheMatchTokens[size]);
         size++;
+    }
+
+    void admissionBlock(String detail) {
+        admissionBlocks[size - 1] = detail;
+    }
+
+    String admissionBlock(int index) {
+        return admissionBlocks[index];
     }
 
     PrefillEndpoint endpoint(int index) {
@@ -93,6 +112,10 @@ final class PrefillCandidateSet {
         return size;
     }
 
+    int capacity() {
+        return endpoints.length;
+    }
+
     private void ensureCapacity(int expectedCapacity) {
         if (endpoints.length >= expectedCapacity) {
             return;
@@ -101,6 +124,7 @@ final class PrefillCandidateSet {
                 Math.max(expectedCapacity, Math.max(INITIAL_CAPACITY, endpoints.length << 1));
         endpointAddresses = Arrays.copyOf(endpointAddresses, capacity);
         endpoints = Arrays.copyOf(endpoints, capacity);
+        admissionBlocks = Arrays.copyOf(admissionBlocks, capacity);
         projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
         incomingPrefillMs = Arrays.copyOf(incomingPrefillMs, capacity);
         cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);

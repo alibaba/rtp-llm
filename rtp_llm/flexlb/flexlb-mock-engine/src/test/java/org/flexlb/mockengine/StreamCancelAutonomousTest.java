@@ -66,7 +66,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class StreamCancelAutonomousTest {
 
-    /** Fresh range above the 62000-63900 blocks used by the existing suites. */
+    /**
+     * Fresh range above the 62000-63900 blocks used by the existing suites.
+     */
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(64000);
 
     @TempDir Path tempDir;
@@ -120,18 +122,22 @@ class StreamCancelAutonomousTest {
         long rid = 7001L;
 
         try (ClientStream stream =
-                ClientStream.generateStream(prefillPort(), MockEngineTestSupport.input(rid, 16))) {
+                ClientStream.generateStream(
+                        prefillPort(), MockEngineTestSupport.input(String.valueOf(rid), 16))) {
             awaitCondition(
                     () -> prefill.getRunningCount() >= 1,
                     2_000,
                     "prefill request should be running before the break");
-            assertEquals(0, prefill.getCancelledCount(), "sanity: no cancel before the break");
+            assertEquals(
+                    0,
+                    MockEngineTestSupport.getCancelledCount(prefill),
+                    "sanity: no cancel before the break");
 
             stream.breakStream();
 
             // ≤1s autonomous cleanup — the core production-alignment budget.
             awaitCondition(
-                    () -> prefill.getCancelledCount() == 1,
+                    () -> MockEngineTestSupport.getCancelledCount(prefill) == 1,
                     1_000,
                     "prefill should self-cancel after the client stream broke"
                             + " (running="
@@ -182,7 +188,7 @@ class StreamCancelAutonomousTest {
             stream.breakStream();
 
             awaitCondition(
-                    () -> decode.getCancelledCount() == 1,
+                    () -> MockEngineTestSupport.getCancelledCount(decode) == 1,
                     1_000,
                     "decode should be cancelled by the propagated client-gone"
                             + " (running="
@@ -193,7 +199,7 @@ class StreamCancelAutonomousTest {
             assertEquals(0, decode.getInflightCount());
             assertEquals(
                     0,
-                    decode.getActiveKvTokens(),
+                    MockEngineTestSupport.getActiveKvTokens(decode),
                     "decode KV must be released by the propagated cancel");
             assertTrue(
                     cancelledRids(decode).contains(rid),
@@ -203,7 +209,7 @@ class StreamCancelAutonomousTest {
             // the prefill's own accounting stays clean).
             assertEquals(
                     0,
-                    prefill.getCancelledCount(),
+                    MockEngineTestSupport.getCancelledCount(prefill),
                     "prefill must not double-count the propagated cancel");
 
             // Both engines publish exactly one typed CANCELLED terminal for
@@ -257,12 +263,12 @@ class StreamCancelAutonomousTest {
             }
 
             awaitCondition(
-                    () -> decode.getCancelledCount() == 1,
+                    () -> MockEngineTestSupport.getCancelledCount(decode) == 1,
                     1_000,
                     "decode should be cancelled by the broken fetch stream");
             assertEquals(0, decode.getRunningCount());
-            assertEquals(0, decode.getActiveKvTokens());
-            assertEquals(0, prefill.getCancelledCount());
+            assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode));
+            assertEquals(0, MockEngineTestSupport.getCancelledCount(prefill));
             assertEquals(
                     1,
                     countCancelTerminals(prefill, rid),
@@ -295,7 +301,8 @@ class StreamCancelAutonomousTest {
         long rid = 7004L;
 
         try (ClientStream stream =
-                ClientStream.generateStream(decodePort(), MockEngineTestSupport.input(rid, 16))) {
+                ClientStream.generateStream(
+                        decodePort(), MockEngineTestSupport.input(String.valueOf(rid), 16))) {
             awaitCondition(
                     () -> decode.getRunningCount() >= 1,
                     2_000,
@@ -305,7 +312,7 @@ class StreamCancelAutonomousTest {
 
             long breakNanos = System.nanoTime();
             awaitCondition(
-                    () -> decode.getCancelledCount() == 1,
+                    () -> MockEngineTestSupport.getCancelledCount(decode) == 1,
                     1_000,
                     "decode must self-cancel within the 1s window");
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - breakNanos);
@@ -315,7 +322,10 @@ class StreamCancelAutonomousTest {
 
             assertEquals(0, decode.getRunningCount());
             assertEquals(0, decode.getInflightCount());
-            assertEquals(0, decode.getActiveKvTokens(), "decode KV must be released");
+            assertEquals(
+                    0,
+                    MockEngineTestSupport.getActiveKvTokens(decode),
+                    "decode KV must be released");
             assertTrue(cancelledRids(decode).contains(rid));
             assertEquals(
                     1,
@@ -333,14 +343,15 @@ class StreamCancelAutonomousTest {
         // ── Order A: stream breaks FIRST, explicit Cancel arrives second ──
         long ridA = 7005L;
         try (ClientStream stream =
-                ClientStream.generateStream(decodePort(), MockEngineTestSupport.input(ridA, 16))) {
+                ClientStream.generateStream(
+                        decodePort(), MockEngineTestSupport.input(String.valueOf(ridA), 16))) {
             awaitCondition(
                     () -> decode.getRunningCount() >= 1,
                     2_000,
                     "decode should run the request (order A leg)");
             stream.breakStream();
             awaitCondition(
-                    () -> decode.getCancelledCount() == 1,
+                    () -> MockEngineTestSupport.getCancelledCount(decode) == 1,
                     1_000,
                     "client-gone cancel should claim the terminal first");
 
@@ -350,7 +361,7 @@ class StreamCancelAutonomousTest {
                     "explicit cancel after client-gone must no-op (claim already armed)");
             assertEquals(
                     1,
-                    decode.getCancelledCount(),
+                    MockEngineTestSupport.getCancelledCount(decode),
                     "cancelled_count must stay at 1 (idempotent claim)");
             assertEquals(
                     1,
@@ -367,7 +378,8 @@ class StreamCancelAutonomousTest {
         // ── Order B: explicit Cancel FIRST, stream breaks second ──
         long ridB = 7006L;
         try (ClientStream stream =
-                ClientStream.generateStream(decodePort(), MockEngineTestSupport.input(ridB, 16))) {
+                ClientStream.generateStream(
+                        decodePort(), MockEngineTestSupport.input(String.valueOf(ridB), 16))) {
             awaitCondition(
                     () -> decode.getRunningCount() >= 1,
                     2_000,
@@ -375,14 +387,20 @@ class StreamCancelAutonomousTest {
             assertNotNull(
                     decode.cancel(ridB),
                     "explicit cancel should claim the terminal (request running)");
-            assertEquals(2, decode.getCancelledCount(), "two distinct requests cancelled so far");
+            assertEquals(
+                    2,
+                    MockEngineTestSupport.getCancelledCount(decode),
+                    "two distinct requests cancelled so far");
 
             stream.breakStream();
             // Give the break time to propagate — if the detector mis-fired
             // it would show up inside this window.
             Thread.sleep(500);
 
-            assertEquals(2, decode.getCancelledCount(), "the late break must not cancel twice");
+            assertEquals(
+                    2,
+                    MockEngineTestSupport.getCancelledCount(decode),
+                    "the late break must not cancel twice");
             assertEquals(
                     1, countCancelTerminals(decode, ridB), "exactly one typed terminal for ridB");
             assertEquals(
@@ -420,11 +438,11 @@ class StreamCancelAutonomousTest {
             Thread.sleep(300);
             assertEquals(
                     0,
-                    prefill.getCancelledCount(),
+                    MockEngineTestSupport.getCancelledCount(prefill),
                     "normal completion must not be cancelled (prefill)");
             assertEquals(
                     0,
-                    decode.getCancelledCount(),
+                    MockEngineTestSupport.getCancelledCount(decode),
                     "normal completion must not be cancelled (decode)");
             assertEquals(
                     0, clientGoneCensus(), "normal stream close must never count as client-gone");
@@ -455,7 +473,9 @@ class StreamCancelAutonomousTest {
 
     private int basePort;
 
-    /** Actual decode port — with 0 prefill engines the decode takes basePort+0. */
+    /**
+     * Actual decode port — with 0 prefill engines the decode takes basePort+0.
+     */
     private int decodePortValue;
 
     private int prefillPort() {
@@ -556,14 +576,18 @@ class StreamCancelAutonomousTest {
         return (List<Long>) service.getSnapshot().get("cancelled_rids");
     }
 
-    /** Per-RPC counter from the public snapshot surface (rpc_counts map). */
+    /**
+     * Per-RPC counter from the public snapshot surface (rpc_counts map).
+     */
     private static int rpcCount(JavaMockEngineCluster.FastRpcService service, String rpc) {
         @SuppressWarnings("unchecked")
         Map<String, Object> counts = (Map<String, Object>) service.getSnapshot().get("rpc_counts");
         return ((Number) counts.get(rpc)).intValue();
     }
 
-    /** Typed CANCELLED terminals for {@code rid} visible in the next WorkerStatus poll. */
+    /**
+     * Typed CANCELLED terminals for {@code rid} visible in the next WorkerStatus poll.
+     */
     private static long countCancelTerminals(
             JavaMockEngineCluster.FastRpcService service, long rid) {
         return MockEngineTestSupport.workerStatus(service, 0).getFinishedTaskListList().stream()
@@ -657,7 +681,9 @@ class StreamCancelAutonomousTest {
             return stream;
         }
 
-        /** Simulate the client dying: cancel exactly this call mid-flight. */
+        /**
+         * Simulate the client dying: cancel exactly this call mid-flight.
+         */
         void breakStream() {
             call.cancel("client stream gone", null);
         }

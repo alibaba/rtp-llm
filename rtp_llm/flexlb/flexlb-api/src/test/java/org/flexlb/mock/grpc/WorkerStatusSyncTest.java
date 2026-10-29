@@ -1,6 +1,5 @@
 package org.flexlb.mock.grpc;
 
-import com.google.protobuf.ByteString;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -60,9 +59,11 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
     @Test
     void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
-        var context = createBalanceContext("request-a");
-        assertEquals("request-a", context.getRequestId());
-        assertEquals(ByteString.EMPTY, context.getGenerateInputPb());
+        var context = createRequestContext("request-a");
+        assertEquals("request-a", context.data().getRequestId());
+        org.junit.jupiter.api.Assertions.assertNull(
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        context.data(), "generateInput"));
     }
 
     @Override

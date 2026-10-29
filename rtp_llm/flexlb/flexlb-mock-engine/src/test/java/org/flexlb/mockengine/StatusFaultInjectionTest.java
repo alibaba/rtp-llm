@@ -96,13 +96,13 @@ class StatusFaultInjectionTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         // Baseline: rid 1 flows normally at cursor 0.
-        enqueue(prefill, batch(1001, slot(0, input(1, 10))));
+        enqueue(prefill, batch(1001, slot(0, input("1", 10))));
         EngineRpcService.WorkerStatusPB first = awaitFinished(prefill, 0, 1, 5_000);
         assertEquals(1, first.getFinishedTaskListCount());
         assertEquals(1, first.getLatestFinishedVersion());
 
         // A second completion (v2) becomes visible at cursor 1.
-        enqueue(prefill, batch(1002, slot(0, input(2, 10))));
+        enqueue(prefill, batch(1002, slot(0, input("2", 10))));
         EngineRpcService.WorkerStatusPB second = awaitFinished(prefill, 1, 1, 5_000);
         assertEquals(1, second.getFinishedTaskListCount());
         assertEquals(2, second.getFinishedTaskList(0).getRequestId());
@@ -159,7 +159,7 @@ class StatusFaultInjectionTest {
         int basePort = startCluster(model, 1, 0);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
-        enqueue(prefill, batch(2001, slot(0, input(21, 10))));
+        enqueue(prefill, batch(2001, slot(0, input("21", 10))));
         EngineRpcService.WorkerStatusPB normal = workerStatus(prefill, 0);
         assertEquals(1, normal.getRunningTaskInfoCount(), "running snapshot real without fault");
 
@@ -193,7 +193,7 @@ class StatusFaultInjectionTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         inject(basePort, "status_suppress_rids", "\"rids\":[7007]");
-        enqueue(prefill, batch(2002, slot(0, input(7007, 10), input(7008, 10))));
+        enqueue(prefill, batch(2002, slot(0, input("7007", 10), input("7008", 10))));
 
         // Running snapshot: rid 7007 swallowed, rid 7008 reported.
         EngineRpcService.WorkerStatusPB running = workerStatus(prefill, 0);
@@ -337,7 +337,7 @@ class StatusFaultInjectionTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         inject(basePort, "status_duplicate_finished", null);
-        enqueue(prefill, batch(3001, slot(0, input(31, 10))));
+        enqueue(prefill, batch(3001, slot(0, input("31", 10))));
 
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 2, 5_000);
         assertEquals(
@@ -363,7 +363,7 @@ class StatusFaultInjectionTest {
         int basePort = startCluster(model, 1, 0);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
-        enqueue(prefill, batch(4001, slot(0, input(41, 10))));
+        enqueue(prefill, batch(4001, slot(0, input("41", 10))));
         EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
         assertEquals(1, done.getLatestFinishedVersion());
 
@@ -409,11 +409,14 @@ class StatusFaultInjectionTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         inject(basePort, "status_zombie_running", null);
-        enqueue(prefill, batch(5001, slot(0, input(51, 10))));
+        enqueue(prefill, batch(5001, slot(0, input("51", 10))));
 
         // Let the (10ms) prefill finish internally.
         Thread.sleep(150);
-        assertEquals(1, prefill.getCompletedCount(), "the request DID complete internally");
+        assertEquals(
+                1,
+                MockEngineTestSupport.getCompletedCount(prefill),
+                "the request DID complete internally");
 
         long cursor = 0L;
         // The first report publishes the real terminal; later reports retain
@@ -453,7 +456,7 @@ class StatusFaultInjectionTest {
         int decodePort = basePort;
 
         inject(decodePort, "status_zombie_running", null);
-        fireAndForgetGenerate(decode, input(61, 10));
+        fireAndForgetGenerate(decode, input("61", 10));
 
         // One decode step (1ms) finishes internally.
         Thread.sleep(150);
@@ -489,7 +492,9 @@ class StatusFaultInjectionTest {
 
         inject(basePort, "enqueue_ack_partial_fail", "\"k\":2");
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(7001, slot(0, input(1, 10), input(2, 10), input(3, 10))));
+                enqueue(
+                        prefill,
+                        batch(7001, slot(0, input("1", 10), input("2", 10), input("3", 10))));
         assertEquals(1, ack.getSuccessesCount(), "k=2 of 3 members stay successes");
         assertEquals(3, ack.getSuccesses(0).getRequestId());
         assertEquals(2, ack.getErrorsCount(), "k=2 members are moved to errors");
@@ -512,7 +517,9 @@ class StatusFaultInjectionTest {
         // Custom error code replaces 13 per-request.
         inject(basePort, "enqueue_ack_error_code", "\"code\":77");
         EngineRpcService.EnqueueBatchResponsePB ack2 =
-                enqueue(prefill, batch(7002, slot(0, input(4, 10), input(5, 10), input(6, 10))));
+                enqueue(
+                        prefill,
+                        batch(7002, slot(0, input("4", 10), input("5", 10), input("6", 10))));
         assertEquals(1, ack2.getSuccessesCount());
         assertEquals(2, ack2.getErrorsCount());
         assertEquals(77L, ack2.getErrors(0).getErrorInfo().getErrorCode());
@@ -536,7 +543,7 @@ class StatusFaultInjectionTest {
 
         inject(basePort, "enqueue_ack_drop", null);
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(8001, slot(0, input(81, 10), input(82, 10))));
+                enqueue(prefill, batch(8001, slot(0, input("81", 10), input("82", 10))));
         assertEquals(8001, ack.getBatchId(), "batchId is still echoed");
         assertEquals(0, ack.getSuccessesCount(), "empty ack: no successes");
         assertEquals(0, ack.getErrorsCount(), "empty ack: no errors");
@@ -552,7 +559,7 @@ class StatusFaultInjectionTest {
         // Subsequent RPCs behave normally after clearing.
         clearInject(basePort);
         EngineRpcService.EnqueueBatchResponsePB ack2 =
-                enqueue(prefill, batch(8002, slot(0, input(83, 10))));
+                enqueue(prefill, batch(8002, slot(0, input("83", 10))));
         assertEquals(1, ack2.getSuccessesCount());
         assertEquals(0, ack2.getErrorsCount());
         assertFalse(prefill.isStopped(), "enqueue_ack_drop must never set stopped");
@@ -574,7 +581,7 @@ class StatusFaultInjectionTest {
         EngineRpcService.EnqueueBatchResponsePB ack =
                 enqueue(
                         prefill,
-                        batch(7101, slot(0, input(101, 10), input(102, 10), input(103, 10))));
+                        batch(7101, slot(0, input("101", 10), input("102", 10), input("103", 10))));
         assertEquals(
                 3, ack.getSuccessesCount(), "execution-phase injection must not touch the ack");
         assertEquals(0, ack.getErrorsCount());
@@ -601,21 +608,26 @@ class StatusFaultInjectionTest {
         // Prefill-only cluster: survivors take the completed branch, the
         // failed member does NOT count as completed.
         assertEquals(
-                2, prefill.getCompletedCount(), "the failed member is not a completed request");
+                2,
+                MockEngineTestSupport.getCompletedCount(prefill),
+                "the failed member is not a completed request");
 
         // k=2 with a custom code: the first TWO members of a fresh batch fail.
         inject(basePort, "prefill_async_partial_fail", "\"k\":2,\"code\":8431");
         EngineRpcService.EnqueueBatchResponsePB ack2 =
                 enqueue(
                         prefill,
-                        batch(7102, slot(0, input(104, 10), input(105, 10), input(106, 10))));
+                        batch(7102, slot(0, input("104", 10), input("105", 10), input("106", 10))));
         assertEquals(3, ack2.getSuccessesCount());
         EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, 3, 3, 5_000);
         assertTrue(findByRid(done2, 104).hasErrorInfo());
         assertEquals(8431L, findByRid(done2, 104).getErrorInfo().getErrorCode());
         assertTrue(findByRid(done2, 105).hasErrorInfo());
         assertFalse(findByRid(done2, 106).hasErrorInfo(), "k=2: only the first two members fail");
-        assertEquals(3, prefill.getCompletedCount(), "2 + 1 survivors are completed");
+        assertEquals(
+                3,
+                MockEngineTestSupport.getCompletedCount(prefill),
+                "2 + 1 survivors are completed");
 
         // Cumulative counter: 1 + 2 failed members exported via /snapshot.
         assertEquals(
@@ -687,23 +699,23 @@ class StatusFaultInjectionTest {
 
         // Default (never injected): zero impact.
         EngineRpcService.EnqueueBatchResponsePB cleanAck =
-                enqueue(prefill, batch(7301, slot(0, input(301, 10), input(302, 10))));
+                enqueue(prefill, batch(7301, slot(0, input("301", 10), input("302", 10))));
         assertEquals(2, cleanAck.getSuccessesCount());
         EngineRpcService.WorkerStatusPB cleanDone = awaitFinished(prefill, 0, 2, 5_000);
         assertFalse(findByRid(cleanDone, 301).hasErrorInfo());
         assertFalse(findByRid(cleanDone, 302).hasErrorInfo());
-        assertEquals(2, prefill.getCompletedCount());
+        assertEquals(2, MockEngineTestSupport.getCompletedCount(prefill));
 
         // Explicit k=0 is equally inert.
         inject(basePort, "prefill_async_partial_fail", "\"k\":0");
-        enqueue(prefill, batch(7302, slot(0, input(303, 10))));
+        enqueue(prefill, batch(7302, slot(0, input("303", 10))));
         EngineRpcService.WorkerStatusPB k0Done = awaitFinished(prefill, 2, 1, 5_000);
         assertFalse(findByRid(k0Done, 303).hasErrorInfo(), "k=0 must inject nothing");
-        assertEquals(3, prefill.getCompletedCount());
+        assertEquals(3, MockEngineTestSupport.getCompletedCount(prefill));
 
         // Armed (k=1, custom code) → exactly one typed failure.
         inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":9001");
-        enqueue(prefill, batch(7303, slot(0, input(304, 10), input(305, 10))));
+        enqueue(prefill, batch(7303, slot(0, input("304", 10), input("305", 10))));
         EngineRpcService.WorkerStatusPB armedDone = awaitFinished(prefill, 3, 2, 5_000);
         assertTrue(findByRid(armedDone, 304).hasErrorInfo());
         assertEquals(9001L, findByRid(armedDone, 304).getErrorInfo().getErrorCode());
@@ -711,13 +723,14 @@ class StatusFaultInjectionTest {
 
         // Disarmed (enabled=false) → the next batch is fully clean.
         disable(basePort, "prefill_async_partial_fail");
-        enqueue(prefill, batch(7304, slot(0, input(306, 10), input(307, 10))));
+        enqueue(prefill, batch(7304, slot(0, input("306", 10), input("307", 10))));
         EngineRpcService.WorkerStatusPB disarmedDone = awaitFinished(prefill, 5, 2, 5_000);
         assertFalse(
                 findByRid(disarmedDone, 306).hasErrorInfo(),
                 "disabled injection must not fail members");
         assertFalse(findByRid(disarmedDone, 307).hasErrorInfo());
-        assertEquals(6, prefill.getCompletedCount(), "2+1+1+2 completed requests");
+        assertEquals(
+                6, MockEngineTestSupport.getCompletedCount(prefill), "2+1+1+2 completed requests");
     }
 
     @Test
@@ -742,7 +755,7 @@ class StatusFaultInjectionTest {
                 survivorStream.observer());
 
         EngineRpcService.EnqueueBatchResponsePB ack =
-                enqueue(prefill, batch(7401, slot(0, input(401, 10), input(402, 10))));
+                enqueue(prefill, batch(7401, slot(0, input("401", 10), input("402", 10))));
         assertEquals(2, ack.getSuccessesCount());
 
         failedStream.await(10_000);
@@ -881,7 +894,7 @@ class StatusFaultInjectionTest {
 
     private void inject(int enginePort, String type, String extra) throws Exception {
         httpPost(
-                controlServer.getPort(),
+                MockEngineTestSupport.controlPort(controlServer),
                 "/inject",
                 "{\"port\":"
                         + enginePort
@@ -894,16 +907,21 @@ class StatusFaultInjectionTest {
 
     private void disable(int enginePort, String type) throws Exception {
         httpPost(
-                controlServer.getPort(),
+                MockEngineTestSupport.controlPort(controlServer),
                 "/inject",
                 "{\"port\":" + enginePort + ",\"type\":\"" + type + "\",\"enabled\":false}");
     }
 
     private void clearInject(int enginePort) throws Exception {
-        httpPost(controlServer.getPort(), "/clear_inject", "{\"port\":" + enginePort + "}");
+        httpPost(
+                MockEngineTestSupport.controlPort(controlServer),
+                "/clear_inject",
+                "{\"port\":" + enginePort + "}");
     }
 
-    /** Poll until the finished list reaches {@code expectedCount} (or timeout). */
+    /**
+     * Poll until the finished list reaches {@code expectedCount} (or timeout).
+     */
     private static EngineRpcService.WorkerStatusPB awaitFinished(
             JavaMockEngineCluster.FastRpcService service,
             long sinceVersion,
@@ -919,7 +937,9 @@ class StatusFaultInjectionTest {
         return last;
     }
 
-    /** First finished-task entry matching {@code rid} (null if absent). */
+    /**
+     * First finished-task entry matching {@code rid} (null if absent).
+     */
     private static EngineRpcService.TaskInfoPB findByRid(
             EngineRpcService.WorkerStatusPB status, long rid) {
         for (EngineRpcService.TaskInfoPB task : status.getFinishedTaskListList()) {
@@ -935,7 +955,11 @@ class StatusFaultInjectionTest {
      *  as "&lt;role&gt;-&lt;port&gt;", so a name match would never hit. */
     private long snapshotCounter(String role, String field) throws Exception {
         JsonNode snapshot =
-                new ObjectMapper().readTree(httpGet(controlServer.getPort(), "/snapshot"));
+                new ObjectMapper()
+                        .readTree(
+                                httpGet(
+                                        MockEngineTestSupport.controlPort(controlServer),
+                                        "/snapshot"));
         for (JsonNode engine : snapshot.path("engines")) {
             if (role.equals(engine.path("role").asText())) {
                 return engine.path(field).asLong(-1);
@@ -944,7 +968,9 @@ class StatusFaultInjectionTest {
         return -1L;
     }
 
-    /** Drive generateStreamCall without blocking on its stream (decode zombie test). */
+    /**
+     * Drive generateStreamCall without blocking on its stream (decode zombie test).
+     */
     private static void fireAndForgetGenerate(
             JavaMockEngineCluster.FastRpcService service,
             EngineRpcService.GenerateInputPB request) {

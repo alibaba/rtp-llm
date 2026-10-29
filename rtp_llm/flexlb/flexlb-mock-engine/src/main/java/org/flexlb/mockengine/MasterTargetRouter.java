@@ -70,14 +70,20 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class MasterTargetRouter {
 
-    /** Coarse failure taxonomy for the per-request {@code error_kind} field. */
+    /**
+     * Coarse failure taxonomy for the per-request {@code error_kind} field.
+     */
     enum ErrorKind {
         /** Schedule RPC returned a response (any code — business codes are
          *  classified by the caller, not the router). */
         NONE("none"),
-        /** Every target failed with gRPC UNAVAILABLE (transport layer). */
+        /**
+         * Every target failed with gRPC UNAVAILABLE (transport layer).
+         */
         TRANSPORT("transport"),
-        /** gRPC DEADLINE_EXCEEDED — no retry, no switch, no fallback. */
+        /**
+         * gRPC DEADLINE_EXCEEDED — no retry, no switch, no fallback.
+         */
         DEADLINE("deadline"),
         /** Master answered at the gRPC layer but the call failed (INTERNAL,
          *  CANCELLED, ...) or a non-gRPC exception escaped — conservative:
@@ -91,20 +97,30 @@ final class MasterTargetRouter {
         }
     }
 
-    /** Terminal outcome of one failover-aware Schedule call. */
+    /**
+     * Terminal outcome of one failover-aware Schedule call.
+     */
     static final class ScheduleOutcome {
-        /** Master response, or null when no target produced one. */
+        /**
+         * Master response, or null when no target produced one.
+         */
         final FlexlbScheduleProtocol.FlexlbScheduleResponsePB response;
 
-        /** Actually-served (or last-attempted, when none served) target address. */
+        /**
+         * Actually-served (or last-attempted, when none served) target address.
+         */
         final String lastTarget;
 
-        /** True when the same request was retried on another target. */
+        /**
+         * True when the same request was retried on another target.
+         */
         final boolean failover;
 
         final ErrorKind errorKind;
 
-        /** Transport-layer exception of the last UNAVAILABLE attempt (null otherwise). */
+        /**
+         * Transport-layer exception of the last UNAVAILABLE attempt (null otherwise).
+         */
         final Exception failure;
 
         ScheduleOutcome(
@@ -121,7 +137,9 @@ final class MasterTargetRouter {
         }
     }
 
-    /** One target's channel pool — same N_CHANNELS + round-robin shape as the legacy single-target path. */
+    /**
+     * One target's channel pool — same N_CHANNELS + round-robin shape as the legacy single-target path.
+     */
     private static final class TargetPool {
         final String target;
         final ManagedChannel[] channels;
@@ -145,7 +163,9 @@ final class MasterTargetRouter {
 
     private final List<TargetPool> pools;
 
-    /** Index into {@link #pools} of the current sticky target. */
+    /**
+     * Index into {@link #pools} of the current sticky target.
+     */
     private volatile int sticky;
 
     /**
@@ -253,7 +273,9 @@ final class MasterTargetRouter {
                 lastFailure);
     }
 
-    /** Shuts down every target pool's channels (no-op for test-constructed pools). */
+    /**
+     * Shuts down every target pool's channels (no-op for test-constructed pools).
+     */
     void shutdown() {
         for (TargetPool pool : pools) {
             if (pool.channels == null) {

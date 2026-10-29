@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
 
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Public FLEXLB_CONFIG contract, organized by stable responsibility owner.
  * Mutually exclusive behavior is represented by tagged unions so inactive
@@ -30,8 +32,15 @@ public final class FlexlbConfig {
     private boolean enableFallback;
     private long fallbackBatchTokenCapacity = 1_048_576L;
 
-    @JsonIgnore
-    private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
+    @JsonIgnore private final InternalRuntimeSettings internalRuntime;
+
+    public FlexlbConfig() {
+        this(new InternalRuntimeSettings());
+    }
+
+    public FlexlbConfig(InternalRuntimeSettings internalRuntime) {
+        this.internalRuntime = java.util.Objects.requireNonNull(internalRuntime, "internalRuntime");
+    }
 
     @JsonIgnore
     public boolean isDirect() {
@@ -78,16 +87,22 @@ public final class FlexlbConfig {
                 && scheduler.getOrdering().getPreemption().allows(stage);
     }
 
-    /** Resolve the QUEUE decision policy from its single configuration owner. */
     @JsonIgnore
-    public DecisionPolicyConfig decisionPolicy() {
-        return queueScheduler().getDecision();
+    public long resolveExpiresAtMs(long startTime) {
+        return isQueue() ? scheduler.resolveExpiresAtMs(startTime) : Long.MAX_VALUE;
     }
 
     @JsonIgnore
-    public boolean isSingleDecision() {
-        return isQueue()
-                && queueScheduler().getDecision().getType() == DecisionPolicyConfig.Type.SINGLE;
+    public int defaultPriority() {
+        return isPriorityOrdering() ? scheduler.getOrdering().getDefaultPriority() : 50;
+    }
+
+    /**
+     * Resolve the QUEUE decision policy from its single configuration owner.
+     */
+    @JsonIgnore
+    public DecisionPolicyConfig decisionPolicy() {
+        return queueScheduler().getDecision();
     }
 
     @JsonIgnore
@@ -98,29 +113,18 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public DecisionPolicyConfig fixedWindowDecision() {
-        DecisionPolicyConfig policy = decisionPolicy();
-        if (policy.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
-            return policy;
-        }
-        throw new IllegalStateException("fixed-window decision configuration is not active");
-    }
-
-    @JsonIgnore
     public SchedulerConfig queueScheduler() {
-        if (isQueue()) {
-            return scheduler;
-        }
-        throw new IllegalStateException("queue scheduler configuration is not active");
+        checkState(isQueue(), "queue scheduler configuration is not active");
+        return scheduler;
     }
 
     @JsonIgnore
     public QueueOrderingConfig priorityOrdering() {
         QueueOrderingConfig ordering = queueScheduler().getOrdering();
-        if (ordering.getType() == QueueOrderingConfig.Type.PRIORITY) {
-            return ordering;
-        }
-        throw new IllegalStateException("priority ordering configuration is not active");
+        checkState(
+                ordering.getType() == QueueOrderingConfig.Type.PRIORITY,
+                "priority ordering configuration is not active");
+        return ordering;
     }
 
     @Getter
@@ -130,7 +134,29 @@ public final class FlexlbConfig {
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
 
-        /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
+        /**
+         * Zero derives Direct / 4 as a logical receiving wire-byte budget at startup.
+         */
+        private long receiveBudgetBytes = 0L;
+
+        /**
+         * Zero derives Schedule receiving slots with body headroom, at most 1024 total.
+         */
+        private int maxReceivingRequests = 0;
+
+        /**
+         * Zero derives a reserved Cancel receiving lane; not shared with Schedule.
+         */
+        private int maxReceivingControlRequests = 0;
+
+        /**
+         * Headers to decoded half-close; does not limit accepted scheduler queue time.
+         */
+        private long receiveTimeoutMs = 30_000L;
+
+        /**
+         * 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。
+         */
         private long shutdownQuietPeriodMs = 5_000L;
     }
 }

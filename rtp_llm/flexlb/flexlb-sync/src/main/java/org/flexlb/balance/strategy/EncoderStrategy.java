@@ -1,12 +1,12 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EncoderEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.RequestData;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.springframework.stereotype.Component;
 
@@ -18,12 +18,12 @@ import java.util.Objects;
 @Component
 public final class EncoderStrategy {
 
-    private final WorkerDirectory workerDirectory;
+    private final EndpointRegistry workerDirectory;
 
     /**
      * Select from the current worker directory and its pinned endpoint generations.
      */
-    public EncoderStrategy(WorkerDirectory workerDirectory) {
+    public EncoderStrategy(EndpointRegistry workerDirectory) {
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
     }
 
@@ -32,7 +32,7 @@ public final class EncoderStrategy {
      * Older requests continue to choose by running, waiting, and locally pending count.
      * Returns null when no worker qualifies.
      */
-    public SelectedRole select(BalanceContext context, String group) {
+    public EncoderSelection select(RequestData context, String group) {
         context.beginRoutingAttempt(RoleType.ENCODER);
         int maxInflightPerWorker =
                 context.getConfig().isQueue()
@@ -47,7 +47,7 @@ public final class EncoderStrategy {
         try {
             for (String address : workerDirectory.endpointAddressSnapshot(RoleType.ENCODER)) {
                 WorkerEndpoint.GenerationPin candidate =
-                        workerDirectory.captureEndpoint(RoleType.ENCODER, address);
+                        workerDirectory.capture(RoleType.ENCODER, address);
                 if (candidate == null) {
                     continue;
                 }
@@ -104,7 +104,7 @@ public final class EncoderStrategy {
             context.recordSelectionReason(
                     RoleType.ENCODER,
                     weighted ? "LEAST_UNCACHED_TOKENS_CONCURRENCY" : "LEAST_CONCURRENT");
-            SelectedRole selected = SelectedRole.stateless(winner, result);
+            EncoderSelection selected = EncoderSelection.create(winner, result);
             winner = null;
             return selected;
         } finally {

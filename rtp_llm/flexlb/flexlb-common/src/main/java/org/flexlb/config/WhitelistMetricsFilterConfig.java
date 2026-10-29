@@ -74,7 +74,7 @@ public class WhitelistMetricsFilterConfig {
      * default exposition minimal:
      * <ul>
      *   <li>Client-to-gRPC-server: network delay (network transfer)</li>
-     *   <li>gRPC server processing: server entry to BalanceContext start</li>
+     *   <li>gRPC server processing: server entry to RequestContext start</li>
      *   <li>Master decision: route+submit time (decision start to batcher queue placement)</li>
      *   <li>Queue wait: batcher queue wait time (enqueue to dispatch trigger)</li>
      *   <li>Dispatch: dispatch-to-ACK time (gRPC dispatch to engine ACK)</li>

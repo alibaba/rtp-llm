@@ -6,7 +6,7 @@ import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.config.CacheMatchMode;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.monitor.FlexlbLogManager;
@@ -38,7 +38,7 @@ import static org.mockito.Mockito.when;
 class FlexlbControlServerTest {
 
     @Mock private GeneralHttpNettyService generalHttpNettyService;
-    @Mock private LBStatusConsistencyService lbStatusConsistencyService;
+    @Mock private MasterStatusService masterStatusService;
     @Mock private CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
     @Mock private FlexlbLogManager flexlbLogManager;
     private WebTestClient webTestClient;
@@ -48,7 +48,7 @@ class FlexlbControlServerTest {
         FlexlbControlServer server =
                 new FlexlbControlServer(
                         generalHttpNettyService,
-                        lbStatusConsistencyService,
+                        masterStatusService,
                         cacheMatchQueryOrchestrator,
                         flexlbLogManager);
         webTestClient = WebTestClient.bindToRouterFunction(server.flexlbControlRoutes()).build();
@@ -158,7 +158,7 @@ class FlexlbControlServerTest {
                 .isEqualTo("action is required");
 
         verifyNoInteractions(
-                cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
+                cacheMatchQueryOrchestrator, generalHttpNettyService, masterStatusService);
     }
 
     @Test
@@ -173,7 +173,7 @@ class FlexlbControlServerTest {
                 .isBadRequest();
 
         verifyNoInteractions(
-                cacheMatchQueryOrchestrator, generalHttpNettyService, lbStatusConsistencyService);
+                cacheMatchQueryOrchestrator, generalHttpNettyService, masterStatusService);
     }
 
     @Test
@@ -194,9 +194,9 @@ class FlexlbControlServerTest {
 
     @Test
     void forwardsCacheMatchFailoverOnFollower() {
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
-        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        when(lbStatusConsistencyService.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
+        when(masterStatusService.isNeedConsistency()).thenReturn(true);
+        when(masterStatusService.isMaster()).thenReturn(false);
+        when(masterStatusService.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
         when(generalHttpNettyService.request(
                         any(CacheMatchFailoverRequest.class),
                         any(URI.class),

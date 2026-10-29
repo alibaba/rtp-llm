@@ -8,13 +8,13 @@ import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RouteService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -60,7 +60,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Root-cause regression for follower request threads blocked on a slow Master. */
+/**
+ * Root-cause regression for follower request threads blocked on a slow Master.
+ */
 class FollowerAsyncForwardingNettyTest {
 
     private static final int EXECUTOR_CORE_SIZE =
@@ -161,7 +163,7 @@ class FollowerAsyncForwardingNettyTest {
                         follower.rejections.get(),
                         "async forwarding must not reject follower request tasks");
                 master.assertExactlyOnceAndOneHop();
-                verify(follower.routeService, never()).route(any());
+                verify(follower.requestScheduler, never()).submit(any());
             } finally {
                 master.releaseResponses();
             }
@@ -259,7 +261,7 @@ class FollowerAsyncForwardingNettyTest {
                     "forward callback executor must not reject completions");
             assertTrue(executorDrained, "follower request executor did not drain");
             assertTrue(callbackExecutorDrained, "forward callback executor did not drain");
-            verify(follower.routeService, never()).route(any());
+            verify(follower.requestScheduler, never()).submit(any());
         }
     }
 
@@ -540,7 +542,8 @@ class FollowerAsyncForwardingNettyTest {
     private static final class Follower implements AutoCloseable {
         private final AtomicInteger rejections = new AtomicInteger();
         private final AtomicInteger channelRejections = new AtomicInteger();
-        private final RouteService routeService = mock(RouteService.class);
+        private final RequestScheduler requestScheduler = mock(RequestScheduler.class);
+        private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
         private final int requestQueueCapacity;
         private final ThreadPoolExecutor requestExecutor;
         private final ThreadPoolExecutor channelExecutor;
@@ -550,7 +553,7 @@ class FollowerAsyncForwardingNettyTest {
 
         private Follower(String masterHttpAddress, int requestQueueCapacity) throws Exception {
             this.requestQueueCapacity = requestQueueCapacity;
-            LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+            MasterStatusService consistency = mock(MasterStatusService.class);
             when(consistency.isNeedConsistency()).thenReturn(true);
             when(consistency.isMaster()).thenReturn(false);
             when(consistency.getMasterHostIpPort()).thenReturn(masterHttpAddress);
@@ -558,7 +561,7 @@ class FollowerAsyncForwardingNettyTest {
 
             ConfigService configService = mock(ConfigService.class);
             var routingConfig = org.flexlb.mock.TestFlexlbConfigs.create();
-            routingConfig.setDispatcher(DispatcherConfig.nonBatch());
+            routingConfig.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
             when(configService.loadBalanceConfig()).thenReturn(routingConfig);
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
             channelEventLoop = new NioEventLoopGroup(1);
@@ -586,13 +589,15 @@ class FollowerAsyncForwardingNettyTest {
                             channelExecutor);
 
             FlexlbServiceImpl service =
-                    new FlexlbServiceImpl(
-                            routeService,
+                    FlexlbServiceTestSupport.create(
+                            requestScheduler,
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                    requestState),
                             consistency,
                             healthReporter,
                             forwarder,
                             configService,
-                            mock(BatchSchedulerReporter.class),
+                            mock(DeliveryMetricsReporter.class),
                             mock(ServerScheduleLatencyRecorder.class),
                             mock(RequestSchedulerReporter.class));
 

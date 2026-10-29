@@ -1,64 +1,56 @@
 # Resource Management
 
-当前实现没有全局的动态许可信号量。容量约束分为三层：
+容量由 endpoint 的本地预留与引擎观测共同决定。`EndpointRegistry` 管理 worker 代际，
+`PrefillState`、`DecodeState`、`EncoderEndpoint` 分别管理各阶段的资源；
+`RequestContext` 保存请求生命周期，`AbstractRequestScheduler` 将状态变化投影到资源账本。
 
-1. `PriorityScheduler` 用 `maxOutstandingRequestsGlobal` 限制 Master 拥有的 QUEUE 请求总数。
-2. `ResourceMeasure` 在路由时判断单个 worker 是否可选。
-3. `PrefillEndpoint` / `DecodeEndpoint` 用本地预留账本保护尚未反映到引擎
-   `WorkerStatus` 中的调度决策。
+## Worker 代际与地址
 
-主要代码：`balance/resource/`、`balance/endpoint/`、`DefaultRouter` 和
-`PriorityScheduler`。
+`EndpointRegistry` 按角色和 `ip:httpPort@engineIndex` 管理逻辑 worker，包括 N=1 的 `@0`。
+网络 RPC 使用物理地址与相应的 frontend/status 端口。选点先读取不可变快照，再取得对应代际的
+`GenerationPin`；代际变化时重新选点。退休先关闭路由入口，再在锁外等待派发和清理完成。
+旧回调只能修改与其 WorkerStatus、请求 ID、reservation token 匹配的记录。
 
-## EndpointRegistry
+## Prefill 队列与容量
 
-`EndpointRegistry` 按角色和 `ip:port` 维护 Prefill、Decode、P/D Fusion 与 VIT endpoint。
-Encoder 有独立的 `EncoderEndpoint`，不会与同地址的 VIT 或 Generation endpoint 共用任务账本。
-选中 Encoder 后，endpoint 记录尚未在 WorkerStatus 中出现的请求及预计未命中编码长度；
-首次观察到任务前按 `seq_len - encoder_cache_hit_len` 记账。WorkerStatus 出现 waiting/running 任务后，
-用该组去重后的未命中合成输入 `input_length` 替换预测值，直到任务结束；不扣减 `prefix_length`。
-全命中组可能只上报 finished，其 `input_length` 是原始 prompt 长度，不计入编码负载；
-finished、取消或失活后按请求 ID 清除本地记录。
-同一地址的 `WorkerStatus` 代际变化时，registry 原子替换 endpoint 并关闭旧实例；
-过期 worker 只能用当时观察到的 `WorkerStatus` 对象条件删除，避免删掉同地址的
-新代际。
+QUEUE 请求进入选定 Prefill 的 `PrefillQueueRunner`，由 `PrefillState` 保存队列、正在准备和已提交的批次。
+`GroupingPolicy` 使用同一份约束完成实际凑批与路由时的排队预测：最大请求数、Token/KV 容量、
+预测执行时间和收集窗口。引擎没有报告 Token 上限时使用配置的 fallback batch token capacity。
+收集窗口可动态更新；已经提交的 DecisionGroup 保留当时的策略与成员。
+Prefill 放置队列不以请求数量过滤缓存命中最优 worker，也不通过驱逐排队请求腾出入口。
+QUEUE 先比较全体可调度 worker 的 cache 与预计工作量，请求并发上限在交付阶段执行；
+DIRECT 仍在选定 worker 后检查其并发容量。
 
-## Prefill 可用性与队列
+BATCH 在准备和发送时持有批次资源；NON_BATCH 由
+`dispatcher.maxInflightPerPrefillWorker` 限制未确认的请求数。引擎有效状态将本地预留转为
+已观测任务，避免重复记账。未明确发送的失败可以回滚；发送结果不确定时继续保留资源，
+直到独立的完成或清理证据到达。
 
-`PrefillResourceMeasure` 要求 endpoint 存活，且引擎观测到的有效待处理请求低于
-`router.roles.prefill.availability.maxPendingRequests`（默认 64）。上下线切换使用
-`router.availabilityHysteresisPercent`（默认 15）做滞回，避免在阈值附近抖动。
+## Decode 预留与引擎执行
 
-QUEUE scheduler 选中 Prefill 后，请求进入该 endpoint 的 `WorkerBatcher`。
-`BatchDispatcherConfig.maxWaitingRequestsPerPrefillWorker`（默认 1024）是 batcher 等待队列的
-硬上限，与路由层的 worker 可用性阈值是不同责任。
+`DecodeResources.AdmissionCapacity` 统一检查最大引擎请求数、硬 KV 与输入加输出上限的 KV。
+请求注册时冻结其配置，路由、预留、抢占和派发使用同一约束。
+`tryReserveQueuedRequest` 在路由发布前预留并发与 KV；已经进入 Prefill 队列的请求继续占用
+placement 容量，但不占引擎 dispatch 并发。真正派发前取得精确 reservation 对应的 dispatch permit。
 
-## Decode 容量与本地预留
+有效 WorkerStatus 将预留转换为引擎确认记录。完整活动任务表中缺失已确认请求时，释放其容量，
+同时保留原请求关联，标记 `waitingForWorkerFinishedReport`，等待迟到的 Finished、请求清理或代际退休。
+重复缺失不会再次释放容量；任务重新出现时恢复实际容量。不能把“没有占用容量”当成“已收到完成”。
 
-`DecodeResourceMeasure` 要求 endpoint 存活，并同时检查：
+RPC 抢占先确认所有 victim 的请求与取消地址，再建立精确声明，收到独立的 Decode 释放证据后
+提交 incoming 预留。取消 ACK 本身不能证明 Decode 已释放。
+RETURN 模式在同一资源事务中声明所有 victim 并预留 incoming，将 victim ID 随路由返回；
+incoming 发送前的本地回滚释放该声明，发送或引擎确认后继续等待 victim 的独立完成证据。
 
-- 引擎可见负载未超过可选的
-  `router.roles.decode.availability.maxEngineRequests`。
-- 真实 KV 使用率未超过 `maxKvUsagePercent`（默认 90）；同样使用
-  `availabilityHysteresisPercent` 做滞回。
+## Encoder
 
-`DecodeEndpoint.reserve()` 在对外发布前建立 shadow 预留，记录并发槽位、硬 KV
-和预期 KV。已在 Prefill 队列中的预留继续保护 KV，但不计入引擎面的
-concurrency，避免引擎空闲时被本地排队预留假性压满。
-
-WorkerStatus 到达后，`DecodeEndpoint.calibrate()` 用引擎已确认状态对账。对于取消或
-发布结果不确定的请求，Engine fence 在权威终态到达前持有相应账本，防止
-KV 或并发容量被提前释放并二次分配。
-
-## 策略层使用
-
-`ResourceMeasureFactory` 按指标注册 Prefill / Decode measure。`DefaultRouter` 及其策略先
-排除不可用 endpoint，再根据等待时间、KV 负载、cache 亲和性和配置的候选集
-选择 worker。QUEUE 路径成功后，endpoint 账本由 `PriorityScheduler` 负责提交、
-回滚和终态释放。
+Encoder 有独立的阶段队列和 `EncoderEndpoint`，同一请求 ID 可同时存在 Encoder 与 Generation 记录。
+首次 WorkerStatus 前按 `seq_len - encoder_cache_hit_len` 记录预计编码工作量；观测到任务后
+使用去重的活动任务 `input_length` 替换预测值。全命中任务可能直接出现在 Finished 中，
+其原始 prompt 长度不参与在途编码负载。完成、取消或失活会清除本地记录；Encoder 不发送生成阶段的 Cancel RPC。
 
 ## 观测
 
-`BatchSchedulerReporter` 上报 endpoint 队列深度、等待时间、batch 大小、inflight、
-Decode 负载和本地 KV 预留。`PrioritySchedulerReporter` 上报优先级准入、抢占、
-取消和分层 Decode 负载。观测失败不得改变调度结果或资源所有权。
+指标使用 `getMetricIpPort()`：单引擎为 `ip:port`，多引擎包含 `@engineIndex`。
+`DeliveryMetricsReporter` 上报队列、批次与在途请求，`RequestSchedulerReporter` 上报准入、抢占、取消
+和 Decode 分层容量。指标失败不能改变资源记账或业务结果。

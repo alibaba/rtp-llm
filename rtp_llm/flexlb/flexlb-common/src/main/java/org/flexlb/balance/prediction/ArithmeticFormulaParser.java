@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.AggregateFuncNode;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.ConstantNode;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Function;
@@ -16,7 +17,9 @@ import static org.flexlb.balance.prediction.ArithmeticFormulaAst.evaluate;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.function;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.unary;
 
-/** Recursive-descent grammar and binding/aggregate validation. */
+/**
+ * Recursive-descent grammar and binding/aggregate validation.
+ */
 final class ArithmeticFormulaParser {
     private final String input;
     private final Map<String, ConstantNode> parameters = new LinkedHashMap<>();
@@ -42,10 +45,10 @@ final class ArithmeticFormulaParser {
         this.allowAggregates = allowAggregates;
         int count = 0;
         for (int index : this.variables.values()) {
-            if (index < 0 || index == Integer.MAX_VALUE) {
-                throw new IllegalArgumentException(
-                        "Variable index is outside its domain: " + index);
-            }
+            checkArgument(
+                    index >= 0 && index != Integer.MAX_VALUE,
+                    "Variable index is outside its domain: %s",
+                    index);
             count = Math.max(count, index + 1);
         }
         this.variableCount = count;

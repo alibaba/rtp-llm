@@ -13,6 +13,8 @@ import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.engine.grpc.GrpcCallTrace;
+import org.flexlb.engine.grpc.GrpcTransportObserver;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -56,9 +58,20 @@ public class GrpcChannelFactory {
     }
 
     public ManagedChannel create(GrpcTarget target) {
+        return create(target, null);
+    }
+
+    public ManagedChannel create(GrpcTarget target, GrpcTransportObserver observer) {
         log.info("Creating gRPC channel: {}", target);
-        return NettyChannelBuilder.forAddress(target.host(), target.port())
-                .channelType(channelType(eventLoopGroup))
+        NettyChannelBuilder builder = NettyChannelBuilder.forAddress(target.host(), target.port());
+        if (observer == null) {
+            builder.channelType(channelType(eventLoopGroup));
+        } else if (eventLoopGroup instanceof EpollEventLoopGroup) {
+            builder.channelFactory(observer::newEpollChannel);
+        } else {
+            builder.channelFactory(observer::newChannel);
+        }
+        return builder.intercept(GrpcCallTrace.INTERCEPTOR)
                 .withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)

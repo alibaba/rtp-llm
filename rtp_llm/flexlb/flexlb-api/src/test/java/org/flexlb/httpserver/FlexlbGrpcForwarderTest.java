@@ -13,7 +13,7 @@ import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.config.ConfigService;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
@@ -32,20 +32,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class FlexlbGrpcForwarderTest {
 
     @Test
     void missingMasterDoesNotAttemptRpc() {
-        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+        MasterStatusService consistency = mock(MasterStatusService.class);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
@@ -60,7 +60,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void missingMasterStateQueryReturnsNullWithoutGuardSideEffects() {
-        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+        MasterStatusService consistency = mock(MasterStatusService.class);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
@@ -78,7 +78,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void grpcFailureDoesNotSetIndependentDeadlineAndKeepsChannelUntilShutdown() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
@@ -107,7 +107,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void grpcFailureLogsStatusDescriptionAndThrowableForScheduleAndCancel() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
@@ -169,7 +169,9 @@ class FlexlbGrpcForwarderTest {
                 assertTrue(event.getFormattedMessage().contains("status=UNKNOWN"));
                 assertEquals(
                         expectedDescription,
-                        event.getFormattedMessage().split(" description=", 2)[1]);
+                        event.getFormattedMessage()
+                                .split(" description=", 2)[1]
+                                .split(" cause=", 2)[0]);
                 assertFalse(event.getFormattedMessage().contains("\n"));
                 assertFalse(event.getFormattedMessage().contains("\r"));
                 assertFalse(event.getFormattedMessage().contains("\uD83D"));
@@ -191,7 +193,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void forwardedRequestCannotBeForwardedAgain() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -212,7 +214,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void cancellationReceivedBySecondFollowerIsNotRelayedAgain() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -235,7 +237,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void staleSelfLeaderIsRejectedWithoutOpeningChannel() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.3:7001");
+        MasterStatusService consistency = masterAt("10.0.0.3:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -251,7 +253,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void staleSelfLeaderNeverBlocksOnSynchronousRefreshOrOpensChannel() throws Exception {
-        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+        MasterStatusService consistency = mock(MasterStatusService.class);
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.3:7001");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
@@ -261,13 +263,15 @@ class FlexlbGrpcForwarderTest {
                 await(forwarder.forwardScheduleToMaster(request(7)));
 
         assertEquals("SELF_FORWARD_BLOCKED", result.failure());
-        verify(consistency, never()).refreshMasterHost(true);
+        verify(consistency).getMasterHostIpPort();
+        verify(consistency).getLocalHostIp();
+        verifyNoMoreInteractions(consistency);
         assertTrue(channels(forwarder).isEmpty());
     }
 
     @Test
     void shutdownRejectsNewForwardWithoutCreatingOrLeakingAChannel() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -284,7 +288,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void forwardedStateQueryCannotBeForwardedAgain() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -303,7 +307,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void stateQueryNeverForwardsToStaleSelfTarget() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.3:7001");
+        MasterStatusService consistency = masterAt("10.0.0.3:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -321,7 +325,7 @@ class FlexlbGrpcForwarderTest {
 
     @Test
     void unifiedGuardGivesHopLimitPrecedenceForBothOperations() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.3:7001");
+        MasterStatusService consistency = masterAt("10.0.0.3:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -346,7 +350,9 @@ class FlexlbGrpcForwarderTest {
         verify(consistency, times(2)).getMasterHostIpPort();
         verify(consistency, times(2)).getLocalHostIp();
         verify(reporter, times(2)).reportForwardToMasterResult("10.0.0.3", "HOP_LIMIT");
-        verify(reporter, never()).reportForwardToMasterResult(anyString(), eq("SELF_TARGET"));
+        verify(reporter, never())
+                .reportForwardToMasterResult(
+                        org.mockito.ArgumentMatchers.anyString(), eq("SELF_TARGET"));
     }
 
     @Test
@@ -550,7 +556,7 @@ class FlexlbGrpcForwarderTest {
      */
     @Test
     void forwardByteBudgetRejectsOversizeForwardBeforeRpcAndReleasesFully() throws Exception {
-        LBStatusConsistencyService consistency = masterAt("10.0.0.2:7001");
+        MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -604,7 +610,7 @@ class FlexlbGrpcForwarderTest {
     }
 
     private static FlexlbGrpcForwarder forwarder(
-            LBStatusConsistencyService consistency, EngineHealthReporter reporter) {
+            MasterStatusService consistency, EngineHealthReporter reporter) {
         return new FlexlbGrpcForwarder(
                 consistency,
                 mock(ConfigService.class),
@@ -613,8 +619,8 @@ class FlexlbGrpcForwarderTest {
                 mock(Executor.class));
     }
 
-    private static LBStatusConsistencyService masterAt(String address) {
-        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
+    private static MasterStatusService masterAt(String address) {
+        MasterStatusService consistency = mock(MasterStatusService.class);
         when(consistency.getMasterHostIpPort()).thenReturn(address);
         return consistency;
     }

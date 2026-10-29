@@ -33,12 +33,16 @@ public enum RoleType {
         this.description = description;
     }
 
-    /** Whether this role executes Prefill work, including fused Prefill/Decode. */
+    /**
+     * Whether this role executes Prefill work, including fused Prefill/Decode.
+     */
     public boolean supportsPrefill() {
         return this == PREFILL || this == PDFUSION;
     }
 
-    /** Whether cache polling supplies detailed block keys for the routing index. */
+    /**
+     * Whether cache polling supplies detailed block keys for the routing index.
+     */
     public boolean requiresCacheKeys() {
         return supportsPrefill();
     }

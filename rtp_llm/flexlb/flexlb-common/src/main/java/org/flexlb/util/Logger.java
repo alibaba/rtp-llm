@@ -18,7 +18,9 @@ public final class Logger {
         return log.isDebugEnabled();
     }
 
-    /** Returns whether fine-grained per-candidate tracing is enabled. */
+    /**
+     * Returns whether fine-grained per-candidate tracing is enabled.
+     */
     public static boolean isTraceEnabled() {
         return log.isTraceEnabled();
     }

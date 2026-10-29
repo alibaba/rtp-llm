@@ -52,19 +52,23 @@ import static org.objectweb.asm.Opcodes.IRETURN;
 import static org.objectweb.asm.Opcodes.RETURN;
 import static org.objectweb.asm.Opcodes.V17;
 
-/** JVM backend: fused aggregates and scoped common subexpressions, without reassociation. */
+/**
+ * JVM backend: fused aggregates and scoped common subexpressions, without reassociation.
+ */
 final class ArithmeticFormulaCompiler {
     private static final String CLASS_NAME =
             "org/flexlb/balance/prediction/ArithmeticFormula$Generated";
     private static final String SIGNATURE = "([DLjava/util/List;)D";
     private final MethodVisitor method;
+    private final boolean objectBindings;
     private int nextLocal = 3; // this, scalar variables, batch items
 
-    private ArithmeticFormulaCompiler(MethodVisitor method) {
+    private ArithmeticFormulaCompiler(MethodVisitor method, boolean objectBindings) {
         this.method = method;
+        this.objectBindings = objectBindings;
     }
 
-    static Executable compile(Node root) {
+    static Executable compile(Node root, boolean objectBindings) {
         try {
             ClassWriter writer =
                     new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
@@ -85,7 +89,7 @@ final class ArithmeticFormulaCompiler {
             MethodVisitor method =
                     writer.visitMethod(ACC_PUBLIC, "evaluate", SIGNATURE, null, null);
             method.visitCode();
-            new ArithmeticFormulaCompiler(method).expression(root);
+            new ArithmeticFormulaCompiler(method, objectBindings).expression(root);
             method.visitInsn(DRETURN);
             method.visitMaxs(0, 0);
             method.visitEnd();
@@ -111,7 +115,9 @@ final class ArithmeticFormulaCompiler {
         double evaluate(double[] batch, double[] sums);
     }
 
-    /** Same AST and ordered additions as full evaluation; only the lifetime of sums changes. */
+    /**
+     * Same AST and ordered additions as full evaluation; only the lifetime of sums changes.
+     */
     static Incremental compileIncremental(Node root) {
         Map<AggregateFuncNode, Integer> aggregates = new LinkedHashMap<>();
         collectAggregates(root, aggregates, new HashSet<>());
@@ -140,8 +146,8 @@ final class ArithmeticFormulaCompiler {
 
             MethodVisitor append = writer.visitMethod(ACC_PUBLIC, "append", "([D[D)V", null, null);
             append.visitCode();
-            var compiler = new ArithmeticFormulaCompiler(append);
-            Scope item = new Scope(1, -1);
+            var compiler = new ArithmeticFormulaCompiler(append, false);
+            Scope item = new Scope(1, -1, false);
             for (var entry : aggregates.entrySet()) {
                 append.visitVarInsn(ALOAD, 2);
                 append.visitLdcInsn(entry.getValue());
@@ -156,8 +162,8 @@ final class ArithmeticFormulaCompiler {
             MethodVisitor evaluate =
                     writer.visitMethod(ACC_PUBLIC, "evaluate", "([D[D)D", null, null);
             evaluate.visitCode();
-            compiler = new ArithmeticFormulaCompiler(evaluate);
-            Scope batch = new Scope(1, -1);
+            compiler = new ArithmeticFormulaCompiler(evaluate, false);
+            Scope batch = new Scope(1, -1, false);
             for (var entry : aggregates.entrySet()) {
                 evaluate.visitVarInsn(ALOAD, 2);
                 evaluate.visitLdcInsn(entry.getValue());
@@ -190,7 +196,7 @@ final class ArithmeticFormulaCompiler {
     }
 
     private void expression(Node root) {
-        Scope outer = new Scope(1, 2);
+        Scope outer = new Scope(1, 2, false);
         Map<AggregateFuncNode, Integer> aggregates = new LinkedHashMap<>();
         collectAggregates(root, aggregates, new HashSet<>());
         if (aggregates.size() > 1) {
@@ -219,7 +225,9 @@ final class ArithmeticFormulaCompiler {
         }
     }
 
-    /** One traversal, independent ordered accumulators, shared per-item expressions. */
+    /**
+     * One traversal, independent ordered accumulators, shared per-item expressions.
+     */
     private void fuseAggregates(Map<AggregateFuncNode, Integer> aggregates, Scope outer) {
         aggregates.replaceAll(
                 (aggregate, ignored) -> {
@@ -250,9 +258,13 @@ final class ArithmeticFormulaCompiler {
         method.visitVarInsn(ALOAD, iterator);
         method.visitMethodInsn(
                 INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", true);
-        method.visitTypeInsn(CHECKCAST, "[D");
+        method.visitTypeInsn(
+                CHECKCAST,
+                objectBindings
+                        ? "org/flexlb/balance/prediction/ArithmeticFormula$Variables"
+                        : "[D");
         method.visitVarInsn(ASTORE, vars);
-        Scope itemScope = new Scope(vars, -1);
+        Scope itemScope = new Scope(vars, -1, objectBindings);
         for (var entry : aggregates.entrySet()) {
             method.visitVarInsn(DLOAD, entry.getValue());
             emit(entry.getKey().arg(), itemScope);
@@ -263,7 +275,7 @@ final class ArithmeticFormulaCompiler {
         method.visitLabel(done);
         method.visitJumpInsn(GOTO, end);
         method.visitLabel(scalar);
-        Scope scalarScope = new Scope(outer.vars, -1);
+        Scope scalarScope = new Scope(outer.vars, -1, false);
         for (var entry : aggregates.entrySet()) {
             emit(entry.getKey().arg(), scalarScope);
             method.visitVarInsn(DSTORE, entry.getValue());
@@ -282,7 +294,16 @@ final class ArithmeticFormulaCompiler {
             case VariableNode variable -> {
                 method.visitVarInsn(ALOAD, scope.vars);
                 method.visitLdcInsn(variable.varIndex());
-                method.visitInsn(DALOAD);
+                if (scope.objectBindings) {
+                    method.visitMethodInsn(
+                            INVOKEINTERFACE,
+                            "org/flexlb/balance/prediction/ArithmeticFormula$Variables",
+                            "variable",
+                            "(I)D",
+                            true);
+                } else {
+                    method.visitInsn(DALOAD);
+                }
             }
             case UnaryNode unary -> {
                 emit(unary.operand(), scope);
@@ -339,11 +360,13 @@ final class ArithmeticFormulaCompiler {
     private static final class Scope {
         private final int vars;
         private final int items;
+        private final boolean objectBindings;
         private final Map<Node, Integer> locals = new HashMap<>();
 
-        private Scope(int vars, int items) {
+        private Scope(int vars, int items, boolean objectBindings) {
             this.vars = vars;
             this.items = items;
+            this.objectBindings = objectBindings;
         }
     }
 }

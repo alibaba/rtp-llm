@@ -10,6 +10,8 @@ import org.flexlb.metric.MicrometerFlexMonitor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -32,8 +34,10 @@ import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_HI
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -229,5 +233,21 @@ class CacheMetricsReporterTest {
         FlexMetricTags roleTags = FlexMetricTags.of("role", RoleType.PREFILL.name());
         verify(monitor).report(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, roleTags, 128L);
         verify(monitor).report(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, roleTags, 256L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void brokenRegistrationAndReportDoNotStopOtherCacheMetrics(boolean error) {
+        Throwable failure =
+                error
+                        ? new AssertionError("monitor failed")
+                        : new IllegalStateException("monitor failed");
+        doThrow(failure).when(monitor).register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE);
+        assertDoesNotThrow(reporter::init);
+        verify(monitor).register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE);
+        var tags = FlexMetricTags.of("engineIp", "10.0.0.1", "role", "PREFILL");
+        doThrow(failure).when(monitor).report(CACHE_ENGINE_LOCAL_COUNT, tags, 2);
+        assertDoesNotThrow(() -> reporter.reportEngineLocalMetrics("10.0.0.1", "PREFILL", 2));
+        verify(monitor).report(CACHE_ENGINE_LOCAL_BYTES, tags, 272L);
     }
 }

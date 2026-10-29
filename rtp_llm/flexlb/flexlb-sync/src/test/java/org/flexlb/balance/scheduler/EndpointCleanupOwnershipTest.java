@@ -1,13 +1,17 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointCleanupTestSupport;
 import org.flexlb.balance.endpoint.EndpointCleanupTestSupport.PrefillLedger;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,13 +19,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.lang.management.ManagementFactory;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
@@ -31,16 +33,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Cleanup uses current directory membership, including terminal records, rather than live Slot state. */
+/**
+ * Cleanup uses current directory membership, including terminal records, rather than live request state.
+ */
 class EndpointCleanupOwnershipTest {
     private FlexlbConfig config;
-    private RequestRegistry registry;
+    private AbstractRequestScheduler registry;
 
     @BeforeEach
     void setup() {
@@ -48,81 +52,179 @@ class EndpointCleanupOwnershipTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         registry =
-                new RequestRegistry(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
-                        mock(BatchSchedulerReporter.class),
-                        mock(RequestSchedulerReporter.class));
+                        mock(DeliveryMetricsReporter.class),
+                        mock(RequestSchedulerReporter.class),
+                        mock(TheoryCacheHitReporter.class));
     }
 
     @AfterEach
     void close() {
-        if (registry.closeAdmissionAndAwaitMutations()) {
+        if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
             registry.closeOutstandingAndTerminalize();
-            registry.closeExpiration();
-            registry.closePublisher();
+            SchedulerTestSupport.timer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
+                    .close();
+            SchedulerTestSupport.closeRequestExecutors(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
     }
 
     @Test
     void currentDirectoryProtectsReservationButEarlierSnapshotCanEvictIt() {
         Set<String> beforeRegistration =
-                registry.snapshotSlots().stream()
-                        .map(RequestSlot::requestId)
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .snapshotActive()
+                        .stream()
+                        .map(context -> context.data().getRequestId())
                         .collect(java.util.stream.Collectors.toSet());
-        String id = "7001";
-        registry.register(RequestLifecycleTestSupport.context(config, id));
+        long id = 7001L;
+        registry.register(
+                RequestProtocolTestSupport.context(config, String.valueOf(id)),
+                () -> {},
+                StrategyErrorType.BATCH_SLO_EXPIRED);
         var endpoint =
-                new DecodeEndpoint(
+                EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        mock(EndpointEventProjector.class));
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                mock(AbstractRequestScheduler.class)));
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            assertNotNull(endpoint.reserveUnqueued(pin, id, 1L, 1L, 50));
+            assertNotNull(
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            endpoint, pin, String.valueOf(id), 1L, 1L, 50));
         }
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
-        assertEquals(1, endpoint.getInflightCount());
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
+        assertEquals(1, endpoint.resourceSnapshot().reservedCount());
         // Models moving the ownership scan outside the endpoint lock without revalidation.
         assertEquals(1, endpoint.evictExpiredRequests(-1L, beforeRegistration::contains));
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertTrue(
-                registry.retainForSchedulerCleanup(id),
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .retainsIdentity(String.valueOf(id)),
                 "request is still registered despite premature eviction");
     }
 
     @Test
     void terminalRecordMembershipIsConservativeButNotEquivalentToLiveOwnership() throws Exception {
-        String id = "7002";
-        var future = registry.register(RequestLifecycleTestSupport.context(config, id));
-        RequestSlot original = registry.requestSlot(id);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
+        long id = 7002L;
+        var future =
+                registry.register(
+                        RequestProtocolTestSupport.context(config, String.valueOf(id)),
+                        () -> {},
+                        StrategyErrorType.BATCH_SLO_EXPIRED);
+        RequestContext original = registry.requests.findActive(String.valueOf(id));
+        registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, java.util.concurrent.TimeUnit.SECONDS);
-        assertEquals(0, registry.trackedRequestCount());
-        assertTrue(registry.retainForSchedulerCleanup(id));
-        assertSame(original, registry.requestSlot(id), "terminal record remains indexed");
-        assertTrue(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
-        assertFalse(registry.retainForSchedulerCleanup(id));
-        registry.register(RequestLifecycleTestSupport.context(config, id));
-        assertNotSame(original, registry.requestSlot(id));
-        assertTrue(registry.retainForSchedulerCleanup(id));
-        assertFalse(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
+        assertEquals(
+                0,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .liveRequestCount());
         assertTrue(
-                registry.retainForSchedulerCleanup(id),
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .retainsIdentity(String.valueOf(id)));
+        assertNull(
+                registry.requests.findActive(String.valueOf(id)),
+                "finished requests leave the active context directory");
+        assertEquals(
+                RequestState.Phase.CANCELLED,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(String.valueOf(id), 0L)
+                        .state());
+        RequestState retiredRecord0 =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(original.data().getRequestId(), 0L);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord0),
+                                Long.MAX_VALUE));
+        assertFalse(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .retainsIdentity(String.valueOf(id)));
+        var replacementFuture =
+                registry.register(
+                        RequestProtocolTestSupport.context(config, String.valueOf(id)),
+                        () -> {},
+                        StrategyErrorType.BATCH_SLO_EXPIRED);
+        assertNotSame(original, registry.requests.findActive(String.valueOf(id)));
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .retainsIdentity(String.valueOf(id)));
+        assertFalse(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord0),
+                                Long.MAX_VALUE));
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .retainsIdentity(String.valueOf(id)),
                 "old generation cleanup must preserve replacement");
+        registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
+        replacementFuture.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        RequestState replacement =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(String.valueOf(id), 0L);
+        assertEquals(RequestState.Phase.CANCELLED, replacement.state());
+        assertNotSame(retiredRecord0, replacement);
+        assertFalse(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord0),
+                                Long.MAX_VALUE));
+        assertSame(
+                replacement,
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(String.valueOf(id), 0L),
+                "old sweeper cannot delete a new terminal record");
+        RequestState equalCopy =
+                new RequestState(
+                        replacement.requestId(),
+                        replacement.originalNumericRequestId(),
+                        replacement.state(),
+                        replacement.deliveryClaimKind(),
+                        replacement.batchId(),
+                        replacement.createdAtMs(),
+                        replacement.updatedAtMs(),
+                        replacement.detail());
+        assertEquals(replacement, equalCopy);
+        assertFalse(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, equalCopy),
+                                Long.MAX_VALUE));
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, replacement),
+                                Long.MAX_VALUE));
     }
 
     @ParameterizedTest(name = "Decode confirmed={0}: absent lookup cannot release the replacement")
     @ValueSource(booleans = {false, true})
     void registrationAfterAbsentCheckAcquiresFreshReservation(boolean confirmed) throws Exception {
-        String id = "7003";
+        long id = 7003L;
         var endpoint =
-                new DecodeEndpoint(
+                EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        mock(EndpointEventProjector.class));
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                mock(AbstractRequestScheduler.class)));
         var oldReservation = reserve(endpoint, id, 100L, 150L);
         if (confirmed) {
-            EndpointCleanupTestSupport.confirmDecode(endpoint, id);
+            EndpointCleanupTestSupport.confirmDecode(endpoint, String.valueOf(id));
         }
         Runnable assertOldLedger =
                 () -> {
@@ -132,16 +234,14 @@ class EndpointCleanupOwnershipTest {
                             confirmed ? 1 : 0,
                             confirmed ? 0L : 100L,
                             confirmed ? 0L : 150L);
-                    assertEquals(confirmed, endpoint.isAcceptedByEngine(oldReservation));
+                    assertEquals(confirmed, endpoint.ownership(oldReservation).confirmed());
                 };
         assertOldLedger.run();
 
-        // Confirmed entries are queried once in the shadow loop, then again in
-        // the confirmed-record loop. Force registration at the latter lookup.
+        // Every owned entry now has one retention check in the canonical sweep.
         var result =
                 raceRegistrationAfterAbsentCheck(
                         id,
-                        confirmed ? 1 : 0,
                         retain -> endpoint.evictExpiredRequests(-1L, retain),
                         () -> reserve(endpoint, id, 200L, 350L),
                         assertOldLedger);
@@ -152,20 +252,48 @@ class EndpointCleanupOwnershipTest {
         var replacement = result.owner();
         assertNotEquals(oldReservation.reservationToken(), replacement.reservationToken());
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
-        endpoint.release(oldReservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+        endpoint.release(oldReservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
 
-        RequestSlot slot = registry.requestSlot(id);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        RequestContext requestContext = registry.requests.findActive(String.valueOf(id));
+        registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
-        assertTrue(registry.removeExactTerminalRecord(slot, Long.MAX_VALUE));
-        assertEquals(1, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        RequestState retiredRecord1 =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(requestContext.data().getRequestId(), 0L);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord1),
+                                Long.MAX_VALUE));
+        assertEquals(
+                1,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
-        endpoint.release(replacement, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        endpoint.release(replacement, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
     }
 
@@ -178,8 +306,7 @@ class EndpointCleanupOwnershipTest {
         ledger.advanceBeyondTtl();
         var result =
                 raceRegistrationAfterAbsentCheck(
-                        id,
-                        0,
+                        Long.parseLong(id),
                         ledger::sweep,
                         () -> ledger.commit(id, 2L, 70L),
                         () -> ledger.assertOwned(old, 20L));
@@ -192,97 +319,234 @@ class EndpointCleanupOwnershipTest {
         ledger.assertOwned(replacement, 70L);
 
         ledger.advanceBeyondTtl();
-        assertEquals(0, ledger.sweep(registry::retainForSchedulerCleanup));
+        assertEquals(
+                0,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertOwned(replacement, 70L);
-        RequestSlot slot = registry.requestSlot(id);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals(0, ledger.sweep(registry::retainForSchedulerCleanup));
+        RequestContext requestContext = registry.requests.findActive(id);
+        registry.cancel(id, 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(
+                0,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertOwned(replacement, 70L);
-        assertTrue(registry.removeExactTerminalRecord(slot, Long.MAX_VALUE));
-        assertEquals(1, ledger.sweep(registry::retainForSchedulerCleanup));
+        RequestState retiredRecord2 =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(requestContext.data().getRequestId(), 0L);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord2),
+                                Long.MAX_VALUE));
+        assertEquals(
+                1,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertEmpty();
         ledger.assertStaleReleaseIsIgnored(replacement);
-        assertEquals(0, ledger.sweep(registry::retainForSchedulerCleanup));
+        assertEquals(
+                0,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertEmpty();
 
         // Reacquisition with a limit of one checks that cleanup returned the
         // actual admission capacity, including the batch lease, exactly once.
-        registry.register(RequestLifecycleTestSupport.context(config, id));
+        registry.register(
+                RequestProtocolTestSupport.context(config, id),
+                () -> {},
+                StrategyErrorType.BATCH_SLO_EXPIRED);
         var third = ledger.commit(id, 3L, 90L);
         ledger.assertOwned(third, 90L);
         ledger.assertStaleReleaseIsIgnored(replacement);
         ledger.assertOwned(third, 90L);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
-        assertTrue(registry.removeExactTerminalRecord(registry.requestSlot(id), Long.MAX_VALUE));
+        registry.cancel(id, 0L, CancelReason.CLIENT_CANCELLED);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry,
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                .repository(registry)
+                                                .getRequestState(id, 0L)),
+                                Long.MAX_VALUE));
         ledger.advanceBeyondTtl();
-        assertEquals(1, ledger.sweep(registry::retainForSchedulerCleanup));
+        assertEquals(
+                1,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertEmpty();
     }
 
     @ParameterizedTest(name = "Prefill batch={0}: replacement directory entry retains old work")
     @ValueSource(booleans = {false, true})
     void prefillReplacementDirectoryEntryConservativelyRetainsOldWork(boolean batch) {
-        String id = "7006";
-        registry.register(RequestLifecycleTestSupport.context(config, id));
+        long id = 7006L;
+        registry.register(
+                RequestProtocolTestSupport.context(config, String.valueOf(id)),
+                () -> {},
+                StrategyErrorType.BATCH_SLO_EXPIRED);
         var ledger = new PrefillLedger(batch);
-        var old = ledger.commit(id, 1L, 20L);
+        var old = ledger.commit(String.valueOf(id), 1L, 20L);
         ledger.advanceBeyondTtl();
-        RequestSlot original = registry.requestSlot(id);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals(0, ledger.sweep(registry::retainForSchedulerCleanup));
+        RequestContext original = registry.requests.findActive(String.valueOf(id));
+        registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(
+                0,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertOwned(old, 20L);
-        assertTrue(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
+        RequestState retiredRecord3 =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(original.data().getRequestId(), 0L);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord3),
+                                Long.MAX_VALUE));
 
-        registry.register(RequestLifecycleTestSupport.context(config, id));
-        assertFalse(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
-        assertEquals(0, ledger.sweep(registry::retainForSchedulerCleanup));
+        registry.register(
+                RequestProtocolTestSupport.context(config, String.valueOf(id)),
+                () -> {},
+                StrategyErrorType.BATCH_SLO_EXPIRED);
+        assertFalse(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord3),
+                                Long.MAX_VALUE));
+        assertEquals(
+                0,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertOwned(old, 20L);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
-        assertTrue(registry.removeExactTerminalRecord(registry.requestSlot(id), Long.MAX_VALUE));
-        assertEquals(1, ledger.sweep(registry::retainForSchedulerCleanup));
+        registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry,
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                .repository(registry)
+                                                .getRequestState(String.valueOf(id), 0L)),
+                                Long.MAX_VALUE));
+        assertEquals(
+                1,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertStaleReleaseIsIgnored(old);
-        assertEquals(0, ledger.sweep(registry::retainForSchedulerCleanup));
+        assertEquals(
+                0,
+                ledger.sweep(
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         ledger.assertEmpty();
     }
 
     @Test
     void confirmedRecordIsRetainedUntilExactTerminalRecordRemoval() {
-        String id = "7005";
-        registry.register(RequestLifecycleTestSupport.context(config, id));
+        long id = 7005L;
+        registry.register(
+                RequestProtocolTestSupport.context(config, String.valueOf(id)),
+                () -> {},
+                StrategyErrorType.BATCH_SLO_EXPIRED);
         var endpoint =
-                new DecodeEndpoint(
+                EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        mock(EndpointEventProjector.class));
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                mock(AbstractRequestScheduler.class)));
         var reservation = reserve(endpoint, id, 100L, 150L);
-        EndpointCleanupTestSupport.confirmDecode(endpoint, id);
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        EndpointCleanupTestSupport.confirmDecode(endpoint, String.valueOf(id));
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 1, 0L, 0L);
-        RequestSlot original = registry.requestSlot(id);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        RequestContext original = registry.requests.findActive(String.valueOf(id));
+        registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 1, 0L, 0L);
-        assertTrue(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
+        RequestState retiredRecord3 =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .getRequestState(original.data().getRequestId(), 0L);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord3),
+                                Long.MAX_VALUE));
 
-        registry.register(RequestLifecycleTestSupport.context(config, id));
-        assertFalse(registry.removeExactTerminalRecord(original, Long.MAX_VALUE));
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
-        assertTrue(endpoint.isAcceptedByEngine(reservation));
+        registry.register(
+                RequestProtocolTestSupport.context(config, String.valueOf(id)),
+                () -> {},
+                StrategyErrorType.BATCH_SLO_EXPIRED);
+        assertFalse(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry, retiredRecord3),
+                                Long.MAX_VALUE));
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
+        assertTrue(endpoint.ownership(reservation).confirmed());
         assertDecodeLedger(endpoint, 0, 1, 0L, 0L);
-        registry.cancelRequest(id, 0L, CancelReason.CLIENT_CANCELLED);
-        assertTrue(registry.removeExactTerminalRecord(registry.requestSlot(id), Long.MAX_VALUE));
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
+        assertTrue(
+                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                        .removeExactTerminal(
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.terminalRecord(
+                                        registry,
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                .repository(registry)
+                                                .getRequestState(String.valueOf(id), 0L)),
+                                Long.MAX_VALUE));
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
-        assertFalse(endpoint.isAcceptedByEngine(reservation));
-        assertEquals(0, endpoint.evictExpiredRequests(-1L, registry::retainForSchedulerCleanup));
+        assertFalse(endpoint.ownership(reservation).confirmed());
+        assertEquals(
+                0,
+                endpoint.evictExpiredRequests(
+                        -1L,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
+                                ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 0, 0L, 0L);
     }
 
-    private static DecodeEndpoint.ReservationHandle reserve(
-            DecodeEndpoint endpoint, String id, long requiredKv, long kvBudget) {
+    private static DecodeResources.ReservationHandle reserve(
+            DecodeEndpoint endpoint, long id, long hardKv, long expectedKv) {
         try (var pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
-            var reservation = endpoint.reserveUnqueued(pin, id, requiredKv, kvBudget, 50);
+            var reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            endpoint, pin, String.valueOf(id), hardKv, expectedKv, 50);
             assertNotNull(reservation);
             return reservation;
         }
@@ -291,29 +555,28 @@ class EndpointCleanupOwnershipTest {
     private static void assertDecodeLedger(
             DecodeEndpoint endpoint, int reserved, int confirmed, long requiredKv, long kvBudget) {
         var view = endpoint.resourceSnapshot();
-        assertEquals(reserved, endpoint.getInflightCount());
-        assertEquals(reserved, view.reserved().size());
-        assertEquals(confirmed, view.confirmed().size());
+        assertEquals(reserved, endpoint.resourceSnapshot().reservedCount());
+        assertEquals(reserved, view.reservedCount());
+        assertEquals(confirmed, view.confirmedCount());
         assertEquals(reserved + confirmed, view.routing().totalLoad());
         // These are immediate reservations, so both unqueued shadows and
         // confirmed Engine owners occupy dispatch capacity.
         assertEquals(reserved + confirmed, view.engineCapacityUsed());
-        assertEquals(requiredKv, view.routing().inputKvReserved());
-        assertEquals(kvBudget, view.routing().inputAndMaxOutputKvReserved());
+        assertEquals(requiredKv, view.routing().inflightHardKv());
+        assertEquals(kvBudget, EndpointTestSupport.expectedReservedKv(view));
     }
 
     private record CleanupRace<T>(int evicted, T owner) {}
 
     private <T> CleanupRace<T> raceRegistrationAfterAbsentCheck(
-            String id,
-            int earlierQueries,
+            long id,
             ToIntFunction<Predicate<String>> sweep,
             Supplier<T> acquire,
             Runnable assertOldLedger)
             throws Exception {
         CountDownLatch checkedAbsent = new CountDownLatch(1);
         CountDownLatch registered = new CountDownLatch(1);
-        AtomicReference<Thread> acquirer = new AtomicReference<>();
+        CountDownLatch swept = new CountDownLatch(1);
         AtomicInteger queries = new AtomicInteger();
         var executor =
                 Executors.newFixedThreadPool(
@@ -326,41 +589,47 @@ class EndpointCleanupOwnershipTest {
         try {
             var cleanup =
                     executor.submit(
-                            () ->
-                                    sweep.applyAsInt(
+                            () -> {
+                                try {
+                                    return sweep.applyAsInt(
                                             requestId -> {
-                                                assertEquals(id, requestId);
+                                                assertEquals(String.valueOf(id), requestId);
                                                 boolean retain =
-                                                        registry.retainForSchedulerCleanup(
-                                                                requestId);
+                                                        org.flexlb.balance.scheduler
+                                                                .SchedulerTestSupport.repository(
+                                                                        registry)
+                                                                .retainsIdentity(requestId);
                                                 assertFalse(retain);
-                                                if (queries.getAndIncrement() < earlierQueries) {
-                                                    return retain;
-                                                }
+                                                queries.incrementAndGet();
                                                 assertOldLedger.run();
                                                 checkedAbsent.countDown();
                                                 await(registered);
-                                                // Do not unblock cleanup until the new generation
-                                                // has actually
-                                                // attempted resource acquisition and is waiting on
-                                                // this lock.
-                                                awaitEndpointLockWait(
-                                                        acquirer.get(), Thread.currentThread());
-                                                assertOldLedger.run();
+                                                // The retention check runs outside State's lock.
+                                                // Exact identities and current
+                                                // resource facts fence replacement acquisition when
+                                                // cleanup resumes.
                                                 return retain;
-                                            }));
+                                            });
+                                } finally {
+                                    swept.countDown();
+                                }
+                            });
             var replacement =
                     executor.submit(
                             () -> {
                                 await(checkedAbsent);
-                                registry.register(RequestLifecycleTestSupport.context(config, id));
-                                acquirer.set(Thread.currentThread());
+                                registry.register(
+                                        RequestProtocolTestSupport.context(
+                                                config, String.valueOf(id)),
+                                        () -> {},
+                                        StrategyErrorType.BATCH_SLO_EXPIRED);
                                 registered.countDown();
+                                await(swept);
                                 return acquire.get();
                             });
             int evicted = cleanup.get(10, TimeUnit.SECONDS);
             T owner = replacement.get(10, TimeUnit.SECONDS);
-            assertEquals(earlierQueries + 1, queries.get());
+            assertEquals(1, queries.get());
             return new CleanupRace<>(evicted, owner);
         } finally {
             executor.shutdownNow();
@@ -376,18 +645,5 @@ class EndpointCleanupOwnershipTest {
             Thread.currentThread().interrupt();
             throw new AssertionError(interrupted);
         }
-    }
-
-    private static void awaitEndpointLockWait(Thread acquirer, Thread cleaner) {
-        var threads = ManagementFactory.getThreadMXBean();
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (System.nanoTime() < deadline) {
-            var info = threads.getThreadInfo(acquirer.threadId());
-            if (info != null && info.getLockOwnerId() == cleaner.threadId()) {
-                return;
-            }
-            Thread.yield();
-        }
-        fail("new resource acquisition did not wait for the cleanup thread's endpoint lock");
     }
 }

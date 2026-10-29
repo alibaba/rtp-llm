@@ -1,11 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillCleanupDeadlockFixture;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -29,10 +31,11 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /**
- * Cleanup must finish while a business operation holds the Slot monitor and needs
+ * Cleanup must finish while a business operation holds the context monitor and needs
  * the endpoint lock. A child JVM contains any regression to a non-interruptible deadlock.
  */
 class EndpointCleanupDeadlockTest {
+
     @TempDir Path outputDirectory;
 
     @Test
@@ -56,12 +59,7 @@ class EndpointCleanupDeadlockTest {
     }
 
     @Test
-    void decodeCleanupAndWorkerTerminalFinish() throws Exception {
-        verifyCompletion("decode-terminal");
-    }
-
-    @Test
-    void timerCloseDoesNotHoldRegistrationLockWhileWaitingForSlot() throws Exception {
+    void timerCloseDoesNotHoldRegistrationLockWhileWaitingForContext() throws Exception {
         verifyCompletion("timer-close");
     }
 
@@ -94,6 +92,7 @@ class EndpointCleanupDeadlockTest {
     }
 
     public static class Reproducer {
+
         public static void main(String[] args) {
             try {
                 run(args[0]);
@@ -108,63 +107,86 @@ class EndpointCleanupDeadlockTest {
             var config = SchedulingTestConfig.batchConfig();
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            RequestRegistry registry = mock(RequestRegistry.class);
-            ExpirationTimer timer = new ExpirationTimer(registry, service);
-            RequestSlot slot =
-                    new RequestSlot(
-                            mock(RequestCompletionPublisher.class),
-                            RequestLifecycleTestSupport.context(config, 992L),
-                            timer,
-                            new RequestTerminalCleanup(
-                                    timer,
-                                    mock(
-                                            org.flexlb.service.monitor.RequestSchedulerReporter
-                                                    .class)),
-                            () -> {});
-            CountDownLatch slotHeld = new CountDownLatch(1);
-            CountDownLatch closeReachesSlots = new CountDownLatch(1);
+            AbstractRequestScheduler registry = mock(AbstractRequestScheduler.class);
+            ExpirationTimer timer =
+                    new ExpirationTimer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry));
+            RequestContext requestContext = RequestProtocolTestSupport.context(config, "992");
+            when(SchedulerTestSupport.repository(registry).isCurrent(requestContext))
+                    .thenReturn(true);
+            AbstractRequestScheduler requestOwner =
+                    RequestProtocolTestSupport.initialize(
+                            mock(ResponseCompletionExecutor.class), requestContext, timer);
+
+            CountDownLatch contextHeld = new CountDownLatch(1);
+            CountDownLatch closeReachesContexts = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
+            @SuppressWarnings("unchecked")
+            var slots =
+                    (java.util.concurrent.ConcurrentMap<RequestContext, ?>)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    timer, "slots");
+            var observed = spy(slots);
             doAnswer(
                             call -> {
-                                closeReachesSlots.countDown();
-                                return java.util.List.of(slot);
+                                closeReachesContexts.countDown();
+                                return call.callRealMethod();
                             })
-                    .when(registry)
-                    .snapshotSlots();
+                    .when(observed)
+                    .keySet();
+            org.springframework.test.util.ReflectionTestUtils.setField(timer, "slots", observed);
             Thread holder =
                     new Thread(
                             () -> {
                                 try {
-                                    synchronized (slot) {
-                                        slotHeld.countDown();
-                                        assertTrue(closeReachesSlots.await(5, TimeUnit.SECONDS));
-                                        // close() is about to acquire Slot. Registration must
+                                    synchronized (requestContext) {
+                                        contextHeld.countDown();
+                                        assertTrue(closeReachesContexts.await(5, TimeUnit.SECONDS));
+                                        // close() is about to acquire Context. Registration must
                                         // remain available
                                         // to reject this late request; holding it while waiting for
-                                        // Slot deadlocks.
+                                        // Context deadlocks.
                                         assertThrows(
                                                 java.util.concurrent.RejectedExecutionException
                                                         .class,
                                                 () ->
-                                                        timer.attachRequestDeadline(
-                                                                slot, Long.MAX_VALUE));
+                                                        timer.update(
+                                                                requestContext,
+                                                                new ExpirationTimer.Plan(
+                                                                        requestContext
+                                                                                        .snapshot()
+                                                                                        .deadlines()
+                                                                                        .revision()
+                                                                                + 1L,
+                                                                        requestContext
+                                                                                .snapshot()
+                                                                                .deadlines()
+                                                                                .request(),
+                                                                        requestContext
+                                                                                .snapshot()
+                                                                                .deadlines()
+                                                                                .visibility(),
+                                                                        requestContext
+                                                                                .snapshot()
+                                                                                .deadlines()
+                                                                                .inactivity())));
                                     }
                                 } catch (Throwable error) {
                                     failure.set(error);
                                 }
                             },
-                            "slot-checks-timer-registration");
+                            "context-checks-timer-registration");
             Thread closer =
                     new Thread(
                             () -> {
                                 try {
-                                    assertTrue(slotHeld.await(5, TimeUnit.SECONDS));
+                                    assertTrue(contextHeld.await(5, TimeUnit.SECONDS));
                                     timer.close();
                                 } catch (Throwable error) {
                                     failure.set(error);
                                 }
                             },
-                            "timer-close-waits-for-slot");
+                            "timer-close-waits-for-context");
             holder.setDaemon(true);
             closer.setDaemon(true);
             holder.start();
@@ -175,7 +197,8 @@ class EndpointCleanupDeadlockTest {
                 throw new AssertionError(failure.get());
             }
             assertFalse(
-                    holder.isAlive() || closer.isAlive(), "Slot / timer registration lock cycle");
+                    holder.isAlive() || closer.isAlive(),
+                    "Context / timer registration lock cycle");
         }
 
         private static void run(String kind) throws Exception {
@@ -187,30 +210,33 @@ class EndpointCleanupDeadlockTest {
             var config = SchedulingTestConfig.batchConfig();
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            RequestRegistry registry =
-                    new RequestRegistry(
+            AbstractRequestScheduler registry =
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                             service,
-                            mock(BatchSchedulerReporter.class),
-                            mock(RequestSchedulerReporter.class));
+                            mock(DeliveryMetricsReporter.class),
+                            mock(RequestSchedulerReporter.class),
+                            mock(TheoryCacheHitReporter.class));
             long id = 991L;
-            var context = RequestLifecycleTestSupport.context(config, id);
-            var future = registry.register(context);
-            RequestSlot slot = registry.requestSlot(Long.toString(id));
-            CountDownLatch slotHeld = new CountDownLatch(1);
+            var context = RequestProtocolTestSupport.context(config, String.valueOf(id));
+            var future = RequestProtocolTestSupport.register(registry, context);
+            RequestContext requestContext = registry.requests.findActive(String.valueOf(id));
+            CountDownLatch contextHeld = new CountDownLatch(1);
             CountDownLatch endpointHeld = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
             Predicate<String> ownership =
                     requestId -> {
                         // This callback is invoked by the real endpoint sweep under its real lock.
                         endpointHeld.countDown();
-                        return registry.retainForSchedulerCleanup(requestId);
+                        return org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                        registry)
+                                .retainsIdentity(requestId);
                     };
             Runnable sweep;
             Runnable endpointOperation;
             if (kind.startsWith("decode")) {
                 var endpoint =
                         spy(
-                                new DecodeEndpoint(
+                                EndpointTestSupport.decode(
                                         WorkerStatus.createDiscovered(
                                                 RoleType.DECODE,
                                                 null,
@@ -218,17 +244,20 @@ class EndpointCleanupDeadlockTest {
                                                 8080,
                                                 8081,
                                                 null),
-                                        mock(EndpointEventProjector.class)));
-                DecodeEndpoint.ReservationHandle reservation;
+                                        org.flexlb.balance.scheduler.SchedulerTestSupport
+                                                .repository(mock(AbstractRequestScheduler.class))));
+                DecodeResources.ReservationHandle reservation;
                 try (var pin = endpoint.tryPinGeneration()) {
                     assertNotNull(pin);
-                    reservation = endpoint.reserveUnqueued(pin, Long.toString(id), 1L, 1L, 50);
+                    reservation =
+                            EndpointTestSupport.reserveUnqueuedDecode(
+                                    endpoint, pin, String.valueOf(id), 1L, 1L, 50);
                 }
                 assertNotNull(reservation);
+                org.junit.jupiter.api.Assertions.assertSame(future, context.data().getFuture());
                 var item =
-                        new ScheduledRequest(
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
                                 context,
-                                future,
                                 new org.flexlb.dao.loadbalance.Response(),
                                 null,
                                 null,
@@ -236,10 +265,10 @@ class EndpointCleanupDeadlockTest {
                                 endpoint,
                                 reservation,
                                 System.currentTimeMillis());
-                var registered = new RequestLifecycleTestSupport.Registered(item, future);
-                RequestLifecycleTestSupport.bindRoute(registry, registered);
+                var registered = new RequestProtocolTestSupport.Registered(item, future);
+                RequestProtocolTestSupport.beginRoutePublication(registry, registered);
                 var claim =
-                        RequestLifecycleTestSupport.claimBatchWithoutPrediction(
+                        RequestProtocolTestSupport.claimBatchWithoutPrediction(
                                 registry, item, 1L, () -> true);
                 assertNotNull(claim);
                 // Negative TTL makes the fixture eligible without a wall-clock sleep.
@@ -248,47 +277,30 @@ class EndpointCleanupDeadlockTest {
                     doAnswer(
                                     invocation -> {
                                         assertFalse(
-                                                Thread.holdsLock(slot),
-                                                "reservation release must not hold the Slot monitor");
-                                        slotHeld.countDown();
+                                                Thread.holdsLock(requestContext),
+                                                "reservation release must not hold the context monitor");
+                                        contextHeld.countDown();
                                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                                         return invocation.callRealMethod();
                                     })
                             .when(endpoint)
-                            .release(reservation, DecodeEndpoint.ReleaseReason.NOT_SENT);
-                }
-                if (kind.equals("decode-terminal")) {
-                    doAnswer(
-                                    invocation -> {
-                                        assertFalse(
-                                                Thread.holdsLock(slot),
-                                                "Worker cleanup must not retain Slot");
-                                        slotHeld.countDown();
-                                        assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
-                                        return invocation.callRealMethod();
-                                    })
-                            .when(endpoint)
-                            .release(
-                                    reservation, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+                            .release(reservation, DecodeResources.ReleaseReason.NOT_SENT);
                 }
                 endpointOperation =
                         switch (kind) {
                             case "decode-rejection" ->
                                     () ->
-                                            claim.complete(
+                                            RequestProtocolTestSupport.transport(
+                                                    claim.owner().data().getScheduler(),
+                                                    claim,
                                                     org.flexlb.balance.delivery.DeliveryResult
                                                             .notSent(
                                                                     new IllegalStateException(
                                                                             "not sent")));
-                            case "decode-terminal" ->
-                                    () ->
-                                            slot.processDecodeStatus(
-                                                    endpoint,
-                                                    DecodeEndpoint.WorkerStatusFact.terminal(
-                                                            reservation, 0L));
                             default ->
                                     () ->
-                                            registry.setDeliveryPrediction(
+                                            RequestProtocolTestSupport.prediction(
+                                                    registry,
                                                     claim,
                                                     new org.flexlb.balance.projection.WorkSnapshot(
                                                             System.currentTimeMillis(),
@@ -307,19 +319,18 @@ class EndpointCleanupDeadlockTest {
                 endpointOperation = fixture::reserveNextBatch;
             }
             // Reproduce the production lock order, without mocking either lock or ownership check.
-            // The slot monitor is held explicitly to isolate the inversion from admission setup.
+            // The context monitor is held explicitly to isolate the inversion from admission setup.
             Thread holder =
                     new Thread(
                             () -> {
                                 try {
-                                    if (kind.equals("decode-rejection")
-                                            || kind.equals("decode-terminal")) {
+                                    if (kind.equals("decode-rejection")) {
                                         // Reservation release and cleanup can contend for the
-                                        // endpoint without holding Slot.
+                                        // endpoint without holding Context.
                                         endpointOperation.run();
                                     } else {
-                                        synchronized (slot) {
-                                            slotHeld.countDown();
+                                        synchronized (requestContext) {
+                                            contextHeld.countDown();
                                             assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                                             endpointOperation.run();
                                         }
@@ -328,18 +339,18 @@ class EndpointCleanupDeadlockTest {
                                     failure.set(e);
                                 }
                             },
-                            "slot-waits-for-endpoint");
+                            "context-waits-for-endpoint");
             Thread cleaner =
                     new Thread(
                             () -> {
                                 try {
-                                    assertTrue(slotHeld.await(5, TimeUnit.SECONDS));
+                                    assertTrue(contextHeld.await(5, TimeUnit.SECONDS));
                                     sweep.run();
                                 } catch (Throwable e) {
                                     failure.set(e);
                                 }
                             },
-                            "cleanup-waits-for-slot");
+                            "cleanup-waits-for-context");
             holder.setDaemon(true);
             cleaner.setDaemon(true);
             holder.start();

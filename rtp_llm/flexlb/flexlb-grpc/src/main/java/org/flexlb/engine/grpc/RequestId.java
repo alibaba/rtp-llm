@@ -1,7 +1,6 @@
 package org.flexlb.engine.grpc;
 
 import com.google.protobuf.ByteString;
-import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 
 /**
@@ -38,17 +37,23 @@ public final class RequestId {
         return preferString(message.getRequestIdStr(), message.getRequestId());
     }
 
-    /** 将引擎消息中的 int64 请求 ID 转为字符串。 */
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
     public static String parse(EngineRpcService.GenerateInputPBOrBuilder message) {
         return Long.toString(message.getRequestId());
     }
 
-    /** 将引擎消息中的 int64 请求 ID 转为字符串。 */
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
     public static String parse(EngineRpcService.EnqueueBatchSuccessPBOrBuilder message) {
         return Long.toString(message.getRequestId());
     }
 
-    /** 将引擎消息中的 int64 请求 ID 转为字符串。 */
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
     public static String parse(EngineRpcService.EnqueueBatchErrorPBOrBuilder message) {
         return Long.toString(message.getRequestId());
     }
@@ -61,17 +66,34 @@ public final class RequestId {
         if (generateInput.isEmpty()) {
             throw new IllegalArgumentException("generate_input is required for BATCH generation");
         }
-        EngineRpcService.GenerateInputPB input;
-        try {
-            input = EngineRpcService.GenerateInputPB.parseFrom(generateInput);
-        } catch (InvalidProtocolBufferException error) {
-            throw new IllegalArgumentException(
-                    "generate_input must contain a valid GenerateInputPB", error);
-        }
-        if (!parse(input).equals(requestId)) {
+        if (!readGenerateInputRequestId(generateInput).equals(requestId)) {
             throw new IllegalArgumentException(
                     "BATCH request_id must be the canonical int64 decimal string matching generate_input.request_id");
         }
+    }
+
+    /**
+     * Read the generation identity without allocating the token or multimodal payload.
+     * The delivery worker remains responsible for parsing nested generation inputs.
+     */
+    public static String readGenerateInputRequestId(ByteString bytes) {
+        var input = bytes.newCodedInput();
+        long requestId = 0L;
+        try {
+            int tag;
+            while ((tag = input.readTag()) != 0) {
+                if (tag == 8) {
+                    requestId = input.readInt64();
+                } else if (!input.skipField(tag)) {
+                    throw new IllegalArgumentException("unexpected end-group in generate_input");
+                }
+            }
+            input.checkLastTagWas(0);
+        } catch (java.io.IOException malformed) {
+            throw new IllegalArgumentException(
+                    "generate_input must contain a valid GenerateInputPB", malformed);
+        }
+        return Long.toString(requestId);
     }
 
     /**

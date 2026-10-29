@@ -26,7 +26,19 @@ for variant in ("before", "after"):
     d = out / variant
     d.mkdir(exist_ok=True)
     body = source
-    if variant == "before":
+    directory = baseline if variant == "before" else root
+    if not (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/projection/RequestTimeEstimation.java"
+    ).exists():
+        body = body.replace("RequestTimeEstimation", "RouteProjection")
+    planner_source = (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java"
+    ).read_text()
+    if not re.search(r"record Item\(\s*String\b", planner_source):
+        body = body.replace("String.valueOf(i)", "i").replace('"99999"', "99999")
+    if variant == "before" and " select(" in planner_source:
         a = body.index("        // INCREMENTAL_BEGIN")
         b = body.index("        // INCREMENTAL_END") + len("        // INCREMENTAL_END")
         body = (
@@ -35,6 +47,34 @@ for variant in ("before", "after"):
                 prefix -> model.predictBatchMs(org.flexlb.balance.prediction.PrefillBatchFeatures.from(prefix,
                         GroupPlanner.Item::seqLen, GroupPlanner.Item::hitCache)));"""
             + body[b:]
+        )
+    delivery_source = (
+        directory
+        / "flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java"
+    )
+    if delivery_source.exists():
+        body = body.replace(
+            "RouteProjection.forDelivery(org.flexlb.config.DispatcherConfig.Type.BATCH)",
+            "new BatchDeliveryStrategy(() -> null, () -> 1L, new DeliveryMetricsReporter(null), "
+            "new org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity(0L, 90L), 2).projectionPolicy()",
+        )
+    if (
+        delivery_source.exists()
+        and "AdmissionCapacity capacity" not in delivery_source.read_text()
+    ):
+        body = body.replace(
+            ", new org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity(0L, 90L), 2)",
+            ")",
+        )
+    if "interface ItemAccess<" not in planner_source:
+        body = body.replace(
+            "items, GroupPlanner.itemAccess(), constraints(size)",
+            "items, constraints(size)",
+        )
+    else:
+        body = body.replace(
+            "selectWithPrediction(items, constraints(size)",
+            "selectWithPrediction(items, GroupPlanner.itemAccess(), constraints(size)",
         )
     (d / "PlanningBench.java").write_text(body)
     runtime = cp.replace(str(root), str(baseline)) if variant == "before" else cp

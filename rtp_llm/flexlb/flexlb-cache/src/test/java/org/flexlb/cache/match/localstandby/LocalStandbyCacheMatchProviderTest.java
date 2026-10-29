@@ -26,7 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
@@ -165,7 +164,8 @@ class LocalStandbyCacheMatchProviderTest {
         } finally {
             provider.shutdown();
         }
-        verify(cacheManager, after(200).never()).addRoutedRequestBlocks(anyString(), anyList());
+        verify(cacheManager, after(200).never())
+                .addRoutedRequestBlocks(org.mockito.ArgumentMatchers.anyString(), anyList());
     }
 
     @Test
@@ -174,7 +174,7 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyCacheMatchProvider provider =
                 new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
         Request request = request();
-        request.setBlockCacheKeys(null);
+        request = request.toBuilder().blockCacheKeys(null).build();
         try {
             provider.updateFromRoutedRequest(request(), null);
             provider.updateFromRoutedRequest(request(), List.of());
@@ -186,10 +186,10 @@ class LocalStandbyCacheMatchProviderTest {
     }
 
     private Request request() {
-        Request request = new Request();
-        request.setRequestId("1");
-        request.setBlockSize(4096);
-        request.setBlockCacheKeys(List.of(11L, 22L));
+        Request request = Request.builder().build();
+        request = request.toBuilder().requestId("1").build();
+        request = request.toBuilder().blockSize(4096).build();
+        request = request.toBuilder().blockCacheKeys(List.of(11L, 22L)).build();
         return request;
     }
 

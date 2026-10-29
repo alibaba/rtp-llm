@@ -1,10 +1,10 @@
 # Worker Sync and KV Cache
 
 worker 健康与容量信息由后台线程高频异步同步；KV cache 元数据用于 cache 感知路由。
-本分支（feature/flexlb-kvcm）支持三种 cache 匹配源：LOCAL_SYNC（本地全量索引）、
+支持三种 cache 匹配源：LOCAL_SYNC（本地全量索引）、
 KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
-主要代码：`flexlb-sync/src/main/java/org/flexlb/sync/`、`service/grpc/`，
+主要代码：`flexlb-sync/src/main/java/org/flexlb/sync/`、`flexlb-grpc/.../client/WorkerStatusRpcClient.java`，
 `flexlb-cache/src/main/java/org/flexlb/cache/`，`flexlb-grpc/.../KvcmGrpcClient.java`。
 
 ## Worker 状态同步
@@ -30,7 +30,8 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
 `GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
 对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
-BATCH Generation 的 Schedule 入口在入队前检查 `generate_input` 是有效的 GenerateInputPB，
+BATCH Generation 的 Schedule 入口在入队前流式检查 `generate_input` 的 wire 结构与 ID，
+完整 Token/MM 内容仍由派发线程延迟解析，
 并要求字符串 request_id 与该 PB 的 int64 ID 的规范十进制写法完全一致；`"007"`、非数字、
 越界或不一致的 ID 返回 INVALID_REQUEST。大于 JS 精确整数范围的 ID
 通过字符串与支持 int64 的 protobuf 编码传输，不转换为浮点数。
@@ -39,20 +40,19 @@ NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需�
 
 ### 调度拓扑
 
-- `MasterEngineSynchronizer`：`ScheduledThreadPoolExecutor(5)` 每 **20ms**
-  （`SYNC_STATUS_INTERVAL`）触发一轮，单次 gRPC 超时 200ms。每轮按 模型×角色 提交
-  `EngineSyncRunner` 到共享线程池。
-- `AbstractEngineStatusSynchronizer`：两个静态线程池（core 500 / max 1000 / 队列 15000 /
-  AbortPolicy）——`engine-sync-executor`（状态同步）与 `status-checker-executor`。
-- `EngineSyncRunner`：从服务发现拉 worker 列表（陈旧条目要过 `max(3×同步间隔, 1s)` 宽限期
-  才移除），然后对每个 worker：
-  - 提交 `GrpcWorkerStatusRunner`，用 `statusCheckInProgress` CAS 保证**每 worker 同时至多
-    一个在途状态检查**；
-  - **仅当 `!kvcmEnabled`** 时提交 `GrpcCacheStatusCheckRunner`（`cacheCheckInProgress` CAS）。
+- `WorkerStatusSynchronizer` 使用 5 线程定时器，按 `workerRegistry.health.statusPollIntervalMs`
+  触发模型所需角色的 `EngineSyncRunner`；默认间隔 20ms，单次 RPC 默认超时 5000ms。
+- 状态同步、状态 RPC、cache RPC 与状态应用使用分开的组件执行器；
+  同一角色的发现刷新合并执行，慢 cache 查询或状态应用不占用后续状态 RPC 的执行槽；
+  关闭同步组件时停止这些执行器，不使用跨组件的静态线程池。
+- 每个逻辑 worker 的 `tryBeginStatusPoll()` 返回独占 `PollLease`，确保至多一个在途检查。
+  `PollCompletion` 在正常完成、异常、回调拒绝与取消路径都释放 lease。
+- 未启用 KVCM 时，独立的 `tryBeginCachePoll()` 控制缓存状态查询；缓存查询不占用状态 lease。
 
 `WorkerAddressService` 按 Endpoint 保存最近一次成功的非空发现快照。查询异常、超过 500ms、
 线程池拒绝任务或返回空列表时保留该快照，已有 worker 继续接受状态探测；首次发现尚无缓存时
-返回空列表。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
+成功空结果返回空列表；查询失败则抛出带原始原因的异常，`EngineSyncRunner` 继续轮询
+注册表中的已知代际，不把失败当成缩容。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
 完成，也不会更新快照。成功的非空结果替换快照，允许正常的部分缩容与节点更换。
 
 `EngineAddressResolver` 在构造阶段同步查询所有 Endpoint。每个查询必须成功且返回非空机器列表，
@@ -118,14 +118,13 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 `cache_match_rollback_blocks`、`kv_cache_group_mode` 等。没有显式 TTFT 字段——负载估计由 `stepLatencyMs` 与本地
 `runningQueueTime` 组成。
 
-处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
-对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
-任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
-连续 3 次状态探测失败（RPC 失败或响应转换失败）会把该逻辑 worker 标为不健康并移除其 endpoint；
-同一 frontend 的其他已发布 logical worker 不受影响。任务既没有有效字符串 ID，也没有可兼容读取的
-旧 int64 编码时，整份状态观测被拒收，不发布部分任务状态，并按上述连续失败规则处理。
-新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
-（`status_version=0`）与响应处理异常跳过本轮更新。
+新的正版本在 worker 代际锁内校验并一次发布完整快照；相同版本只做心跳与活动任务对账，
+不重放版本化的资源修改。非正版本、版本回退或角色不匹配会退休该代际，避免继续使用不一致快照。
+完成对账后，在锁外发布请求事件、缓存预测反馈、阶段耗时与 step 指标。
+`CacheAwareService.observeCacheHitFeedback` 异步生成预测与实际命中对照，写入指标和 PV。
+连续 3 次角色与版本有效的 `alive=false` 上报会退休该逻辑 worker；RPC 失败或格式错误
+不能证明 worker 已停止，不累积为该退休条件。同一 frontend 的其他逻辑 worker 不受影响。
+新发现 worker 在首次有效状态提交前不可路由。
 
 ### WorkerStatus 的本地预测与对账
 
@@ -143,7 +142,15 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 即使轮询跳过中间阶段，完成任务包含完整时间戳时仍能计算该阶段耗时。
 请求超时与清理由请求生命周期和 endpoint 状态管理，见 [请求生命周期](02-queue-scheduling.md)。
 
+状态轮询和 cache 轮询分别记录 `EndpointTrace`；RPC 完成后先释放轮询执行槽，状态应用持有
+独立的代际应用 lease。退休先关闭路由，再异步等待精确代际的 pin/lease 归还并清理索引，
+不占住正在等待的回调所需线程。
+
 ## Cache 状态同步（LOCAL_SYNC 路径，仅 KVCM 关闭时）
+
+cache 快照、已索引版本与索引更新使用 `cacheMutationLock`，不占用状态代际锁。
+`KvCacheManager` 对同一逻辑地址串行化更新与发现侧删除；新增先写 local view 再写 global index，
+删除先清 global index 再清 local view。中断的新增会在下一轮 diff 前重放，避免快照变化留下孤立索引。
 
 `GrpcCacheStatusCheckRunner`：挂在 20ms 同步 tick 上，但 PREFILL/PDFUSION 按
 `DynamicCacheIntervalService.getCurrentIntervalMs()` 降频（跳 tick 实现）。请求携带当前

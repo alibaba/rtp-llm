@@ -1,69 +1,99 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.strategy.SelectedRole;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.strategy.EncoderSelection;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.route.RequestPhase;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
-import org.flexlb.util.PriorityNormalizer;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.IdentityHashMap;
-import java.util.List;
-import java.util.Objects;
+import java.util.PriorityQueue;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 
 /**
- * Orders Encoder route decisions independently of the Generation queue.
- * A single decision thread commits each local selection before reading the next request,
- * so locally pending requests count toward the configured worker limit.
+ * Orders Encoder decisions separately from Generation and waits for Encoder capacity changes.
  */
 final class EncoderQueueCoordinator implements AutoCloseable {
+    private record Entry(RequestContext context, long sequence) {}
 
-    private final DefaultRouter router;
-    private final RequestRegistry requests;
-    private final OrderedRequestQueue queue;
+    private final AbstractRequestScheduler owner;
+    private final Function<RequestContext, PlacementResult<EncoderSelection, PlacementKey>>
+            selectEncoder;
+    private final PlacementAvailability availability;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
-    private final Set<GlobalQueueEntry> blocked =
-            Collections.newSetFromMap(new IdentityHashMap<>());
+    private final PriorityQueue<Entry> ready;
+    private final Set<Entry> blocked = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final IdentityHashMap<RequestContext, Entry> entries = new IdentityHashMap<>();
+    private final PlacementAvailability.Listener capacityListener =
+            key -> {
+                if (key.role() == RoleType.ENCODER) {
+                    capacityChanged();
+                }
+            };
     private final Thread decisionThread;
     private boolean closed;
+    private long nextSequence;
     private long capacityVersion;
 
     EncoderQueueCoordinator(
-            DefaultRouter router, RequestRegistry requests, boolean priorityOrdering) {
-        this.router = Objects.requireNonNull(router, "router");
-        this.requests = Objects.requireNonNull(requests, "requests");
-        this.queue = new OrderedRequestQueue(priorityOrdering);
-        decisionThread = new Thread(this::runDecisions, "flexlb-encoder-decision");
-        decisionThread.setDaemon(true);
-        requests.attachEncoderQueue(this);
+            AbstractRequestScheduler owner,
+            Function<RequestContext, PlacementResult<EncoderSelection, PlacementKey>> selectEncoder,
+            PlacementAvailability availability,
+            boolean priorityOrdering) {
+        this.owner = owner;
+        this.selectEncoder = selectEncoder;
+        this.availability = availability;
+        Comparator<Entry> order = Comparator.comparingLong(Entry::sequence);
+        if (priorityOrdering) {
+            order =
+                    Comparator.<Entry>comparingInt(entry -> entry.context().data().getPriority())
+                            .reversed()
+                            .thenComparing(order);
+        }
+        ready = new PriorityQueue<>(order);
+        decisionThread =
+                Thread.ofPlatform()
+                        .daemon()
+                        .name("flexlb-encoder-decision")
+                        .unstarted(this::runDecisions);
+        availability.addListener(capacityListener);
         decisionThread.start();
     }
 
-    boolean offer(BalanceContext context, CompletableFuture<Response> future) {
-        GlobalQueueEntry entry =
-                new GlobalQueueEntry(
-                        context,
-                        future,
-                        PriorityNormalizer.isValid(context.getPriority())
-                                ? context.getPriority()
-                                : PriorityNormalizer.DEFAULT_PRIORITY);
+    boolean offer(RequestContext context) {
         lock.lock();
         try {
-            if (closed) {
+            if (closed || context.data().getFuture().isDone()) {
                 return false;
             }
-            queue.add(entry);
-            future.whenComplete((ignored, failure) -> remove(entry));
+            Entry entry = new Entry(context, ++nextSequence);
+            entries.put(context, entry);
+            ready.add(entry);
+            context.data().getFuture().whenComplete((ignored, failure) -> remove(context));
             changed.signal();
             return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void remove(RequestContext context) {
+        lock.lock();
+        try {
+            Entry entry = entries.remove(context);
+            if (entry != null) {
+                ready.remove(entry);
+                blocked.remove(entry);
+            }
+            changed.signal();
         } finally {
             lock.unlock();
         }
@@ -72,7 +102,7 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     int size() {
         lock.lock();
         try {
-            return queue.size();
+            return entries.size();
         } finally {
             lock.unlock();
         }
@@ -87,13 +117,11 @@ final class EncoderQueueCoordinator implements AutoCloseable {
         }
     }
 
-    void capacityChanged() {
+    private void capacityChanged() {
         lock.lock();
         try {
             capacityVersion++;
-            for (GlobalQueueEntry entry : blocked) {
-                queue.markRequestReadyForRetry(entry);
-            }
+            ready.addAll(blocked);
             blocked.clear();
             changed.signal();
         } finally {
@@ -104,12 +132,48 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     private void runDecisions() {
         try {
             while (true) {
-                GlobalQueueEntry entry = nextRequest();
-                if (entry == null) {
-                    return;
+                Entry entry;
+                long observedCapacity;
+                lock.lock();
+                try {
+                    while (!closed && ready.isEmpty()) {
+                        changed.await();
+                    }
+                    if (closed) {
+                        return;
+                    }
+                    entry = ready.remove();
+                    observedCapacity = capacityVersion;
+                } finally {
+                    lock.unlock();
                 }
-                decide(entry);
+                if (entry.context().data().requestExpired(System.currentTimeMillis())) {
+                    owner.cancel(entry.context(), 0L, CancelReason.DEADLINE_EXCEEDED);
+                    remove(entry.context());
+                    continue;
+                }
+                if (owner.decideEncoder(entry.context(), selectEncoder)) {
+                    remove(entry.context());
+                    continue;
+                }
+                lock.lock();
+                try {
+                    if (!closed
+                            && entries.get(entry.context()) == entry
+                            && !entry.context().data().getFuture().isDone()) {
+                        if (capacityVersion == observedCapacity) {
+                            blocked.add(entry);
+                        } else {
+                            ready.add(entry);
+                            changed.signal();
+                        }
+                    }
+                } finally {
+                    lock.unlock();
+                }
             }
+        } catch (InterruptedException interruption) {
+            Thread.currentThread().interrupt();
         } catch (Throwable failure) {
             Logger.error("Encoder queue decision thread failed", failure);
         } finally {
@@ -117,148 +181,35 @@ final class EncoderQueueCoordinator implements AutoCloseable {
         }
     }
 
-    private GlobalQueueEntry nextRequest() {
-        lock.lock();
-        try {
-            while (!closed) {
-                List<GlobalQueueEntry> ready =
-                        queue.scanForPlanningCandidates(
-                                1,
-                                Math.max(1, queue.size()),
-                                entry ->
-                                        !entry.removed
-                                                && !entry.future.isDone()
-                                                && !blocked.contains(entry));
-                if (!ready.isEmpty()) {
-                    return ready.getFirst();
-                }
-                changed.await();
-            }
-            return null;
-        } catch (InterruptedException interruption) {
-            Thread.currentThread().interrupt();
-            return null;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private void decide(GlobalQueueEntry entry) {
-        if (entry.future.isDone()) {
-            remove(entry);
-            return;
-        }
-        if (entry.context.requestExpired(System.currentTimeMillis())) {
-            requests.cancelRequest(
-                    entry.context.getRequestId(),
-                    0L,
-                    CancelReason.DEADLINE_EXCEEDED,
-                    RequestPhase.ENCODER);
-            remove(entry);
-            return;
-        }
-        try {
-            long observedCapacityVersion = capacityVersion();
-            PlacementResult<SelectedRole, PlacementKey> selection =
-                    router.selectEncoder(entry.context);
-            entry.context.setSchedulingDiagnostics(selection.diagnostics());
-            switch (selection.status()) {
-                case SUCCESS -> publishRoute(entry, selection.value());
-                case BLOCKED -> park(entry, observedCapacityVersion);
-                case REJECTED -> fail(entry, selection.failure());
-                case CLOSED -> fail(entry, Response.error(StrategyErrorType.REQUEST_CANCELLED));
-            }
-        } catch (RuntimeException failure) {
-            Logger.warn(
-                    "Encoder QUEUE admission failed: request_id={}",
-                    entry.context.getRequestId(),
-                    failure);
-            fail(entry, Response.error(StrategyErrorType.DISPATCH_FAILED));
-        }
-    }
-
-    private void publishRoute(GlobalQueueEntry entry, SelectedRole selected) {
-        try (selected;
-                var pin = selected.takeGenerationPin()) {
-            Response response = new Response();
-            response.setSuccess(true);
-            response.setServerStatus(List.of(selected.serverStatus()));
-            if (!requests.claimEncoderRoute(entry.context.getRequestId(), entry.future, pin)
-                    || !requests.publishEncoderRoute(
-                            entry.context.getRequestId(), entry.future, response)) {
-                fail(entry, Response.error(StrategyErrorType.REQUEST_CANCELLED));
-            }
-        }
-    }
-
-    private long capacityVersion() {
-        lock.lock();
-        try {
-            return capacityVersion;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private void park(GlobalQueueEntry entry, long observedCapacityVersion) {
-        lock.lock();
-        try {
-            if (!entry.removed && !entry.future.isDone()) {
-                if (capacityVersion == observedCapacityVersion) {
-                    blocked.add(entry);
-                } else {
-                    queue.markRequestReadyForRetry(entry);
-                    changed.signal();
-                }
-            }
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private void fail(GlobalQueueEntry entry, Response response) {
-        if (!requests.publishDecisionResponseAsync(
-                entry.context.getRequestId(), entry.future, response, RequestPhase.ENCODER)) {
-            remove(entry);
-        }
-    }
-
-    private void remove(GlobalQueueEntry entry) {
-        lock.lock();
-        try {
-            blocked.remove(entry);
-            queue.remove(entry);
-            changed.signal();
-        } finally {
-            lock.unlock();
-        }
-    }
-
     @Override
     public void close() {
-        List<GlobalQueueEntry> abandoned;
+        ArrayList<RequestContext> abandoned;
         lock.lock();
         try {
             if (closed) {
                 return;
             }
             closed = true;
-            abandoned = queue.drain();
+            abandoned = new ArrayList<>(entries.keySet());
+            entries.clear();
+            ready.clear();
             blocked.clear();
             changed.signalAll();
         } finally {
             lock.unlock();
         }
-        for (GlobalQueueEntry entry : abandoned) {
-            fail(
-                    entry,
+        availability.removeListener(capacityListener);
+        for (RequestContext context : abandoned) {
+            owner.publish(
+                    context,
                     Response.buildErrorResponse(
                             StrategyErrorType.DISPATCH_FAILED,
-                            "request scheduler is shutting down"));
+                            "request scheduler is shutting down"),
+                    false);
         }
         if (Thread.currentThread() != decisionThread) {
             try {
-                decisionThread.join(1_000L);
+                decisionThread.join();
             } catch (InterruptedException interruption) {
                 Thread.currentThread().interrupt();
             }

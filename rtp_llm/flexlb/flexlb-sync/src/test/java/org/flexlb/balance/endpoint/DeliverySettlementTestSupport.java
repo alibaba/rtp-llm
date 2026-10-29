@@ -1,8 +1,9 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 
@@ -13,74 +14,106 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Real endpoint accounting used by delivery callback ordering tests. */
+/**
+ * Real endpoint accounting used by delivery callback ordering tests.
+ */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
-    public final PrefillState prefill =
-            new PrefillState(
-                    lock,
-                    PrefillActiveIndex.ordered(
-                            4, Comparator.comparing(ScheduledRequest::requestId)),
-                    System::currentTimeMillis,
-                    () -> {});
+    public final PrefillState prefill;
     private final EndpointGenerationLifecycle generation =
             new EndpointGenerationLifecycle(() -> {});
 
-    public void enqueue(ScheduledRequest item) {
+    public DeliverySettlementTestSupport() {
+        this(Comparator.comparing(RequestRoute::requestId));
+    }
+
+    public DeliverySettlementTestSupport(Comparator<RequestRoute> ordering) {
+        prefill =
+                new PrefillState(
+                        lock, PrefillActiveIndex.ordered(4, ordering), System::currentTimeMillis);
+    }
+
+    public void enqueue(RequestRoute item) {
         lock.lock();
         try {
-            assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+            assertSame(
+                    item,
+                    prefill.updateQueue(
+                            PrefillState.QueueChange.ENQUEUE, item, System.currentTimeMillis()));
         } finally {
             lock.unlock();
         }
     }
 
     public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
-            ScheduledRequest head, long batchId, int maxBatches) {
+            RequestRoute head, long batchId, int maxBatches) {
         return prefill.reserveBatch(head, batchId, maxBatches, generation.tryAcquireHandoff());
     }
 
-    public void commit(long batchId, List<ScheduledRequest> items) {
+    public PrefillState.CommittedHandoff commit(PrefillState.CommitPlan plan) {
+        var permit = plan.batchReservation() == null ? generation.tryAcquireHandoff() : null;
+        PrefillState.CommittedHandoff committed = null;
+        try {
+            committed = prefill.commitLocked(plan, permit);
+            return committed;
+        } finally {
+            if (committed == null && permit != null) {
+                permit.close();
+            }
+        }
+    }
+
+    public void commit(long batchId, List<RequestRoute> items) {
         lock.lock();
         try {
-            for (ScheduledRequest item : items) {
-                assertTrue(prefill.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+            for (RequestRoute item : items) {
+                assertSame(
+                        item,
+                        prefill.updateQueue(
+                                PrefillState.QueueChange.ENQUEUE,
+                                item,
+                                System.currentTimeMillis()));
             }
         } finally {
             lock.unlock();
         }
-        try (var reservation =
-                prefill.reserveBatch(items.getFirst(), batchId, 2, generation.tryAcquireHandoff())
-                        .reservation()) {
-            assertNotNull(reservation);
-            try (var handoff = reservation.commit(items, 100L)) {
-                assertNotNull(handoff);
+        {
+            var reservation =
+                    prefill.reserveBatch(
+                                    items.getFirst(), batchId, 2, generation.tryAcquireHandoff())
+                            .reservation();
+            try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                assertNotNull(reservation);
+                try (var handoff =
+                        EndpointTestSupport.commitBatch(prefill, reservation, items, 100L)) {
+                    assertNotNull(handoff);
+                }
             }
         }
     }
 
-    public List<PrefillState.WorkerStatusFact> finish(long batchId, ScheduledRequest item) {
+    public List<PrefillState.PrefillRequestStatus> finish(long batchId, RequestRoute item) {
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(item.requestId());
         finished.setBatchId(batchId);
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of(item.requestId(), finished));
+        response.setFinishedTaskInfo(
+                Map.of(Long.toString(Long.parseLong(item.requestId())), finished));
         var observation =
-                EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
-                        .freezeStatusResponse(response);
-        var result =
-                prefill.reconcileWorkerStatus(observation, ignored -> 100L, () -> {}, () -> {});
-        assertNull(result.publicationFailure());
-        return result.schedulerFacts();
+                WorkerStatusTestSupport.freezeStatusResponse(
+                        EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
+                        response);
+        var result = EndpointTestSupport.reconcile(prefill, observation, ignored -> 100L);
+        return result.requestStatuses();
     }
 
     public static void queueDecode(
-            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+            DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of());
         response.setFinishedTaskInfo(Map.of());
@@ -88,28 +121,35 @@ public final class DeliverySettlementTestSupport {
         response.setTotalKvCacheTokens(10_000L);
         EndpointTestSupport.applyStatus(endpoint, response).run();
         try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(endpoint.markQueued(pin, reservation));
+            assertTrue(endpoint.markQueued(pin, reservation).status().applied());
         }
     }
 
     public static void dispatchDecode(
-            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+            DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
         queueDecode(endpoint, reservation);
         var permit =
                 endpoint.acquireDispatchPermit(
-                                reservation, new DecodeEndpoint.AdmissionCapacity(0, 100L))
-                        .permit();
+                                reservation, new DecodeResources.AdmissionCapacity(0, 100L))
+                        .handle();
         assertNotNull(permit);
         assertEquals(
-                DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED, permit.dispatch());
+                DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                permit.dispatch().status());
     }
 
-    public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {
+    public static void decodeStatus(DecodeEndpoint endpoint, String requestId, boolean finished) {
+        decodeStatus(endpoint, requestId, finished, 0L);
+    }
+
+    public static void decodeStatus(
+            DecodeEndpoint endpoint, String requestId, boolean finished, long errorCode) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(Long.toString(requestId));
+        task.setRequestId(requestId);
+        task.setErrorCode(errorCode);
         task.setPhase(finished ? null : TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();
-        var tasks = Map.of(Long.toString(requestId), task);
+        var tasks = Map.of(Long.toString(Long.parseLong(requestId)), task);
         response.setRunningTaskInfo(finished ? Map.of() : tasks);
         response.setFinishedTaskInfo(finished ? tasks : Map.of());
         response.setAvailableKvCacheTokens(10_000L);

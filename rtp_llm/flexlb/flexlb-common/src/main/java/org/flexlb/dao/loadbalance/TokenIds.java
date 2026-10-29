@@ -3,7 +3,9 @@ package org.flexlb.dao.loadbalance;
 import java.util.Objects;
 import java.util.function.IntUnaryOperator;
 
-/** Read-only, indexed access to prompt token IDs without requiring an array copy. */
+/**
+ * Read-only, indexed access to prompt token IDs without requiring an array copy.
+ */
 public interface TokenIds {
 
     int size();

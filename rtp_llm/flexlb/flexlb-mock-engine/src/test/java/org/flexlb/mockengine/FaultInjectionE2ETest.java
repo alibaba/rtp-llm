@@ -3,7 +3,7 @@ package org.flexlb.mockengine;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Task35 场景 C：11 种故障注入逐一验证 —— 明确错误传播到调度器终态，
  * post-send 不确定性在请求 TTL 内等待确认，到期回收，且同集群其余引擎不受影响。
  *
- * <p>覆盖 {@link FaultInjectionConfig} 全部字段：failOnEnqueue、enqueueErrorCode、
+ * <p>覆盖 {@link FaultInjectionConfig} 全部字段：failOnEnqueue、
  * enqueueErrorMessage、enqueueDelayMs、generateDelayMs、generateError、fetchError、
  * noRespond、kvPressureTokens、queueDepthLimit、crashAfterNRequests。
  *
@@ -35,15 +35,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * missing ACK 则断言 TTL 前保留记账、到期回收；数据面（generate_stream/fetch_response）
  * 故障不经过 LB 控制面，用直连 RPC 断言 mock 行为，同时验证调度器路径不受影响。
  *
- * <p>已知缺陷（只报不修，见任务报告）：{@code enqueueErrorCode} 字段从未被
- * {@link JavaMockEngineCluster} 读取 —— 错误响应只携带 message 不携带自定义
- * 错误码，c01 用断言固化该现状。
  */
 class FaultInjectionE2ETest {
 
     private static final int BASE_PORT = 62900;
 
-    /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
+    /**
+     * 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。
+     */
     private static void arm(AutoTpmE2EHarness h) {
         h.startAutoPump(10);
     }
@@ -51,12 +50,12 @@ class FaultInjectionE2ETest {
     private static Response submitTo(AutoTpmE2EHarness h, int prefillIndex, long requestId)
             throws Exception {
         h.prefillSelector = ctx -> prefillIndex;
-        CompletableFuture<Response> future = h.scheduler.submit(h.context(requestId, 50));
+        CompletableFuture<Response> future =
+                h.scheduler.submit(h.context(String.valueOf(requestId), 50));
         return future.get(10, TimeUnit.SECONDS);
     }
 
-    // ==================== C1 failOnEnqueue + enqueueErrorMessage + enqueueErrorCode
-    // ====================
+    // ==================== C1 failOnEnqueue + enqueueErrorMessage ====================
 
     @Test
     @Timeout(30)
@@ -64,7 +63,7 @@ class FaultInjectionE2ETest {
             throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT, 2, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT, 2, 1, "5", 1.0, false, ConfigTestSupport.single())) {
             arm(h);
             h.prefillEngines
                     .get(0)
@@ -72,7 +71,6 @@ class FaultInjectionE2ETest {
                             FaultInjectionConfig.builder()
                                     .failOnEnqueue(true)
                                     .enqueueErrorMessage("injected-boom")
-                                    .enqueueErrorCode(9999)
                                     .build());
 
             Response failed = submitTo(h, 0, 9101);
@@ -86,14 +84,10 @@ class FaultInjectionE2ETest {
                     failed.getErrorMessage().contains("injected-boom"),
                     "custom enqueueErrorMessage must reach the caller: "
                             + failed.getErrorMessage());
-            // 缺陷固化：enqueueErrorCode 从未被 mock 引擎写入 wire（死配置）
-            assertFalse(
-                    failed.getErrorMessage().contains("9999"),
-                    "KNOWN DEFECT: enqueueErrorCode is never consumed by JavaMockEngineCluster");
 
             // 故障引擎无泄漏（请求从未被接受）
             assertEquals(0, h.prefillEngines.get(0).getRunningCount());
-            assertEquals(0, h.prefillEngines.get(0).getAcceptedCount());
+            assertEquals(0, MockEngineTestSupport.getAcceptedCount(h.prefillEngines.get(0)));
 
             // 健康引擎完全不受影响
             Response healthy = submitTo(h, 1, 9102);
@@ -110,7 +104,7 @@ class FaultInjectionE2ETest {
     void c02_enqueue_delay_defers_ack_but_request_succeeds() throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 10, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 10, 1, 1, "5", 1.0, false, ConfigTestSupport.single())) {
             arm(h);
             h.prefillEngines
                     .get(0)
@@ -126,7 +120,7 @@ class FaultInjectionE2ETest {
             assertTrue(
                     elapsedMs >= 300,
                     "terminal must wait for the delayed engine ack, took " + elapsedMs + "ms");
-            assertEquals(1, h.prefillEngines.get(0).getAcceptedCount());
+            assertEquals(1, MockEngineTestSupport.getAcceptedCount(h.prefillEngines.get(0)));
         }
     }
 
@@ -137,7 +131,7 @@ class FaultInjectionE2ETest {
     void c03_generate_delay_slows_prefill_execution_without_breaking_completion() throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 20, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 20, 1, 1, "5", 1.0, false, ConfigTestSupport.single())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             prefill.setFaultConfig(FaultInjectionConfig.builder().generateDelayMs(300).build());
@@ -153,8 +147,8 @@ class FaultInjectionE2ETest {
             assertTrue(
                     elapsedMs >= 300,
                     "prefill execution must include the injected delay, took " + elapsedMs + "ms");
-            assertEquals(1, prefill.getAcceptedCount());
-            assertFalse(prefill.isLeakDetected());
+            assertEquals(1, MockEngineTestSupport.getAcceptedCount(prefill));
+            assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
         }
     }
 
@@ -165,7 +159,7 @@ class FaultInjectionE2ETest {
     void c04_generate_error_fails_direct_stream_and_scheduler_path_unaffected() throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 30, 2, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 30, 2, 1, "5", 1.0, false, ConfigTestSupport.single())) {
             arm(h);
             h.prefillEngines
                     .get(0)
@@ -191,7 +185,7 @@ class FaultInjectionE2ETest {
     void c05_fetch_error_fails_fetch_response_and_scheduler_path_unaffected() throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 40, 2, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 40, 2, 1, "5", 1.0, false, ConfigTestSupport.single())) {
             arm(h);
             h.prefillEngines
                     .get(0)
@@ -218,7 +212,7 @@ class FaultInjectionE2ETest {
             throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 50, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 50, 1, 1, "5", 1.0, false, ConfigTestSupport.single())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             JavaMockEngineCluster.FastRpcService decode = h.decodeEngines.get(0);
@@ -243,7 +237,7 @@ class FaultInjectionE2ETest {
                     "noRespond engine still settles its internal accounting");
             assertEquals(
                     0L,
-                    decode.getOccupiedKvTokens(),
+                    MockEngineTestSupport.getOccupiedKvTokens(decode),
                     "suppressed decode handoff must release its reserved KV lease");
             assertEquals(
                     decodeAvailableBefore,
@@ -262,9 +256,9 @@ class FaultInjectionE2ETest {
     void c07_kv_pressure_propagates_through_worker_status_and_clears() throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 60, 1, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 60, 1, 1, "5", 1.0, false, ConfigTestSupport.single())) {
             JavaMockEngineCluster.FastRpcService decode = h.decodeEngines.get(0);
-            long totalKv = decode.getTotalKvTokens();
+            long totalKv = MockEngineTestSupport.getTotalKvTokens(decode);
             // The scheduler fixture is already published at status version 1.
             // Consume the engine's matching baseline before asserting a newer snapshot.
             h.pumpOnce();
@@ -293,7 +287,7 @@ class FaultInjectionE2ETest {
         // 长 prefill（800ms）让第一个请求稳定占住 pending 名额
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 70, 2, 1, "800", 1.0, false, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 70, 2, 1, "800", 1.0, false, ConfigTestSupport.single())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
 
@@ -323,7 +317,7 @@ class FaultInjectionE2ETest {
             boolean clientCancellation) throws Exception {
         try (AutoTpmE2EHarness h =
                 new AutoTpmE2EHarness(
-                        BASE_PORT + 80, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
+                        BASE_PORT + 80, 2, 1, "5", 1.0, true, ConfigTestSupport.single())) {
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
@@ -333,7 +327,7 @@ class FaultInjectionE2ETest {
             // 首个 EnqueueBatch 触发 crash 并返回空 ACK。请求可能已经越过发送边界，
             // Master 在请求 TTL 内等待匹配状态；持续无确认时必须本地回收。
             h.prefillSelector = ctx -> 0;
-            CompletableFuture<Response> crashed = h.scheduler.submit(h.context(9902, 50));
+            CompletableFuture<Response> crashed = h.scheduler.submit(h.context("9902", 50));
             CountDownLatch crashedTerminal = new CountDownLatch(1);
             crashed.whenComplete((ignored, error) -> crashedTerminal.countDown());
 
@@ -343,36 +337,38 @@ class FaultInjectionE2ETest {
                     "the first enqueue must trigger the configured engine crash");
             AutoTpmE2EHarness.await(
                     () ->
-                            h.scheduler.getTrackedRequestCount() == 1
-                                    && prefillEndpoint.getInflightBatchCount() == 1
-                                    && prefillEndpoint.getLocallyOwnedRequestCount() == 1,
+                            h.requests.liveRequestCount() == 1
+                                    && prefillEndpoint.ownership.stats().batchCount() == 1
+                                    && prefillEndpoint.ownership.stats().locallyOwnedRequests()
+                                            == 1,
                     2_000,
                     "missing ACK must retain scheduler and Prefill accounting");
 
             assertEquals(
                     0,
-                    prefillEndpoint.getIndividuallyTrackedRequestCount(),
+                    prefillEndpoint.ownership.stats().individuallyOwnedRequests(),
                     "batch delivery must not consume the route-request ledger");
             assertFalse(
                     crashedTerminal.await(250, TimeUnit.MILLISECONDS),
                     "missing ACK stays pending before the request inactivity deadline");
             assertFalse(crashed.isDone(), "the unconfirmed request stays incomplete before TTL");
             if (clientCancellation) {
-                h.scheduler.cancelRequest("9902", 0L, CancelReason.CLIENT_CANCELLED);
+                h.scheduler.cancel("9902", 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(
                     0L,
                     engineCancelCalls(prefill),
-                    "uncertain delivery and ordinary cancellation must not send Engine Cancel");
+                    "a crashed Engine cannot receive the cleanup RPC");
 
             // 一个请求等待 Engine 确认时，不得阻塞同集群的健康 Prefill。
             Response healthy = submitTo(h, 1, 9904);
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
-            assertFalse(
-                    crashed.isDone(),
-                    "healthy delivery must not settle the unrelated unconfirmed request");
-            assertEquals(1, prefillEndpoint.getInflightBatchCount());
-            assertEquals(1, prefillEndpoint.getLocallyOwnedRequestCount());
+            if (!clientCancellation) {
+                assertFalse(
+                        crashed.isDone(), "healthy delivery cannot settle the unrelated request");
+            }
+            assertEquals(1, prefillEndpoint.ownership.stats().batchCount());
+            assertEquals(1, prefillEndpoint.ownership.stats().locallyOwnedRequests());
 
             Response expired = crashed.get(5, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
@@ -389,19 +385,14 @@ class FaultInjectionE2ETest {
                                     clientCancellation
                                             ? CancelReason.CLIENT_CANCELLED.getMessage()
                                             : "REQUEST_INACTIVE"));
-            assertEquals(0, prefillEndpoint.getInflightBatchCount());
-            assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
-            AutoTpmE2EHarness.await(
-                    () ->
-                            h.scheduler.getTrackedRequestCount() == 0
-                                    && h.decodeEndpoint(0).getInflightCount() == 0,
-                    2_000,
-                    "TTL must release the crashed request's scheduler and Decode accounting");
-            assertTrue(
-                    prefill.isStopped(), "cleanup cannot depend on the crashed Engine returning");
-            for (var engine : h.services.values()) {
-                assertEquals(0L, engineCancelCalls(engine), "TTL only releases Master accounting");
-            }
+            assertEquals(1, prefillEndpoint.ownership.stats().batchCount());
+            assertEquals(1, prefillEndpoint.ownership.stats().locallyOwnedRequests());
+            assertTrue(h.requests.liveRequestCount() > 0, "failure response is not cleanup proof");
+            assertTrue(prefill.isStopped());
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalStateException.class,
+                    h::close,
+                    "unreachable cleanup must not report successful shutdown");
         }
     }
 
@@ -414,7 +405,9 @@ class FaultInjectionE2ETest {
 
     private record StreamResult(Throwable error, boolean completed) {}
 
-    /** 直连 generate_stream，等 500ms 观察流事件（fault 场景内即时返回或保持沉默）。 */
+    /**
+     * 直连 generate_stream，等 500ms 观察流事件（fault 场景内即时返回或保持沉默）。
+     */
     private static StreamResult callGenerateStream(
             JavaMockEngineCluster.FastRpcService svc, long requestId) throws InterruptedException {
         EngineRpcService.GenerateInputPB.Builder input =
@@ -450,7 +443,9 @@ class FaultInjectionE2ETest {
         return new StreamResult(error.get(), finished && error.get() == null);
     }
 
-    /** 直连 fetch_response，等 500ms 观察流事件。 */
+    /**
+     * 直连 fetch_response，等 500ms 观察流事件。
+     */
     private static StreamResult callFetchResponse(
             JavaMockEngineCluster.FastRpcService svc, long requestId) throws InterruptedException {
         AtomicReference<Throwable> error = new AtomicReference<>();

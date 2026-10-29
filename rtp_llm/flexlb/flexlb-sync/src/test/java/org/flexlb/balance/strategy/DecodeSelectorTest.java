@@ -1,24 +1,26 @@
 package org.flexlb.balance.strategy;
 
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
+import org.flexlb.balance.scheduler.RequestData;
+import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,8 +35,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-@Slf4j
+import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
+
 class DecodeSelectorTest {
+
+    private static final SchedulingMetadata SCHEDULING =
+            SchedulingMetadata.explicit(0, Long.MAX_VALUE);
 
     private ConfigService configService;
     private Map<String, WorkerStatus> decodeStatuses;
@@ -55,7 +61,9 @@ class DecodeSelectorTest {
                 RoleType.DECODE, group, ip, 8080, 9090, true, 0L, 0L);
     }
 
-    /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
+    /**
+     * Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry.
+     */
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
         EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
@@ -77,81 +85,14 @@ class DecodeSelectorTest {
     }
 
     private DecodeSelector availableStrategy(EndpointRegistry registry) {
-        return new DecodeSelector(new WorkerDirectory(registry));
+        return new DecodeSelector(
+                registry,
+                configService,
+                SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
     }
 
-    @Test
-    void selectedDecodePreservesLogicalEngineIdentity() {
-        WorkerStatus worker =
-                WorkerStatus.createDiscovered(
-                        RoleType.DECODE,
-                        null,
-                        "127.0.0.1",
-                        8080,
-                        9090,
-                        "test-site",
-                        "deployment",
-                        1,
-                        2);
-        StrategyTestSupport.publish(
-                worker, StrategyTestSupport.response(RoleType.DECODE, true, 10_000L, 10_000L, 1L));
-        decodeStatuses.put(worker.getLogicalIpPort(), worker);
-        EndpointRegistry registry = decodeRegistry();
-        try {
-            ServerStatus selected =
-                    selectStatus(
-                            availableStrategy(registry), context(100L, 1L), RoleType.DECODE, null);
-
-            Assertions.assertNotNull(selected);
-            Assertions.assertEquals(1, selected.getEngineIndex());
-            Assertions.assertEquals("127.0.0.1:8080@1", selected.getLogicalIpPort());
-        } finally {
-            registry.close();
-        }
-    }
-
-    @Test
-    void recordsMinimumCostSelectionReason() {
-        registerWorker("127.0.0.1", 10_000L, 10_000L);
-        EndpointRegistry registry = decodeRegistry();
-        try {
-            BalanceContext context = context(100L, 2L);
-            ServerStatus selected =
-                    selectStatus(availableStrategy(registry), context, RoleType.DECODE, null);
-
-            Assertions.assertNotNull(selected);
-            Assertions.assertEquals("DECODE_MIN_COST", context.selectionReason(RoleType.DECODE));
-        } finally {
-            registry.close();
-        }
-    }
-
-    @Test
-    void recordsRoundRobinTiebreakForEqualMinimumCostCandidates() {
-        registerWorker("127.0.0.1", 10_000L, 10_000L);
-        registerWorker("127.0.0.2", 10_000L, 10_000L);
-        EndpointRegistry registry = decodeRegistry();
-        try {
-            BalanceContext context = context(100L, 3L);
-            ServerStatus selected =
-                    selectStatus(availableStrategy(registry), context, RoleType.DECODE, null);
-
-            Assertions.assertNotNull(selected);
-            Assertions.assertEquals(
-                    "DECODE_MIN_COST_ROUND_ROBIN_TIEBREAK",
-                    context.selectionReason(RoleType.DECODE));
-        } finally {
-            registry.close();
-        }
-    }
-
-    private BalanceContext context(long sequenceLength, long requestId) {
-        Request request = new Request();
-        request.setSeqLen(sequenceLength);
-        request.setRequestId(Long.toString(requestId));
-        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
-        context.setRequest(request);
-        return context;
+    private static Request request(long sequenceLength, String requestId) {
+        return Request.builder().seqLen(sequenceLength).requestId(requestId).build();
     }
 
     @Test
@@ -160,37 +101,39 @@ class DecodeSelectorTest {
         EndpointRegistry registry = decodeRegistry();
         try {
             DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
-            DecodeEndpoint.AdmissionSummary empty = endpoint.admissionSummary();
+            DecodeResources.AdmissionSummary empty = endpoint.admissionSummary();
             Assertions.assertSame(empty, endpoint.admissionSummary());
             try (var pin = endpoint.tryPinGeneration()) {
-                var reservation = endpoint.reserve(pin, "42", 128L, 256L, 70);
+                var reservation =
+                        endpoint.tryReserveQueuedRequest(pin, "42", 128L, 256L, 70, null).handle();
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
                 Assertions.assertSame(queued, endpoint.admissionSummary());
                 Assertions.assertEquals(
-                        new DecodeEndpoint.CapacityRelease(1L, 128L, 256L),
+                        new DecodeResources.CapacityRelease(1L, 128L, 256L),
                         queued.placementOccupancy(70));
                 Assertions.assertEquals(
-                        DecodeEndpoint.CapacityRelease.NONE, queued.engineOccupancy(70));
+                        DecodeResources.CapacityRelease.NONE, queued.engineOccupancy(70));
 
                 var acquired =
                         endpoint.acquireDispatchPermit(
-                                reservation, new DecodeEndpoint.AdmissionCapacity(10L, 100L));
+                                reservation, new DecodeResources.AdmissionCapacity(10L, 100L));
                 Assertions.assertEquals(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                        DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         acquired.status());
                 var dispatching = endpoint.admissionSummary();
                 Assertions.assertNotSame(queued, dispatching);
                 Assertions.assertEquals(
                         queued.placementOccupancy(70), dispatching.engineOccupancy(70));
                 Assertions.assertEquals(
-                        DecodeEndpoint.CapacityRelease.NONE,
+                        DecodeResources.CapacityRelease.NONE,
                         queued.engineOccupancy(70),
                         "a published summary must remain immutable after ownership changes");
-                Assertions.assertTrue(acquired.permit().release());
-                endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                Assertions.assertTrue(acquired.handle().release());
+                endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
+                        .status();
                 Assertions.assertEquals(
-                        DecodeEndpoint.CapacityRelease.NONE,
+                        DecodeResources.CapacityRelease.NONE,
                         endpoint.admissionSummary().placementOccupancy(70));
             }
         } finally {
@@ -201,12 +144,16 @@ class DecodeSelectorTest {
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
-        WorkerDirectory engineWorkerStatus = new WorkerDirectory(emptyRegistry);
-        DecodeSelector decodeSelector = new DecodeSelector(engineWorkerStatus);
+        EndpointRegistry engineWorkerStatus = emptyRegistry;
+        DecodeSelector decodeSelector =
+                new DecodeSelector(
+                        engineWorkerStatus,
+                        configService,
+                        SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
 
-        BalanceContext balanceContext = context(1_000, 1_000L);
+        Request inputs = request(1_000, "1000");
 
-        ServerStatus status = selectStatus(decodeSelector, balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(decodeSelector, inputs, null);
 
         Assertions.assertNull(status);
     }
@@ -216,38 +163,196 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 10_000, 9_000);
         registerWorker("127.0.0.2", 10_000, 9_000);
         EndpointRegistry registry = decodeRegistry();
-        WorkerDirectory actual = new WorkerDirectory(registry);
-        Map<String, DecodeEndpoint.DecodeRoutingView> views = new HashMap<>();
-        for (DecodeEndpoint.DecodeRoutingView view : actual.decodeRoutingSnapshot(null)) {
+        EndpointRegistry actual = registry;
+        Map<String, DecodeResources.DecodeRoutingView> views = new HashMap<>();
+        for (DecodeResources.DecodeRoutingView view : decodeRoutingSnapshot(actual, null)) {
             views.put(view.address(), view);
         }
-        DecodeEndpoint.DecodeRoutingView stale = views.get("127.0.0.1:8080");
-        DecodeEndpoint.DecodeRoutingView replacement = views.get("127.0.0.2:8080");
+        DecodeResources.DecodeRoutingView stale = views.get("127.0.0.1:8080");
+        DecodeResources.DecodeRoutingView replacement = views.get("127.0.0.2:8080");
         WorkerEndpoint.GenerationPin replacementPin =
                 Mockito.mock(WorkerEndpoint.GenerationPin.class);
+        Mockito.when(replacementPin.isOpen()).thenReturn(true);
         Mockito.when(replacementPin.endpoint())
                 .thenReturn(decodeEndpoint(registry, replacement.address()));
         Mockito.when(replacementPin.generationId()).thenReturn(replacement.generationId());
-        WorkerDirectory racing = Mockito.mock(WorkerDirectory.class);
-        Mockito.when(racing.decodeRoutingSnapshot(null))
-                .thenReturn(List.of(stale))
-                .thenReturn(List.of(replacement));
+        EndpointRegistry racing = Mockito.mock(EndpointRegistry.class);
+        var captures = new java.util.concurrent.atomic.AtomicInteger();
+        Mockito.doAnswer(
+                        call -> {
+                            List<DecodeResources.DecodeRoutingView> target = call.getArgument(1);
+                            target.add(captures.getAndIncrement() == 0 ? stale : replacement);
+                            return null;
+                        })
+                .when(racing)
+                .decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
         Mockito.when(racing.captureDecodeGeneration(stale)).thenReturn(null);
         Mockito.when(racing.captureDecodeGeneration(replacement)).thenReturn(replacementPin);
 
-        PlacementResult<SelectedRole, RoleType> result =
-                new DecodeSelector(racing)
-                        .select(DecodeBinding.capture(context(1_000, 1_001L)), null);
+        var inputs = request(1_000, 1_001L);
+        PlacementResult<RequestRoute, RoleType> result =
+                StrategyTestSupport.select(
+                        new DecodeSelector(
+                                racing,
+                                configService,
+                                SchedulingTestConfig.capacity(configService.loadBalanceConfig())),
+                        inputs,
+                        SCHEDULING,
+                        null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-        SelectedRole selected = result.value();
-        Assertions.assertEquals("127.0.0.2", selected.serverStatus().getServerIp());
+        RequestRoute selected = result.value();
+        Assertions.assertEquals("127.0.0.2", selected.decode().getServerIp());
         Mockito.verify(replacementPin, Mockito.never()).close();
         selected.close();
         Mockito.verify(replacementPin).close();
-        Mockito.verify(racing, Mockito.times(2)).decodeRoutingSnapshot(null);
+        Mockito.verify(racing, Mockito.times(2))
+                .decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
         Mockito.verify(racing).captureDecodeGeneration(stale);
         Mockito.verify(racing).captureDecodeGeneration(replacement);
+    }
+
+    @Test
+    void reentrantSelectionKeepsOuterCaptureAndClearsBothWorkspaces() {
+        decodeStatuses.put("127.0.0.1:8080", createWorkerStatus("127.0.0.1", "outer"));
+        decodeStatuses.put("127.0.0.2:8080", createWorkerStatus("127.0.0.2", "inner"));
+        EndpointRegistry registry = Mockito.spy(decodeRegistry());
+        try {
+            DecodeSelector selector = availableStrategy(registry);
+            Mockito.doAnswer(
+                            call -> {
+                                call.callRealMethod();
+                                var outerScratch = scratchCache().get();
+                                Assertions.assertEquals(
+                                        "127.0.0.2",
+                                        selectStatus(selector, request(1L, "2"), "inner")
+                                                .getServerIp());
+                                Assertions.assertSame(outerScratch, scratchCache().get());
+                                return null;
+                            })
+                    .when(registry)
+                    .decodeRoutingSnapshot(Mockito.eq("outer"), Mockito.anyList());
+            Assertions.assertEquals(
+                    "127.0.0.1", selectStatus(selector, request(1L, "1"), "outer").getServerIp());
+            assertScratchReleased(scratchCache().get());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void exceptionalPartialCaptureReleasesReferencesAndNextSelectionStillWorks() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        EndpointRegistry registry = Mockito.spy(decodeRegistry());
+        try {
+            var view = decodeRoutingSnapshot(registry, null).getFirst();
+            DecodeSelector selector = availableStrategy(registry);
+            Mockito.doAnswer(
+                            call -> {
+                                List<DecodeResources.DecodeRoutingView> target =
+                                        call.getArgument(1);
+                                target.add(view);
+                                throw new IllegalStateException("capture failed");
+                            })
+                    .doCallRealMethod()
+                    .when(registry)
+                    .decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
+            Assertions.assertThrows(
+                    IllegalStateException.class,
+                    () -> StrategyTestSupport.select(selector, request(1L, 1L), SCHEDULING, null));
+            assertScratchReleased(scratchCache().get());
+            Assertions.assertEquals(
+                    "127.0.0.1", selectStatus(selector, request(1L, "2"), null).getServerIp());
+            assertScratchReleased(scratchCache().get());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void oversizedCaptureIsNotRetainedByTheThreadCache() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        EndpointRegistry registry = Mockito.spy(decodeRegistry());
+        try {
+            var view = decodeRoutingSnapshot(registry, null).getFirst();
+            Mockito.doAnswer(
+                            call -> {
+                                List<DecodeResources.DecodeRoutingView> target =
+                                        call.getArgument(1);
+                                target.addAll(java.util.Collections.nCopies(4097, view));
+                                return null;
+                            })
+                    .when(registry)
+                    .decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
+            Object previous = scratchCache().get();
+            Assertions.assertEquals(
+                    "127.0.0.1",
+                    selectStatus(availableStrategy(registry), request(1L, "1"), null)
+                            .getServerIp());
+            assertScratchReleased(previous);
+            Assertions.assertNotSame(previous, scratchCache().get());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void concurrentSelectionsKeepTheirOwnViewsAndReleaseGenerationPins() throws Exception {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try (var executor = java.util.concurrent.Executors.newFixedThreadPool(8)) {
+            var selector = availableStrategy(registry);
+            var counts =
+                    new java.util.concurrent.ConcurrentHashMap<
+                            String, java.util.concurrent.atomic.LongAdder>();
+            var calls = new java.util.ArrayList<java.util.concurrent.Callable<Void>>();
+            for (int thread = 0; thread < 8; thread++) {
+                calls.add(
+                        () -> {
+                            for (int i = 0; i < 250; i++) {
+                                var selected =
+                                        selectStatus(
+                                                selector, request(1L, Integer.toString(i)), null);
+                                counts.computeIfAbsent(
+                                                selected.getServerIp(),
+                                                key -> new java.util.concurrent.atomic.LongAdder())
+                                        .increment();
+                            }
+                            assertScratchReleased(scratchCache().get());
+                            return null;
+                        });
+            }
+            for (var future : executor.invokeAll(calls)) {
+                future.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            Assertions.assertEquals(1000L, counts.get("127.0.0.1").sum());
+            Assertions.assertEquals(1000L, counts.get("127.0.0.2").sum());
+            for (var view : decodeRoutingSnapshot(registry, null)) {
+                Assertions.assertEquals(0L, view.totalLoad());
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    private static ThreadLocal<?> scratchCache() {
+        return (ThreadLocal<?>)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        DecodeSelector.class, "SCRATCH");
+    }
+
+    private static void assertScratchReleased(Object scratch) {
+        for (String field : List.of("views", "candidates")) {
+            var list =
+                    (java.util.ArrayList<?>)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    scratch, field);
+            Assertions.assertTrue(list.isEmpty());
+        }
+        Assertions.assertEquals(
+                false,
+                org.springframework.test.util.ReflectionTestUtils.getField(scratch, "inUse"));
     }
 
     @ParameterizedTest
@@ -266,7 +371,7 @@ class DecodeSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
         for (int i = 0; i < 12; i++) {
             ServerStatus selected =
-                    selectStatus(strategy, context(1_000L, 1_000L + i), RoleType.DECODE, null);
+                    selectStatus(strategy, request(1_000L, String.valueOf(1_000L + i)), null);
             counts.merge(selected.getServerIp(), 1, Integer::sum);
         }
         Assertions.assertEquals(Map.of("127.0.0.1", 4, "127.0.0.2", 4, "127.0.0.3", 4), counts);
@@ -279,10 +384,9 @@ class DecodeSelectorTest {
         decodeStatuses.put("127.0.0.1:8080", worker1);
 
         DecodeSelector decodeSelector = availableStrategy(decodeRegistry());
-        BalanceContext balanceContext = context(1_000, 1_000L);
+        Request inputs = request(1_000, "1000");
 
-        ServerStatus status =
-                selectStatus(decodeSelector, balanceContext, RoleType.DECODE, "group-a");
+        ServerStatus status = selectStatus(decodeSelector, inputs, "group-a");
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
@@ -312,7 +416,7 @@ class DecodeSelectorTest {
         DecodeSelector strategy = availableStrategy(registry);
         for (int i = 0; i < 10; i++) {
             ServerStatus selected =
-                    selectStatus(strategy, context(1_000L, 1_000L + i), RoleType.DECODE, null);
+                    selectStatus(strategy, request(1_000L, String.valueOf(1_000L + i)), null);
             Assertions.assertEquals(expectedIp, selected.getServerIp());
         }
     }
@@ -336,7 +440,7 @@ class DecodeSelectorTest {
         java.util.Set<String> selected = new java.util.HashSet<>();
         for (int i = 0; i < 16; i++) {
             selected.add(
-                    selectStatus(strategy, context(1L, 10_000L + i), RoleType.DECODE, null)
+                    selectStatus(strategy, request(1L, String.valueOf(10_000L + i)), null)
                             .getServerIp());
         }
         Assertions.assertEquals(16, selected.size());
@@ -357,11 +461,7 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 10_000L, 9_000L);
 
         ServerStatus selected =
-                selectStatus(
-                        availableStrategy(decodeRegistry()),
-                        context(100L, 1_001L),
-                        RoleType.DECODE,
-                        null);
+                selectStatus(availableStrategy(decodeRegistry()), request(100L, "1001"), null);
 
         Assertions.assertEquals(
                 "127.0.0.2",
@@ -376,12 +476,11 @@ class DecodeSelectorTest {
         EndpointRegistry registry = decodeRegistry();
         DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
         reserveQueued(endpoint, 91L, 100L, 2_000L, 50);
-        Assertions.assertEquals(100L, endpoint.routingView().inputKvReserved());
+        Assertions.assertEquals(100L, endpoint.routingView().inflightHardKv());
         Assertions.assertEquals(2_500L, endpoint.routingView().realKvUsed());
 
         ServerStatus selected =
-                selectStatus(
-                        availableStrategy(registry), context(100L, 1_001L), RoleType.DECODE, null);
+                selectStatus(availableStrategy(registry), request(100L, "1001"), null);
 
         Assertions.assertEquals("127.0.0.2", selected.getServerIp());
     }
@@ -397,7 +496,7 @@ class DecodeSelectorTest {
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
-                    selectStatus(strategy, context(100L, 1_001L + i), RoleType.DECODE, null)
+                    selectStatus(strategy, request(100L, String.valueOf(1_001L + i)), null)
                             .getServerIp(),
                     "110% KV usage must remain cheaper than 210%");
         }
@@ -413,8 +512,7 @@ class DecodeSelectorTest {
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
 
         ServerStatus selected =
-                selectStatus(
-                        availableStrategy(registry), context(100L, 1_001L), RoleType.DECODE, null);
+                selectStatus(availableStrategy(registry), request(100L, "1001"), null);
 
         Assertions.assertEquals("127.0.0.2", selected.getServerIp());
     }
@@ -427,10 +525,11 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 10_000L, 10_000L);
         DecodeSelector strategy = availableStrategy(decodeRegistry());
 
+        var inputs = request(100L, "1001");
         IllegalStateException error =
                 Assertions.assertThrows(
                         IllegalStateException.class,
-                        () -> strategy.select(DecodeBinding.capture(context(100L, 1_001L)), null));
+                        () -> StrategyTestSupport.select(strategy, inputs, SCHEDULING, null));
 
         Assertions.assertTrue(
                 error.getMessage().contains("Decode cost formula produced no finite score"));
@@ -447,8 +546,7 @@ class DecodeSelectorTest {
         reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
 
         ServerStatus selected =
-                selectStatus(
-                        availableStrategy(registry), context(100L, 1_001L), RoleType.DECODE, null);
+                selectStatus(availableStrategy(registry), request(100L, "1001"), null);
 
         Assertions.assertEquals("127.0.0.2", selected.getServerIp());
     }
@@ -466,7 +564,7 @@ class DecodeSelectorTest {
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
-                    selectStatus(strategy, context(100L, 1_001L + i), RoleType.DECODE, null)
+                    selectStatus(strategy, request(100L, String.valueOf(1_001L + i)), null)
                             .getServerIp());
         }
     }
@@ -497,7 +595,7 @@ class DecodeSelectorTest {
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
-                    selectStatus(strategy, context(100L, 1_001L + i), RoleType.DECODE, null)
+                    selectStatus(strategy, request(100L, String.valueOf(1_001L + i)), null)
                             .getServerIp());
         }
 
@@ -508,7 +606,7 @@ class DecodeSelectorTest {
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.1",
-                    selectStatus(strategy, context(100L, 2_001L + i), RoleType.DECODE, null)
+                    selectStatus(strategy, request(100L, String.valueOf(2_001L + i)), null)
                             .getServerIp(),
                     "queued reservations count toward running cost before they face the Engine");
         }
@@ -519,7 +617,7 @@ class DecodeSelectorTest {
     void availabilityUsesDispatchForDirectAndAllReservationsForQueue(boolean direct) {
         configureCost("running_size / max_running_size");
         if (direct) {
-            configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
+            configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
         }
         configService
                 .loadBalanceConfig()
@@ -536,8 +634,7 @@ class DecodeSelectorTest {
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
 
         ServerStatus selected =
-                selectStatus(
-                        availableStrategy(registry), context(100L, 1_001L), RoleType.DECODE, null);
+                selectStatus(availableStrategy(registry), request(100L, "1001"), null);
 
         Assertions.assertEquals(
                 direct ? "127.0.0.2" : "127.0.0.1",
@@ -549,15 +646,15 @@ class DecodeSelectorTest {
     @ValueSource(strings = {"kvcache_used_ratio", "running_size"})
     void should_skip_worker_with_insufficient_kv_cache_capacity(String expression) {
         configureCost(expression);
-        configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
+        configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
         registerWorker("127.0.0.1", 1_000, 100);
         registerWorker("127.0.0.2", 1_000, 800);
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
         DecodeSelector decodeSelector = availableStrategy(registry);
-        BalanceContext balanceContext = context(500, 2_000L);
+        Request inputs = request(500, "2000");
 
-        ServerStatus status = selectStatus(decodeSelector, balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(decodeSelector, inputs, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.2", status.getServerIp());
@@ -565,13 +662,13 @@ class DecodeSelectorTest {
 
     @Test
     void should_return_error_when_all_workers_kv_insufficient() {
-        configService.loadBalanceConfig().setScheduler(SchedulerConfig.direct());
+        configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
         registerWorker("127.0.0.1", 1_000, 50);
         registerWorker("127.0.0.2", 1_000, 100);
         DecodeSelector decodeSelector = availableStrategy(decodeRegistry());
-        BalanceContext balanceContext = context(200, 3_000L);
+        Request inputs = request(200, "3000");
 
-        ServerStatus status = selectStatus(decodeSelector, balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(decodeSelector, inputs, null);
 
         Assertions.assertNull(status);
     }
@@ -583,11 +680,11 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 128L, 128L);
         registerWorker("127.0.0.2", 256L, 256L);
         DecodeSelector strategy = availableStrategy(decodeRegistry());
-        BalanceContext context = context(257L, 3_050L);
-        context.getRequest().setMaxNewTokens(1);
+        Request inputs = request(257L, "3050");
+        inputs = inputs.toBuilder().maxNewTokens(1).build();
 
-        PlacementResult<SelectedRole, RoleType> result =
-                strategy.select(DecodeBinding.capture(context), null);
+        PlacementResult<RequestRoute, RoleType> result =
+                StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.REJECTED, result.status());
         Assertions.assertTrue(result.failure().getErrorMessage().contains("demand=258"));
@@ -599,8 +696,8 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 0L, 0L);
         DecodeSelector strategy = availableStrategy(decodeRegistry());
 
-        PlacementResult<SelectedRole, RoleType> result =
-                strategy.select(DecodeBinding.capture(context(1_000_000L, 3_051L)), null);
+        PlacementResult<RequestRoute, RoleType> result =
+                StrategyTestSupport.select(strategy, request(1_000_000L, 3_051L), SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
         result.value().close();
@@ -621,8 +718,7 @@ class DecodeSelectorTest {
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
 
         ServerStatus selected =
-                selectStatus(
-                        availableStrategy(registry), context(100L, 3_052L), RoleType.DECODE, null);
+                selectStatus(availableStrategy(registry), request(100L, "3052"), null);
 
         Assertions.assertEquals("127.0.0.1", selected.getServerIp());
     }
@@ -637,38 +733,61 @@ class DecodeSelectorTest {
 
         Assertions.assertTrue(
                 endpoint.routingView().realKvUsed()
-                        > new DecodeEndpoint.AdmissionCapacity(0L, 90L)
+                        > new DecodeResources.AdmissionCapacity(0L, 90L)
                                 .kvBudget(endpoint.routingView().totalKv()));
-        Assertions.assertEquals(0L, endpoint.routingView().engineFacingKvUsed());
+        Assertions.assertEquals(0L, endpoint.routingView().dispatchUsage().expectedKvUsed());
 
-        DecodeSelector strategy = new DecodeSelector(new WorkerDirectory(registry));
+        DecodeSelector strategy =
+                new DecodeSelector(
+                        registry,
+                        configService,
+                        SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
 
-        BalanceContext context = context(100, 3L);
-        Request request = context.getRequest();
+        Request inputs = request(100, "3");
 
-        PlacementResult<SelectedRole, RoleType> fifoPlacement =
-                strategy.select(DecodeBinding.capture(context), null);
+        PlacementResult<RequestRoute, RoleType> fifoPlacement =
+                StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, fifoPlacement.status());
-        SelectedRole fifoSelection = fifoPlacement.value();
-        ServerStatus fifoResult = fifoSelection.serverStatus();
+        RequestRoute fifoSelection = fifoPlacement.value();
+        ServerStatus fifoResult = fifoSelection.decode();
         Assertions.assertTrue(fifoResult.isSuccess());
-        Assertions.assertEquals(request.getRequestId(), fifoResult.getRequestId());
+        Assertions.assertEquals(inputs.getRequestId(), fifoResult.getRequestId());
         Assertions.assertFalse(
-                endpoint.resourceSnapshot().isQueued("3"),
+                EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), "3"),
                 "selection must not mutate Decode reservation ownership");
         fifoSelection.close();
+    }
 
-        QueueOrderingConfig preemptiveOrdering = QueueOrderingConfig.priority();
-        preemptiveOrdering.setPreemption(preemption());
-        configService.loadBalanceConfig().queueScheduler().setOrdering(preemptiveOrdering);
-        request.setRequestId("4");
-        PlacementResult<SelectedRole, RoleType> priorityPlacement =
-                strategy.select(DecodeBinding.capture(context), null);
-        Assertions.assertEquals(PlacementResult.Status.SUCCESS, priorityPlacement.status());
-        Assertions.assertFalse(
-                endpoint.resourceSnapshot().isQueued("4"),
-                "priority planning must leave capacity acquisition to commit");
-        priorityPlacement.value().close();
+    @Test
+    void directReportsCapacityBlockWhenEveryWorkerIsTemporarilyBusy() {
+        configureCost("running_size");
+        configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
+        configService
+                .loadBalanceConfig()
+                .getRouter()
+                .getRoles()
+                .getDecode()
+                .getAvailability()
+                .setMaxEngineRequests(1L);
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            reservePinned(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+            reservePinned(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
+
+            var inputs = request(100L, 1_001L);
+            var result =
+                    StrategyTestSupport.select(
+                            availableStrategy(registry), inputs, SCHEDULING, null);
+
+            Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+            Assertions.assertEquals(RoleType.DECODE, result.blocker());
+            Assertions.assertNotNull(result.failure());
+            Assertions.assertEquals("Decode capacity exhausted", result.diagnostics().get("cause"));
+        } finally {
+            registry.close();
+        }
     }
 
     @Test
@@ -680,9 +799,9 @@ class DecodeSelectorTest {
         // The cheaper endpoint cannot fit this request, so readiness must win.
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
         DecodeSelector strategy = availableStrategy(registry);
-        BalanceContext context = context(300L, 5L);
+        Request inputs = request(300L, "5");
 
-        ServerStatus selected = selectStatus(strategy, context, RoleType.DECODE, null);
+        ServerStatus selected = selectStatus(strategy, inputs, null);
 
         Assertions.assertNotNull(selected);
         Assertions.assertEquals(
@@ -703,15 +822,17 @@ class DecodeSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
         for (int index = 0; index < 10; index++) {
             long requestId = 123L + index;
-            PlacementResult<SelectedRole, RoleType> result =
-                    strategy.select(DecodeBinding.capture(context(100L, requestId)), null);
+            PlacementResult<RequestRoute, RoleType> result =
+                    StrategyTestSupport.select(
+                            strategy, request(100L, requestId), SCHEDULING, null);
             Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-            try (SelectedRole selected = result.value()) {
-                counts.merge(selected.serverStatus().getServerIp(), 1, Integer::sum);
+            try (RequestRoute selected = result.value()) {
+                counts.merge(selected.decode().getServerIp(), 1, Integer::sum);
                 Assertions.assertFalse(
-                        decodeEndpoint(registry, selected.serverStatus().getServerIp() + ":8080")
-                                .resourceSnapshot()
-                                .isQueued(Long.toString(requestId)),
+                        EndpointTestSupport.isQueued(
+                                decodeEndpoint(registry, selected.decode().getServerIp() + ":8080")
+                                        .resourceSnapshot(),
+                                Long.toString(requestId)),
                         "selection cannot claim capacity");
             }
         }
@@ -730,7 +851,7 @@ class DecodeSelectorTest {
         DecodeSelector strategy = availableStrategy(registry);
         for (long requestId = 200L; requestId < 204L; requestId++) {
             ServerStatus selected =
-                    selectStatus(strategy, context(200L, requestId), RoleType.DECODE, null);
+                    selectStatus(strategy, request(200L, String.valueOf(requestId)), null);
             Assertions.assertNotNull(selected);
             Assertions.assertEquals("127.0.0.2", selected.getServerIp());
         }
@@ -746,7 +867,7 @@ class DecodeSelectorTest {
         QueueOrderingConfig ordering =
                 policy == QueuePolicy.FIFO
                         ? new QueueOrderingConfig()
-                        : QueueOrderingConfig.priority();
+                        : ConfigTestSupport.priority();
         if (policy == QueuePolicy.PRIORITY) {
             ordering.setPreemption(null);
         }
@@ -769,13 +890,13 @@ class DecodeSelectorTest {
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
         DecodeSelector strategy = availableStrategy(registry);
-        BalanceContext context = context(0L, 30_000L);
+        Request inputs = request(0L, "30000");
         int lowerLoadSelections = 0;
         int higherLoadSelections = 0;
 
         for (int index = 0; index < 20; index++) {
-            context.getRequest().setRequestId(Long.toString(30_000L + index));
-            ServerStatus selected = selectStatus(strategy, context, RoleType.DECODE, null);
+            inputs = inputs.toBuilder().requestId(String.valueOf(30_000L + index)).build();
+            ServerStatus selected = selectStatus(strategy, inputs, null);
             if ("127.0.0.1".equals(selected.getServerIp())) {
                 lowerLoadSelections++;
             } else {
@@ -801,13 +922,9 @@ class DecodeSelectorTest {
 
         DecodeSelector strategy = availableStrategy(registry);
 
-        Request request = new Request();
-        request.setSeqLen(1);
-        request.setRequestId("500");
-        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
-        context.setRequest(request);
+        Request request = Request.builder().seqLen(1).requestId("500").build();
 
-        ServerStatus status = selectStatus(strategy, context, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(strategy, request, null);
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
     }
@@ -815,12 +932,12 @@ class DecodeSelectorTest {
     @Test
     void fullOutputDemandCannotWaitForeverBehindAnImpossibleKvBudget() {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
-        BalanceContext context = context(500L, 991L);
-        context.getRequest().setMaxNewTokens(10_000);
+        Request inputs = request(500L, "991");
+        inputs = inputs.toBuilder().maxNewTokens(10_000).build();
         Assertions.assertEquals(
                 PlacementResult.Status.REJECTED,
-                availableStrategy(decodeRegistry())
-                        .select(DecodeBinding.capture(context), null)
+                StrategyTestSupport.select(
+                                availableStrategy(decodeRegistry()), inputs, SCHEDULING, null)
                         .status());
     }
 
@@ -835,7 +952,7 @@ class DecodeSelectorTest {
                 .getAvailability()
                 .setMaxKvUsagePercent(percent);
         Assertions.assertThrows(
-                IllegalArgumentException.class, () -> DecodeBinding.capture(context(1L, 992L)));
+                IllegalArgumentException.class, () -> availableStrategy(decodeRegistry()));
     }
 
     private void configureCost(String expression) {
@@ -869,7 +986,14 @@ class DecodeSelectorTest {
             long kvBudgetTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserve(pin, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
+            endpoint.tryReserveQueuedRequest(
+                            pin,
+                            String.valueOf(requestId),
+                            kvTokens,
+                            kvBudgetTokens,
+                            priority,
+                            null)
+                    .handle();
         }
     }
 
@@ -877,7 +1001,9 @@ class DecodeSelectorTest {
         return (DecodeEndpoint) registry.get(RoleType.DECODE, address);
     }
 
-    /** Non-queued inflight reservation: each call raises engineLoad by one. */
+    /**
+     * Non-queued inflight reservation: each call raises engineLoad by one.
+     */
     private static void reservePinned(
             DecodeEndpoint endpoint,
             long requestId,
@@ -885,20 +1011,104 @@ class DecodeSelectorTest {
             long kvBudgetTokens,
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
-            endpoint.reserveUnqueued(
-                    pin, Long.toString(requestId), kvTokens, kvBudgetTokens, priority);
+            EndpointTestSupport.reserveUnqueuedDecode(
+                    endpoint, pin, String.valueOf(requestId), kvTokens, kvBudgetTokens, priority);
         }
     }
 
+    private static Request request(long sequenceLength, long requestId) {
+        return request(sequenceLength, Long.toString(requestId));
+    }
+
     private static ServerStatus selectStatus(
-            DecodeSelector strategy, BalanceContext context, RoleType role, String group) {
-        PlacementResult<SelectedRole, RoleType> result =
-                strategy.select(context, DecodeBinding.capture(context), group);
+            DecodeSelector strategy, Request inputs, String group) {
+        PlacementResult<RequestRoute, RoleType> result =
+                StrategyTestSupport.select(strategy, inputs, SCHEDULING, group);
         if (result.status() != PlacementResult.Status.SUCCESS) {
             return null;
         }
-        try (SelectedRole selected = result.value()) {
-            return selected.serverStatus();
+        try (RequestRoute selected = result.value()) {
+            return selected.decode();
+        }
+    }
+
+    @Test
+    void recordsMinimumCostSelectionReason() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            RequestData context = context(100L, 2L);
+            ServerStatus selected =
+                    selectStatus(availableStrategy(registry), context, RoleType.DECODE, null);
+
+            Assertions.assertNotNull(selected);
+            Assertions.assertEquals("DECODE_MIN_COST", context.selectionReason(RoleType.DECODE));
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void recordsRoundRobinTiebreakForEqualMinimumCostCandidates() {
+        registerWorker("127.0.0.1", 10_000L, 10_000L);
+        registerWorker("127.0.0.2", 10_000L, 10_000L);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            RequestData context = context(100L, 3L);
+            ServerStatus selected =
+                    selectStatus(availableStrategy(registry), context, RoleType.DECODE, null);
+
+            Assertions.assertNotNull(selected);
+            Assertions.assertEquals(
+                    "DECODE_MIN_COST_ROUND_ROBIN_TIEBREAK",
+                    context.selectionReason(RoleType.DECODE));
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void selectedDecodePreservesLogicalEngineIdentity() {
+        WorkerStatus worker =
+                WorkerStatus.createDiscovered(
+                        RoleType.DECODE,
+                        null,
+                        "127.0.0.1",
+                        8080,
+                        9090,
+                        "test-site",
+                        "deployment",
+                        1,
+                        2);
+        StrategyTestSupport.publish(
+                worker, StrategyTestSupport.response(RoleType.DECODE, true, 10_000L, 10_000L, 1L));
+        decodeStatuses.put(worker.getLogicalIpPort(), worker);
+        EndpointRegistry registry = decodeRegistry();
+        try {
+            ServerStatus selected =
+                    selectStatus(
+                            availableStrategy(registry), context(100L, 1L), RoleType.DECODE, null);
+
+            Assertions.assertNotNull(selected);
+            Assertions.assertEquals(1, selected.getEngineIndex());
+            Assertions.assertEquals("127.0.0.1:8080@1", selected.getLogicalIpPort());
+        } finally {
+            registry.close();
+        }
+    }
+
+    private RequestData context(long sequenceLength, long requestId) {
+        var data = new RequestData(configService.loadBalanceConfig());
+        data.setRequest(request(sequenceLength, Long.toString(requestId)));
+        data.setSchedulingMetadata(SCHEDULING);
+        return data;
+    }
+
+    private static ServerStatus selectStatus(
+            DecodeSelector selector, RequestData data, RoleType role, String group) {
+        try (var route = new RequestRoute(new org.flexlb.balance.scheduler.RequestContext(data))) {
+            var result = selector.select(data, group, route);
+            return result.status() == PlacementResult.Status.SUCCESS ? result.value() : null;
         }
     }
 }
