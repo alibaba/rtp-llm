@@ -99,7 +99,6 @@ class _InvalidTypePDSepConfig:
         return _new_config, (PDSepConfig,), tuple(state)
 
 
-
 class MoeConfigPickleTest(unittest.TestCase):
     def test_non_default_fp4_moe_op_round_trip(self):
         config = MoeConfig()
@@ -126,7 +125,6 @@ class PDSepConfigPickleTest(unittest.TestCase):
 
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
         self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
-
 
     def test_rejects_invalid_state_length(self):
         for size in (20, 21, 23):
@@ -232,6 +230,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.decode_capture_batch_sizes = [2, 7]
         config.disable_dpc_random = True
         config.rocm_disable_custom_ag = True
+        config.enable_fuse_kernels = False
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -253,6 +252,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
         self.assertTrue(restored.disable_dpc_random)
         self.assertTrue(restored.rocm_disable_custom_ag)
+        self.assertFalse(restored.enable_fuse_kernels)
 
     def test_legacy_14_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
@@ -267,7 +267,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (15, 17, 18):
+        for size in (15, 18, 19):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):

@@ -7,6 +7,7 @@
 
 #define private public
 #define protected public
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -124,6 +125,14 @@ TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {
 }
 
 TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutcome) {
+    startKmonServiceStatus(nullptr);
+    setKmonServiceServing(true);
+    struct StopTestMetrics {
+        ~StopTestMetrics() {
+            stopKmonServiceStatus();
+        }
+    } stop_test_metrics;
+
     const struct {
         ErrorCode error;
         int       retries;
@@ -136,9 +145,9 @@ TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutco
                  {ErrorCode::DECODE_MALLOC_FAILED, 0}};
     for (const auto& test : cases) {
         SCOPED_TRACE(testing::Message() << "error=" << static_cast<int>(test.error) << " retries=" << test.retries);
-        kmonitor::MetricsTags tags;
-        auto                  reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-        auto                  stream   = createStream({1, 2, 3}, /*reuse_cache=*/false, RoleType::PREFILL);
+        auto tags     = kmonTagsWithServiceStatus(nullptr);
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+        auto stream   = createStream({1, 2, 3}, /*reuse_cache=*/false, RoleType::PREFILL);
         stream->setMetricsReporter(reporter);
         auto  allocator  = installRetryableInitMalloc();
         auto* operations = reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
@@ -160,9 +169,13 @@ TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutco
         EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
         stream->reportMetricOnce();
         stream->reportMetricOnce();
+        const auto stream_tag_map =
+            buildStreamMetricTagMap(stream->priority(), test.error == ErrorCode::GENERATE_TIMEOUT);
+        const kmonitor::MetricsTags stream_tags(stream_tag_map);
+        const auto                  serving_stream_tags = kmonTagsWithServiceStatus(&stream_tags);
         stream.reset();
         expectQps(reporter->getMetricsGroup<RtpLLMStreamMetrics>()->kv_cache_malloc_failed_qps_metric,
-                  tags,
+                  serving_stream_tags,
                   test.error == ErrorCode::MALLOC_FAILED || test.error == ErrorCode::DECODE_MALLOC_FAILED);
         expectQps(operations->malloc_retry_qps_metric, tags, 0);
     }

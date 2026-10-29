@@ -187,6 +187,21 @@ class GenerateOutputs {
 public:
     std::vector<GenerateOutput> generate_outputs;
     int64_t                     request_id;
+    bool                        frontend_metric_only = false;
+    // Internal queue boundary, never serialized or exposed in public AuxInfo.
+    bool                                     frontend_metrics_terminal = false;
+    std::vector<std::pair<uint64_t, double>> frontend_sp_tpot_samples;
+    std::optional<int64_t>                   frontend_input_len;
+    std::optional<int64_t>                   frontend_output_len;
+    std::optional<int64_t>                   frontend_context_token_num;
+    std::optional<int64_t>                   frontend_context_token_num_with_cache;
+    std::optional<int64_t>                   frontend_context_execute_time_us;
+    std::optional<int64_t>                   frontend_context_execute_time_with_cache_us;
+    std::optional<int64_t>                   frontend_generate_token_num;
+    std::optional<int64_t>                   frontend_generate_execute_time_us;
+    std::optional<int64_t>                   frontend_speculative_verify_rounds;
+    std::optional<int64_t>                   frontend_speculative_accepted_token_num;
+    std::optional<int64_t>                   frontend_speculative_proposed_draft_tokens;
 };
 
 enum class StreamState {

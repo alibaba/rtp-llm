@@ -49,7 +49,8 @@ double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags&
         ADD_FAILURE() << "metric is null";
         return -1;
     }
-    kmonitor::Metric* qps_metric = metric->DeclareMetric(&tags);
+    const auto        serving_tags = kmonTagsWithServiceStatus(&tags);
+    kmonitor::Metric* qps_metric   = metric->DeclareMetric(&serving_tags);
     if (qps_metric == nullptr) {
         ADD_FAILURE() << "metric series is missing for tags=" << tags.ToString();
         return -1;
@@ -65,8 +66,9 @@ double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags&
 }
 
 void expectCountSamples(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags, size_t count) {
-    auto* series = metric->DeclareMetric(&tags);
-    auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
+    const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+    auto*      series       = metric->DeclareMetric(&serving_tags);
+    auto*      gauge        = dynamic_cast<kmonitor::GaugeMetric*>(series);
     EXPECT_NE(gauge, nullptr);
     if (gauge != nullptr) {
         EXPECT_EQ(gauge->calculator_.Count(), count);
@@ -202,7 +204,7 @@ void initializeGroups(const std::vector<GroupSetPtr>&                          g
                       std::vector<block_transfer_engine_test::TestGroupConfig> group_bases) {
     RTP_LLM_CHECK(groups.size() == device_pools.size());
     RTP_LLM_CHECK(groups.size() == group_bases.size());
-    auto topology = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
+    auto   topology     = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
     size_t group_set_id = 0;
     for (const auto& tag : topology->groupTags()) {
         groups[group_set_id]->initialize(group_set_id, topology, {tag});
@@ -528,7 +530,7 @@ public:
         }
         const std::string test_name = test_info->name();
         device_pools_               = {makeTestDevicePool(4, test_name + "_device_0"),
-                         makeTestDevicePool(4, test_name + "_device_1")};
+                                       makeTestDevicePool(4, test_name + "_device_1")};
         host_pools_                 = {makePinnedHostPool(4), makePinnedHostPool(4)};
         disk_pools_ = {makeTestDiskPool(4, test_name + "_disk_0"), makeTestDiskPool(4, test_name + "_disk_1")};
         if (device_pools_[0] == nullptr || device_pools_[1] == nullptr || host_pools_[0] == nullptr
@@ -538,7 +540,7 @@ public:
 
         groups_                           = {std::make_shared<FullGroupSet>(
                        std::vector<DeviceBlockPoolPtr>{device_pools_[0]}, host_pools_[0], disk_pools_[0]),
-                   std::make_shared<LinearGroupSet>(
+                                             std::make_shared<LinearGroupSet>(
                        std::vector<DeviceBlockPoolPtr>{device_pools_[1]}, host_pools_[1], disk_pools_[1])};
         auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
         auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
@@ -668,9 +670,9 @@ public:
     std::unique_ptr<BlockTreeEvictor>                    evictor_;
 
 private:
-    mutable std::mutex                 settled_mutex_;
-    std::condition_variable            settled_cv_;
-    std::vector<bool> settled_events_;
+    mutable std::mutex      settled_mutex_;
+    std::condition_variable settled_cv_;
+    std::vector<bool>       settled_events_;
 };
 
 TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleInReverseCompletionOrder) {
@@ -741,7 +743,7 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     const auto                   metrics_reporter = environment.metricsReporter();
     const std::vector<TreeNode*> path             = environment.insertParentDeviceChildHost();
     ASSERT_EQ(path.size(), 2u);
-    TreeNode* const child  = path[1];
+    TreeNode* const child = path[1];
 
     ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::HOST, /*max_victim_count=*/1).madeProgress());
     ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::HOST, /*max_victim_count=*/1).madeProgress());
@@ -778,8 +780,7 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     EXPECT_FALSE(environment.disk_pools_[0]->isAllocated(group_0_desc->target_blocks.front()));
     EXPECT_TRUE(environment.tree_->pending_node_pool_.empty());
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.settledEvents(),
-              (std::vector<bool>{false, false, false}));
+    EXPECT_EQ(environment.settledEvents(), (std::vector<bool>{false, false, false}));
 }
 
 void verifyLoadCorruptionWhileAnotherGroupIsDemoting(size_t corrupt_group, bool copy_success) {
@@ -870,12 +871,13 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     ASSERT_TRUE(task_pool.start());
     auto                    transfer_engine = std::make_shared<DeferredEvictionTransferEngine>(groups);
     BlockTransferDispatcher dispatcher(transfer_engine);
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto kmonitor_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-    BlockTreeCacheMetricsReporter      metrics_reporter{kmonitor_reporter};
-    std::mutex                         cache_mutex;
-    std::mutex                         settled_mutex;
-    std::vector<bool> settled_events;
-    BlockTreeEvictor                   evictor(
+    BlockTreeCacheMetricsReporter metrics_reporter{kmonitor_reporter};
+    std::mutex                    cache_mutex;
+    std::mutex                    settled_mutex;
+    std::vector<bool>             settled_events;
+    BlockTreeEvictor              evictor(
         &tree,
         EvictionPolicy::LRU,
         EvictionPolicy::LRU,
@@ -952,8 +954,9 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
         for (const auto& [metric, start_time_us] :
              {std::make_pair(metrics->evicted_block_lifetime_ms_metric, child_timing.tier_enter_time_us),
               std::make_pair(metrics->evicted_block_idletime_ms_metric, child_timing.last_access_time_us)}) {
-            auto* series = metric->DeclareMetric(&detached_tags);
-            auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
+            const auto serving_tags = kmonTagsWithServiceStatus(&detached_tags);
+            auto*      series       = metric->DeclareMetric(&serving_tags);
+            auto*      gauge        = dynamic_cast<kmonitor::GaugeMetric*>(series);
             EXPECT_NE(gauge, nullptr);
             if (gauge != nullptr) {
                 EXPECT_EQ(gauge->calculator_.Count(), 1);
@@ -1417,7 +1420,9 @@ TEST_F(BlockTreeEvictorTest, ComputeWatermarkEvictCountRejectsPendingReleasesAbo
     try {
         (void)evictor_->computeWatermarkEvictCount(
             *group_, Tier::DEVICE, TierWatermark{/*low_ratio=*/0.4, /*high_ratio=*/0.5});
-    } catch (const std::runtime_error& error) { error_message = error.what(); }
+    } catch (const std::runtime_error& error) {
+        error_message = error.what();
+    }
     {
         std::lock_guard<std::mutex> lock(evictor_->pending_release_mutex_);
         evictor_->pending_release_counts_.clear();
@@ -1458,7 +1463,8 @@ TEST_F(BlockTreeEvictorTest, WatermarkRequiresHighAndRequestsDownToLowWithIntege
 }
 
 TEST_F(BlockTreeEvictorTest, WatermarkBlockCountsReportNoProgressOnceAndSkipIdleChecks) {
-    const auto metrics_reporter = evictor_runtime_.metricsReporter();
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    const auto                                  metrics_reporter = evictor_runtime_.metricsReporter();
 
     const auto blocks = device_pool_->malloc(116);
     ASSERT_TRUE(blocks.has_value());
@@ -1531,7 +1537,8 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCoun
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTransferLimit) {
-    auto host_pool = makePinnedHostPool(4);
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    auto                                        host_pool = makePinnedHostPool(4);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "device_host_watermark_batch");
@@ -1585,6 +1592,7 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTr
 }
 
 TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     device_pool_ = makeTestDevicePool(20, "direct_device_watermark_convergence");
     ASSERT_NE(device_pool_, nullptr);
     resetGroup();
@@ -1614,9 +1622,7 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     ASSERT_EQ(device_pool_->usedBlocksNum(), 18u);
 
     std::vector<bool> settled_events;
-    evictor_->settled_ = [&settled_events](bool check_watermark) {
-        settled_events.push_back(check_watermark);
-    };
+    evictor_->settled_ = [&settled_events](bool check_watermark) { settled_events.push_back(check_watermark); };
     evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, TierWatermark{/*low_ratio=*/0.40, /*high_ratio=*/0.80});
 
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 0u);
@@ -1654,6 +1660,7 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     device_pool_ = makeTestDevicePool(10, "persistent_device_watermark");
     ASSERT_NE(device_pool_, nullptr);
     auto host_pool = makePinnedHostPool(4);
@@ -1691,18 +1698,18 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow)
     scheduled_tags.AddTag("tier", tierName(Tier::DEVICE));
     scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
 
-    const TierWatermark                watermark{/*low_ratio=*/0.50, /*high_ratio=*/0.80};
-    std::vector<bool> settled_events;
-    evictor_->settled_ = [this, &watermark, &settled_events, eviction_metrics, &required_tags, &scheduled_tags](
-                             bool check_watermark) {
-        expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 0);
-        expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 0);
-        settled_events.push_back(check_watermark);
-        if (check_watermark) {
-            evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
-            evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
-        }
-    };
+    const TierWatermark watermark{/*low_ratio=*/0.50, /*high_ratio=*/0.80};
+    std::vector<bool>   settled_events;
+    evictor_->settled_ =
+        [this, &watermark, &settled_events, eviction_metrics, &required_tags, &scheduled_tags](bool check_watermark) {
+            expectCountSamples(eviction_metrics->eviction_blocks_count_metric, required_tags, 0);
+            expectCountSamples(eviction_metrics->eviction_blocks_count_metric, scheduled_tags, 0);
+            settled_events.push_back(check_watermark);
+            if (check_watermark) {
+                evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+                evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+            }
+        };
     evictor_runtime_.transferEngine()->enqueue(true);
     evictor_runtime_.transferEngine()->enqueue(true);
 
@@ -1989,9 +1996,7 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
     }
 
     std::vector<bool> settled_events;
-    evictor_->settled_ = [&](bool check_watermark) {
-        settled_events.push_back(check_watermark);
-    };
+    evictor_->settled_   = [&](bool check_watermark) { settled_events.push_back(check_watermark); };
     const bool submitted = evictor_
                                ->batchEvictLocked(
                                    /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2)
@@ -2053,9 +2058,7 @@ TEST_F(BlockTreeEvictorTest, BatchTargetExhaustionLeavesEntirePlannedBatchUnchan
     }
 
     std::vector<bool> settled_events;
-    evictor_->settled_ = [&](bool check_watermark) {
-        settled_events.push_back(check_watermark);
-    };
+    evictor_->settled_ = [&](bool check_watermark) { settled_events.push_back(check_watermark); };
     evictor_runtime_.transferEngine()->enqueue(false);
     EXPECT_FALSE(evictor_
                      ->batchEvictLocked(
@@ -2663,7 +2666,7 @@ TEST_F(BlockTreeEvictorTest, MatchRefreshesHeapWithoutAdmittingIntermediateNode)
     const BlockIdxType                         leaf_block   = (*allocated)[1];
     const BlockIdxType                         rival_block  = (*allocated)[2];
     std::vector<std::vector<GroupSetResource>> resources    = {{makeResource(Tier::DEVICE, parent_block)},
-                                                            {makeResource(Tier::DEVICE, leaf_block)}};
+                                                               {makeResource(Tier::DEVICE, leaf_block)}};
     auto                                       result       = insert({100, 200}, resources);
     ASSERT_EQ(result.inserted_nodes.size(), 2u);
     auto rival = insert({300}, {{makeResource(Tier::DEVICE, rival_block)}});
@@ -3053,7 +3056,7 @@ TEST_F(BlockTreeEvictorTest, BatchSettlementRefreshesSharedParentAfterDemotion) 
     ASSERT_TRUE(blocks.has_value());
     ASSERT_EQ(blocks->size(), 3u);
     const auto parent_resource = makeResource(Tier::DEVICE, (*blocks)[0]);
-    auto result = insert({100, 200}, {{parent_resource}, {makeResource(Tier::DEVICE, (*blocks)[1])}});
+    auto       result          = insert({100, 200}, {{parent_resource}, {makeResource(Tier::DEVICE, (*blocks)[1])}});
     ASSERT_EQ(result.inserted_nodes.size(), 2u);
     TreeNode* const parent = result.inserted_nodes[0];
     insert({100, 300}, {{parent_resource}, {makeResource(Tier::DEVICE, (*blocks)[2])}});

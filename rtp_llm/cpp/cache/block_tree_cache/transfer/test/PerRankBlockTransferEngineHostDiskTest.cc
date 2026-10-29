@@ -16,6 +16,7 @@
 #include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
@@ -60,8 +61,8 @@ GroupSetPtr makeHostDiskGroup(size_t                                  group_set_
     auto device_pool = makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
     auto group       = makeTestGroupSet(group_set_id,
                                   std::move(topology),
-                                  {"group0"},
-                                  {std::move(device_pool)},
+                                        {"group0"},
+                                        {std::move(device_pool)},
                                   std::move(host_pool),
                                   std::move(disk_pool));
     return group;
@@ -183,16 +184,18 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThroughMetricsReporter) {
+    startKmonServiceStatus(nullptr);
+    setKmonServiceServing(true);
+    struct StopTestMetrics {
+        ~StopTestMetrics() {
+            stopKmonServiceStatus();
+        }
+    } stop_test_metrics;
+
     auto metrics_reporter       = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter);
-    auto engine                 = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set_},
-                                                               false,
-                                                               DeviceHostCopyOptions{},
-                                                               4,
-                                                               8,
-                                                               4,
-                                                               10000,
-                                                               cache_metrics_reporter);
+    auto engine                 = std::make_shared<PerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 8, 4, 10000, cache_metrics_reporter);
 
     const BlockIdxType host_block = poolMalloc(*host_pool_);
     const BlockIdxType disk_block = poolMalloc(*disk_pool_);
@@ -204,6 +207,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThrough
     kmonitor::MetricsTags tags("pool_type", "transfer");
     tags.AddTag("source_tier", tierName(Tier::HOST));
     tags.AddTag("target_tier", tierName(Tier::DISK));
+    tags                = kmonTagsWithServiceStatus(&tags);
     auto* waiting_tasks = transfer_metrics->task_queue_waiting_tasks_metric;
     ASSERT_NE(waiting_tasks, nullptr);
     EXPECT_EQ(waiting_tasks->metric_data_->Size(), 1u);

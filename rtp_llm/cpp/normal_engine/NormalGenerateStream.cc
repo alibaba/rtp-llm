@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <numeric>
 
 namespace rtp_llm {
 
@@ -13,12 +14,11 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeo
 
     std::unique_lock<std::mutex> lock(*mutex_);
 
-    if (stream_timeout_ms > 0) {
+    if (stream_timeout_ms > 0 && !consumerFinishedWithoutLock()) {
         const auto elapsed_us   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         const auto remaining_us = std::max<int64_t>(stream_timeout_ms * 1000 - elapsed_us, 0);
         stream_deadline         = std::chrono::steady_clock::now() + std::chrono::microseconds(remaining_us);
     }
-
     if (!consumerReadyWithoutLock()) {
         if (wait_timeout_ms == 0 && stream_timeout_ms <= 0) {
             consumer_cv_->wait(lock, [this] { return consumerReadyWithoutLock(); });
@@ -30,7 +30,8 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeo
             }
 
             if (!consumer_cv_->wait_until(lock, wait_deadline, [this] { return consumerReadyWithoutLock(); })) {
-                if (stream_timeout_ms > 0 && std::chrono::steady_clock::now() >= stream_deadline) {
+                if (stream_timeout_ms > 0 && std::chrono::steady_clock::now() >= stream_deadline
+                    && !consumerFinishedWithoutLock()) {
                     const auto running_time_ms =
                         (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
                     reportTimeoutWithoutLock(running_time_ms, stream_timeout_ms);
@@ -41,7 +42,6 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeo
             }
         }
     }
-
     // Preserve existing precedence: terminal errors override queued output.
     if (hasErrorWithoutLock()) {
         return statusInfoWithoutLock();
@@ -51,6 +51,14 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeo
     if (!generate_outputs_.empty()) {
         auto output = std::move(generate_outputs_.front());
         generate_outputs_.pop_front();
+        if (output.frontend_metric_only) {
+            output = takeLatestFrontendMetricOutput(std::move(output));
+        }
+        // Take a completed, immutable snapshot here. Serialization never waits
+        // on executor state and cannot drain samples from a future iteration.
+        fillFrontendTimingCounters(output);
+        output.frontend_sp_tpot_samples.swap(frontend_sp_tpot_samples_);
+        frontend_timing_dirty_ = false;
         return output;
     }
 
@@ -63,17 +71,119 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeo
 
 bool NormalGenerateStream::hasOutput() {
     std::lock_guard<std::mutex> lock(*mutex_);
-    return !generate_outputs_.empty();
+    return !generate_outputs_.empty()
+           && (!generate_outputs_.front().frontend_metrics_terminal || frontend_metrics_pending_steps_ == 0);
 }
 
 bool NormalGenerateStream::consumerReadyWithoutLock() const {
-    return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
+    if (hasErrorWithoutLock()) {
+        return true;
+    }
+    if (!generate_outputs_.empty()) {
+        return !generate_outputs_.front().frontend_metrics_terminal || frontend_metrics_pending_steps_ == 0;
+    }
+    return frontend_metrics_pending_steps_ == 0 && consumerFinishedWithoutLock();
+}
+
+bool NormalGenerateStream::beginFrontendMetricsStep() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!generate_input_->generate_config->frontend_metric_streaming || isFakeStream() || hasErrorWithoutLock()
+        || consumerFinishedWithoutLock()) {
+        return false;
+    }
+    ++frontend_metrics_pending_steps_;
+    return true;
+}
+
+void NormalGenerateStream::endFrontendMetricsStep() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_CHECK(frontend_metrics_pending_steps_ > 0);
+    --frontend_metrics_pending_steps_;
+    if (frontend_timing_dirty_ && !hasErrorWithoutLock() && generate_outputs_.empty()
+        && !consumerFinishedWithoutLock()) {
+        enqueueLatestFrontendMetricOutput(prepareFrontendMetricOutput());
+    }
+    consumer_cv_->notify_all();
+}
+
+bool NormalGenerateStream::publishFrontendMetrics(const FrontendMetricUpdate& update) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (hasErrorWithoutLock() || frontend_metrics_pending_steps_ == 0) {
+        return false;
+    }
+    frontend_timing_dirty_ |=
+        update.sp_tpot_us.has_value() || update.generate_tokens > 0
+        || (update.execute_time_us > 0 && (update.context_tokens > 0 || update.context_tokens_with_cache > 0));
+    if (update.execute_time_us > 0) {
+        if (update.context_tokens > 0) {
+            frontend_context_token_num_ += update.context_tokens;
+            frontend_context_execute_time_us_ += update.execute_time_us;
+        }
+        if (update.context_tokens_with_cache > 0) {
+            frontend_context_token_num_with_cache_ += update.context_tokens_with_cache;
+            frontend_context_execute_time_with_cache_us_ += update.execute_time_us;
+        }
+    }
+    // The engine's generate TPS numerator is independent of execution timing.
+    if (update.generate_tokens > 0) {
+        frontend_generate_token_num_ += update.generate_tokens;
+        frontend_generate_execute_time_us_ += std::max<int64_t>(update.execute_time_us, 0);
+    }
+    if (update.sp_tpot_us.has_value()) {
+        frontend_sp_tpot_samples_.emplace_back(++frontend_sp_tpot_sequence_, *update.sp_tpot_us);
+    }
+    return true;
+}
+
+void NormalGenerateStream::fillFrontendTimingCounters(GenerateOutputs& generate_results) {
+    if (!generate_input_->generate_config->frontend_metric_streaming) {
+        return;
+    }
+    if (frontend_context_token_num_ > 0) {
+        generate_results.frontend_context_token_num = frontend_context_token_num_;
+    }
+    if (frontend_context_token_num_with_cache_ > 0) {
+        generate_results.frontend_context_token_num_with_cache = frontend_context_token_num_with_cache_;
+    }
+    if (frontend_context_execute_time_us_ > 0) {
+        generate_results.frontend_context_execute_time_us = frontend_context_execute_time_us_;
+    }
+    if (frontend_context_execute_time_with_cache_us_ > 0) {
+        generate_results.frontend_context_execute_time_with_cache_us = frontend_context_execute_time_with_cache_us_;
+    }
+    if (frontend_generate_token_num_ > 0) {
+        generate_results.frontend_generate_token_num = frontend_generate_token_num_;
+    }
+    if (frontend_generate_execute_time_us_ > 0) {
+        generate_results.frontend_generate_execute_time_us = frontend_generate_execute_time_us_;
+    }
+}
+
+void NormalGenerateStream::fillFrontendMetricCounters(GenerateOutputs& generate_results) {
+    if (!generate_input_->generate_config->frontend_metric_streaming) {
+        return;
+    }
+    generate_results.frontend_input_len = generate_input_->inputLength();
+    int64_t frontend_output_len         = 0;
+    for (size_t i = 0; i < currentBatchSize(); ++i) {
+        frontend_output_len += subGenerateOutputLength(i);
+    }
+    generate_results.frontend_output_len = frontend_output_len;
+    fillFrontendTimingCounters(generate_results);
+    generate_results.frontend_speculative_verify_rounds = sp_iter_count_;
+    generate_results.frontend_speculative_accepted_token_num =
+        sp_iter_count_
+        + std::accumulate(
+            speculative_accepted_tokens_per_pos_.begin(), speculative_accepted_tokens_per_pos_.end(), int64_t{0});
+    generate_results.frontend_speculative_proposed_draft_tokens = speculative_proposed_draft_tokens_;
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
-    generate_results.request_id = request_id_;
+    generate_results.request_id                = request_id_;
+    generate_results.frontend_metrics_terminal = consumerFinishedWithoutLock();
+    fillFrontendMetricCounters(generate_results);
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -209,6 +319,33 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     return generate_results;
 }
 
+GenerateOutputs NormalGenerateStream::prepareFrontendMetricOutput() {
+    const size_t    step_output_len = seqLength() - last_frontend_metric_output_pos_;
+    GenerateOutputs generate_results;
+    generate_results.request_id           = request_id_;
+    generate_results.frontend_metric_only = true;
+    fillFrontendMetricCounters(generate_results);
+
+    for (int i = 0; i < currentBatchSize(); ++i) {
+        GenerateOutput generate_output;
+        generate_output.finished = false;
+        if (generate_input_->generate_config->aux_info) {
+            generate_output.aux_info.iter_count   = iter_count_;
+            generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
+            generate_output.aux_info.wait_time_us             = wait_time_us_;
+            generate_output.aux_info.input_len                = generate_input_->promptLength();
+            generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
+            generate_output.aux_info.output_len               = subGenerateOutputLength(i);
+            generate_output.aux_info.step_output_len          = step_output_len;
+            generate_output.aux_info.reuse_len                = initial_reuse_length_;
+            generate_output.aux_info.pd_sep                   = queryPdSep();
+        }
+        generate_results.generate_outputs.emplace_back(std::move(generate_output));
+    }
+    return generate_results;
+}
+
 void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_results) {
     if (generate_outputs_.size() >= kOutputCapacity) {
         /* No matter if the queue is full for any reason,
@@ -218,6 +355,35 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
         generate_outputs_.push_back(std::move(generate_results));
         consumer_cv_->notify_all();
     }
+}
+
+void NormalGenerateStream::enqueueLatestFrontendMetricOutput(GenerateOutputs&& generate_results) {
+    latest_frontend_metric_output_ = std::move(generate_results);
+    if (frontend_metric_marker_pending_) {
+        return;
+    }
+
+    // The queue carries only one lightweight marker. The cumulative metric
+    // payload lives in latest_frontend_metric_output_ and is overwritten on
+    // every step, so a slow consumer receives the newest snapshot without
+    // metric frames ever exhausting the business output queue.
+    GenerateOutputs marker;
+    marker.request_id           = request_id_;
+    marker.frontend_metric_only = true;
+    if (generate_outputs_.size() < kOutputCapacity) {
+        generate_outputs_.push_back(std::move(marker));
+        frontend_metric_marker_pending_ = true;
+        consumer_cv_->notify_all();
+    }
+}
+
+GenerateOutputs NormalGenerateStream::takeLatestFrontendMetricOutput(GenerateOutputs&& marker) {
+    if (latest_frontend_metric_output_.has_value()) {
+        marker = std::move(latest_frontend_metric_output_.value());
+        latest_frontend_metric_output_.reset();
+    }
+    frontend_metric_marker_pending_ = false;
+    return marker;
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
@@ -285,8 +451,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         }
     }
 
-    bool pd_sep_first_token = queryPdSep();
-    bool need_update        = pd_sep_first_token || isStreaming() || finished_;
+    bool pd_sep_first_token     = queryPdSep();
+    bool frontend_metric_update = generate_input_->generate_config->frontend_metric_streaming && !isStreaming()
+                                  && !finished_ && !pd_sep_first_token;
+    if (frontend_metric_update && seqLength() > last_frontend_metric_output_pos_) {
+        enqueueLatestFrontendMetricOutput(prepareFrontendMetricOutput());
+        last_frontend_metric_output_pos_ = seqLength();
+    }
+
+    bool need_update = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
         return;
     }
@@ -303,7 +476,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    last_output_pos_ = seqLength();
+    last_output_pos_                 = seqLength();
+    last_frontend_metric_output_pos_ = last_output_pos_;
 }
 
 GenerationPrefillCudaGraphStatus NormalGenerateStream::generationPrefillCudaGraphStatus() const {

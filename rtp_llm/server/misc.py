@@ -8,6 +8,33 @@ from rtp_llm.lora.lora_exception import LoraCountException
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
 
 
+def format_client_exception(e: BaseException) -> Dict[str, Any]:
+    """Keep error codes and AuxInfo, but never send internal exception text.
+
+    Backend exceptions can already contain stack traces in their messages.
+    Construct the public payload independently of the detailed log payload.
+    """
+    if isinstance(e, FtRuntimeException):
+        error_type = ExceptionType(e.exception_type)
+    elif isinstance(e, ConcurrencyException):
+        error_type = ExceptionType.CONCURRENCY_LIMIT_ERROR
+    elif isinstance(e, asyncio.CancelledError):
+        error_type = ExceptionType.CANCELLED_ERROR
+    elif isinstance(e, LoraCountException):
+        error_type = ExceptionType.UPDATE_ERROR
+    else:
+        error_type = ExceptionType.UNKNOWN_ERROR
+    payload = {
+        "error_code": int(error_type),
+        "error_code_str": f"{int(error_type)}_{error_type.name}",
+        "message": error_type.name,
+    }
+    aux_info = getattr(e, "aux_info", None)
+    if aux_info:
+        payload["aux_info"] = aux_info
+    return payload
+
+
 def format_exception(e: BaseException):
     def _format(errcode: int, errcode_str: str, message: str) -> Dict[str, Any]:
         formatted = {

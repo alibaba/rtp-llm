@@ -24,7 +24,7 @@ USAGE_HEADER = "USAGE"
 
 
 class BackendManager(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(self, py_env_configs: PyEnvConfigs, service_draining=None):
         self.py_env_configs = py_env_configs
         self._access_logger = AccessLogger(
             get_log_path(),
@@ -41,6 +41,18 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional["BaseEngine"] = None
         self._shutdown_requested = threading.Event()
+        self._service_draining = service_draining
+        self._metrics_state_lock = threading.RLock()
+        self._stop_lock = threading.Lock()
+        self._stopped = False
+        self._status_watcher_stop = threading.Event()
+        kmonitor.bind_service_draining(service_draining)
+        if service_draining is not None:
+            threading.Thread(
+                target=self._watch_service_draining,
+                name="backend_service_status",
+                daemon=True,
+            ).start()
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -183,10 +195,40 @@ class BackendManager(object):
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
         )
+        self._mark_serving_when_ready()
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
+
+    def _watch_service_draining(self):
+        # This only updates tags; the process manager retains responsibility for
+        # draining frontend RPCs before stopping the backend engine.
+        while not self._status_watcher_stop.is_set():
+            if self._service_draining.wait(0.1):
+                self._mark_not_serving()
+                return
+
+    def _mark_not_serving(self):
+        with self._metrics_state_lock:
+            kmonitor.set_serving(False)
+            if self.engine is not None:
+                try:
+                    self.engine.set_serving(False)
+                except Exception:
+                    # A status update must never prevent the shutdown cleanup.
+                    logging.exception("failed to update backend serving metrics")
+
+    def _mark_serving_when_ready(self):
+        with self._metrics_state_lock:
+            if self._shutdown_requested.is_set() or (
+                self._service_draining is not None and self._service_draining.is_set()
+            ):
+                kmonitor.set_serving(False)
+                self.engine.set_serving(False)
+            else:
+                self.engine.set_serving(True)
+                kmonitor.start_serving_when_ready()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
@@ -204,9 +246,17 @@ class BackendManager(object):
         """Request graceful shutdown of the backend manager"""
         logging.info("BackendManager shutdown requested")
         self._shutdown_requested.set()
+        self._mark_not_serving()
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+        self._shutdown_requested.set()
+        self._status_watcher_stop.set()
+        self._mark_not_serving()
         if self.engine is not None:
             from rtp_llm.utils.fuser import _nfs_manager
 
