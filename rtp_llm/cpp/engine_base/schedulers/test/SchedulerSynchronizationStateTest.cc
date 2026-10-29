@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <functional>
 #include <thread>
 
 #include "gtest/gtest.h"
@@ -10,6 +11,78 @@
 namespace rtp_llm {
 namespace {
 using namespace std::chrono_literals;
+
+TEST(SchedulerSynchronizationStateTest, DiscardedLoadCallbackReturnsCountAfterLastCopy) {
+    auto                  state        = std::make_shared<SchedulerSynchronizationState>();
+    auto                  registration = std::make_shared<PendingCacheLoadRegistration>(state);
+    std::function<void()> callback     = [registration] { registration->release(); };
+    auto                  copy         = callback;
+    registration.reset();
+    callback = nullptr;
+    EXPECT_EQ(state->pending_cache_load_count.load(), 1);
+    EXPECT_FALSE(state->cache_load_completion_trigger);
+    copy = nullptr;
+    EXPECT_EQ(state->pending_cache_load_count.load(), 0);
+    EXPECT_TRUE(state->cache_load_completion_trigger);
+    EXPECT_EQ(state->wake_generation, 1);
+}
+
+TEST(SchedulerSynchronizationStateTest, CompletedLoadCallbackCopiesCannotReleaseTwice) {
+    auto                  state        = std::make_shared<SchedulerSynchronizationState>();
+    auto                  registration = std::make_shared<PendingCacheLoadRegistration>(state);
+    std::function<void()> callback     = [registration] { registration->release(); };
+    auto                  copy         = callback;
+    registration.reset();
+    callback();
+    copy();
+    callback = nullptr;
+    copy     = nullptr;
+    EXPECT_EQ(state->pending_cache_load_count.load(), 0);
+    EXPECT_EQ(state->wake_generation, 1);
+}
+
+TEST(SchedulerSynchronizationStateTest, OnlyLastLoadRegistrationWakesScheduler) {
+    auto state  = std::make_shared<SchedulerSynchronizationState>();
+    auto first  = std::make_shared<PendingCacheLoadRegistration>(state);
+    auto second = std::make_shared<PendingCacheLoadRegistration>(state);
+    EXPECT_EQ(state->pending_cache_load_count.load(), 2);
+    first->release();
+    EXPECT_EQ(state->pending_cache_load_count.load(), 1);
+    EXPECT_FALSE(state->cache_load_completion_trigger);
+    first.reset();
+    EXPECT_EQ(state->pending_cache_load_count.load(), 1);
+    second.reset();
+    EXPECT_EQ(state->pending_cache_load_count.load(), 0);
+    EXPECT_TRUE(state->cache_load_completion_trigger);
+    EXPECT_EQ(state->wake_generation, 1);
+}
+
+TEST(SchedulerSynchronizationStateTest, ConcurrentLoadReleasesDoNotAcquireSchedulerMutex) {
+    auto                         state        = std::make_shared<SchedulerSynchronizationState>();
+    auto                         registration = std::make_shared<PendingCacheLoadRegistration>(state);
+    std::unique_lock<std::mutex> lock(state->mutex);
+    std::promise<void>           start;
+    auto                         gate   = start.get_future().share();
+    auto                         first  = std::async(std::launch::async, [registration, gate] {
+        gate.wait();
+        registration->release();
+    });
+    auto                         second = std::async(std::launch::async, [registration, gate] {
+        gate.wait();
+        registration->release();
+    });
+    start.set_value();
+    const auto first_status  = first.wait_for(1s);
+    const auto second_status = second.wait_for(1s);
+    lock.unlock();
+    EXPECT_EQ(first_status, std::future_status::ready);
+    EXPECT_EQ(second_status, std::future_status::ready);
+    first.get();
+    second.get();
+    registration.reset();
+    EXPECT_EQ(state->pending_cache_load_count.load(), 0);
+    EXPECT_EQ(state->wake_generation, 1);
+}
 
 TEST(SchedulerSynchronizationStateTest, ReadyPredicateDoesNotWait) {
     SchedulerSynchronizationState state;

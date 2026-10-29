@@ -47,6 +47,18 @@ async_cache_test_deps = test_deps + [
 ]
 
 cc_test(
+    name = "fifo_scheduler_load_registration_test",
+    srcs = ["FIFOSchedulerLoadRegistrationTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+    ],
+    env = {"GPU_COUNT": "0"},
+    exec_properties = {"gpu_count": "0"},
+)
+
+cc_test(
     name = "fifo_scheduler_test",
     srcs = [
         "FIFOSchedulerTest.cc",

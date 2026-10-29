@@ -37,12 +37,12 @@ struct SchedulerSynchronizationState {
     // calls or callbacks. On return the caller still owns the scheduler mutex only.
     template<typename Predicate>
     void wait(std::unique_lock<std::mutex>& scheduler_lock,
-              Predicate                    predicate,
-              std::chrono::milliseconds    timeout = std::chrono::milliseconds::max()) {
+              Predicate                     predicate,
+              std::chrono::milliseconds     timeout = std::chrono::milliseconds::max()) {
         assert(scheduler_lock.owns_lock() && scheduler_lock.mutex() == &mutex);
         const bool timed = timeout != std::chrono::milliseconds::max();
-        const auto deadline = timed ? std::chrono::steady_clock::now() + timeout :
-                                      std::chrono::steady_clock::time_point::max();
+        const auto deadline =
+            timed ? std::chrono::steady_clock::now() + timeout : std::chrono::steady_clock::time_point::max();
         for (;;) {
             std::unique_lock<std::mutex> wake_lock(wake_mutex);
             if (predicate() || (timed && std::chrono::steady_clock::now() >= deadline)) {
@@ -73,5 +73,34 @@ struct SchedulerSynchronizationState {
 };
 
 using SchedulerSynchronizationStatePtr = std::shared_ptr<SchedulerSynchronizationState>;
+
+// A registered callback may be discarded when an unfinished load context is destroyed.
+// Share this registration across callback copies and release its count exactly once.
+class PendingCacheLoadRegistration {
+public:
+    explicit PendingCacheLoadRegistration(const SchedulerSynchronizationStatePtr& sync_state): sync_state_(sync_state) {
+        sync_state_->pending_cache_load_count.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    ~PendingCacheLoadRegistration() {
+        release();
+    }
+
+    void release() {
+        if (released_.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        const size_t previous = sync_state_->pending_cache_load_count.fetch_sub(1, std::memory_order_acq_rel);
+        assert(previous > 0);
+        if (previous == 1) {
+            // May run under scheduler or allocator locks; only acquire the wake mutex.
+            sync_state_->notifyCacheLoadCompletion();
+        }
+    }
+
+private:
+    const SchedulerSynchronizationStatePtr sync_state_;
+    std::atomic<bool>                      released_{false};
+};
 
 }  // namespace rtp_llm

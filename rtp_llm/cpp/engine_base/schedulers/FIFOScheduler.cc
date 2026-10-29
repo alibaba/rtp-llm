@@ -322,22 +322,8 @@ void FIFOScheduler::onRunningStream(const GenerateStreamPtr& stream) {
 }
 
 void FIFOScheduler::onLoadingStream(const GenerateStreamPtr& stream) {
-    const auto sync_state = scheduler_sync_state_;
-    sync_state->pending_cache_load_count.fetch_add(1, std::memory_order_acq_rel);
-    const bool registered = stream->streamCacheResource().onAllocatorLoadDone([sync_state] {
-        const size_t previous = sync_state->pending_cache_load_count.fetch_sub(1, std::memory_order_acq_rel);
-        RTP_LLM_CHECK_WITH_INFO(previous > 0, "allocator load completion count underflow");
-        if (previous != 1) {
-            return;
-        }
-
-        // May run inline under scheduler or allocator locks; only acquire the wake mutex.
-        sync_state->notifyCacheLoadCompletion();
-    });
-    if (!registered) {
-        const size_t previous = sync_state->pending_cache_load_count.fetch_sub(1, std::memory_order_acq_rel);
-        RTP_LLM_CHECK_WITH_INFO(previous > 0, "allocator load registration count underflow");
-    }
+    const auto registration = std::make_shared<PendingCacheLoadRegistration>(scheduler_sync_state_);
+    stream->streamCacheResource().onAllocatorLoadDone([registration] { registration->release(); });
 }
 
 bool FIFOScheduler::waitPredicate() {
@@ -667,7 +653,7 @@ bool FIFOScheduler::partitionChunkContinuations() {
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    auto timeout = std::chrono::milliseconds::max();
+    auto               timeout = std::chrono::milliseconds::max();
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
         || !waiting_group_queue_.empty()) {
         timeout = std::chrono::milliseconds(10);
@@ -683,9 +669,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         std::lock_guard<std::mutex> wake_lock(scheduler_sync_state_->wake_mutex);
         scheduler_sync_state_->cache_load_completion_trigger = false;
     }
-    last_admitted_context_batch_size_                    = 0;
-    last_admitted_context_token_size_                    = 0;
-    last_waiting_oldest_age_us_                          = 0;
+    last_admitted_context_batch_size_ = 0;
+    last_admitted_context_token_size_ = 0;
+    last_waiting_oldest_age_us_       = 0;
 
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     const size_t waiting_size_before_cache_update = waiting_streams_.size();
