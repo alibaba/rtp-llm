@@ -53,6 +53,7 @@ from rtp_llm.multimodal.vit_metrics import (
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, get_multimodal_feature_hash
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+from rtp_llm.utils.multiprocessing_util import ensure_short_ipc_temp_dir
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
 _worker_vit_config: Optional[VitConfig] = None
@@ -138,6 +139,7 @@ def _worker_initializer(
     global _worker_vit_config, _worker_preprocess_params, _worker_preprocess_func
     # 让工作进程忽略 SIGINT 信号，这样主进程的 Ctrl+C 不会杀死它们
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    ensure_short_ipc_temp_dir()
     _worker_vit_config = vit_config
     _worker_preprocess_params = preprocess_params
     _worker_preprocess_func = preprocess_func
@@ -318,6 +320,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 
     def _create_pool(self) -> None:
         """创建进程池"""
+        ensure_short_ipc_temp_dir()
         logging.info(
             f"Creating multiprocessing pool for preprocessing with {self.vit_config.mm_preprocess_max_workers} workers"
         )

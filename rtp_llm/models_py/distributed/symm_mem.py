@@ -196,7 +196,15 @@ class TorchSymmMemCommunicator:
             self.disabled = True
             return
 
-        handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
+        previous_tmpdir = os.environ.get("TMPDIR")
+        os.environ["TMPDIR"] = "/tmp"
+        try:
+            handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
+        finally:
+            if previous_tmpdir is None:
+                os.environ.pop("TMPDIR", None)
+            else:
+                os.environ["TMPDIR"] = previous_tmpdir
 
         # The post-rendezvous checks are local verdicts too. If they split the
         # group, some ranks would call multimem_all_reduce_ while others fall

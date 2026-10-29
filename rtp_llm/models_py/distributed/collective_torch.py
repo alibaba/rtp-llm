@@ -89,7 +89,10 @@ def _init_flashinfer_allreduce(
 def _make_cpu_tp_broadcaster_base_path(
     parallelism_config: ParallelismConfig,
     nccl_init_port: int,
-) -> str:
+) -> str | None:
+    if not 1 < parallelism_config.tp_size <= parallelism_config.local_world_size:
+        return None
+
     session_id = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_ID")
     if not session_id:
         session_id = f"ppid{os.getppid()}_port{nccl_init_port}"
@@ -97,10 +100,7 @@ def _make_cpu_tp_broadcaster_base_path(
 
     base_dir = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_DIR")
     if not base_dir:
-        base_dir = os.path.join(
-            os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
-        )
-    os.makedirs(base_dir, mode=0o700, exist_ok=True)
+        base_dir = os.path.join("/tmp", f"rtp_llm_{os.getuid()}")
     base_path = os.path.join(
         base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
     )
@@ -110,6 +110,7 @@ def _make_cpu_tp_broadcaster_base_path(
             f"CpuTpBroadcaster UDS path too long ({len(os.fsencode(rank0_path))} "
             f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {rank0_path}"
         )
+    os.makedirs(base_dir, mode=0o700, exist_ok=True)
     return base_path
 
 

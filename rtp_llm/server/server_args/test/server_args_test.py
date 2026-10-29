@@ -551,6 +551,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
+        os.environ["MAX_BATCH_KV_LEN"] = "16384"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["PREFILL_CHUNK_SIZE"] = "256"
         os.environ["WARM_UP"] = "1"
@@ -626,6 +627,11 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(restored_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            16384,
+        )
+        self.assertEqual(restored_fifo_config.max_batch_kv_len, 16384)
         # Old pickles carry only the two original slots; every field added later
         # must fall back to its default instead of raising.
         fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
@@ -636,11 +642,16 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
         self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
         seven_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
-        seven_slot_fifo_config.__setstate__(
-            (32, 8192, "ratio", "2", False, 16, 2048)
-        )
+        seven_slot_fifo_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048))
         self.assertEqual(seven_slot_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(seven_slot_fifo_config.prefill_chunk_size, 0)
+        self.assertEqual(seven_slot_fifo_config.max_batch_kv_len, 0)
+        eight_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        eight_slot_fifo_config.__setstate__(
+            (32, 8192, "ratio", "2", False, 16, 2048, 256)
+        )
+        self.assertEqual(eight_slot_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(eight_slot_fifo_config.max_batch_kv_len, 0)
 
         # Verify frontend and DashSc pre-stop windows are configured independently.
         self.assertEqual(
@@ -722,6 +733,8 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--max_batch_tokens_without_cache",
             "4096",
+            "--max_batch_kv_len",
+            "32768",
             "--prefill_chunk_size",
             "512",
             "--cp_force_single_prefill",
@@ -798,6 +811,10 @@ class ServerArgsSetTest(TestCase):
             16,
         )
 
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            32768,
+        )
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
         self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
@@ -1818,10 +1835,14 @@ class GenerateArgsFromEnvTest(TestCase):
         with patch.dict(os.environ, {"ENABLE_CRC": "0"}, clear=True):
             value = read_env_value("ENABLE_CRC", True, str2bool)
         self.assertIs(value, False)
-        self.assertEqual(format_argument_pair("--enable_crc", value), ["--enable_crc", "0"])
+        self.assertEqual(
+            format_argument_pair("--enable_crc", value), ["--enable_crc", "0"]
+        )
 
     def test_invalid_str2bool_environment_value_is_rejected(self):
-        from rtp_llm.server.server_args.generate_args_from_env_clean import read_env_value
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            read_env_value,
+        )
         from rtp_llm.server.server_args.util import str2bool
 
         with patch.dict(os.environ, {"ENABLE_CRC": "not-a-bool"}, clear=True):
