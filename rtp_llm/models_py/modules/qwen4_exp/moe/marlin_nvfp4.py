@@ -266,6 +266,10 @@ class Nvfp4MarlinMoE:
         load_library()
         self.experts, both_n, packed_k = q1.shape
         self.n, self.k = both_n // 2, packed_k * 2
+        self._one_row_sm120 = (self.k, self.n) == (
+            2560,
+            640,
+        ) and torch.cuda.get_device_capability(q1.device) == (12, 0)
         self.first = self.experts * ep_rank
         self.w1, self.s1, self.g1 = prepare_weight(
             torch.cat((q1[:, self.n :], q1[:, : self.n]), 1),
@@ -301,6 +305,11 @@ class Nvfp4MarlinMoE:
             (x, upgate, self.w1, self.s1, self.g1, m, 2 * self.n, k, topk, False),
             (activated, down, self.w2, self.s2, self.g2, m * topk, k, self.n, 1, True),
         ]:
+            thread_config = (
+                (128, 64, 2 if weighted else 1)
+                if m == 1 and self._one_row_sm120
+                else (-1, -1, -1)
+            )
             torch.ops.rtp_qwen4_marlin.moe_wna16_marlin_gemm(
                 a,
                 c,
@@ -325,9 +334,7 @@ class Nvfp4MarlinMoE:
                 False,
                 True,
                 False,
-                -1,
-                -1,
-                -1,
+                *thread_config,
             )
             if not weighted:
                 _activate[(m * topk, triton.cdiv(self.n, 256))](
@@ -449,6 +456,10 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
                 raise ValueError("Changing packed Qwen MoE weights requires restart")
             moe = object.__new__(Nvfp4MarlinMoE)
             moe.experts, moe.n, moe.k = experts, n, k
+            moe._one_row_sm120 = (k, n) == (
+                2560,
+                640,
+            ) and torch.cuda.get_device_capability(q1.device) == (12, 0)
             moe.first = experts * self.ep_rank
             moe.w1 = q1.view(torch.int32).reshape(experts, k // 16, both_n * 2)
             moe.w2 = q2.view(torch.int32).reshape(experts, n // 16, k * 2)
