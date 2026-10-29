@@ -342,7 +342,7 @@ class MegaAttentionWiringTest(unittest.TestCase):
                     side_effect=lambda q, freq, dim: q.add_(2),
                 ) as q_rope, patch.object(
                     compute_qkv,
-                    "fused_rmsnorm_rope",
+                    "swa_kv_norm_rope",
                     side_effect=lambda value, *args, **kwargs: value + 7,
                 ) as kv_rope:
                     result = compute_qkv.decode_compute_qkv(

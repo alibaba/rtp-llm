@@ -601,7 +601,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         with (
             patch.object(
                 dspark_model_module,
-                "fused_rmsnorm_rope",
+                "swa_kv_norm_rope",
                 return_value=torch.zeros((4, 4), dtype=torch.bfloat16),
             ),
             patch.object(
@@ -722,7 +722,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                 with (
                     patch.object(
                         dspark_model_module,
-                        "fused_rmsnorm_rope",
+                        "swa_kv_norm_rope",
                         side_effect=project,
                     ),
                     patch(

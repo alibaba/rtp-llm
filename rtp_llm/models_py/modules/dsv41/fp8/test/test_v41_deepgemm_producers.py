@@ -8,9 +8,6 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-    fused_rmsnorm_rope,
-)
 from rtp_llm.models_py.modules.dsv41._v41_query_quant import query_norm_quant
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_indexer
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
@@ -29,6 +26,10 @@ from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_decode_global import (
     _clone_case,
     _reference,
     _snapshot,
+)
+from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_swa_kv import (
+    reference_norm_rope,
+    reference_swa_kv,
 )
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
@@ -118,11 +119,14 @@ class DeepGEMMProducerTest(unittest.TestCase):
                 )
                 q = attn.wq_b.forward_quantized(*pair).unflatten(-1, (64, 512))
                 _apply_v41_q_rope(q, freqs, 64)
-                kv = fused_rmsnorm_rope(
-                    projected[..., 1280:], attn.kv_norm, freqs, 64, eps=attn.eps
+                kv = reference_swa_kv(
+                    projected[..., 1280:], attn.kv_norm, freqs, eps=attn.eps
+                )
+                prequant = reference_norm_rope(
+                    projected[..., 1280:], attn.kv_norm, freqs, eps=attn.eps
                 )
                 quantize_and_insert_swa_k_cache(
-                    kv.reshape(rows, 512), expected_cache, slots
+                    prequant.reshape(rows, 512), expected_cache, slots
                 )
                 with patch.dict(
                     os.environ,

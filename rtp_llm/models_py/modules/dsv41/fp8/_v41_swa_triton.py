@@ -21,6 +21,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
+
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
         CPByteSlicedSlotCompaction,
@@ -97,11 +99,8 @@ def _quantize_and_insert_swa_kernel(
         values = original.to(tl.float32)
     else:
         values = tl.load(kv + row * input_stride.to(tl.int64) + columns).to(tl.float32)
-    groups = values.reshape((16, 32))
-    maximum = tl.maximum(tl.max(tl.abs(groups), 1), 1e-4)
-    exponent = tl.ceil(tl.log2(maximum * (1.0 / 448.0)))
-    scaled = tl.clamp(groups * tl.exp2(-exponent)[:, None], -448.0, 448.0)
-    payload = scaled.to(tl.float8e4nv).to(tl.uint8, bitcast=True).reshape((512,))
+    quantized, encoded, _ = quantize_swa_row(values)
+    payload = quantized.to(tl.uint8, bitcast=True)
     payload_byte = position * 528 + columns
     if CP_BYTES:
         begin = rank.to(tl.int64) * local_bytes
@@ -112,7 +111,6 @@ def _quantize_and_insert_swa_kernel(
         )
     else:
         tl.store(base + payload_byte, payload)
-    encoded = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.uint8)
     scale_byte = position * 528 + 512 + tl.arange(0, 16)
     if CP_BYTES:
         tl.store(

@@ -44,9 +44,6 @@ from rtp_llm.models_py.modules.dsv41._dspark_metadata_triton import (
     DSparkMetadata,
     try_build_dspark_metadata,
 )
-from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-    fused_rmsnorm_rope,
-)
 from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import build_cp_context_for_forward
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
@@ -56,6 +53,7 @@ from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv41.fp8._swa_ops_triton import (
     compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
 from rtp_llm.models_py.modules.dsv41.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv41.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv41.fp8.decode.decode_attn_metadata import (
@@ -661,7 +659,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             context_freqs = attn.freqs_cis.index_select(
                 0, safe_context_pos
             ).contiguous()
-            context_kv = fused_rmsnorm_rope(
+            context_kv = swa_kv_norm_rope(
                 (
                     attn._lin(attn.wkv, main_x).contiguous()
                     if projected_kv is None

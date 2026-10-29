@@ -66,6 +66,7 @@ from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
 from rtp_llm.models_py.modules.dsv41.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv41.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
@@ -4402,7 +4403,7 @@ class AttentionFP8(nn.Module):
                     )
                 else:
                     kv_in = self._lin(self.wkv, x_3d)
-                return fused_rmsnorm_rope(
+                return swa_kv_norm_rope(
                     kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
                 )
 

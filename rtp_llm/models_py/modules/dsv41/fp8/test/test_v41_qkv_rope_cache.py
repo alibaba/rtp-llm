@@ -8,13 +8,14 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
-    fused_rmsnorm_rope,
-)
 from rtp_llm.models_py.modules.dsv41._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_qkv_rope_cache_triton as fused
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
     quantize_and_insert_swa_k_cache,
+)
+from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_swa_kv import (
+    reference_norm_rope,
+    reference_swa_kv,
 )
 
 
@@ -57,7 +58,8 @@ def reference(case):
     q = case["q"].clone()
     frequencies = case["freqs_table"].index_select(0, case["positions"].long())
     rope_only_inplace(q[..., -64:], frequencies)
-    kv = fused_rmsnorm_rope(case["kv"], case["kv_norm"], frequencies, 64)
+    kv = reference_swa_kv(case["kv"], case["kv_norm"], frequencies)
+    prequant = reference_norm_rope(case["kv"], case["kv_norm"], frequencies)
     pool = torch.empty_strided(
         case["pool_3d"].shape,
         case["pool_3d"].stride(),
@@ -65,11 +67,57 @@ def reference(case):
         dtype=torch.uint8,
     )
     pool.copy_(case["pool_3d"])
-    quantize_and_insert_swa_k_cache(kv.reshape(-1, 512), pool, case["slots"])
+    quantize_and_insert_swa_k_cache(prequant.reshape(-1, 512), pool, case["slots"])
     return q, kv, frequencies, pool
 
 
+def assert_cache_equal_except_zero_sign(actual, expected):
+    """Only FP8 +0/-0 may differ; scales and every nonzero byte stay exact.
+
+    The independent RoPE oracle uses a rounded FP64 expression to model FMA.
+    It need not preserve the fused instruction's sign of an exactly-zero result.
+    E4M3 0x00 and 0x80 both decode to zero. This does not permit another scale,
+    nonzero FP8 code, or an overwrite of the nonzero sentinel in unused slots.
+    """
+    torch.testing.assert_close(actual[..., 512:], expected[..., 512:], rtol=0, atol=0)
+    payload, reference_payload = actual[..., :512], expected[..., :512]
+    changed = payload != reference_payload
+    changed_actual = payload[changed]
+    changed_expected = reference_payload[changed]
+    torch.testing.assert_close(
+        changed_actual & 0x7F, torch.zeros_like(changed_actual), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        changed_expected & 0x7F, torch.zeros_like(changed_expected), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        changed_actual ^ changed_expected,
+        torch.full_like(changed_actual, 0x80),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        payload.contiguous().view(torch.float8_e4m3fn).float(),
+        reference_payload.contiguous().view(torch.float8_e4m3fn).float(),
+        rtol=0,
+        atol=0,
+    )
+
+
 class V41QKVRopeCacheCPUTest(unittest.TestCase):
+    def test_cache_assertion_accepts_only_signed_zero_payload(self):
+        expected = torch.full((2, 3, 528), 173, dtype=torch.uint8)
+        expected[0, 0, 448:450] = torch.tensor([0x00, 0x80], dtype=torch.uint8)
+        actual = expected.clone()
+        actual[0, 0, 448:450] = torch.tensor([0x80, 0x00], dtype=torch.uint8)
+        assert_cache_equal_except_zero_sign(actual, expected)
+        # Nonzero payload, a scale byte, and an unused slot must still fail.
+        for coordinate in ((0, 0, 0), (0, 0, 512), (1, 2, 0)):
+            damaged = actual.clone()
+            damaged[coordinate] ^= 0x80
+            with self.subTest(coordinate=coordinate), self.assertRaises(AssertionError):
+                assert_cache_equal_except_zero_sign(damaged, expected)
+
     def test_cpu_and_disabled_inputs_have_no_side_effects(self):
         case = make_case(1, 1, 1, device="cpu")
         q, kv, pool = case["q"].clone(), case["kv"].clone(), case["pool_3d"].clone()
@@ -111,7 +159,7 @@ class V41QKVRopeCacheCudaTest(unittest.TestCase):
         torch.testing.assert_close(output.q, expected_q, rtol=0, atol=0)
         torch.testing.assert_close(output.kv, expected_kv, rtol=0, atol=0)
         torch.testing.assert_close(output.freqs_cis, expected_freqs, rtol=0, atol=0)
-        torch.testing.assert_close(case["pool_3d"], expected_pool, rtol=0, atol=0)
+        assert_cache_equal_except_zero_sign(case["pool_3d"], expected_pool)
         for name, previous in protected.items():
             torch.testing.assert_close(case[name], previous, rtol=0, atol=0)
         return output
@@ -210,7 +258,7 @@ class V41QKVRopeCacheCudaTest(unittest.TestCase):
             torch.testing.assert_close(actual.q, q, rtol=0, atol=0)
             torch.testing.assert_close(actual.kv, kv, rtol=0, atol=0)
             torch.testing.assert_close(actual.freqs_cis, freqs, rtol=0, atol=0)
-            torch.testing.assert_close(case["pool_3d"], pool, rtol=0, atol=0)
+            assert_cache_equal_except_zero_sign(case["pool_3d"], pool)
 
     def test_invalid_positive_slot_traps_in_subprocess(self):
         code = """import resource
