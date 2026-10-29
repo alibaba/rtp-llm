@@ -331,6 +331,10 @@ The gRPC server executor, shutdown quiet period and HTTP/2 keepalive policy are 
   "executorCoreSize": 1000,
   "executorMaxSize": 1000,
   "executorQueueSize": 1000,
+  "maxReceivingRequests": 1024,
+  "maxReceivingControlRequests": 128,
+  "receiveBudgetBytes": 0,
+  "receiveTimeoutMs": 30000,
   "shutdownQuietPeriodMs": 5000,
   "permitKeepAliveTimeMs": 10000,
   "permitKeepAliveWithoutCalls": true
@@ -339,6 +343,12 @@ The gRPC server executor, shutdown quiet period and HTTP/2 keepalive policy are 
 
 All three executor settings default to 1000. Core size may be 0; maximum size and queue size
 must be positive, and maximum size must be at least core size.
+`maxReceivingRequests` limits concurrent calls from HEADERS to decoded half-close;
+accepted scheduler/inference time does not consume this limit. Cancel has its own
+`maxReceivingControlRequests` limit. These counts are configured directly and do not
+reserve a fixed number of bytes per call. `receiveBudgetBytes=0` uses one quarter of
+the JVM Direct limit for received body bytes. The body watchdog defaults to 30 seconds.
+See [receiving limits](docs/grpc-receiving-guard.md) for byte accounting and cleanup.
 `shutdownQuietPeriodMs` (静默时间) defaults to 5000 ms and must be positive.
 The quiet period starts when shutting down; each Schedule arrival restarts it.
 After it elapses, gRPC waits for accepted RPCs to finish before serving resources
