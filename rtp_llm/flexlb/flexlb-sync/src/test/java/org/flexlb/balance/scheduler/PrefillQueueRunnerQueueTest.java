@@ -253,6 +253,47 @@ class PrefillQueueRunnerQueueTest {
     }
 
     @Test
+    void life002AdmissionBoundaryAndFifoContract() {
+        PrefillQueueRunner runtime = runningRuntime();
+        long now = System.currentTimeMillis();
+        var requests =
+                List.of(
+                        item(1001L, 40, Long.MAX_VALUE, now, 128),
+                        item(1002L, 40, Long.MAX_VALUE, now + 1, 256),
+                        item(1003L, 40, Long.MAX_VALUE, now + 2, 512));
+
+        requests.forEach(route -> assertTrue(runtime.offer(route)));
+        assertEquals(
+                List.of("1001", "1002", "1003"),
+                requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()));
+
+        assertTrue(runtime.control(requests.get(0), PrefillQueueRunner.Control.REMOVE));
+        assertEquals(
+                List.of("1002", "1003"),
+                requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()));
+        assertTrue(runtime.offer(item(1004L, 40, Long.MAX_VALUE, now + 3, 128)));
+        assertEquals(
+                List.of("1002", "1003", "1004"),
+                requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()),
+                "released capacity must re-enter at the tail of the same-priority queue");
+    }
+
+    @Test
+    void sched001PriorityAndSamePriorityFairnessContract() {
+        PrefillQueueRunner runtime = runningRuntime();
+        long now = System.currentTimeMillis();
+        assertTrue(runtime.offer(item(1101L, 0, Long.MAX_VALUE, now, 128)));
+        assertTrue(runtime.offer(item(1102L, 50, Long.MAX_VALUE, now + 1, 128)));
+        assertTrue(runtime.offer(item(1103L, 100, Long.MAX_VALUE, now + 2, 128)));
+        assertTrue(runtime.offer(item(1104L, 50, Long.MAX_VALUE, now + 3, 1024)));
+
+        assertEquals(
+                List.of("1103", "1102", "1104", "1101"),
+                requestIds(PrefillQueueRunnerTestSupport.capture(runtime).items()),
+                "priority must dominate length while equal priority remains FIFO");
+    }
+
+    @Test
     void snapshotsExposeExactCanonicalIdentitiesAndMonotonicMutationVersion() {
         PrefillQueueRunner runtime = runningRuntime();
         RequestRoute first = item(11, 70, Long.MAX_VALUE, 1, 128);

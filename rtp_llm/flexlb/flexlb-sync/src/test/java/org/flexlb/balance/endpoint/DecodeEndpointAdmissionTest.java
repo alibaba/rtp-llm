@@ -551,6 +551,29 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
+    void sched003CapacityBoundaryClassifiesWaitAndReopensAfterRelease() {
+        reserve("31", 100L, 100L, 50);
+        reserve("32", 100L, 100L, 50);
+        markQueued(31L);
+        markQueued(32L);
+        var capacity = new DecodeResources.AdmissionCapacity(1L, 100L);
+
+        var first = endpoint.acquireDispatchPermit(reservations.get("31"), capacity);
+        assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, first.status());
+        var blocked = endpoint.acquireDispatchPermit(reservations.get("32"), capacity);
+        assertEquals(
+                DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL, blocked.status());
+        assertTrue(first.handle().release());
+
+        var retry = endpoint.acquireDispatchPermit(reservations.get("32"), capacity);
+        assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, retry.status());
+        assertTrue(retry.handle().release());
+        release("31");
+        release("32");
+        assertEquals(0L, endpoint.routingView().totalLoad());
+    }
+
+    @Test
     void closedEndpointRejectsPermitAcquisitionAsRetired() {
         reserveQueued("1", 100L, 110L, 50);
         endpoint.close();
