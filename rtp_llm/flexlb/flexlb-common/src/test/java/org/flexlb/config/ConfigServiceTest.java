@@ -72,6 +72,23 @@ class ConfigServiceTest {
     }
 
     @Test
+    void receivingCountsDefaultIndependentlyOfExecutorAndAcceptExplicitOverrides() {
+        var defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(1024, defaults.getMaxReceivingRequests());
+        assertEquals(128, defaults.getMaxReceivingControlRequests());
+        var configured = ConfigTestFixtures.parse("""
+                {"grpcServer":{"executorCoreSize":64,"executorMaxSize":64,
+                 "maxReceivingRequests":4096,"maxReceivingControlRequests":16}}
+                """).getGrpcServer();
+        assertEquals(4096, configured.getMaxReceivingRequests());
+        assertEquals(16, configured.getMaxReceivingControlRequests());
+        for (String field : new String[]{"maxReceivingRequests", "maxReceivingControlRequests"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> ConfigTestFixtures.parse("{\"grpcServer\":{\"" + field + "\":-1}}"));
+        }
+    }
+
+    @Test
     void grpcKeepAlivePermitDefaultsAndOverridesAreValidated() {
         FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
         assertEquals(10_000L, defaults.getPermitKeepAliveTimeMs());

@@ -127,15 +127,18 @@ public final class FlexlbConfig {
     @Getter
     @Setter
     public static final class GrpcServerConfig {
+        public static final int DEFAULT_MAX_RECEIVING_REQUESTS = 1024;
+        public static final int DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS = 128;
+
         private int executorCoreSize = 1000;
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
         /** Zero derives Direct / 4 as a logical receiving wire-byte budget at startup. */
         private long receiveBudgetBytes = 0L;
-        /** Zero derives Schedule receiving slots with body headroom, at most 1024 total. */
-        private int maxReceivingRequests = 0;
-        /** Zero derives a reserved Cancel receiving lane; not shared with Schedule. */
-        private int maxReceivingControlRequests = 0;
+        /** Concurrent Schedule calls from HEADERS to decoded half-close. Zero uses the default. */
+        private int maxReceivingRequests = DEFAULT_MAX_RECEIVING_REQUESTS;
+        /** Independent concurrent Cancel receiving limit. Zero uses the default. */
+        private int maxReceivingControlRequests = DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS;
         /** Headers to decoded half-close; does not limit accepted scheduler queue time. */
         private long receiveTimeoutMs = 30_000L;
         /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
