@@ -1101,5 +1101,155 @@ class PackedVerifyCUDA(unittest.TestCase):
             )
 
 
+class PackedFusedMetadataEquivalence(unittest.TestCase):
+    """The Triton fusions must be selected and match the eager chain exactly."""
+
+    _FUSED = (
+        "packed_pool_slots_fused",
+        "packed_swa_abs_idx_fused",
+        "packed_valid_requests_fused",
+        "try_snapshot_block_tables",
+    )
+    _WATCHED = (
+        "start_pos",
+        "input_lengths",
+        "position_ids",
+        "position_ids_long",
+        "req_id_per_token",
+        "req_id_per_token_long",
+        "decode_seq_start_per_req",
+        "decode_cu_seq_per_req",
+        "valid_requests",
+        "swa_abs_idx",
+        "swa_topk_length",
+        "topk_buffer_compressed",
+        "swa_global_slots",
+    )
+
+    @classmethod
+    def _snapshot(cls, meta):
+        values = {name: getattr(meta, name).clone() for name in cls._WATCHED}
+        values["tables"] = {
+            tag: table.clone() for tag, table in meta.pool_block_tables.items()
+        }
+        values["writes"] = {
+            tag: slots.clone() for tag, slots in meta.pool_write_slot_mappings.items()
+        }
+        values["decoder_slots"] = meta.decoder_swa_metadata.swa_global_slots.clone()
+        return values
+
+    def _assert_same(self, expected, actual):
+        for name, value in expected.items():
+            if isinstance(value, dict):
+                for tag, tensor in value.items():
+                    torch.testing.assert_close(
+                        actual[name][tag], tensor, rtol=0, atol=0
+                    )
+            else:
+                torch.testing.assert_close(actual[name], value, rtol=0, atol=0)
+
+    def test_cpu_falls_back_to_the_eager_chain(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.decode import (
+            _fused_prepare_meta_triton,
+        )
+
+        originals = {
+            name: getattr(_fused_prepare_meta_triton, name) for name in self._FUSED
+        }
+        selected = []
+
+        def tracking(*args, _name, _original, **kwargs):
+            chosen = _original(*args, **kwargs)
+            selected.append((_name, chosen))
+            return chosen
+
+        for name in self._FUSED:
+            setattr(
+                _fused_prepare_meta_triton,
+                name,
+                lambda *args, _name=name, **kwargs: tracking(
+                    *args, _name=_name, _original=originals[_name], **kwargs
+                ),
+            )
+        try:
+            meta, inputs, tables, entries, spans = _fixture("cpu")
+            update_packed_decode_metadata(meta, inputs, tables, entries, spans)
+        finally:
+            for name, original in originals.items():
+                setattr(_fused_prepare_meta_triton, name, original)
+        # Every helper declines CPU tensors, so the eager chain must produce the
+        # same graph-stable buffers the fused path would have written.
+        self.assertEqual(len(selected), 7)
+        self.assertFalse(any(chosen for _, chosen in selected), selected)
+        self.assertEqual(meta.valid_requests.tolist(), [True, True, True])
+        for row, (request, position) in enumerate(
+            zip(meta.req_id_per_token.tolist(), meta.position_ids.tolist())
+        ):
+            visible = range(max(0, position - 127), position + 1)
+            expected = [
+                int(tables[SWA_KV][request, p // 128]) * 256 + p % 256 for p in visible
+            ]
+            expected += [-1] * (128 - len(expected))
+            self.assertEqual(meta.swa_global_slots[row].tolist(), expected)
+
+    def test_fused_helpers_are_selected_and_match_the_eager_chain(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.decode import (
+            _fused_prepare_meta_triton,
+            packed_metadata,
+        )
+
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA required")
+        originals = {
+            name: getattr(_fused_prepare_meta_triton, name) for name in self._FUSED
+        }
+        selected = []
+
+        def tracking(*args, _name, _original, **kwargs):
+            chosen = _original(*args, **kwargs)
+            selected.append((_name, chosen))
+            return chosen
+
+        for name in self._FUSED:
+            setattr(
+                _fused_prepare_meta_triton,
+                name,
+                lambda *args, _name=name, **kwargs: tracking(
+                    *args, _name=_name, _original=originals[_name], **kwargs
+                ),
+            )
+        try:
+            fused_meta, inputs, tables, entries, spans = _fixture("cuda")
+            live = torch.tensor(3, dtype=torch.int32, device="cuda")
+            update_packed_decode_metadata(
+                fused_meta, inputs, tables, entries, spans, valid_request_count=live
+            )
+            with mock.patch.object(
+                packed_metadata, "_load_fused_kernels", return_value=None
+            ):
+                eager_meta, inputs, tables, entries, spans = _fixture("cuda")
+                update_packed_decode_metadata(
+                    eager_meta, inputs, tables, entries, spans, valid_request_count=live
+                )
+        finally:
+            for name, original in originals.items():
+                setattr(_fused_prepare_meta_triton, name, original)
+        # Two SWA tags x (write, read) plus the three scalar fusions.
+        self.assertEqual(
+            [name for name, _ in selected],
+            [
+                "packed_valid_requests_fused",
+                "packed_swa_abs_idx_fused",
+                "try_snapshot_block_tables",
+                "packed_pool_slots_fused",
+                "packed_pool_slots_fused",
+                "packed_pool_slots_fused",
+                "packed_pool_slots_fused",
+            ],
+        )
+        self.assertTrue(all(chosen for _, chosen in selected), selected)
+        self._assert_same(self._snapshot(eager_meta), self._snapshot(fused_meta))
+
+
 if __name__ == "__main__":
     unittest.main()

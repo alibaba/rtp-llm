@@ -3,6 +3,34 @@
 The model tensor may be viewed as [B, average_width, H] for existing GEMMs.
 That view never defines request boundaries: device lengths/cumulative lengths
 own all positions, cache writes and attention request ids.
+
+Fusion
+------
+``update_packed_decode_metadata`` runs inside the target-verify CUDA graph, so
+every eager aten kernel it launches is replayed on every step.  The dense path
+already collapses its equivalents into Triton kernels
+(``_fused_prepare_meta_triton``); this module now does the same for the three
+hottest groups:
+
+* ``packed_pool_slots`` (write map + ``[rows, window]`` read map) →
+  ``packed_pool_slots_fused``, which also writes the int32
+  ``swa_global_slots`` buffer directly instead of materialising an int64
+  tensor and converting it.
+* the ``arange(win)`` / broadcast sub-clamp-add / ``where`` window that is
+  copied into ``meta.swa_abs_idx`` → ``packed_swa_abs_idx_fused``; the filled
+  buffer doubles as the read-map positions, so no second ``[rows, window]``
+  tensor is built.
+* ``arange(batch) < live`` → ``packed_valid_requests_fused``, and the per-tag
+  ``zero_() + copy_()`` block-table refresh → the existing
+  ``try_snapshot_block_tables``.
+
+Fallback
+--------
+Every fused helper returns ``False`` instead of raising when the inputs are not
+something the kernel can reproduce exactly (CPU tensors, unsupported dtypes,
+mismatched shapes, aliased storage, or a Triton/CUDA import failure).  The
+eager chain is then executed verbatim, so numerics and error behaviour are
+unchanged — including for CPU-only unit tests, which never take the fused path.
 """
 
 from __future__ import annotations
@@ -10,6 +38,17 @@ from __future__ import annotations
 from dataclasses import replace
 
 import torch
+
+
+def _load_fused_kernels():
+    """Return the Triton fusion module, or ``None`` when it is unavailable."""
+    try:
+        from rtp_llm.models_py.modules.dsv41.fp8.decode import (
+            _fused_prepare_meta_triton,
+        )
+    except ImportError:  # pragma: no cover - Triton/CUDA not installed
+        return None
+    return _fused_prepare_meta_triton
 
 
 def packed_row_mapping(lengths, prefixes, row_count, cu_seqlens=None):
@@ -148,13 +187,24 @@ def update_packed_decode_metadata(
     meta.req_id_per_token_long.copy_(request)
     meta.decode_seq_start_per_req.copy_(prefixes)
     meta.decode_cu_seq_per_req.copy_(cu)
-    meta.valid_requests.copy_(torch.arange(batch, device=device) < live)
+    fused = _load_fused_kernels()
+    if fused is None or not fused.packed_valid_requests_fused(
+        meta.valid_requests, live
+    ):
+        meta.valid_requests.copy_(torch.arange(batch, device=device) < live)
 
     win = meta.window_size
-    columns = torch.arange(win, device=device, dtype=torch.int64)
-    candidates = (positions[:, None] - win + 1).clamp_min(0) + columns
-    absolute = torch.where(candidates <= positions[:, None], candidates, -1)
-    meta.swa_abs_idx.copy_(absolute.reshape_as(meta.swa_abs_idx))
+    if fused is not None and fused.packed_swa_abs_idx_fused(
+        positions, meta.swa_abs_idx, win
+    ):
+        # The kernel wrote the window in place; reuse that buffer as the read
+        # map so the read slots never materialise a second [rows, win] tensor.
+        absolute = meta.swa_abs_idx.reshape(rows, win)
+    else:
+        columns = torch.arange(win, device=device, dtype=torch.int64)
+        candidates = (positions[:, None] - win + 1).clamp_min(0) + columns
+        absolute = torch.where(candidates <= positions[:, None], candidates, -1)
+        meta.swa_abs_idx.copy_(absolute.reshape_as(meta.swa_abs_idx))
     # FlashMLA bounds the same index width for S execution rows. Those rows
     # can straddle requests, so use their maximum, not a request's last row.
     if capture_full_width_lengths:
@@ -163,10 +213,15 @@ def update_packed_decode_metadata(
         visible = (positions + 1).clamp(0, win).reshape(batch, meta.q_len_per_req)
         meta.swa_topk_length.copy_(visible.max(dim=1).values)
     meta.topk_buffer_compressed.fill_(-1)
-    for tag, dst in meta.pool_block_tables.items():
-        src = paged_block_tables[tag]
-        dst.zero_()
-        dst[:, : src.shape[1]].copy_(src)
+    # ``zero_() + copy_()`` per tag is exactly what the batched snapshot writes:
+    # the source rectangle, zeros elsewhere.
+    if fused is None or not fused.try_snapshot_block_tables(
+        meta.pool_block_tables, paged_block_tables, batch
+    ):
+        for tag, dst in meta.pool_block_tables.items():
+            src = paged_block_tables[tag]
+            dst.zero_()
+            dst[:, : src.shape[1]].copy_(src)
 
     for tag in (SWA_KV, DECODER_SWA_KV):
         if tag not in meta.pool_block_tables:
@@ -174,12 +229,16 @@ def update_packed_decode_metadata(
         table = meta.pool_block_tables[tag]
         entries = paged_pool_entries_per_block[tag]
         span = paged_pool_tokens_per_block[tag]
-        writes = packed_pool_slots(table, request, positions, entries, span)
-        meta.pool_write_slot_mappings[tag].copy_(writes)
+        write_slots = meta.pool_write_slot_mappings[tag]
+        if fused is None or not fused.packed_pool_slots_fused(
+            table, request, positions, entries, span, out=write_slots
+        ):
+            write_slots.copy_(
+                packed_pool_slots(table, request, positions, entries, span)
+            )
         read_request = request[:, None].expand_as(absolute)
-        reads = packed_pool_slots(table, read_request, absolute, entries, span).int()
         if tag == SWA_KV:
-            meta.swa_global_slots.copy_(reads)
+            read_slots = meta.swa_global_slots
         else:
             child = meta.decoder_swa_metadata
             if child is None:
@@ -198,7 +257,13 @@ def update_packed_decode_metadata(
                 )
                 meta.decoder_swa_metadata = child
             child.is_packed = True
-            child.swa_global_slots.copy_(reads)
+            read_slots = child.swa_global_slots
+        if fused is None or not fused.packed_pool_slots_fused(
+            table, read_request, absolute, entries, span, out=read_slots
+        ):
+            read_slots.copy_(
+                packed_pool_slots(table, read_request, absolute, entries, span).int()
+            )
 
 
 def allocate_packed_decode_metadata(*, paged_block_tables=None, **kwargs):
