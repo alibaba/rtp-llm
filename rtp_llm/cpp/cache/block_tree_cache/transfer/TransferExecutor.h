@@ -22,7 +22,8 @@ protected:
     TransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                      size_t                                         max_descriptors_per_batch,
                      std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
-                     BlockTreeTaskPool*                             load_task_pool = nullptr);
+                     BlockTreeTaskPool*                             load_task_pool = nullptr,
+                     int64_t                                        world_rank     = -1);
 
     virtual TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                         const std::vector<TransferDescriptor>& descriptors,
@@ -38,6 +39,7 @@ private:
     BlockTreeTaskPool*                             load_task_pool_;
     size_t                                         max_descriptors_per_batch_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
+    int64_t                                        world_rank_;
 };
 
 }  // namespace rtp_llm
