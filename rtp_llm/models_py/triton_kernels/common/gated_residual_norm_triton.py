@@ -88,7 +88,9 @@ def _norm_fp8_scale(AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr):
     offsets = tl.arange(0, BLOCK)
     maximum = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
     # Match the CUDA per-tensor quantizer's constant reciprocal multiplication.
-    tl.store(SCALE, maximum * (1.0 / 448.0))
+    scale = maximum * (1.0 / 448.0)
+    scale = tl.where(scale < 1.1754943508222875e-38, 0.0, scale)
+    tl.store(SCALE, scale)
 
 
 def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
