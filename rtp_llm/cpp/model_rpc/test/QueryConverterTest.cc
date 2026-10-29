@@ -8,6 +8,7 @@
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -699,6 +700,82 @@ TEST_F(QueryConverterTest, NormalImageInputPreservesSourceAndCanonicalMarker) {
     ASSERT_TRUE(input->multimodal_inputs);
     ASSERT_EQ(input->multimodal_inputs->size(), 1);
     EXPECT_EQ(input->multimodal_inputs->at(0).url, source);
+}
+
+// These conversion contracts use CPU tensors and do not initialize a device.
+TEST(QueryConverterMultimodalInputTest, UrlOnlyImageHasEmptyTensorOnVitRpcWire) {
+    GenerateInputPB wire;
+    wire.add_token_ids(7);
+    auto* media = wire.add_multimodal_inputs();
+    media->set_multimodal_url("data:image/jpeg;base64,AQID");
+    media->set_multimodal_type(1);
+    media->mutable_mm_preprocess_config()->set_max_pixels(1024);
+    ASSERT_FALSE(media->has_multimodal_tensor());
+
+    const auto input = QueryConverter::transQuery(&wire);
+    ASSERT_TRUE(input->multimodal_inputs);
+    ASSERT_EQ(input->multimodal_inputs->size(), 1);
+    const auto& image = input->multimodal_inputs->at(0);
+    EXPECT_EQ(image.tensor.numel(), 0);
+    EXPECT_EQ(image.tensor.dim(), 1);
+    EXPECT_TRUE(image.tensor.device().is_cpu());
+
+    const auto rpc = MultimodalPbConverter::inputsToPb(*input->multimodal_inputs, 123);
+    ASSERT_EQ(rpc.multimodal_inputs_size(), 1);
+    const auto& forwarded = rpc.multimodal_inputs(0);
+    EXPECT_EQ(forwarded.multimodal_url(), media->multimodal_url());
+    EXPECT_EQ(forwarded.multimodal_type(), 1);
+    EXPECT_EQ(forwarded.mm_preprocess_config().max_pixels(), 1024);
+    EXPECT_EQ(forwarded.multimodal_tensor().shape_size(), 1);
+    EXPECT_EQ(forwarded.multimodal_tensor().shape(0), 0);
+    EXPECT_TRUE(forwarded.multimodal_tensor().fp32_data().empty());
+    EXPECT_EQ(QueryConverter::transTensor(forwarded.multimodal_tensor()).numel(), 0);
+}
+
+TEST(QueryConverterMultimodalInputTest, NonUrlOnlyQueryKeepsExistingPlaceholder) {
+    for (const bool has_url : {false, true}) {
+        for (const bool has_tensor : {false, true}) {
+            if (has_url && !has_tensor) {
+                continue;
+            }
+            GenerateInputPB wire;
+            wire.add_token_ids(7);
+            auto* media = wire.add_multimodal_inputs();
+            if (has_url) {
+                media->set_multimodal_url("data:image/jpeg;base64,AQID");
+            }
+            if (has_tensor) {
+                media->mutable_multimodal_tensor()->add_shape(0);
+            }
+            const auto input = QueryConverter::transQuery(&wire);
+            ASSERT_TRUE(input->multimodal_inputs);
+            // This entry point did not decode TensorPB before this fix. Check
+            // only its existing shape, never read uninitialized placeholder data.
+            EXPECT_EQ(input->multimodal_inputs->at(0).tensor.numel(), 1);
+        }
+    }
+}
+
+TEST(QueryConverterMultimodalInputTest, ExplicitTensorRemainsUnchangedOnVitRpcWire) {
+    // Exercise the real tensor-bearing boundary directly. The URL-only fix
+    // must not add a receiver-side shape heuristic that drops a true scalar.
+    for (const auto dtype : {torch::kFloat32, torch::kInt32}) {
+        const auto                         expected = torch::full({1}, 42, torch::TensorOptions().dtype(dtype));
+        const std::vector<MultimodalInput> inputs{MultimodalInput("data:image/jpeg;base64,AQID", expected, 1)};
+        const auto                         rpc = MultimodalPbConverter::inputsToPb(inputs, 124);
+        const auto actual = QueryConverter::transTensor(rpc.multimodal_inputs(0).multimodal_tensor());
+        EXPECT_EQ(actual.scalar_type(), dtype);
+        EXPECT_TRUE(torch::equal(actual, expected));
+    }
+}
+
+TEST(QueryConverterMultimodalInputTest, TensorOnlyInputRemainsUnchangedOnVitRpcWire) {
+    const auto                         expected = torch::arange(6, torch::kInt32).reshape({2, 3});
+    const std::vector<MultimodalInput> inputs{MultimodalInput("", expected, 4)};
+    const auto                         rpc = MultimodalPbConverter::inputsToPb(inputs, 125);
+    EXPECT_TRUE(rpc.multimodal_inputs(0).multimodal_url().empty());
+    EXPECT_EQ(rpc.multimodal_inputs(0).multimodal_type(), 4);
+    EXPECT_TRUE(torch::equal(QueryConverter::transTensor(rpc.multimodal_inputs(0).multimodal_tensor()), expected));
 }
 
 }  // namespace rtp_llm

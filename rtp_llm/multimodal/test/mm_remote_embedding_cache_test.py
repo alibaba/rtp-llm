@@ -9,14 +9,17 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.multimodal.kvcm.tensor_object import pack_object, plan_object
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.multimodal.test.multimodal_process_engine_test import (
     FakeEmbeddingLengthInterface,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 class Store:
@@ -625,6 +628,79 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
         self.evict(self.cache)
         self.assertEqual(self.cache.stats()["read_error"], 1)
         self.assertEqual(self.cache.stats()["write_error"], 1)
+
+
+class VitRpcRemoteIdentityTest(unittest.TestCase):
+    def setUp(self):
+        self.cache = MMRemoteEmbeddingCache(
+            None,
+            client_factory=lambda: self.fail("identity checks must not open a client"),
+            namespace="deepseek-v41-test-weight-revision",
+            model_identity={"model_type": "deepseek_v41"},
+            max_object_bytes=65536,
+            max_inflight_bytes=1024 * 1024,
+        )
+        self.addCleanup(self.cache.close)
+
+    def decode(self, url="data:image/jpeg;base64,AQID", tensor=None, mm_type=1):
+        wire = MultimodalInputsPB(request_id=123)
+        image = wire.multimodal_inputs.add()
+        image.multimodal_url = url
+        image.multimodal_type = mm_type
+        if tensor is not None:
+            image.multimodal_tensor.CopyFrom(trans_from_tensor(tensor))
+        # Exercise the actual protobuf wire decoder used by the ViT RPC server.
+        decoded = MultimodalInputsPB.FromString(wire.SerializeToString())
+        return trans_mm_input(decoded)
+
+    def test_url_only_empty_tensor_wire_is_admitted_for_deepseek_v41(self):
+        for tensor in (None, torch.empty(0)):
+            with self.subTest(tensor_present=tensor is not None):
+                inputs = self.decode(tensor=tensor)
+                self.assertEqual(inputs[0].tensor.numel(), 0)
+                self.assertIsNotNone(self.cache.key(inputs))
+
+    def test_real_jpeg_bytes_are_admitted_after_wire_roundtrip(self):
+        import base64
+        import io
+
+        from PIL import Image
+
+        content = io.BytesIO()
+        Image.new("RGB", (3, 2), (11, 22, 33)).save(content, format="JPEG")
+        image_bytes = content.getvalue()
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            self.assertEqual(image.size, (3, 2))
+        url = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode()
+        inputs = self.decode(url=url, tensor=torch.empty(0))
+        self.assertEqual(inputs[0].tensor.numel(), 0)
+        self.assertEqual(inputs[0].url, url)
+        key = self.cache.key(inputs)
+        self.assertIsNotNone(key)
+        self.assertEqual(key, self.cache.key(self.decode(url=url)))
+
+    def test_explicit_one_float_is_preserved_and_bypasses_remote_cache(self):
+        expected = torch.tensor([42.0])
+        inputs = self.decode(tensor=expected)
+        self.assertTrue(torch.equal(inputs[0].tensor, expected))
+        self.assertIsNone(self.cache.key(inputs))
+        self.assertTrue(torch.equal(inputs[0].tensor, expected))
+
+    def test_mutable_urls_and_grouped_inputs_still_bypass(self):
+        for url in (
+            "https://host/image.jpg",
+            "/tmp/image.jpg",
+            "data:image/jpeg;base64,!",
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(self.cache.key(self.decode(url=url)))
+        self.assertIsNone(self.cache.key(self.decode() + self.decode()))
+
+    def test_tensor_only_rpc_stays_a_tensor_and_bypasses_remote_cache(self):
+        expected = torch.arange(6, dtype=torch.int32).reshape(2, 3)
+        inputs = self.decode(url="", tensor=expected, mm_type=4)
+        self.assertTrue(torch.equal(inputs[0].tensor, expected))
+        self.assertIsNone(self.cache.key(inputs))
 
 
 if __name__ == "__main__":
