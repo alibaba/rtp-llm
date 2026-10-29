@@ -57,7 +57,7 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
     rows = x.numel() // 10240
     residual = torch.empty_like(x)
     norm = torch.empty_like(x)
-    collect = 4093 <= rows <= 4096 or 8192 <= rows <= 16384
+    collect = 7 <= rows <= 32 or 4093 <= rows <= 4096 or 8192 <= rows <= 16384
     partial = (
         torch.empty(rows * 4, device=x.device, dtype=torch.float32)
         if collect
@@ -99,7 +99,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
         and sublayer.shape == (*x.shape[:-1], 2560)
         and gates.shape == (*x.shape[:-1], 4)
         and gamma.shape == (10240,)
-        and 4093 <= x.numel() // 10240 <= 16384
+        and (1 <= x.numel() // 10240 <= 32 or 4093 <= x.numel() // 10240 <= 16384)
         and all(
             t.dtype == torch.bfloat16
             and t.device == x.device
