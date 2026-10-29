@@ -173,7 +173,11 @@ class MMRemoteEmbeddingCache:
 
         if item.mm_type != MMUrlType.IMAGE:
             return bypass("unsupported_media_type", mm_type=int(item.mm_type))
-        match = re.match(r"^data:image/[^;,]+;base64,", item.url)
+        # The V4.1 renderer wraps immutable image bytes as octet-stream.
+        # IMAGE remains the type gate; the MIME label is not part of identity.
+        match = re.match(
+            r"^data:(?:image/[^;,]+|application/octet-stream);base64,", item.url
+        )
         if match is None:
             return bypass("non_inline_image")
         if item.tensor is not None and item.tensor.numel():

@@ -679,6 +679,137 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
         self.assertIsNotNone(key)
         self.assertEqual(key, self.cache.key(self.decode(url=url)))
 
+    def test_renderer_png_and_jpeg_octet_stream_keep_original_image_key(self):
+        import base64
+        import io
+
+        from PIL import Image
+
+        from rtp_llm.config.generate_config import GenerateConfig
+        from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
+        from rtp_llm.openai.renderers.deepseekv41_renderer import _image_records_to_urls
+        from rtp_llm.utils.base_model_datatypes import GenerateInput, MMUrlType
+
+        for image_format, mime in (("PNG", "image/png"), ("JPEG", "image/jpeg")):
+            with self.subTest(image_format=image_format):
+                content = io.BytesIO()
+                Image.new("RGB", (3, 2), (11, 22, 33)).save(
+                    content, format=image_format
+                )
+                image_bytes = content.getvalue()
+                encoded = base64.b64encode(image_bytes).decode("ascii")
+                original_url = f"data:{mime};base64,{encoded}"
+                original_key = self.cache.key(self.decode(url=original_url))
+                self.assertIsNotNone(original_key)
+                for record in (
+                    {"source": {"url": original_url}},
+                    {"data": image_bytes},
+                ):
+                    urls = _image_records_to_urls([1234], [record], 1234)
+                    self.assertEqual(
+                        urls, ["data:application/octet-stream;base64," + encoded]
+                    )
+                    # Invoke the actual frontend serializer, not a hand-built
+                    # absent TensorPB. URL-only requests must reach C++ with
+                    # has_multimodal_tensor() false.
+                    frontend = trans_input(
+                        GenerateInput(
+                            request_id=123,
+                            token_ids=torch.tensor([1234], dtype=torch.int32),
+                            mm_inputs=[
+                                MultimodalInput(
+                                    url=urls[0],
+                                    mm_type=MMUrlType.IMAGE,
+                                    tensor=torch.empty(0),
+                                    mm_preprocess_config=MMPreprocessConfig(),
+                                )
+                            ],
+                            generate_config=GenerateConfig(max_new_tokens=1),
+                        )
+                    )
+                    frontend = type(frontend).FromString(frontend.SerializeToString())
+                    self.assertEqual(len(frontend.multimodal_inputs), 1)
+                    image = frontend.multimodal_inputs[0]
+                    self.assertEqual(image.multimodal_url, urls[0])
+                    self.assertEqual(image.multimodal_type, MMUrlType.IMAGE)
+                    self.assertFalse(image.HasField("multimodal_tensor"))
+
+                    # QueryConverterMultimodalInputTest independently exercises
+                    # the actual C++ converter for this absent-TensorPB contract.
+                    # Reproduce its present zero-length tensor on the ViT wire,
+                    # then invoke the actual Python ViT decoder and cache key.
+                    wire = MultimodalInputsPB(request_id=123)
+                    forwarded = wire.multimodal_inputs.add()
+                    forwarded.CopyFrom(image)
+                    forwarded.multimodal_tensor.CopyFrom(
+                        trans_from_tensor(torch.empty(0))
+                    )
+                    self.assertTrue(forwarded.HasField("multimodal_tensor"))
+                    self.assertEqual(list(forwarded.multimodal_tensor.shape), [0])
+                    inputs = trans_mm_input(
+                        MultimodalInputsPB.FromString(wire.SerializeToString())
+                    )
+                    self.assertEqual(inputs[0].tensor.numel(), 0)
+                    # Compare the same serialized preprocessing defaults.
+                    expected = [
+                        MultimodalInput(
+                            url=original_url,
+                            mm_type=MMUrlType.IMAGE,
+                            tensor=torch.empty(0),
+                            mm_preprocess_config=inputs[0].mm_preprocess_config,
+                        )
+                    ]
+                    expected_key = self.cache.key(expected)
+                    self.assertIsNotNone(expected_key)
+                    self.assertEqual(self.cache.key(inputs), expected_key)
+
+    def test_octet_stream_requires_image_media_type(self):
+        url = "data:application/octet-stream;base64,AQID"
+        for mm_type in (0, 2, 3, 4):
+            with self.subTest(mm_type=mm_type):
+                self.assertIsNone(self.cache.key(self.decode(url=url, mm_type=mm_type)))
+
+    def test_other_data_media_and_parameters_still_bypass(self):
+        for prefix in (
+            "data:application/json;base64,",
+            "data:application/pdf;base64,",
+            "data:application/octet-stream-extra;base64,",
+            "data:text/plain;base64,",
+            "data:audio/wav;base64,",
+            "data:video/mp4;base64,",
+            "data:application/octet-stream;charset=utf-8;base64,",
+            "data:application/octet-stream,",
+        ):
+            with self.subTest(prefix=prefix):
+                self.assertIsNone(self.cache.key(self.decode(url=prefix + "AQID")))
+
+    def test_octet_stream_base64_and_nonempty_tensor_fail_closed(self):
+        prefix = "data:application/octet-stream;base64,"
+        for payload in ("", "!", "AQI", "AQID\n", "AQ ID"):
+            with self.subTest(payload=payload):
+                self.assertIsNone(self.cache.key(self.decode(url=prefix + payload)))
+        expected = torch.tensor([42.0])
+        inputs = self.decode(url=prefix + "AQID", tensor=expected)
+        self.assertIsNone(self.cache.key(inputs))
+        self.assertTrue(torch.equal(inputs[0].tensor, expected))
+        self.assertIsNone(
+            self.cache.key(self.decode(url=prefix + "AQID") + self.decode())
+        )
+
+    def test_octet_stream_keeps_preprocessing_and_source_bytes_in_identity(self):
+        url = "data:application/octet-stream;base64,AQID"
+        inputs = self.decode(url=url)
+        original_key = self.cache.key(inputs)
+        self.assertIsNotNone(original_key)
+        inputs[0].mm_preprocess_config.width = 256
+        self.assertNotEqual(self.cache.key(inputs), original_key)
+        self.assertNotEqual(
+            self.cache.key(
+                self.decode(url="data:application/octet-stream;base64,AQIE")
+            ),
+            original_key,
+        )
+
     def test_explicit_one_float_is_preserved_and_bypasses_remote_cache(self):
         expected = torch.tensor([42.0])
         inputs = self.decode(tensor=expected)
