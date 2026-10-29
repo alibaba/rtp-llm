@@ -174,6 +174,10 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_DOWNLOAD_FAILED, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_PROCESS_ERROR, DASH_ERROR_INTERNAL),
+            (ExceptionType.MM_EMPTY_ENGINE_ERROR, DASH_ERROR_INTERNAL),
+            (ExceptionType.MM_REMOTE_RPC_FAILED, DASH_ERROR_INTERNAL),
             (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
             (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
@@ -1036,8 +1040,32 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("backend down", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
-    async def test_content_inspection_error_keeps_public_contract(self) -> None:
+    async def test_multimodal_error_keeps_public_contract(self) -> None:
         cases = (
+            (
+                ExceptionType.MM_DOWNLOAD_FAILED,
+                "Failed to download multimodal content",
+                400,
+                "InvalidParameter",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
+                ExceptionType.MM_EMPTY_ENGINE_ERROR,
+                "ViT connection unavailable",
+                500,
+                "InternalError",
+                19,
+                LLMFinishReason.INNER_ENGINE_ERROR,
+            ),
+            (
+                ExceptionType.MM_REMOTE_RPC_FAILED,
+                "ViT RPC failed",
+                500,
+                "InternalError",
+                19,
+                LLMFinishReason.INNER_ENGINE_ERROR,
+            ),
             (
                 ExceptionType.UNSAFE_INPUT_CONTENT,
                 "Input image [1] data may contain inappropriate content.",
