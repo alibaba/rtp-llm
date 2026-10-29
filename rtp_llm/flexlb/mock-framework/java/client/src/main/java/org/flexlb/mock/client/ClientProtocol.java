@@ -9,26 +9,11 @@ import static org.flexlb.mock.api.Endpoint.Kind.*;
 /** Private Client control transport. Python owns the Case API. */
 public interface ClientProtocol {
     record Empty() {}
-    record Input(List<Integer> token_ids, int max_new_tokens, int priority) {
-        public Input {
-            token_ids = List.copyOf(token_ids);
-            if (token_ids.isEmpty() || token_ids.stream().anyMatch(v -> v < 0) || max_new_tokens < 1 || priority < 0)
-                throw new IllegalArgumentException("Invalid text request");
-        }
-    }
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record Start(@Argument(optional=true) List<String> masters, @Argument(optional=true) List<Input> requests,
-                 @Argument(optional=true) String requests_file, double qps, int concurrency, int queue_capacity,
+    record Start(@Argument(optional=true) List<String> masters, String requests_file, double qps, int concurrency, int queue_capacity,
                  long request_timeout_ms, long drain_timeout_ms) {
         public Start {
-            if ((requests == null) == (requests_file == null))
-                throw new IllegalArgumentException("Specify exactly one of requests or requests_file");
-            if (requests != null) {
-                requests = List.copyOf(requests);
-                if (requests.isEmpty() || requests.size() / qps > 86400)
-                    throw new IllegalArgumentException("Invalid request count (maximum 24 hours)");
-            }
-            if (requests_file != null && (requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute()))
+            if (requests_file == null || requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute())
                 throw new IllegalArgumentException("requests_file must be an absolute local path");
             if (masters != null) {
                 masters = List.copyOf(masters);
@@ -40,7 +25,7 @@ public interface ClientProtocol {
                 throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
         }
     }
-    record Item(long request_id, long index, Input input) {
+    record Item(long request_id, long index, org.flexlb.mock.client.input.ClientInput.Request input) {
         public Item { if (request_id <= 0 || index < 0) throw new IllegalArgumentException("Invalid request identity"); }
     }
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -48,7 +33,7 @@ public interface ClientProtocol {
                  long count, long first_index, int stride, long first_request_id, String sha256,
                  double qps, int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
         public Shard {
-            new Start(masters, null, requests_file, qps, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms);
+            new Start(masters, requests_file, qps, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms);
             masters = masters == null ? null : List.copyOf(masters);
             if (sequence < 1 || count < 1 || first_index < 0 || stride < 1 || first_index >= stride || first_request_id < 1
                     || sha256 == null || !sha256.matches("[0-9a-f]{64}"))

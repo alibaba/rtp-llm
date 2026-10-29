@@ -96,7 +96,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
             save(directory.resolve("coordinator/" + created.number + "/input.json"), Map.of("count", total, "shards", parts));
             for (int i = 0; i < created.peers.size(); i++) {
-                RequestFiles.checkInterrupted();
+                InputFile.checkInterrupted();
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");
                 var part = parts.get(i);
                 int slots = args.concurrency() / created.peers.size() + (i < args.concurrency() % created.peers.size() ? 1 : 0);
@@ -106,7 +106,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
             for (String peer : created.peers) {
-                RequestFiles.checkInterrupted();
+                InputFile.checkInterrupted();
                 if (created.stop || closed) throw new IOException("Client start stopped before begin");
                 call(peer, "worker/begin", new Begin(created.number, startAt));
             }

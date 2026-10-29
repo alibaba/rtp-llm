@@ -50,14 +50,13 @@ class ClientGroup:
         envelope = {'interface': operation, 'args': args, 'context': {'run': 'foreground',
                     'query_time': query_time, 'observation': None, 'timeout_ms': max(1, int(timeout * 1000))}}
         if len(json.dumps(envelope).encode()) > 1024 * 1024:
-            raise ExecutionError('Inline Client requests exceed the 1 MiB control limit; use requests_file for larger inputs')
+            raise ExecutionError('Client control parameters exceed the 1 MiB limit')
         return await post(self.coordinator(), envelope)
 
     async def start(self, body, query_time, timeout):
         clients = self.topology.active('client')
-        if (not clients or body['concurrency'] < len(clients)
-                or 'requests' in body and len(body['requests']) < len(clients)):
-            raise ExecutionError('Need at least one request and concurrency slot per Client')
+        if not clients or body['concurrency'] < len(clients):
+            raise ExecutionError('Need at least one concurrency slot per Client')
         available = {node['rpc'] for node in self.topology.active('master')}
         if not available or 'masters' in body and set(body['masters']) - available:
             raise ExecutionError('Unknown Master address')

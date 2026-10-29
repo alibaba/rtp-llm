@@ -1,0 +1,16 @@
+syntax = "proto3";
+package flexlb.mock.input;
+option java_package = "org.flexlb.mock.client.input";
+option java_outer_classname = "ClientInput";
+
+// Playback data only; request identity and timing are assigned by the coordinator/Player.
+message Request {
+  repeated int32 token_ids = 1;
+  int32 max_new_tokens = 2;
+  optional int32 priority = 3; // Absent means 50.
+}
+message Batch {
+  uint64 sequence = 1;
+  repeated Request requests = 2;
+  optional uint64 total_requests = 3; // Final batch only, with no requests.
+}

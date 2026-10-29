@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from pathlib import Path
 import pytest
 from mock_framework.config import Registry
 from mock_framework.config.errors import ConfigError
@@ -8,6 +9,7 @@ from mock_framework.execution.transport import ExecutionError
 from mock_framework.execution import clients as client_runtime
 from mock_framework.execution.clients import ClientGroup
 from mock_framework import evidence
+from mock_framework.input import read_inputs, write_inputs, pb
 
 
 def context():
@@ -20,12 +22,12 @@ def context():
     records = SimpleNamespace(emit=lambda **v: events.append(v))
     clients = ClientGroup(component=None, recipe=None, launcher=None, supervisor=None,
         topology=topology, records=records, monitoring=None)
-    return SimpleNamespace(runtime=SimpleNamespace(topology=topology, clients=clients), nodes=nodes,
+    return SimpleNamespace(runtime=SimpleNamespace(topology=topology, clients=clients, case=SimpleNamespace(directory=Path(__file__).resolve().parents[1])), nodes=nodes,
         query_time='2026-10-28T00:00:00Z', timeout=20, records=records, events=events)
 
 
 def args():
-    return {'masters': ['master:1'], 'requests': [{'token_ids': [1, 2], 'max_new_tokens': 3}] * 2,
+    return {'masters': ['master:1'], 'requests_file': str(Path(__file__).resolve().parents[1] / 'cases/basic/requests.binpb.zst'),
             'qps': 10, 'concurrency': 2}
 
 
@@ -87,8 +89,7 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
 
 
 @pytest.mark.parametrize('changes', [{'qps': 0}, {'qps': float('inf')}, {'masters': []}, {'masters': ['a', 'a']},
-                                      {'queue_capacity': 0}, {'request_timeout': '0s'}, {'requests': []},
-                                      {'requests': [{'token_ids': [], 'max_new_tokens': 1}]}])
+                                      {'queue_capacity': 0}, {'request_timeout': '0s'}, {'requests_file': ''}, {'requests_file': None}])
 def test_invalid_plans_fail_at_python_boundary(changes):
     with pytest.raises(ConfigError):
         Registry.standard().get('client/start').arguments(args() | changes)
@@ -102,8 +103,8 @@ def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypa
     assert asyncio.run(metrics.client_qps(context(), metrics.MetricArgs())) == 123.0
 
 
-@pytest.mark.parametrize('replicas,file_input', [(2, False), (1, True), (2, True)], ids=['inline-two', 'file-one', 'file-two'])
-def test_client_playback_through_real_master(tmp_path, replicas, file_input):
+@pytest.mark.parametrize('replicas,large_input', [(2, False), (1, True), (2, True)], ids=['small-two', 'large-one', 'large-two'])
+def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     import json
     import os
     from pathlib import Path
@@ -129,19 +130,17 @@ def test_client_playback_through_real_master(tmp_path, replicas, file_input):
                         'client': {'deployment': {'replicas': replicas}, 'config': {}}},
         'phases': [{'id': 'traffic', 'describe': 'Play and collect', 'timeout': '35s', 'steps': [
             {'id': 'start', 'describe': 'Start global request plan', 'interface': 'client/start', 'args': {
-                'masters': {'ref': 'globals.masters'}, 'requests': [{'token_ids': [1, 2, 3], 'max_new_tokens': 3}] * 12,
+                'masters': {'ref': 'globals.masters'}, 'requests_file': 'requests.binpb.zst',
                 'qps': 4, 'concurrency': 4, 'queue_capacity': 8, 'request_timeout': '5s', 'drain_timeout': '5s'}, 'wait_after': '6s'},
             {'id': 'stop', 'describe': 'Collect every Client', 'interface': 'client/stop'}]}]}
-    count = 720 if file_input else 12
-    if file_input:
-        source = tmp_path / 'requests.jsonl'
-        with source.open('w') as stream:
-            for index in range(count):
-                stream.write(json.dumps({'token_ids': [index + 10000] * 512, 'max_new_tokens': 3}) + '\n')
-        assert source.stat().st_size > 1024 * 1024
+    count = 720 if large_input else 12
+    source = tmp_path / 'requests.binpb.zst'
+    write_inputs(source, (pb.Request(token_ids=[index + 10000] * (1024 if large_input else 3), max_new_tokens=3)
+                          for index in range(count)))
+    if large_input:
+        assert sum(request.ByteSize() for request in read_inputs(source)) > 1024 * 1024
         start = data['phases'][0]['steps'][0]
-        start['args'].pop('requests')
-        start['args'].update(requests_file=source.name, qps=24, concurrency=16, queue_capacity=32)
+        start['args'].update(qps=24, concurrency=16, queue_capacity=32)
         start['wait_after'] = '24s'
         data['phases'][0]['timeout'] = '60s'
     data['phases'][0]['steps'].append({'id': 'records', 'describe': 'Read sealed Client evidence',
@@ -156,11 +155,11 @@ def test_client_playback_through_real_master(tmp_path, replicas, file_input):
     if os.environ.get('PROMETHEUS_BIN'):
         recipe['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '250ms'}
         data['phases'][0]['steps'].insert(1, {'id': 'qps', 'describe': 'Check aggregate issued rate',
-            'interface': 'client/qps', 'args': {'range': ['-10s' if file_input else '-6s', '0s']},
-            'expect': {'gte': 21.6, 'lte': 26.4} if file_input else {'gte': 1.5, 'lte': 3},
-            'wait_after': '10s' if file_input else '0s'})
+            'interface': 'client/qps', 'args': {'range': ['-10s' if large_input else '-6s', '0s']},
+            'expect': {'gte': 21.6, 'lte': 26.4} if large_input else {'gte': 1.5, 'lte': 3},
+            'wait_after': '10s' if large_input else '0s'})
         path.write_text(yaml.safe_dump(data)); case = compile_case(path, registry)
-    elif file_input:
+    elif large_input:
         data['phases'][0]['steps'][0]['wait_after'] = '34s'
         path.write_text(yaml.safe_dump(data)); case = compile_case(path, registry)
     launch = prepare_launch(recipe, case, tmp_path)
@@ -181,12 +180,12 @@ def test_client_playback_through_real_master(tmp_path, replicas, file_input):
         import hashlib
         contents = Path(shard['path']).read_bytes()
         assert hashlib.sha256(contents).hexdigest() == shard['sha256']
-        if file_input:
-            for line in contents.splitlines():
-                index = json.loads(line)['token_ids'][0] - 10000
+        if large_input:
+            for request in read_inputs(shard['path']):
+                index = request.token_ids[0] - 10000
                 assert index not in seen
                 seen.add(index)
-    if file_input: assert seen == set(range(count))
+    if large_input: assert seen == set(range(count))
     from mock_framework.evidence import playback_directories, read_requests
     assert not (output / 'topology-history.json').exists()
     topology = [json.loads(path.read_text()) for path in sorted(output.glob('components/client-*/endpoints.json'))]
@@ -249,31 +248,30 @@ def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
 
 
 def test_file_input_resolves_against_case_and_only_sends_metadata(tmp_path, monkeypatch):
-    import json
-    source = tmp_path / 'requests.jsonl'
-    source.write_text(json.dumps({'token_ids': [1], 'max_new_tokens': 2}) + '\n')
+    source = tmp_path / 'requests.binpb.zst'
+    write_inputs(source, [pb.Request(token_ids=[1], max_new_tokens=2)])
     ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     calls = []
     async def post(url, body): calls.append(body['args']); return {'accepted': True}
     monkeypatch.setattr(client_runtime, 'post', post)
-    value = args(); value.pop('requests'); value['requests_file'] = source.name
+    value = args(); value['requests_file'] = source.name
     assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
     assert calls[0]['requests_file'] == str(source) and 'requests' not in calls[0]
 
 
 @pytest.mark.parametrize('source', ['', 'https://example.com/data', None])
 def test_missing_or_invalid_input_source_fails_contract(source):
-    value = args(); value.pop('requests'); value['requests_file'] = source
+    value = args(); value['requests_file'] = source
     with pytest.raises(ConfigError): Registry.standard().get('client/start').arguments(value)
 
 
-def test_two_input_sources_are_rejected():
-    with pytest.raises(ConfigError): Registry.standard().get('client/start').arguments(args() | {'requests_file': 'data.jsonl'})
+def test_removed_inline_input_is_rejected():
+    with pytest.raises(ConfigError): Registry.standard().get('client/start').arguments(args() | {'requests': [{'token_ids': [1], 'max_new_tokens': 2}]})
 
 
 def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
     ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
-    value = args(); value.pop('requests'); value['requests_file'] = str(tmp_path)
+    value = args(); value['requests_file'] = str(tmp_path)
     with pytest.raises(ExecutionError, match='regular file'):
         asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
     assert not ctx.runtime.clients.pending

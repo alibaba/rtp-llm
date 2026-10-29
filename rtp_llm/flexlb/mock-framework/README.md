@@ -2,7 +2,7 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、文本请求列表/文件播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集数据格式转换及 ViT/vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、标准压缩输入播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集数据格式转换及 ViT/vLLM 尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## Scheduler 输入、执行完成、传输完成与状态查询
 
@@ -23,7 +23,7 @@ EngineLoop 负责唤醒、执行和结果交接，不判断后端队列和协议
 
 ## 设计边界
 
-本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通文本请求列表/文件播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
+本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通标准压缩输入播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
 
 ### Python Case 操作与 Java 实例能力
 
@@ -189,68 +189,56 @@ Client 取快了就在队列为空时等待；取慢了允许小队列暂时积�
 
 Python 在 stop 或最终清理时收集异常，不增加实时发压监控。开始响应丢失也必须尝试最终 stop，不能据此重发 start。Runner 原有进程退出监视保留。收尾先停 Client、获取结果，再做 Prometheus 最后采样和进程清理；不能遗漏 stop 后仍给出虚假的成功。收尾超时取消剩余调用，记录执行错误，不补造远端释放事实。
 
-#### 当前可运行范围
+#### 标准压缩输入与分片
 
-输入二选一：`requests` 为显式文本请求列表，`requests_file` 为本地 UTF-8 JSONL 文件。文件路径相对 Case YAML 所在目录解析，也接受绝对路径；当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。每行一个请求对象，包含非空 `token_ids`、正整数 `max_new_tokens` 和可选非负 `priority`（默认 50）；整数必须在 int32 范围内，token ID 非负。空行、重复键、未知字段、多轮字段和非法值均报错。每条原始/规范化记录最多 1 MiB，整个文件不受控制请求的 1 MiB 限制。内联 requests 仍受该控制请求限制，不自动切换输入方式。
+`client/start` 只接受 `requests_file`，路径指向标准 Protobuf＋Zstd 文件；不接受 inline requests、JSONL、xz 或格式兼容开关。相对路径基于 Case YAML 所在目录，也接受绝对路径。当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。
 
-client0 在 start 的步骤预算内逐条校验输入，并按全局序号 `k % Client 数` 写入本轮独立分片；所有输入校验完、分片关闭并发布后才 prepare/begin。每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点和 SHA-256，不携带全部请求。请求 ID 在一次实验的多轮 start 之间单调分配，主动停止留下的未发请求不重新分配给后续轮次。播放器逐条读取自己的分片，保留一个待发送记录和原有有界小队列；client0 不参与发压时的数据转发。内联输入也走同一分片和播放流程。
+唯一输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 提交同一 protoc 3.25.1 生成的 client_input_pb2.py。当前 Request 仅实现文本请求：非空、非负 int32 token_ids，正 int32 max_new_tokens，可选非负 int32 priority（缺省为 50，显式 0 保留）。多模态、完整生成参数、真实观测及旧数据集转换尚未接通；不能把二进制格式接通等同于这些能力已实现。未知字段、非法请求及不支持的版本均拒绝。
 
-分片保存在 `components/client-0/coordinator/<轮次>/shards/`，先写 `.part` 再原子发布 `.jsonl`，`input.json` 记录条数及各分片摘要；各 Client 的 plan 指向自己的分片。准备失败不启动播放，已产生的部分文件保留供诊断。源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错，准备后只使用分片快照。播放时读取失败、条数不符或自然读完后的校验和不符使整组失败；主动 stop 不读取和校验未消费的后缀，剩余请求计入 unsent。文件写入/关闭失败及准备取消同样不能产生 PASS。
+文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf Batch。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。Batch.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。输入和分片使用同一份格式与读写器，输入消息与执行证据消息分开定义。
 
-不复制旧数据解码器，不做数据生成、tokenizer、旧 prefix-lineage 采集格式转换、循环、多轮、trace、ramp 或动态参与者。该 JSONL 是规范化的单轮输入，不表示已经支持旧数据集格式。磁盘须容纳输入及各轮保留的分片；准备时间计入 start 的 within/phase timeout，大文件应明确配置足够的预算。
+client0 在 start 的步骤预算内流式校验整个输入，按全局序号 `k % Client 数` 写本轮压缩分片；校验、封口、关闭和发布全部完成后才 prepare/begin。分片位于 `components/client-0/coordinator/<轮次>/shards/`，直接写压缩 `.part`，成功后原子发布为 `.binpb.zst`。input.json 只记录条数和摘要等元数据，不保存可读请求副本。准备失败不启动播放；源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错。
 
-`RequestFilesTest` 用独立 48 MiB 堆的 JVM 分片并完整读取超过 64 MiB 的文件，并覆盖坏行、截断、内容变化和准备取消。`tests/test_client_interfaces.py` 用相同文件在 1/2 个 Client JVM 中播放 720 个请求，按发压期间的窗口检查合计 24 QPS；Master 生命周期测试使用文件输入持续接流。它们验证有界读取、总量和接线，不测量最大可达 QPS。
+每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点、SHA-256 和发流参数。Player 使用同一 InputFile.Reader 按批次解压，交给原有小队列；不把完整输入放进堆，也不把请求/响应经 client0 转发。请求 ID 在多轮 start 之间单调分配，主动停止留下的未发请求不会重新分配给后续轮次。播放读失败、条数或完整读取后的 SHA-256 不符使整组失败；主动 stop 不扫描未消费的后缀，剩余请求计入 unsent。
 
-启动参数：masters 可省略，默认持续发现本实验的全部 Master；显式填写时是非空、无重复的已知地址列表，播放期间只在这个固定范围内选主备。`masters: {ref: globals.masters}` 也会固定为该 step 执行时的列表，后续补回实例不会自动加入该列表；需要跟随扩容/替换时省略 masters。requests 与 requests_file 必须恰好指定一个，文件总请求数在准备阶段校验；qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16 条，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h。容量默认值仅用于接线，尚未经过压力校准。
+masters 可省略，Client 默认持续发现本实验的全部 Master；显式填写时固定为该 step 的地址集合，播放期间只在其中选主备。qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h；每个 Client 至少分到一个请求和并发槽。准备时间计入 start 的 within/phase timeout，大文件需明确足够的预算。
 
-参与发压的 Client 在本轮固定；Master 按下文主备发现规则动态选择。单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。当前只支持本机多 JVM；开始时间经本机墙钟转换为各 JVM 的单调时钟，未承诺跨机器时钟同步。准备后 30s 未收到开始命令的 Client 自行报错退出本轮。
+参与发压的 Client 在本轮固定；单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。只支持本机多 JVM，未承诺跨机器时钟同步。准备后 30s 未收到 begin 的 Client 报错退出本轮。请求循环、多轮对话、trace、ramp、动态参与者和旧数据转换不在当前范围。
 
 ```yaml
-# environment 增加 client: {deployment: {replicas: 2}, config: {}}
-# 以下 steps 放在已有 phase 内；省略 masters，持续跟随本实验的 Master 发现。
 - id: load
-  describe: 两个 Client 分担同一份流量
+  describe: 全体 Client 合计 24 QPS
   interface: client/start
+  within: 60s
   args:
-    qps: 2
-    concurrency: 2
-    requests:
-      - {token_ids: [1, 2, 3], max_new_tokens: 3}
-      - {token_ids: [4, 5, 6], max_new_tokens: 3}
-  wait_after: 3s
+    requests_file: traffic.binpb.zst
+    qps: 24
+    concurrency: 16
+  wait_after: 10s
 - id: stop_load
   describe: 收集全部 Client 的执行结果
   interface: client/stop
 ```
 
-文件播放示例（`traffic.jsonl` 放在 Case YAML 旁边）：
+离线准备时直接构造共享 Protobuf Request 并写压缩文件：
 
-```yaml
-- id: traffic
-  describe: 从文件分片播放，全体 Client 合计 24 QPS
-  interface: client/start
-  within: 60s
-  args:
-    requests_file: traffic.jsonl
-    qps: 24
-    concurrency: 16
-  wait_after: 10s
+```python
+from mock_framework.input import pb, write_inputs
+write_inputs("traffic.binpb.zst", (
+    pb.Request(token_ids=[1, 2, i + 3], max_new_tokens=3)
+    for i in range(20)
+))
 ```
 
-```jsonl
-{"token_ids":[1,2,3],"max_new_tokens":16}
-{"token_ids":[4,5,6],"max_new_tokens":8,"priority":20}
-```
+写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。基本 Case 直接携带标准二进制输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
 
-启动配方中的 client 使用 `java -jar <framework>/java/client/target/mock-client-1.0-SNAPSHOT-all.jar`，仍由 Runner 注入配置、拓扑和独立输出目录。
+`RequestFilesTest` 在独立 48 MiB 堆的 JVM 中分片并完整播放解压后超过 64 MiB 的输入，覆盖非法输入、截断、校验和、内容变化和准备取消。跨语言测试验证 Python 写→Java 读、Java 写→Python 读；真实 Master 接线测试在 1/2 个 Client JVM 中播放并校验分片总量、全局请求 ID 和发压窗口内的合计 QPS。这些是有界读取和功能接线验证，不测量最大可达 QPS。
 
-`client/qps` 复用公共 Python 指标查询，统计 `mock_client_requests_issued_total`，不是完成 QPS。沿用 targets 和 range 参数；最终检查必须选择实际发压窗口，不能用包含空闲和收尾的整个实验时长稀释目标。latest 在自然结束后可能已经为零，all 尚不支持。没有第二套“发压有效性”自动门禁。
+`client/qps` 复用公共 Python 查询，统计 mock_client_requests_issued_total，是发出 QPS；最终检查选择实际发压窗口，不能用含空闲和收尾的实验全时长稀释目标。latest 在自然结束后可能为零，all 尚不支持；缺实例或采样不足按公共查询规则报错。各 Client 仅上报自己的指标，client0 不重复上报全局汇总，不再增加一套发压有效性门禁。
 
-各 Client 只上报自己的 issued/finished、TTFT 和请求耗时；client0 不把全局汇总重复上报。缺实例或采样不足按公共查询规则报错。Client 执行结果包含 produced/issued/finished/unsent、在途/队列余量、各终态计数和异常，不把业务错误计数当成执行异常。
+每个 Client 在自己的 playback/<轮次>/ 保存计划与结果，client0 另在 coordinator/<轮次>/ 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和后续轮次不会覆盖旧结果。每轮输入分片与逐请求执行证据分别保存，输入不作为已发送/已完成的证明；磁盘须容纳输入和各轮分片。Client 结果包含 produced/issued/finished/unsent、在途/队列余量、终态计数和异常，业务错误计数不等于执行异常。
 
-每个 Client 在自己的 `playback/<轮次>/` 保存计划与结果；client0 另在 `coordinator/<轮次>/` 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和下一轮不会覆盖旧结果。输入分片保存规范化输入，逐请求执行事实另存为 `requests.binpb.zst`。输入分片不是实际发送/完成的证据。
-
-剩余待讨论项收敛为：旧采集数据如何转换成规范化输入，是否需要部分停止，以及适合真实负载的队列/并发默认值。QPS 的容忍度和窗口由 Case 检查指定，不在 Client 再定义一份。
+启动配方中的 Client 使用 java -jar <framework>/java/client/target/mock-client-1.0-SNAPSHOT-all.jar，由 Runner 注入配置、拓扑和独立输出目录。部分停止与队列/并发默认值的压力校准仍待讨论。
 
 ### Client 逐请求记录与查询
 
@@ -373,7 +361,7 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/check.sh
 
 ## 第一个可运行 Case
 
-`cases/basic/case.yaml` 使用真实 Master、RTP Prefill/Decode 和一个 Client。20 条请求保存在同目录的 requests.jsonl，总 QPS 为 2、总并发为 2。Case 检查唯一主 Master，在播放中段的 4 秒窗口检查 QPS，然后收尾并检查 20 条请求全部成功。QPS 门禁范围为 1.5–2.5，用于小流量接线检查，不是压力或容量验收。
+`cases/basic/case.yaml` 使用真实 Master、RTP Prefill/Decode 和一个 Client。20 条请求保存在同目录的 requests.binpb.zst，总 QPS 为 2、总并发为 2。Case 检查唯一主 Master，在播放中段的 4 秒窗口检查 QPS，然后收尾并检查 20 条请求全部成功。QPS 门禁范围为 1.5–2.5，用于小流量接线检查，不是压力或容量验收。
 
 在本目录完成 Java 构建后，指定 Java 21 和 Prometheus 的可执行文件，生成本机启动配方，再运行同一份 Case：
 
@@ -401,7 +389,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
   --output <输出目录>/compiled.json
 ```
 
-每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。Client 接受 start 参数中的显式请求列表或规范化 requests.jsonl 文件，不提供旧数据集格式兼容、转换器或生成器。
+每个 Case 独立目录组织自己的配置，数据集可共享。私有相对路径基于 Case 目录；显式提供共享根时，`data/`、`datasets/`、`views/` 基于共享根。编译不启动进程、不查询指标，也不检查数据内容。Client 只接受 start 参数 requests_file 指向的标准 Protobuf＋Zstd 文件，不提供旧数据集格式兼容、转换器或数据合成工具。
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。phase 和 step 完全顺序执行；每个 step 直接写 `interface` 与 `args`，可选 `expect`、`within` 和 `wait_after`；不再使用 call/check 外壳或 run 字段。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 

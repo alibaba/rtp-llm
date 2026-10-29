@@ -11,6 +11,7 @@ from mock_framework import cli
 from mock_framework.config import Registry, compile_case, load_yaml
 from mock_framework.execution import ExecutionError, prepare_launch, run_case
 from mock_framework.execution.launch import local_launch
+from mock_framework.input import read_inputs
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'cases/basic/case.yaml'
@@ -42,9 +43,9 @@ def artifacts(tmp_path):
 def test_basic_case_uses_its_own_finite_input_and_existing_interfaces(basic):
     start = next(step for phase in basic.phases for step in phase.steps if step.interface == 'client/start')
     source = basic.directory / start.args['requests_file']
-    requests = [json.loads(line) for line in source.read_text().splitlines()]
+    requests = list(read_inputs(source))
     assert len(requests) == 20
-    assert all(request['token_ids'] and request['max_new_tokens'] == 3 for request in requests)
+    assert all(request.token_ids and request.max_new_tokens == 3 for request in requests)
     assert start.args['qps'] == 2 and start.wait_after == '6s'
     assert set(basic.environment) == {'master', 'prefill', 'decode', 'client'}
 

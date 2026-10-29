@@ -97,12 +97,12 @@ final class LoadClient implements AutoCloseable {
                         cancel = List.copyOf(active.values());
                     } else if (begun && !stopped && !queue.isEmpty() && active.size() < plan.concurrency()) {
                         var item = queue.remove();
-                        var input = GenerateInputPB.newBuilder().setRequestId(item.request_id()).addAllTokenIds(item.input().token_ids())
-                            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().max_new_tokens())
+                        var input = GenerateInputPB.newBuilder().setRequestId(item.request_id()).addAllTokenIds(item.input().getTokenIdsList())
+                            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().getMaxNewTokens())
                                 .setCanUsePdSeparation(true).setReturnIncremental(true)).build();
                         var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.request_id())
-                            .setSeqLen(item.input().token_ids().size()).setMaxNewTokens(item.input().max_new_tokens())
-                            .setPriority(item.input().priority()).setGenerateInput(input.toByteString()).build();
+                            .setSeqLen(item.input().getTokenIdsList().size()).setMaxNewTokens(item.input().getMaxNewTokens())
+                            .setPriority(item.input().hasPriority() ? item.input().getPriority() : 50).setGenerateInput(input.toByteString()).build();
                         var call = client.send(request, Duration.ofMillis(plan.request_timeout_ms()));
                         active.put(item.request_id(), call); issued++; metrics.issued();
                         call.completion().whenComplete((result, error) -> {

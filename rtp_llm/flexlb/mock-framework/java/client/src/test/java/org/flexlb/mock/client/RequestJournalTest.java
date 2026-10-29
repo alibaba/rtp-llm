@@ -87,8 +87,7 @@ class RequestJournalTest {
              var one = new ClientNode("client-1", topology, directory.resolve("client-1"))) {
             new com.fasterxml.jackson.databind.ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-            zero.start(new ClientProtocol.Start(null, Collections.nCopies(100, PlaybackTest.input()), null,
-                10, 4, 16, 3000, 1000));
+            zero.start(InputFixture.plan(directory, null, 100, 10, 4, 16, 3000, 1000));
             PlaybackTest.eventually(() -> one.state(new ClientProtocol.Sequence(1)).issued() > 0);
             var workerField = ClientNode.class.getDeclaredField("worker"); workerField.setAccessible(true);
             var journalField = LoadClient.class.getDeclaredField("journal"); journalField.setAccessible(true);

@@ -14,22 +14,10 @@ from ..execution.transport import ExecutionError
 
 
 @dataclass(frozen=True)
-class Request:
-    token_ids: list[Annotated[int, Bounds(minimum=0, maximum=2147483647)]]
-    max_new_tokens: Annotated[int, Bounds(minimum=1, maximum=2147483647)]
-    priority: Annotated[int, Bounds(minimum=0, maximum=2147483647)] = 50
-
-    def __post_init__(self):
-        if not self.token_ids:
-            raise ValueError('token_ids must not be empty')
-
-
-@dataclass(frozen=True)
 class Start:
+    requests_file: str
     qps: float
     concurrency: Annotated[int, Bounds(minimum=1, maximum=2147483647)]
-    requests: list[Request] | None = None
-    requests_file: str | None = None
     masters: list[str] | None = None
     queue_capacity: Annotated[int, Bounds(minimum=1, maximum=100000)] = 16
     request_timeout: Annotated[str, 'duration'] = '30s'
@@ -38,14 +26,10 @@ class Start:
     def __post_init__(self):
         if self.masters is not None and (not self.masters or len(set(self.masters)) != len(self.masters) or any(not v.strip() for v in self.masters)):
             raise ValueError('masters must be nonempty and unique when supplied')
-        if (self.requests is None) == (self.requests_file is None):
-            raise ValueError('Specify exactly one of requests or requests_file')
         if not math.isfinite(self.qps) or self.qps <= 0:
             raise ValueError('Positive finite QPS is required')
-        if self.requests is not None and (not self.requests or len(self.requests) / self.qps > 86400):
-            raise ValueError('A nonempty text request list with at most 24h playback is required')
-        if self.requests_file is not None and (not self.requests_file.strip() or '://' in self.requests_file):
-            raise ValueError('requests_file must be a local file path')
+        if not self.requests_file.strip() or '://' in self.requests_file:
+            raise ValueError('requests_file must be a local Protobuf+Zstd input path')
         for value in (self.request_timeout, self.drain_timeout):
             millis = duration(value, positive=True) * 1000
             if millis != int(millis) or not 1 <= millis <= 3600000:
@@ -61,11 +45,10 @@ class Empty:
 async def start(ctx, args: Start) -> bool:
     """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
     body = {key: value for key, value in asdict(args).items() if value is not None}
-    if args.requests_file is not None:
-        path = (ctx.runtime.case.directory / Path(args.requests_file)).resolve()
-        if not path.is_file():
-            raise ExecutionError(f'Client requests_file is not a regular file: {path}')
-        body['requests_file'] = str(path)
+    path = (ctx.runtime.case.directory / Path(args.requests_file)).resolve()
+    if not path.is_file():
+        raise ExecutionError(f'Client requests_file is not a regular file: {path}')
+    body['requests_file'] = str(path)
     body['request_timeout_ms'] = int(duration(body.pop('request_timeout')) * 1000)
     body['drain_timeout_ms'] = int(duration(body.pop('drain_timeout')) * 1000)
     return await ctx.runtime.clients.start(body, ctx.query_time, ctx.timeout)

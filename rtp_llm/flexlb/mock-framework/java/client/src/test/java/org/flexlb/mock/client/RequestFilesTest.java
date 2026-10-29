@@ -1,6 +1,7 @@
 package org.flexlb.mock.client;
 
 import static org.junit.jupiter.api.Assertions.*;
+import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -8,20 +9,25 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.flexlb.mock.client.ClientProtocol.*;
+import org.flexlb.mock.client.input.ClientInput.*;
+import com.github.luben.zstd.ZstdCompressCtx;
 
 class RequestFilesTest {
     @TempDir Path directory;
-    Start filePlan(Path file) {
-        return new Start(null, null, file.toString(), 1000000000, 3, 4, 1000, 1000);
-    }
+    Start filePlan(Path file) { return new Start(null, file.toString(), 1000000000, 3, 4, 1000, 1000); }
     static Shard shard(RequestFiles.Part part, int index, int stride) {
         return new Shard(1, null, part.path(), part.count(), index, stride, 100, part.sha256(), 1000000000, 1, 4, 1000, 1000);
     }
-    @Test void shardsHaveUniqueGlobalIdsAndKeepDefaultPriority() throws Exception {
-        var file = directory.resolve("input.jsonl");
-        var lines = new ArrayList<String>();
-        for (int i = 0; i < 8; i++) lines.add("{\"token_ids\":[" + i + "],\"max_new_tokens\":3}");
-        Files.writeString(file, String.join("\r\n", lines));
+    static byte[] frame(Batch batch) throws Exception {
+        try (var compressor = new ZstdCompressCtx().setLevel(3).setContentSize(true).setChecksum(true);
+             var bytes = new ByteArrayOutputStream(); var out = new DataOutputStream(bytes)) {
+            var encoded = compressor.compress(batch.toByteArray());
+            out.writeInt(encoded.length); out.write(encoded); return bytes.toByteArray();
+        }
+    }
+    @Test void sourceAndShardsUseSameCodecAndGlobalIds() throws Exception {
+        var file = InputFixture.write(directory.resolve("input.binpb.zst"), java.util.stream.IntStream.range(0, 8)
+            .mapToObj(i -> Request.newBuilder().addTokenIds(i).setMaxNewTokens(3).build()).toList());
         var parts = RequestFiles.split(filePlan(file), directory.resolve("shards"), 3, () -> false);
         assertEquals(List.of(3L, 3L, 2L), parts.stream().map(RequestFiles.Part::count).toList());
         var ids = new HashSet<Long>();
@@ -29,56 +35,83 @@ class RequestFilesTest {
             int offset = i;
             Player.play(shard(parts.get(i), i, 3), System.nanoTime(), item -> {
                 assertEquals(offset, item.index() % 3);
-                assertEquals(item.index(), item.input().token_ids().getFirst().longValue());
+                assertEquals(item.index(), item.input().getTokenIds(0));
                 assertEquals(item.index() + 100, item.request_id());
-                assertEquals(50, item.input().priority());
+                assertFalse(item.input().hasPriority());
                 assertTrue(ids.add(item.request_id()));
             });
         }
         assertEquals(8, ids.size());
-        assertThrows(java.io.IOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("shards"), 3, () -> false));
+        assertThrows(IOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("shards"), 3, () -> false));
     }
-    @Test void badRecordsAreRejectedBeforeAnyShardIsPublished() throws Exception {
-        var file = directory.resolve("bad.jsonl");
-        var valid = "{\"token_ids\":[1],\"max_new_tokens\":2}";
-        for (String bad : List.of("", " ", "null", "{}", valid + " {}", valid.replace("[1]", "[true]"),
-                valid.replace("[1]", "[1.5]"), valid.replace("[1]", "[2147483648]"), valid.replace("[1]", "[-1]"),
-                valid.replace("[1]", "[]"), valid.replace(":2", ":0"), valid.replace("}", ",\"priority\":null}"),
-                valid.replace("}", ",\"extra\":1}"), valid.replace("}", ",\"max_new_tokens\":3}"))) {
-            Files.writeString(file, valid + "\n" + bad + "\n");
-            Path destination = directory.resolve(UUID.randomUUID().toString());
-            var error = assertThrows(java.io.IOException.class, () -> RequestFiles.split(filePlan(file), destination, 1, () -> false));
-            assertTrue(error.getMessage().contains("record 2"), error.toString());
-            assertFalse(Files.exists(destination.resolve("0.jsonl")));
+    @Test void invalidRequestsAndJsonInputAreRejected() throws Exception {
+        var valid = InputFixture.request();
+        for (var invalid : List.of(valid.toBuilder().clearTokenIds().build(), valid.toBuilder().setTokenIds(0, -1).build(),
+                valid.toBuilder().setMaxNewTokens(0).build(), valid.toBuilder().setPriority(-1).build(),
+                valid.toBuilder().setUnknownFields(com.google.protobuf.UnknownFieldSet.newBuilder()
+                    .addField(100, com.google.protobuf.UnknownFieldSet.Field.newBuilder().addVarint(1).build()).build()).build())) {
+            try (var writer = new InputFile.Writer(new ByteArrayOutputStream())) {
+                assertThrows(IOException.class, () -> writer.write(invalid));
+            }
         }
-        Files.writeString(file, " ".repeat(RequestFiles.MAX_RECORD_BYTES + 1));
-        assertThrows(java.io.IOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("large"), 1, () -> false));
-        Files.writeString(file, "");
-        assertThrows(java.io.IOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("empty"), 1, () -> false));
+        var file = directory.resolve("legacy.jsonl");
+        Files.writeString(file, "{\"token_ids\":[1],\"max_new_tokens\":2}\n");
+        assertThrows(IOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("legacy"), 1, () -> false));
+        assertFalse(Files.exists(directory.resolve("legacy/0.binpb.zst")));
+    }
+    @Test void malformedFramesNeverPublishShards() throws Exception {
+        var request = InputFixture.request();
+        byte[] data = frame(Batch.newBuilder().setSequence(1).addRequests(request).build());
+        byte[] seal = frame(Batch.newBuilder().setSequence(2).setTotalRequests(1).build());
+        var cases = new ArrayList<byte[]>();
+        cases.add(data); // Missing final seal.
+        cases.add(Arrays.copyOf(data, data.length - 1));
+        cases.add(frame(Batch.newBuilder().setSequence(2).addRequests(request).build()));
+        cases.add(frame(Batch.newBuilder().setSequence(1).addRequests(Request.getDefaultInstance()).build()));
+        var corrupt = data.clone(); corrupt[corrupt.length - 1] ^= 1; cases.add(corrupt);
+        try (var bytes = new ByteArrayOutputStream()) {
+            bytes.write(data); bytes.write(frame(Batch.newBuilder().setSequence(2).setTotalRequests(2).build())); cases.add(bytes.toByteArray());
+        }
+        try (var bytes = new ByteArrayOutputStream()) {
+            bytes.write(data); bytes.write(seal); bytes.write(1); cases.add(bytes.toByteArray());
+        }
+        try (var compressor = new ZstdCompressCtx().setLevel(3).setChecksum(true).setContentSize(true);
+             var bytes = new ByteArrayOutputStream(); var out = new DataOutputStream(bytes)) {
+            byte[] first = compressor.compress(Batch.newBuilder().setSequence(1).addRequests(request).build().toByteArray());
+            byte[] extra = compressor.compress(new byte[0]);
+            out.writeInt(first.length + extra.length); out.write(first); out.write(extra); out.write(seal);
+            cases.add(bytes.toByteArray());
+        }
+        for (var content : cases) {
+            var file = directory.resolve(UUID.randomUUID() + ".binpb.zst");
+            try (var out = Files.newOutputStream(file)) { out.write(InputFile.MAGIC); out.write(content); }
+            var destination = directory.resolve(UUID.randomUUID().toString());
+            assertThrows(IOException.class, () -> RequestFiles.split(filePlan(file), destination, 1, () -> false));
+            assertFalse(Files.exists(destination.resolve("0.binpb.zst")));
+        }
     }
     @Test void stoppedPreparationAndOverlongPlaybackNeverPublish() throws Exception {
-        var file = directory.resolve("input.jsonl");
-        Files.writeString(file, "{\"token_ids\":[1],\"max_new_tokens\":2}\n");
-        assertThrows(java.io.InterruptedIOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("stop"), 1, () -> true));
-        var plan = new Start(null, null, file.toString(), 0.000001, 1, 1, 1000, 1000);
-        assertThrows(java.io.IOException.class, () -> RequestFiles.split(plan, directory.resolve("slow"), 1, () -> false));
-        assertFalse(Files.exists(directory.resolve("slow/0.jsonl")));
+        var file = InputFixture.write(directory.resolve("input.binpb.zst"), List.of(InputFixture.request()));
+        assertThrows(InterruptedIOException.class, () -> RequestFiles.split(filePlan(file), directory.resolve("stop"), 1, () -> true));
+        var plan = new Start(null, file.toString(), 0.000001, 1, 1, 1000, 1000);
+        assertThrows(IOException.class, () -> RequestFiles.split(plan, directory.resolve("slow"), 1, () -> false));
+        assertFalse(Files.exists(directory.resolve("slow/0.binpb.zst")));
     }
     @Test void truncationExtraRecordsAndChangedContentCannotPassPlayback() throws Exception {
-        var file = directory.resolve("input.jsonl");
-        var record = "{\"token_ids\":[1],\"max_new_tokens\":2,\"priority\":50}\n";
-        Files.writeString(file, record.repeat(3));
+        var file = InputFixture.write(directory.resolve("input.binpb.zst"), Collections.nCopies(3, InputFixture.request()));
         var part = RequestFiles.split(filePlan(file), directory.resolve("shards"), 1, () -> false).getFirst();
-        for (String changed : List.of(record, record.repeat(4), record.replace("[1]", "[2]").repeat(3))) {
-            Files.writeString(Path.of(part.path()), changed);
-            assertThrows(java.io.IOException.class, () -> Player.play(shard(part, 0, 1), System.nanoTime(), item -> {}));
+        for (int count : List.of(1, 4, 3)) {
+            Files.delete(Path.of(part.path()));
+            InputFixture.write(Path.of(part.path()), Collections.nCopies(count, InputFixture.request().toBuilder().setPriority(30).build()));
+            assertThrows(IOException.class, () -> Player.play(shard(part, 0, 1), System.nanoTime(), item -> {}));
         }
     }
-    @Test void inputAndShardsLargerThanHeapAreStreamedInASeparateJvm() throws Exception {
-        Path file = directory.resolve("large.jsonl"), log = directory.resolve("small-heap.log");
-        String record = "{\"token_ids\":[" + String.join(",", Collections.nCopies(256, "1234567")) + "],\"max_new_tokens\":3}\n";
-        try (var writer = Files.newBufferedWriter(file)) { for (int i = 0; i < 40000; i++) writer.write(record); }
-        assertTrue(Files.size(file) > 64L * 1024 * 1024);
+    @Test void expandedInputLargerThanHeapIsStreamedInASeparateJvm() throws Exception {
+        Path file = directory.resolve("large.binpb.zst"), log = directory.resolve("small-heap.log");
+        var request = InputFixture.request().toBuilder().clearTokenIds()
+            .addAllTokenIds(java.util.stream.IntStream.range(1000000, 1001024).boxed().toList()).build();
+        assertTrue((long) request.getSerializedSize() * 40000 > 64L * 1024 * 1024);
+        InputFixture.write(file, Collections.nCopies(40000, request));
         var process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(),
             "-Xmx48m", "-XX:ActiveProcessorCount=2", "-cp", System.getProperty("java.class.path"),
             getClass().getName(), file.toString(), directory.resolve("bounded").toString())
@@ -89,7 +122,7 @@ class RequestFilesTest {
         } finally { process.destroyForcibly(); process.waitFor(); }
     }
     public static void main(String[] args) throws Exception {
-        var plan = new Start(null, null, args[0], 1000000000, 1, 1, 1000, 1000);
+        var plan = new Start(null, args[0], 1000000000, 1, 1, 1000, 1000);
         var parts = RequestFiles.split(plan, Path.of(args[1]), 1, () -> false);
         var count = new AtomicLong();
         Player.play(shard(parts.getFirst(), 0, 1), System.nanoTime(), item -> count.incrementAndGet());
