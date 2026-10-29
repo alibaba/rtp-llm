@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <pthread.h>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -848,6 +849,7 @@ private:
     }
 
     void snapshotLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_snapshot");
         const auto interval = std::chrono::milliseconds(config_.snapshot_interval_ms);
         auto next_snapshot = std::chrono::steady_clock::now();
         while (!stopping_.load(std::memory_order_relaxed)) {
@@ -902,6 +904,7 @@ private:
     }
 
     void snapshotSendLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_snap_send");
         while (!stopping_.load(std::memory_order_relaxed)) {
             SnapshotReport report;
             {
@@ -988,6 +991,7 @@ private:
     }
 
     void heartbeatLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_heartbeat");
         const auto heartbeat_interval = std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1));
         size_t consecutive_failures = 0;
         while (!stopping_.load(std::memory_order_relaxed)) {
@@ -1053,6 +1057,7 @@ private:
     }
 
     void workerLoop() noexcept {
+        pthread_setname_np(pthread_self(), "kvcm_events");
         const auto    base_retry_interval   = std::chrono::milliseconds(std::max(config_.retry_interval_ms, 1));
         const int64_t max_retry_interval_ms = base_retry_interval.count() >= 30000 ?
                                                   base_retry_interval.count() :

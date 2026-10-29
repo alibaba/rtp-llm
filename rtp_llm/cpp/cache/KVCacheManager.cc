@@ -7,6 +7,7 @@
 #include <chrono>
 #include <limits>
 #include <numeric>
+#include <pthread.h>
 #include <sstream>
 #include <unordered_set>
 
@@ -1173,6 +1174,7 @@ void KVCacheManager::stopCacheEventPublisher() {
 }
 
 void KVCacheManager::reportMetricsLoop() {
+    pthread_setname_np(pthread_self(), "kv_cache_stats");
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
     constexpr auto        kFrozenLogInterval   = std::chrono::minutes(1);
