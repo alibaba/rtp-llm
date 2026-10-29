@@ -4,9 +4,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
-from rtp_llm.models_py.modules.hybrid.gated_residual import (
-    GatedResidual,
-)
+from rtp_llm.models_py.modules.hybrid.test.residual_fixtures import ResidualFp8Fixture
 from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
     grouped_rms_norm_triton,
     try_grouped_rms_norm_with_fp8_scale,
@@ -16,7 +14,7 @@ MODULE = "rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
-class ResidualNormFp8Test(unittest.TestCase):
+class ResidualNormFp8Test(unittest.TestCase, ResidualFp8Fixture):
     def setUp(self):
         if torch.cuda.get_device_capability() != (12, 0):
             self.skipTest("SM120 fast path")
@@ -51,28 +49,6 @@ class ResidualNormFp8Test(unittest.TestCase):
                             quantized.view(torch.uint8), reference.view(torch.uint8)
                         )
                     )
-
-    def module(self, inject=True):
-        def weight(shape):
-            return (torch.randn(shape, device="cuda") * 0.1).to(torch.float8_e4m3fn)
-
-        return GatedResidual(
-            torch.randn(10240, device="cuda", dtype=torch.bfloat16) * 0.07,
-            weight((320, 10240)),
-            weight((10240, 320)),
-            weight((4, 10240)) if inject else None,
-            hc_mult=4,
-            norm_eps=1.0e-6,
-            weight_scales=[torch.tensor([0.03125], device="cuda")] * 3,
-            role="PREFILL",
-        )
-
-    def assert_outputs(self, actual, expected):
-        for a, b in zip(actual, expected):
-            if b is None:
-                self.assertIsNone(a)
-            else:
-                self.assertTrue(torch.equal(a, b))
 
     def test_complete_hyperconnection_consumer(self):
         for rows in (257, 4093, 8192, 12288):

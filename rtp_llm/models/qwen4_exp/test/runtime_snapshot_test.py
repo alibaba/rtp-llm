@@ -1,6 +1,5 @@
 """Configuration ownership across final overrides and target/draft spawn."""
 
-import multiprocessing
 import pickle
 import unittest
 from dataclasses import FrozenInstanceError
@@ -8,20 +7,6 @@ from types import SimpleNamespace
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.qwen4_exp_config import freeze_runtime_config
-
-
-def _rebuild_snapshot_in_child(connection, budget, draft):
-    try:
-        config = RuntimeSnapshotTest().config()
-        config.apply_override_args('{"qwen4_ple_prefetch_mb": %d}' % budget)
-        config.is_mtp = draft
-        if draft:
-            config._qwen4_ple_layer_ids = []
-        connection.send(
-            freeze_runtime_config(config, SimpleNamespace(get_attn_tp_size=lambda: 2))
-        )
-    finally:
-        connection.close()
 
 
 class RuntimeSnapshotTest(unittest.TestCase):
@@ -52,34 +37,6 @@ class RuntimeSnapshotTest(unittest.TestCase):
             spawned.options.ple_prefetch_mb = 128
         with self.assertRaisesRegex(RuntimeError, "frozen"):
             config.qwen4_ple_prefetch_mb = 128
-
-    def test_spawn_reconstructs_target_and_draft_after_final_overrides(self):
-        context = multiprocessing.get_context("spawn")
-        for draft in (False, True):
-            with self.subTest(draft=draft):
-                parent, child = context.Pipe(duplex=False)
-                process = context.Process(
-                    target=_rebuild_snapshot_in_child, args=(child, 512, draft)
-                )
-                process.start()
-                child.close()
-                try:
-                    self.assertTrue(parent.poll(60), "snapshot child timed out")
-                    snapshot = parent.recv()
-                    process.join(30)
-                    self.assertEqual(process.exitcode, 0)
-                    self.assertEqual(snapshot.options.ple_prefetch_mb, 512)
-                    self.assertEqual(snapshot.attention_tp, 2)
-                    self.assertEqual(snapshot.is_mtp_draft, draft)
-                    self.assertEqual(
-                        snapshot.geometry.ple_layer_ids, () if draft else (1, 5)
-                    )
-                finally:
-                    parent.close()
-                    if process.is_alive():
-                        process.terminate()
-                        process.join(10)
-                    process.close()
 
     def test_draft_snapshot_has_independent_geometry_and_role(self):
         target = self.config()

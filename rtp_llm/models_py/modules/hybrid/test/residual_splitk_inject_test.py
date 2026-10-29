@@ -4,9 +4,7 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.test.residual_norm_fp8_test import (
-    ResidualNormFp8Test,
-)
+from rtp_llm.models_py.modules.hybrid.test.residual_fixtures import ResidualFp8Fixture
 from rtp_llm.models_py.triton_kernels.common.gated_residual_splitk_inject import (
     try_splitk_down_inject,
 )
@@ -24,7 +22,7 @@ class ResidualSplitKInjectTest(unittest.TestCase):
     def test_all_small_row_counts_and_bf16_boundaries(self):
         for seed in range(3):
             torch.manual_seed(83001 + seed)
-            model = ResidualNormFp8Test().module(True)
+            model = ResidualFp8Fixture().module(True)
             weight = model.inject_projection.compute_weight
             for rows in range(4, 33):
                 with self.subTest(seed=seed, rows=rows):
@@ -43,7 +41,7 @@ class ResidualSplitKInjectTest(unittest.TestCase):
 
     def test_complete_consumer_and_graph_live_weight(self):
         for rows in (4, 8, 16, 17, 24, 32, 4093, 4094, 4095, 4096):
-            model = ResidualNormFp8Test().module(True)
+            model = ResidualFp8Fixture().module(True)
             model.up_projection.role = "DECODE"
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             for _ in range(3):
@@ -58,7 +56,7 @@ class ResidualSplitKInjectTest(unittest.TestCase):
                 graph.replay()
                 with patch(MODULE + ".try_splitk_down_inject", return_value=None):
                     expected = model(x)
-                ResidualNormFp8Test().assert_outputs(actual, expected)
+                ResidualFp8Fixture().assert_outputs(actual, expected)
 
     def test_prefill_mix_tiles_preserve_complete_consumer_and_live_graph(self):
         import triton
@@ -76,7 +74,7 @@ class ResidualSplitKInjectTest(unittest.TestCase):
             return out
 
         for rows in (4, 16, 4093, 4094, 4095, 4096, 12288):
-            model = ResidualNormFp8Test().module(True)
+            model = ResidualFp8Fixture().module(True)
             model.up_projection.role = "PREFILL"
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             for _ in range(3):
@@ -90,7 +88,7 @@ class ResidualSplitKInjectTest(unittest.TestCase):
                 graph.replay()
                 with patch.object(kernels, "fused_mix_reduce", original_mix):
                     expected = model(x)
-                ResidualNormFp8Test().assert_outputs(actual, expected)
+                ResidualFp8Fixture().assert_outputs(actual, expected)
             graph.reset()
 
     def test_unsupported_layouts_do_not_dispatch(self):

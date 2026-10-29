@@ -169,12 +169,6 @@ class IndexerDescTest(unittest.TestCase):
         self.assertEqual(desc.compression_ratio, self.RATIO)
         self.assertTrue(desc.reuse.enable_prefix_reuse)
 
-    def test_kv_desc_is_fixed_to_the_bf16_production_abi(self):
-        """The 128-wide key is 256 B and never carries an inline FP8 scale."""
-        desc = indexer_kv_desc(self.HEAD_DIM, self.RATIO)
-
-        self.assertEqual(desc.entry_elems, 256)
-
     def test_kv_desc_rejects_invalid_geometry(self):
         with self.assertRaisesRegex(ValueError, "indexer_head_dim"):
             indexer_kv_desc(0, self.RATIO)

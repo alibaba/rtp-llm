@@ -3,9 +3,9 @@
 Executes the upstream ``Qwen4ExpTextGatedDeltaNet`` (transformers main) against
 our ``Qwen3NextGatedDeltaNet`` with identical weights and compares outputs.
 
-Set ``QWEN4_EXP_UPSTREAM_SRC`` to transformers' ``modeling_qwen4_exp.py``; the
-optional component test skips when unset; qualification rejects a missing
-fixed source/manifest. The upstream class is exec'd rather than
+The pinned in-repo upstream fixture is used by default;
+``QWEN4_EXP_UPSTREAM_SRC`` can select an explicit source/manifest.
+Qualification additionally requires the real-weight fixture. The upstream class is exec'd rather than
 imported because upstream main's config framework cannot be loaded by the
 released transformers. The upstream file defines its own GQA-capable reference
 kernels (``torch_chunk_gated_delta_rule`` etc.); those are exec'd together with

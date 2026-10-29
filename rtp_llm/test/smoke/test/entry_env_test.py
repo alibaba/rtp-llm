@@ -34,6 +34,19 @@ class EntryEnvironmentExpansionTest(unittest.TestCase):
             "/mnt/models/qwen4",
         )
 
+    def test_hf_fixture_is_resolved_before_building_server_arguments(self):
+        uri = "hf://owner/model@" + "a" * 40
+        with patch.dict(os.environ, {"QWEN4_EXP_CHECKPOINT": uri}), patch(
+            "smoke.entry.resolve_hf_checkpoint", return_value="/cache/pinned"
+        ) as resolve:
+            self.assertEqual(
+                _expand_required_env(
+                    "--checkpoint ${QWEN4_EXP_CHECKPOINT}", field="smoke_args"
+                ),
+                "--checkpoint /cache/pinned",
+            )
+        resolve.assert_called_once_with(uri)
+
 
 if __name__ == "__main__":
     unittest.main()

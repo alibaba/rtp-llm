@@ -1,26 +1,23 @@
 """Verify the weight mapping against a real Qwen3.8-Flash-Next weight index.
 
-Needs only `config.json` + `model.safetensors.index.json` (~170KB), not the
-360GB of tensors. Point QWEN4_EXP_REF_DIR at a directory holding those two files;
-the test skips when it is absent so CI stays green without them.
-
-    mkdir -p ref && cd ref
-    base=https://modelscope.cn/models/Qwen/Qwen3.8-Flash-Next/resolve/master
-    curl -sSLO $base/config.json
-    curl -sSLO $base/model.safetensors.index.json
+The committed config and weight index need no tensor shards or network access.
+QWEN4_EXP_REF_DIR can select a different checkpoint manifest explicitly.
 """
 
 import json
 import os
 import re
 import unittest
+from pathlib import Path
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4ExpWeight
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 
-_REF_DIR = os.environ.get("QWEN4_EXP_REF_DIR", "")
+_REF_DIR = os.environ.get("QWEN4_EXP_REF_DIR") or str(
+    Path(__file__).with_name("reference")
+)
 _INDEX = "model.safetensors.index.json"
 
 # Checkpoint tensors we knowingly do not consume yet, as ckpt-key patterns.
@@ -30,10 +27,6 @@ _EXPECTED_UNMAPPED = {
     "model.visual.",
     "mtp.",
 }
-
-
-def _available():
-    return bool(_REF_DIR) and os.path.exists(os.path.join(_REF_DIR, _INDEX))
 
 
 def _collapse(key):
@@ -53,7 +46,6 @@ def _ckpt_keys(modules):
     return out
 
 
-@unittest.skipUnless(_available(), "QWEN4_EXP_REF_DIR with the weight index not set")
 class RealCkptMappingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test
+from rtp_llm.models_py.modules.hybrid.test import residual_fixtures
 from rtp_llm.models_py.triton_kernels.common.fp8_gemv import fp8_hc_gemv
 from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
     fused_mix_reduce,
@@ -41,12 +41,12 @@ class ResidualUpMixTest(unittest.TestCase):
     def test_complete_hyperconnection(self):
         for rows in (1, 2, 3, 4):
             for inject in (False, True):
-                module = residual_norm_fp8_test.ResidualNormFp8Test().module(inject)
+                module = residual_fixtures.ResidualFp8Fixture().module(inject)
                 module.down_projection.role = module.up_projection.role = "DECODE"
                 x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
                 with patch(MODULE + ".try_fp8_up_mix", return_value=None):
                     expected = module(x)
-                residual_norm_fp8_test.ResidualNormFp8Test().assert_outputs(
+                residual_fixtures.ResidualFp8Fixture().assert_outputs(
                     module(x), expected
                 )
 

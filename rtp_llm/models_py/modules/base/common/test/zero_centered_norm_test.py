@@ -62,12 +62,23 @@ class Qwen4FusedQKNormTest(unittest.TestCase):
     def test_gamma_plus_one_is_not_rounded_to_bf16(self):
         self.q_gamma.fill_(0.003)
         self.k_gamma.fill_(0.003)
-        source = self._input(5)
+        source = torch.arange(1, self.DIM + 1, device="cuda", dtype=torch.float32)
+        source = source.bfloat16().repeat(5, self.HEADS + 2 * self.KV_HEADS)
         reference = self._run(source, False)
         fused = self._run(source, True)
-        torch.testing.assert_close(
-            fused.float(), reference.float(), atol=0.016, rtol=0.01
+        torch.testing.assert_close(fused, reference, atol=0, rtol=0)
+        # The fixture must distinguish folding +1 into the BF16 checkpoint gain.
+        rounded = self._run(source, False)
+        values = source.reshape(5, self.HEADS + 2 * self.KV_HEADS, self.DIM).float()
+        normalized = values * torch.rsqrt(
+            values.square().mean(-1, keepdim=True) + self.norm.eps
         )
+        rounded[:, : (self.HEADS + self.KV_HEADS) * self.DIM] = (
+            (normalized[:, : self.HEADS + self.KV_HEADS] * (self.q_gamma + 1).float())
+            .bfloat16()
+            .flatten(1)
+        )
+        self.assertFalse(torch.equal(reference, rounded))
 
     def test_replay_reads_new_inputs(self):
         static = self._input(4)

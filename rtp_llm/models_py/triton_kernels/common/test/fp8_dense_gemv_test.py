@@ -4,10 +4,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
-from rtp_llm.models_py.triton_kernels.common.fp8_gemv import (
-    fp8_hc_gemv,
-    is_supported,
-)
+from rtp_llm.models_py.triton_kernels.common.fp8_gemv import fp8_hc_gemv, is_supported
 
 
 @unittest.skipUnless(

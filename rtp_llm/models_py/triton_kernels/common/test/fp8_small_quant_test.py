@@ -10,8 +10,8 @@ from rtp_llm.models_py.modules.base.common.fp8_linear import (
     project_fp8_pair,
 )
 from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
-    try_small_fp8_quant,
     try_silu_mul_fp8_quant,
+    try_small_fp8_quant,
 )
 
 MODULE = "rtp_llm.models_py.triton_kernels.common.fp8_small_quant"

@@ -24,12 +24,11 @@ def uncovered_fixture(reason: str):
 
 
 def upstream_source_path() -> str:
-    source = os.environ.get("QWEN4_EXP_UPSTREAM_SRC", "")
-    manifest_path = os.environ.get("QWEN4_EXP_UPSTREAM_MANIFEST", "")
+    source = os.environ.get("QWEN4_EXP_UPSTREAM_SRC") or str(_VENDORED_UPSTREAM_SOURCE)
+    manifest_path = os.environ.get("QWEN4_EXP_UPSTREAM_MANIFEST") or str(
+        _VENDORED_UPSTREAM_MANIFEST
+    )
     required = os.environ.get("QWEN4_EXP_REQUIRE_PARITY", "0") == "1"
-    if required:
-        source = source or str(_VENDORED_UPSTREAM_SOURCE)
-        manifest_path = manifest_path or str(_VENDORED_UPSTREAM_MANIFEST)
     if required and (not source or not Path(source).is_file() or not manifest_path):
         raise RuntimeError(
             "Qwen4 parity qualification is uncovered: fixed source/manifest missing"
