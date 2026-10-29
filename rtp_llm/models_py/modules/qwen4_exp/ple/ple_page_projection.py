@@ -2,7 +2,11 @@
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.qwen4_ple.page_quant import quantize_pages
+from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import _sm_supported
+from rtp_llm.models_py.kernels.cuda.qwen4_ple.page_quant import (
+    _valid_page_size,
+    quantize_pages,
+)
 
 
 def project_pages_pair(x, first, second, page_size=128):
@@ -19,19 +23,23 @@ def project_pages_pair(x, first, second, page_size=128):
         and x.shape[0] == 1
         and x.shape[2] == 2560
         and 128 <= x.shape[1] <= 32768
-        and page_size == 128
+        and _valid_page_size(page_size)
         and x.is_cuda
         and x.is_contiguous()
         and x.dtype == torch.bfloat16
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and _sm_supported(x.device)
         and tuple(first.weight.shape) == (10240, 2560)
         and tuple(second.weight.shape) == (2560, 2560)
         and first.weight.device == second.weight.device == x.device
     ):
         return None
     quantized, scales = quantize_pages(
-        x.squeeze(0), first.scale, second.scale, row_scales=True
+        x.squeeze(0),
+        first.scale,
+        second.scale,
+        page_size=page_size,
+        row_scales=True,
     )
     outputs = []
     for index, projection in enumerate((first, second)):
