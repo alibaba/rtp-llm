@@ -11,9 +11,19 @@ Requires CUDA tensors — no CPU/fallback path exists.
    ``compute_kv_pool_slot_mapping`` calls for paged pool write slots.
    Handles any subset of {SWA, CSA, INDEXER, HCA} pools via constexpr flags.
 
+3. ``packed_pool_slots_fused`` / ``packed_swa_abs_idx_fused`` /
+   ``packed_valid_requests_fused`` — the request-major ("packed") target-verify
+   counterpart of the above. ``packed_metadata.update_packed_decode_metadata``
+   used to rebuild its SWA metadata from ~120 eager aten kernels per replay,
+   all captured inside the target-verify CUDA graph. Unlike 1/2 these helpers
+   are *optional*: each returns ``False`` instead of raising when the inputs
+   cannot be represented exactly, and the caller falls back to the original
+   eager chain (which also keeps CPU-only unit tests working without Triton).
+
 Correctness verified by ``test/test_fused_decode_meta_comprehensive.py``
 (1342 cases: bs=1-256, q_len=1-6, seqlen=1-1M, ratio=4/128 boundary
-starts, and heterogeneous per-request start_pos).
+starts, and heterogeneous per-request start_pos) and by
+``dsv41/fp8/test/test_v41_packed_verify.py`` for the packed helpers.
 """
 
 from __future__ import annotations
@@ -719,6 +729,292 @@ def try_snapshot_block_tables(destinations, sources, batch):
             SIZES=tuple(dst.numel() for _, dst in pairs),
             OFFSETS=tuple(offsets),
             BATCH=batch,
+            BLOCK=256,
+        )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Packed (request-major) target-verify metadata.
+# ---------------------------------------------------------------------------
+# ``packed_metadata.update_packed_decode_metadata`` builds its SWA metadata
+# from a long chain of eager aten kernels (arange / sub / clamp_min / add /
+# where / index_select / full_like / copy_ ...).  They are captured inside the
+# target-verify CUDA graph, so every replay pays for them again.  The three
+# helpers below collapse the three hottest groups into one kernel each:
+#
+#   * ``packed_pool_slots_fused``     — ``packed_pool_slots`` for both the
+#     write map (1-D request/position) and the read map ([rows, window]).
+#   * ``packed_swa_abs_idx_fused``    — the ``[rows, window]`` absolute index
+#     window that is copied into ``meta.swa_abs_idx``.
+#   * ``packed_valid_requests_fused`` — ``arange(batch) < live``.
+#
+# The per-tag ``dst.zero_(); dst[:, :w].copy_(src)`` pair is already covered by
+# ``try_snapshot_block_tables`` above, so the packed path reuses it.
+#
+# Every helper returns ``False`` instead of raising when the inputs are not
+# something the kernel can reproduce exactly (CPU tensors, unsupported dtypes,
+# mismatched shapes, aliased storage).  The caller then runs the original eager
+# chain, which is also what keeps CPU-only unit tests working without Triton.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _packed_pool_slots_kernel(
+    table_ptr,
+    request_ptr,
+    positions_ptr,
+    out_ptr,
+    N: tl.constexpr,
+    WIDTH: tl.constexpr,
+    ROWS: tl.constexpr,
+    COLS: tl.constexpr,
+    TABLE_ROW_STRIDE: tl.constexpr,
+    TABLE_COL_STRIDE: tl.constexpr,
+    REQUEST_ROW_STRIDE: tl.constexpr,
+    REQUEST_COL_STRIDE: tl.constexpr,
+    POSITION_ROW_STRIDE: tl.constexpr,
+    POSITION_COL_STRIDE: tl.constexpr,
+    OUTPUT_ROW_STRIDE: tl.constexpr,
+    OUTPUT_COL_STRIDE: tl.constexpr,
+    ENTRIES: tl.constexpr,
+    TOKENS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = index < N
+    row = index // WIDTH
+    column = index % WIDTH
+    position = tl.load(
+        positions_ptr + row * POSITION_ROW_STRIDE + column * POSITION_COL_STRIDE,
+        mask,
+        0,
+    ).to(tl.int64)
+    request = tl.load(
+        request_ptr + row * REQUEST_ROW_STRIDE + column * REQUEST_COL_STRIDE,
+        mask,
+        0,
+    ).to(tl.int64)
+    # Eager advanced indexing wraps negative requests; clamping afterwards only
+    # keeps a malformed map from forming an out-of-range address.
+    request = tl.where(request < 0, request + ROWS, request)
+    request = tl.minimum(tl.maximum(request, 0), ROWS - 1)
+    page = tl.maximum(position, 0) // TOKENS
+    valid = (position >= 0) & (page < COLS)
+    block = tl.load(
+        table_ptr
+        + request * TABLE_ROW_STRIDE
+        + tl.minimum(page, COLS - 1) * TABLE_COL_STRIDE,
+        mask,
+        0,
+    ).to(tl.int64)
+    # Explicit floor modulo keeps the eager signed ``remainder`` semantics.
+    offset = (position % ENTRIES + ENTRIES) % ENTRIES
+    slot = block * ENTRIES + offset
+    tl.store(
+        out_ptr + row * OUTPUT_ROW_STRIDE + column * OUTPUT_COL_STRIDE,
+        tl.where(valid & (block > 0), slot, -1),
+        mask,
+    )
+
+
+def _packed_2d_geometry(tensor):
+    """Return ``(rows, width, row_stride, col_stride)`` for a 1-D/2-D map."""
+    if tensor.ndim == 1:
+        return tensor.numel(), 1, tensor.stride(0), 0
+    if tensor.ndim == 2:
+        return tensor.shape[0], tensor.shape[1], tensor.stride(0), tensor.stride(1)
+    return None
+
+
+def packed_pool_slots_fused(
+    table, request, positions, entries, tokens_per_block, out=None
+):
+    """Write ``packed_pool_slots`` results with a single Triton kernel.
+
+    ``request``/``positions`` may be 1-D (the per-token write map) or 2-D (the
+    per-token × window read map, whose request axis is a zero-stride expand).
+    ``out`` receives the int64 slots — or the int32 ``swa_global_slots`` buffer
+    directly, which also removes the eager ``.int()`` pass.
+
+    Returns ``False`` (leaving ``out`` untouched) when the launch would not
+    reproduce the eager result exactly; the caller then runs the eager chain.
+    """
+    entries = int(entries)
+    tokens_per_block = int(tokens_per_block)
+    if out is None:
+        if not positions.is_cuda:
+            return False
+        out = torch.empty(positions.shape, dtype=torch.int64, device=positions.device)
+    request_geometry = _packed_2d_geometry(request)
+    position_geometry = _packed_2d_geometry(positions)
+    output_geometry = _packed_2d_geometry(out)
+    if (
+        request_geometry is None
+        or position_geometry is None
+        or output_geometry is None
+        or table.ndim != 2
+        or not table.is_cuda
+        or table.shape[0] == 0
+        or table.shape[1] == 0
+        or entries <= 0
+        or tokens_per_block <= 0
+        or request_geometry[:2] != position_geometry[:2]
+        or position_geometry[:2] != output_geometry[:2]
+        or any(t.device != table.device for t in (request, positions, out))
+        or any(
+            t.dtype not in (torch.int32, torch.int64)
+            for t in (table, request, positions, out)
+        )
+    ):
+        return False
+    output_storage = out.untyped_storage().data_ptr()
+    if any(
+        t.untyped_storage().data_ptr() == output_storage
+        for t in (table, request, positions)
+    ):
+        return False
+    rows, width = position_geometry[:2]
+    count = rows * width
+    if not count:
+        return True
+    with torch.cuda.device(table.device):
+        _packed_pool_slots_kernel[(triton.cdiv(count, 256),)](
+            table,
+            request,
+            positions,
+            out,
+            N=count,
+            WIDTH=width,
+            ROWS=table.shape[0],
+            COLS=table.shape[1],
+            TABLE_ROW_STRIDE=table.stride(0),
+            TABLE_COL_STRIDE=table.stride(1),
+            REQUEST_ROW_STRIDE=request_geometry[2],
+            REQUEST_COL_STRIDE=request_geometry[3],
+            POSITION_ROW_STRIDE=position_geometry[2],
+            POSITION_COL_STRIDE=position_geometry[3],
+            OUTPUT_ROW_STRIDE=output_geometry[2],
+            OUTPUT_COL_STRIDE=output_geometry[3],
+            ENTRIES=entries,
+            TOKENS=tokens_per_block,
+            BLOCK=256,
+        )
+    return True
+
+
+@triton.jit
+def _packed_swa_abs_idx_kernel(
+    positions_ptr,
+    out_ptr,
+    WINDOW: tl.constexpr,
+    POSITION_STRIDE: tl.constexpr,
+    OUTPUT_ROW_STRIDE: tl.constexpr,
+    OUTPUT_COL_STRIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    column = tl.arange(0, BLOCK)
+    mask = column < WINDOW
+    position = tl.load(positions_ptr + row * POSITION_STRIDE).to(tl.int64)
+    start = tl.maximum(position - WINDOW + 1, 0)
+    candidate = start + column.to(tl.int64)
+    value = tl.where(candidate <= position, candidate, -1)
+    tl.store(
+        out_ptr + row * OUTPUT_ROW_STRIDE + column * OUTPUT_COL_STRIDE, value, mask
+    )
+
+
+def packed_swa_abs_idx_fused(positions, out, window_size):
+    """Fill the ``[rows, window]`` absolute index window with one kernel.
+
+    Replaces ``arange(win)`` + broadcast sub/clamp_min/add + ``where`` + the
+    ``copy_`` into the graph-stable ``swa_abs_idx`` buffer.  ``out`` must be
+    contiguous and hold exactly ``rows * window_size`` elements.
+    """
+    window_size = int(window_size)
+    if (
+        positions.ndim != 1
+        or not positions.is_cuda
+        or not out.is_cuda
+        or positions.device != out.device
+        or positions.dtype not in (torch.int32, torch.int64)
+        or out.dtype not in (torch.int32, torch.int64)
+        or not out.is_contiguous()
+        or window_size <= 0
+        or out.numel() != positions.numel() * window_size
+    ):
+        return False
+    if out.untyped_storage().data_ptr() == positions.untyped_storage().data_ptr():
+        return False
+    rows = positions.numel()
+    if not rows:
+        return True
+    with torch.cuda.device(out.device):
+        _packed_swa_abs_idx_kernel[(rows,)](
+            positions,
+            out,
+            WINDOW=window_size,
+            POSITION_STRIDE=positions.stride(0),
+            OUTPUT_ROW_STRIDE=window_size,
+            OUTPUT_COL_STRIDE=1,
+            BLOCK=_next_pow2(window_size),
+        )
+    return True
+
+
+@triton.jit(do_not_specialize=["live"])
+def _packed_valid_requests_kernel(
+    out_ptr,
+    live_ptr,
+    live,
+    N: tl.constexpr,
+    LIVE_ON_DEVICE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    if LIVE_ON_DEVICE:
+        live = tl.load(live_ptr)
+    index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    tl.store(out_ptr + index, index < live, mask=index < N)
+
+
+def packed_valid_requests_fused(out, live):
+    """Fill the boolean request-validity mask without a host scalar readback.
+
+    ``live`` is either a Python ``int`` or the runner's persistent 0-dim int32
+    device counter, matching ``update_packed_decode_metadata``.
+    """
+    on_device = isinstance(live, torch.Tensor)
+    if on_device:
+        if not (
+            live.numel() == 1
+            and live.dtype == torch.int32
+            and live.device == out.device
+            and live.is_contiguous()
+        ):
+            return False
+        live_ptr = live
+    else:
+        if not 0 <= int(live) <= out.numel():
+            return False
+        live_ptr = None
+    if (
+        not out.is_cuda
+        or out.dtype != torch.bool
+        or out.ndim != 1
+        or not out.is_contiguous()
+    ):
+        return False
+    count = out.numel()
+    if not count:
+        return True
+    with torch.cuda.device(out.device):
+        _packed_valid_requests_kernel[(triton.cdiv(count, 256),)](
+            out,
+            live_ptr,
+            live,
+            N=count,
+            LIVE_ON_DEVICE=on_device,
             BLOCK=256,
         )
     return True
