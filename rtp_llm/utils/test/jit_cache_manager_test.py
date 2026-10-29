@@ -698,6 +698,21 @@ class ScopeTest(JitCacheTestBase):
             triton_only = jit.resolve_scope(self.root)
         self.assertEqual([x.name for x in triton_only.components], ["triton"])
 
+    def test_flashinfer_scope_tracks_bundled_header_location(self):
+        def resolve_at(origin):
+            spec = types.SimpleNamespace(origin=origin) if origin else None
+            with mock.patch.object(jit.importlib.util, "find_spec", return_value=spec):
+                return self.resolve()
+
+        stable = "/cache/flashinfer_cubin/site-packages/flashinfer_cubin/__init__.py"
+        previous = "/expired/test.runfiles/flashinfer_cubin/__init__.py"
+        scope = resolve_at(stable)
+        self.assertEqual(scope.scope_id, resolve_at(stable).scope_id)
+        self.assertNotEqual(scope.scope_id, resolve_at(previous).scope_id)
+        online = resolve_at(None)
+        self.assertNotEqual(scope.scope_id, online.scope_id)
+        self.assertIn("flashinfer", [item.name for item in online.components])
+
     def test_torch_extensions_scope_tracks_rtp_kernel_build(self):
         def with_kernel(version):
             def resolver(name):

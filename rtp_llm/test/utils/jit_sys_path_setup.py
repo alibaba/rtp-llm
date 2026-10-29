@@ -399,7 +399,9 @@ def setup_jit_cache(cache_dir=None, packages=None):
     )
 
     if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+        # The cubin package also supplies JIT headers. Its include paths must
+        # outlive the Bazel action that first generated shared build rules.
+        packages = ["flashinfer", "flashinfer_cubin", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []
