@@ -40,8 +40,12 @@ def _snapshot_decode(
     ss = tl.minimum(tl.maximum(sid * 8 + (pos & 7), 0), SB * 8 - 1)
     ks = tl.where(((pos + 1) & 3) == 0, kid * 32 + ((pos >> 2) & 31), 0)
     ks = tl.minimum(tl.maximum(ks, 0), KB * 32 - 1)
-    tl.store(SS + row, ss)
-    tl.store(KS + row, ks)
+    state_live = (pos >= 0) & (pos >> 7 < STW) & (sid > 0) & (sid < SB)
+    kv_live = (
+        (pos >= 0) & (pos >> 7 < KTW) & (kid > 0) & (kid < KB) & (((pos + 1) & 3) == 0)
+    )
+    tl.store(SS + row, tl.where(state_live, ss, -1))
+    tl.store(KS + row, tl.where(kv_live, ks, -1))
     old_state = tl.load(STATE + ss * 128 + d)
     old_kv = tl.load(KV + ks * 128 + d)
     tl.store(OS + row * 128 + d, old_state)
@@ -101,4 +105,5 @@ def try_snapshot_decode(positions, kv, kt, state, st):
         kv_pool=kv,
         kv_slots=ks,
         original_kv=old_kv,
+        padded_slots=True,
     )

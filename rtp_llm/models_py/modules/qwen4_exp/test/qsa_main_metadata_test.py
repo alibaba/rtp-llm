@@ -22,7 +22,9 @@ class QsaMainMetadataTest(unittest.TestCase):
         )
         inputs = SimpleNamespace(
             is_cuda_graph=True,
+            is_s_padded=False,
             prefix_lengths=prefix,
+            prefix_lengths_device=prefix.cuda(),
             input_lengths=lengths,
             kv_cache_kernel_block_id_device=table,
         )
@@ -66,6 +68,7 @@ class QsaMainMetadataTest(unittest.TestCase):
         self.assertIs(plan.kv_lens, visible)
         self.assertIsNone(owner._qsa_target_visible_lengths)
         owner.attn_inputs.prefix_lengths.add_(1)
+        owner.attn_inputs.prefix_lengths_device.copy_(owner.attn_inputs.prefix_lengths)
         fallback = fmha_inputs._prepare_paged_inputs(owner, source, cache, selected)
         self.assertIsNot(fallback.kv_lens, visible)
         torch.testing.assert_close(fallback.kv_lens, visible + 1, rtol=0, atol=0)
@@ -91,7 +94,7 @@ class QsaMainMetadataTest(unittest.TestCase):
 
     def test_two_graphs_use_live_producer_values_without_cross_layer_state(self):
         owner, source, cache, selected = self.fixture()
-        prefixes = owner.attn_inputs.prefix_lengths.cuda()
+        prefixes = owner.attn_inputs.prefix_lengths_device
         graphs = []
         outputs = []
         for _ in range(3):

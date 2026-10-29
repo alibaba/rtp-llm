@@ -13,9 +13,9 @@ accepted-length callback only when its width is at most one compression group.
 With ``G <= ratio`` it can complete at most one new compressed entry, while the
 ``2 * ratio`` raw-key ring cannot alias the committed partial group. Rejected
 tail entries therefore remain outside the logical length and are overwritten
-before they can become visible. CP and padding remain unsupported; PD requires
+before they can become visible. CP remains unsupported; PD requires
 an explicit committed side-cache publication plan. CUDA
-Graph handles exact-batch decode and target verification, plus bounded packed
+Graph masks padding requests in decode and target verification, plus bounded packed
 MTP-draft prefill with device metadata. Prefix-cache reuse is page-aligned.
 """
 
@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -140,14 +139,8 @@ class Qwen4ExpQSARuntimeContext:
             graph_mode = graph_decode or graph_target
             if bool(inputs.is_cuda_graph) and not graph_mode:
                 raise RuntimeError("qwen4_exp QSA does not support CUDA Graph")
-            if bool(inputs.is_s_padded) and not graph_mode:
-                raise RuntimeError("qwen4_exp QSA does not support padded execution")
             if graph_mode and not bool(inputs.is_cuda_graph):
                 raise RuntimeError("qwen4_exp QSA Graph cache modes disagree")
-            if graph_mode and not bool(
-                getattr(inputs, "is_exact_cuda_graph_batch", False)
-            ):
-                raise RuntimeError("qwen4_exp QSA Graph requires an exact batch graph")
             if inputs.context_parallel_info is not None:
                 raise RuntimeError("qwen4_exp QSA does not support context parallelism")
             prefixes = inputs.prefix_lengths
@@ -191,7 +184,8 @@ class Qwen4ExpQSARuntimeContext:
                 )
 
         lengths = [int(value) for value in self.main_inputs.input_lengths.tolist()]
-        if not lengths or any(length <= 0 for length in lengths):
+        minimum = 0 if self.main_inputs.is_s_padded and not expect_prefill else 1
+        if not lengths or any(length < minimum for length in lengths):
             raise RuntimeError(f"qwen4_exp QSA has invalid input_lengths={lengths}")
         return lengths
 

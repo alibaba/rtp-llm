@@ -1,7 +1,6 @@
 import unittest
 
 import torch
-
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
     DraftHeadGraph,
 )
@@ -76,14 +75,49 @@ class DraftHeadGraphTest(unittest.TestCase):
                 cache.take(wrong)
             self.assertIsNone(cache.take(hidden))
 
-    def test_padded_capture_returns_only_live_rows(self):
+    def test_padded_capture_leaves_live_head_to_post_layer(self):
         cache = DraftHeadGraph(True)
         hidden = torch.arange(4 * 32, device="cuda").reshape(4, 32).to(torch.bfloat16)
         cache.stage(lambda x: x * 2, hidden)
         cache.activate(4)
-        actual = cache.take(hidden[:3])
-        self.assertTrue(torch.equal(actual, (hidden * 2)[:3]))
+        self.assertIsNone(cache.take(hidden[:3]))
         self.assertIsNone(cache.take(hidden))
+
+    def test_padded_fp8_head_recomputes_live_quantization_scale(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_mtp import Qwen4ExpMTPModel
+
+        torch.manual_seed(29)
+        head = Fp8Linear(
+            (torch.randn(128, 2560, device="cuda") * 0.1).to(torch.float8_e4m3fn),
+            torch.tensor([0.02], device="cuda"),
+            role="DECODE",
+        )
+        hidden = torch.randn(4, 2560, device="cuda", dtype=torch.bfloat16)
+        hidden[3].mul_(10000)
+        cache = DraftHeadGraph(True)
+        cache.stage(head, hidden)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            cache.stage(head, hidden)
+        graph.replay()
+        live = hidden[:3]
+        expected = head(live)
+        # Large dummy values change the per-tensor input scale. Cropping the
+        # resulting logits cannot recover the head evaluated on live rows.
+        self.assertFalse(torch.equal(cache.outputs[4][:3], expected))
+        model = Qwen4ExpMTPModel.__new__(Qwen4ExpMTPModel)
+        torch.nn.Module.__init__(model)
+        model._draft_head_graph = cache
+        model._fp8_lm_head = head
+        for method, dtype in (
+            (model.compute_fp8_lm_head_for_tp, torch.bfloat16),
+            (model.compute_fp8_lm_head, torch.float32),
+        ):
+            cache.activate(4)
+            actual = method(live)
+            self.assertEqual(actual.dtype, dtype)
+            torch.testing.assert_close(actual, expected.to(dtype), rtol=0, atol=0)
+            self.assertIsNone(cache.take(hidden))
 
     def test_invalid_head_output_is_rejected(self):
         hidden = torch.zeros(4, 32, device="cuda", dtype=torch.bfloat16)

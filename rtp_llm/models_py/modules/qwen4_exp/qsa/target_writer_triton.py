@@ -33,7 +33,8 @@ def _snapshot_target_window(
     column = tl.minimum(tl.maximum(positions >> 7, 0), STW - 1)
     state_id = tl.load(ST + request * STW + column, step < Q, other=0).to(tl.int64)
     slot = tl.minimum(tl.maximum(state_id * 8 + (positions & 7), 0), SB * 8 - 1)
-    tl.store(STATE_SLOTS + request * Q + step, slot, step < Q)
+    live = (positions >= 0) & (positions >> 7 < STW) & (state_id > 0) & (state_id < SB)
+    tl.store(STATE_SLOTS + request * Q + step, tl.where(live, slot, -1), step < Q)
     old = tl.load(
         STATE + slot[:, None] * 128 + d[None, :], step[:, None] < Q, other=0.0
     )
@@ -49,7 +50,14 @@ def _snapshot_target_window(
         completion < prefix + Q, kv_id * 32 + ((completion >> 2) & 31), 0
     )
     kv_slot = tl.minimum(tl.maximum(kv_slot, 0), KB * 32 - 1)
-    tl.store(KV_SLOTS + request, kv_slot)
+    live_kv = (
+        (completion >= 0)
+        & (completion >> 7 < KTW)
+        & (kv_id > 0)
+        & (kv_id < KB)
+        & (completion < prefix + Q)
+    )
+    tl.store(KV_SLOTS + request, tl.where(live_kv, kv_slot, -1))
     old_kv = tl.load(KV + kv_slot * 128 + d)
     tl.store(OLD_KV + request * 128 + d, old_kv)
 
@@ -214,4 +222,5 @@ def try_write_target_window(
         kv_pool=kv,
         kv_slots=kv_slots,
         original_kv=old_kv,
+        padded_slots=True,
     )

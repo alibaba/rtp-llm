@@ -185,8 +185,6 @@ private:
     bool supports_micro_batch_{false};
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
-    bool requires_exact_cuda_graph_batch_{false};
-    bool warned_exact_batch_graph_miss_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
 
@@ -363,12 +361,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
     supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
-    if (py::hasattr(py_model_, "requires_exact_cuda_graph_batch")) {
-        requires_exact_cuda_graph_batch_ = py_model_.attr("requires_exact_cuda_graph_batch")().cast<bool>();
-    }
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
-    // activate target transactions or inherit their CUDA Graph restriction.
+    // activate target transactions.
     if (use_spec_decoding_) {
         const bool has_prepare_speculative_target_commit = py::hasattr(py_model_, "prepare_speculative_target_commit");
         const bool has_finish_speculative_target_commit  = py::hasattr(py_model_, "finish_speculative_target_commit");
@@ -387,7 +382,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                         || py::hasattr(py_model_, "reduce_speculative_target_prepare_status"),
                                     "Python target status reducer capability requires its reduce hook");
         }
-        requires_exact_cuda_graph_batch_ |= has_speculative_target_commit_hooks_;
         if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
             RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "clear_speculative_target_graph_capture")
                                         && py::hasattr(py_model_, "save_speculative_target_graph_capture")
@@ -437,7 +431,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // Create GraphParams from individual config fields
         GraphParams graph_params;
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
-        graph_params.exact_batch_only             = requires_exact_cuda_graph_batch_;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;

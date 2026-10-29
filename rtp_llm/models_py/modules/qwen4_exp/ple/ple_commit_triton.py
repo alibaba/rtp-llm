@@ -6,6 +6,36 @@ import triton.language as tl
 
 
 @triton.jit
+def _store_decode_rows(
+    POOL, IDS, VALUES, WIDTH: tl.constexpr, STRIDE: tl.constexpr, BLOCK: tl.constexpr
+):
+    row = tl.program_id(0)
+    column = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    block = tl.load(IDS + row)
+    value = tl.load(VALUES + row * WIDTH + column, column < WIDTH, other=0)
+    # Block zero belongs to the allocator, never to a padding request. Even
+    # writing its previous value races when multiple dummy rows share it.
+    tl.store(POOL + block * STRIDE + column, value, (block > 0) & (column < WIDTH))
+
+
+def store_decode_rows(pool, blocks, values):
+    """Store fixed-size request rows, skipping reserved block zero in Graph."""
+    if pool.is_cuda and torch.version.hip is None:
+        values = values.reshape(blocks.numel(), -1).contiguous()
+        _store_decode_rows[(blocks.numel(), triton.cdiv(values.shape[1], 256))](
+            pool,
+            blocks,
+            values,
+            WIDTH=values.shape[1],
+            STRIDE=pool.stride(0),
+            BLOCK=256,
+        )
+    else:
+        live = blocks > 0
+        pool.index_copy_(0, blocks[live], values[live].to(pool.dtype))
+
+
+@triton.jit
 def _commit_block_verdict_kernel(
     TABLE,
     PAGES,

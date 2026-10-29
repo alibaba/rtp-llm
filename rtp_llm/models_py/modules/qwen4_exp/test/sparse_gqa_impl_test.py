@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _select_attention_impl_key,
 )
@@ -106,7 +105,6 @@ def _configs(is_sparse=True, use_mla=False, is_prefill=True, opt_in=True):
         kv_cache_kernel_block_id_device=None,
         is_target_verify=False,
         is_cuda_graph=False,
-        is_exact_cuda_graph_batch=False,
         is_s_padded=False,
         context_parallel_info=None,
         cache_store_inputs=None,
@@ -215,8 +213,10 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         )
         if graph:
             attn_inputs.sequence_lengths = attn_inputs.sequence_lengths.pin_memory()
+            attn_inputs.sequence_lengths_plus_1_device = (
+                attn_inputs.sequence_lengths + 1
+            ).to(_DEV)
             attn_inputs.is_cuda_graph = True
-            attn_inputs.is_exact_cuda_graph_batch = True
             attn_inputs.is_s_padded = True
         attn_inputs.kv_cache_kernel_block_id_device = torch.arange(
             1, batch * 3 + 1, dtype=torch.int32, device=_DEV
@@ -236,9 +236,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
     def _check_draft_graph_main_pages(self, lanes):
         configs, inputs = _configs()
-        inputs.is_cuda_graph = inputs.is_exact_cuda_graph_batch = inputs.is_s_padded = (
-            True
-        )
+        inputs.is_cuda_graph = inputs.is_s_padded = True
         inputs.input_lengths_device = torch.tensor(
             [lanes, lanes], device=_DEV, dtype=torch.int32
         )
@@ -326,6 +324,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         qkv.copy_(torch.randn_like(qkv.float()).bfloat16())
         selected.copy_(torch.tensor([[[0, 3, 5, -1]]], device=_DEV))
         impl.attn_inputs.sequence_lengths[0] = 5
+        impl.attn_inputs.sequence_lengths_plus_1_device.fill_(6)
         impl.attn_inputs.kv_cache_kernel_block_id_device[0].copy_(
             torch.tensor([3, 2, 1], dtype=torch.int32, device=_DEV)
         )
@@ -339,22 +338,60 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         expected = eager.forward(qkv, cache, selected_indices=selected)
         torch.testing.assert_close(got, expected, atol=2e-2, rtol=2e-2)
 
-    def test_decode_graph_rejects_padded_batch_without_exact_provenance(self):
+    def test_decode_graph_accepts_padded_batch(self):
         attn_configs, attn_inputs = _configs(is_prefill=False)
         attn_inputs.is_cuda_graph = True
         attn_inputs.is_s_padded = True
-        with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
-            SparseGqaFmhaImpl(attn_configs, attn_inputs)
+        with patch.object(
+            sparse_gqa_impl, "FusedRopeKVCacheDecodeOp", self._IdentityDecodeWriter
+        ):
+            impl = SparseGqaFmhaImpl(attn_configs, attn_inputs)
+        self.assertTrue(impl.support_cuda_graph())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_decode_graph_masks_stale_selection_in_padding_rows(self):
+        impl = self._decode_impl(batch=2, graph=True)
+        table = impl.attn_inputs.kv_cache_kernel_block_id_device.clone()
+        cache = SimpleNamespace(
+            kv_cache_base=torch.randn(
+                7, 2, _H_KV, 4, _D, dtype=torch.bfloat16, device=_DEV
+            )
+        )
+        qkv = torch.randn(2, (_H_Q + 2 * _H_KV) * _D, dtype=torch.bfloat16, device=_DEV)
+        selected = torch.tensor(
+            [[[0, 2, 4, -1]], [[0, 2, 4, -1]]], dtype=torch.int32, device=_DEV
+        )
+        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+            impl.forward(qkv, cache, selected_indices=selected)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = impl.forward(qkv, cache, selected_indices=selected)
+        for live_batch in (1, 2, 1):
+            impl.attn_inputs.sequence_lengths_plus_1_device.fill_(1)
+            impl.attn_inputs.sequence_lengths_plus_1_device[:live_batch].fill_(8)
+            impl.attn_inputs.kv_cache_kernel_block_id_device.copy_(table)
+            impl.attn_inputs.kv_cache_kernel_block_id_device[live_batch:].zero_()
+            graph.replay()
+            eager = self._decode_impl(batch=live_batch)
+            eager.attn_inputs.sequence_lengths.fill_(7)
+            eager.attn_inputs.kv_cache_kernel_block_id_device = table[:live_batch]
+            expected = eager.forward(
+                qkv[:live_batch], cache, selected_indices=selected[:live_batch]
+            )
+            torch.testing.assert_close(
+                actual[:live_batch], expected, rtol=0.02, atol=0.03
+            )
+            self.assertTrue(bool((actual[live_batch:] == 0).all().item()))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_target_graph_replays_updated_prefix_and_main_pages(self):
         attn_configs, inputs = _configs(is_prefill=True)
         inputs.is_target_verify = True
         inputs.is_cuda_graph = True
-        inputs.is_exact_cuda_graph_batch = True
         inputs.is_s_padded = True
         inputs.input_lengths = torch.tensor([4], dtype=torch.int32).pin_memory()
         inputs.prefix_lengths = torch.tensor([8], dtype=torch.int32).pin_memory()
+        inputs.prefix_lengths_device = inputs.prefix_lengths.to(_DEV)
         inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
         inputs.kv_cache_kernel_block_id_device = torch.tensor(
             [[1, 2, 3]], dtype=torch.int32, device=_DEV
@@ -397,6 +434,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
         qkv.copy_(torch.randn_like(qkv.float()).bfloat16())
         inputs.prefix_lengths[0] = 7
+        inputs.prefix_lengths_device.fill_(7)
         inputs.kv_cache_kernel_block_id_device[0].copy_(
             torch.tensor([3, 2, 1], dtype=torch.int32, device=_DEV)
         )

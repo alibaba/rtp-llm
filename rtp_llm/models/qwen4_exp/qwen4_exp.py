@@ -35,8 +35,8 @@ class Qwen4Exp(Qwen35Moe):
         return Qwen4ExpWeight
 
     def support_cuda_graph(self) -> bool:
-        # Capability only; the common graph setting and exact-batch metadata
-        # decide capture. CPU PLE rows are prepared before capture/replay.
+        # Capability only; common graph settings decide capture.
+        # CPU PLE rows are prepared before capture/replay.
         return getattr(self, "model_config", None) is not None
 
     def load(self, skip_python_model: bool = False):

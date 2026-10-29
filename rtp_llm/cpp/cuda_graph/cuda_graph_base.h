@@ -44,7 +44,6 @@ struct GraphParams {
     bool             is_target_verify                   = false;
     CudaGraphRole    role                               = CudaGraphRole::AUTO;
     int              max_seq_len                        = 0;
-    bool             exact_batch_only                   = false;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     size_t           max_context_batch_size = 128;
     std::size_t      hidden_size            = 0;

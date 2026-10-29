@@ -290,4 +290,5 @@ def try_prepare_target_window(
         kv_pool=kv,
         kv_slots=kv_slots,
         original_kv=old_kv,
+        padded_slots=True,
     )
