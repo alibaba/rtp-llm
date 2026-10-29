@@ -2,6 +2,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -75,6 +76,7 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
 // Block until all submitted tasks complete, then RUNNING -> IDLE.
 // Re-throws the first stored exception after state transition.
 void CacheStoreAsyncWriter::waitAllDone() {
+    RTP_LLM_PROFILE_SCOPE("cache_store_async_writer.waitAllDone");
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,

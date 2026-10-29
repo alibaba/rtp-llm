@@ -24,6 +24,32 @@ public:
     void submit(std::function<void()> task);
     void waitAllDone();
 
+    // Submit independent GPU post-processing before draining this step's writes.
+    // An early return from submit still passes through the drain. On a submit
+    // exception, drain before its buffers can be reused, preserving that error.
+    template<typename F>
+    auto completeAfter(F&& submit) -> decltype(submit()) {
+        bool drain_started = false;
+        try {
+            auto result   = submit();
+            drain_started = true;
+            waitAllDone();
+            return result;
+        } catch (...) {
+            if (!drain_started) {
+                const auto original = std::current_exception();
+                try {
+                    waitAllDone();
+                } catch (...) {
+                    // submit's failure is primary; background task failures
+                    // were logged by submit()'s worker wrapper already.
+                }
+                std::rethrow_exception(original);
+            }
+            throw;
+        }
+    }
+
 private:
     enum class State {
         IDLE,
