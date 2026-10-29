@@ -47,6 +47,11 @@ struct PyWrappedModelTestPeer {
         model.context_parallel_processor_ = std::move(processor);
     }
 
+    static GptModelOutputs
+    forwardPostLayersLastHidden(PyWrappedModel& model, const torch::Tensor& hidden, const GptModelInputs& inputs) {
+        return model.forwardPostLayersLastHidden(hidden, inputs);
+    }
+
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
     }
@@ -1523,7 +1528,8 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
 
 // Exercise input preparation, Python forward, graphs and custom output together.
 // Only decoder math is replaced; all routing and post-layers code is production.
-py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm) {
+py::dict
+runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm, bool compact_output) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
     constexpr int     width             = 4;
@@ -1579,7 +1585,9 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
         model.prepareAttentionInputs(inputs);
         model.updateKVCacheKernelBlockId(inputs);
     }
-    const auto outputs      = model.forward(inputs);
+    const auto outputs            = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
+                                              model, torch::ones({2, width}, lm_head->kernel.options()), inputs) :
+                                                     model.forward(inputs);
     result["graph_status"]  = generationPrefillCudaGraphStatusString(outputs.generation_prefill_cuda_graph_status);
     result["custom_output"] = outputs.custom_output;
     result["custom_output_error"] = outputs.custom_output_error;
@@ -1667,7 +1675,13 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
-    m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_post_layers",
+          &rtp_llm::test::runCustomOutput,
+          py::arg("py_model"),
+          py::arg("handler"),
+          py::arg("indexes"),
+          py::arg("python_norm"),
+          py::arg("compact_output") = false);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
     m.def("initialize_capture_publisher_with_core_dump", &rtp_llm::test::initializeCapturePublisherWithCoreDump);

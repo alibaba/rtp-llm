@@ -320,13 +320,9 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
     def activate_draft_lm_head_graph(self, graph_batch: int) -> None:
         self._draft_head_graph.activate(graph_batch)
 
-    def compute_fp8_lm_head(self, hidden):
+    def _compute_local_logits(self, hidden: torch.Tensor) -> torch.Tensor:
         logits = self._draft_head_graph.take(hidden)
-        return super().compute_fp8_lm_head(hidden) if logits is None else logits.float()
-
-    def compute_fp8_lm_head_for_tp(self, hidden):
-        logits = self._draft_head_graph.take(hidden)
-        return super().compute_fp8_lm_head_for_tp(hidden) if logits is None else logits
+        return super()._compute_local_logits(hidden) if logits is None else logits
 
     def close(self) -> None:
         self._draft_head_graph.clear_activation()

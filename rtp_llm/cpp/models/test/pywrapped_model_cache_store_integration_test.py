@@ -1431,7 +1431,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             else:
                 self.assertEqual(metric_types[name], _KMONITOR_GAUGE)
 
-
     def test_speculative_commit_hooks_must_be_implemented_as_a_pair(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "must implement.*as a pair"):
             run_speculative_commit_bridge(
@@ -1557,9 +1556,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             ["301", "301", "302"],
         )
         middle = _record_for_request(result, 302)
-        self.assertTrue(
-            all("_tag_full" in block["key"] for block in middle["blocks"])
-        )
+        self.assertTrue(all("_tag_full" in block["key"] for block in middle["blocks"]))
         blocks = _blocks_by_key(result)
         for tag, stride, expected in (
             ("swa", 24, {3103: 3, 3104: 4}),
@@ -1915,7 +1912,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             scenarios += ["capture_fp8", "capture_cp"]
         for scenario in scenarios:
             namespace = (
-                "ProfileActor" + "A" * 256 if scenario == "capture_bf16" else "TestActor"
+                "ProfileActor" + "A" * 256
+                if scenario == "capture_bf16"
+                else "TestActor"
             )
             with self.subTest(scenario=scenario), patch.dict(
                 os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}
@@ -1941,7 +1940,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(result["hidden_width"], baseline["hidden_width"])
                 for name in _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS:
                     self.assertEqual(
-                        result["capture_metrics"][name], baseline["capture_metrics"][name]
+                        result["capture_metrics"][name],
+                        baseline["capture_metrics"][name],
                     )
                 self.assertEqual(
                     len(result["forward_hidden_states"]),
@@ -2002,7 +2002,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 children = {e.name: e for e in events if e.cpu_parent is publish[0]}
                 if scenario == "capture_non_owner":
                     self.assertNotIn("hidden_state_capture.gil_acquire", children)
-                    self.assertNotIn("hidden_state_capture.observe_async_errors", children)
+                    self.assertNotIn(
+                        "hidden_state_capture.observe_async_errors", children
+                    )
                     self.assertNotIn("hidden_state_capture.prepare_payload", children)
                     self.assertNotIn("hidden_state_capture.put_batch_admit", children)
                     self.assertNotIn("hidden_state_capture.flush", children)
@@ -2018,7 +2020,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     if scenario == "capture_bf16":
                         self.assertGreater(len(marker.name), 256)
                     self.assertIs(marker.cpu_parent, publish[0])
-                    self.assertLessEqual(prepare.time_range.end, marker.time_range.start)
+                    self.assertLessEqual(
+                        prepare.time_range.end, marker.time_range.start
+                    )
                     self.assertLessEqual(marker.time_range.start, marker.time_range.end)
                     self.assertLessEqual(marker.time_range.end, admit.time_range.start)
                     self.assertLessEqual(prepare.time_range.end, admit.time_range.start)
@@ -2104,8 +2108,12 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     metrics[f"{_CAPTURE_METRIC_PREFIX}publish_success_qps"], 0
                 )
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1)
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0)
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1
+                )
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0
+                )
                 self.assertCaptureStatus(metrics, enabled=1, broken=0)
                 events = prof.events()
                 self.assertCaptureProfileStoreCalls(events, store_calls)
@@ -3862,6 +3870,71 @@ class CustomOutputPostLayersTest(unittest.TestCase):
                 result = self.run_case(handler, python_norm=False)
                 self.assertIsNone(result["custom_output"])
                 self.assertIn(message, result["custom_output_error"])
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/ROCm")
+class ModelLogitsPostLayersTest(unittest.TestCase):
+    def run_case(self, processor, *, compact=False, graph=False):
+        model = ForwardModel()
+        if processor is not None:
+            model.compute_logits = processor
+        return _extension.run_post_layers(
+            model, None, torch.empty(0, dtype=torch.int64).pin_memory(), graph, compact
+        )
+
+    def test_model_logits_own_head_and_preserve_row_selection(self):
+        for compact, graph in ((False, False), (False, True), (True, False)):
+            with self.subTest(compact=compact, graph=graph):
+                baseline = self.run_case(None, compact=compact, graph=graph)
+                seen = []
+
+                def processor(rows):
+                    seen.append(rows.clone())
+                    return (rows.to(torch.bfloat16).float() * 3).contiguous()
+
+                result = self.run_case(processor, compact=compact, graph=graph)
+                torch.testing.assert_close(result["logits"], baseline["logits"] * 3)
+                self.assertTrue(seen)
+                if graph:
+                    self.assertEqual(result["graph_status"], "replayed")
+                    torch.testing.assert_close(
+                        result["next_logits"], baseline["next_logits"] * 3
+                    )
+
+    def test_none_delegates_to_native_head(self):
+        for compact in (False, True):
+            baseline = self.run_case(None, compact=compact)
+            fallback = self.run_case(lambda _: None, compact=compact)
+            torch.testing.assert_close(
+                fallback["logits"], baseline["logits"], rtol=0, atol=0
+            )
+
+    def test_invalid_logits_fail_before_sampling(self):
+        for compact in (False, True):
+            for processor in (
+                lambda x: x.to(torch.bfloat16),
+                lambda x: x.float().cpu(),
+                lambda x: x.float()[:1],
+                lambda x: x.float()[:, :2],
+                lambda x: x.float().unsqueeze(0),
+                lambda x: x.float().t().contiguous().t(),
+            ):
+                with self.subTest(compact=compact, processor=processor):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "compute_logits must return"
+                    ):
+                        self.run_case(processor, compact=compact)
+
+    def test_processor_errors_propagate(self):
+        def processor(_):
+            raise ValueError("logits processor failed")
+
+        for compact in (False, True):
+            # The full forward wraps Python exceptions in its native status;
+            # the compact post-layer entry propagates the Python exception.
+            error_type = ValueError if compact else RuntimeError
+            with self.assertRaisesRegex(error_type, "logits processor failed"):
+                self.run_case(processor, compact=compact)
 
 
 if __name__ == "__main__":

@@ -60,24 +60,19 @@ class TargetHeadGraphTest(unittest.TestCase):
         cache.activate(7)
         self.assertIsNone(cache.take(hidden))
 
-    def test_model_head_consumes_once_and_retains_fp32_and_bf16_contracts(self):
+    def test_model_head_consumes_local_bf16_once(self):
         hidden = torch.ones(4, 32, device="cuda", dtype=torch.bfloat16)
         cache = TargetHeadGraph(True)
         cache.stage(lambda x: x * 2, hidden, 1)
         model = SimpleNamespace(_target_head_graph=cache, _fp8_lm_head=lambda x: x * 3)
-        for method, dtype in (
-            (Qwen4ExpModel.compute_fp8_lm_head, torch.float32),
-            (Qwen4ExpModel.compute_fp8_lm_head_for_tp, torch.bfloat16),
-        ):
-            cache.activate(1)
-            actual = method(model, hidden)
-            self.assertEqual(actual.dtype, dtype)
-            self.assertTrue(torch.equal(actual, hidden.to(dtype) * 2))
-            self.assertTrue(torch.equal(method(model, hidden), hidden.to(dtype) * 3))
-            cache.activate(1)
-            self.assertTrue(
-                torch.equal(method(model, hidden[:1]), hidden[:1].to(dtype) * 3)
-            )
+        method = lambda rows: Qwen4ExpModel._compute_local_logits(model, rows)
+        cache.activate(1)
+        actual = method(hidden)
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        self.assertTrue(torch.equal(actual, hidden * 2))
+        self.assertTrue(torch.equal(method(hidden), hidden * 3))
+        cache.activate(1)
+        self.assertTrue(torch.equal(method(hidden[:1]), hidden[:1] * 3))
 
     def test_disabled_and_malformed_inputs_preserve_fallback(self):
         def fail(_):
