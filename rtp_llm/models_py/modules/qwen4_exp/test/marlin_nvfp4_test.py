@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.qwen4_exp.moe.marlin_nvfp4 import (
     Nvfp4MarlinMoE,
     Qwen4DecodeMarlinExecutor,
     _linear_scales,
+    align,
 )
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import PreparedWeightDict
 from rtp_llm.utils.model_weight import W
@@ -109,7 +110,7 @@ class MarlinNvfp4Test(unittest.TestCase):
 
     def test_graph_refreshes_values_ids_weights(self):
         for rank in (0, 1):
-            for rows in (1, 4):
+            for rows in (1, 4, 8):
                 x, ids, weights = self.inputs(rows, rank)
                 model = self.models[rank]
                 model(x, ids, weights)
@@ -124,6 +125,43 @@ class MarlinNvfp4Test(unittest.TestCase):
                     graph.replay()
                     torch.cuda.synchronize()
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_alignment_stable_order_padding_and_nonlocal_routes(self):
+        for rows in (1, 4, 8, 9, 32):
+            for first in (0, 256):
+                for mode in ("random", "same", "nonlocal", "boundary"):
+                    ids = torch.randint(
+                        0, 512, (rows, 10), device="cuda", dtype=torch.int32
+                    )
+                    if mode == "same":
+                        ids.fill_(first + 3)
+                    elif mode == "nonlocal":
+                        ids.fill_(256 - first)
+                    elif mode == "boundary":
+                        ids.flatten()[::2] = first
+                        ids.flatten()[1::2] = first + 255
+                    routes = ids.numel()
+                    active = min(routes, 256)
+                    capacity = active + (routes - active) // 8
+                    flat = ids.flatten().tolist()
+                    expected_ids, expected_experts = [], []
+                    for expert in range(256):
+                        selected = [
+                            i for i, value in enumerate(flat) if value == first + expert
+                        ]
+                        count = (len(selected) + 7) // 8
+                        expected_ids.extend(
+                            selected + [routes] * (count * 8 - len(selected))
+                        )
+                        expected_experts.extend([expert] * count)
+                    padded = len(expected_ids)
+                    expected_ids.extend([routes] * (capacity * 8 - padded))
+                    expected_experts.extend([0] * (capacity - len(expected_experts)))
+                    actual = align(ids, 256, first)
+                    for tensor, expected in zip(
+                        actual, (expected_ids, expected_experts, [padded])
+                    ):
+                        self.assertEqual(tensor.tolist(), expected)
 
     def test_concurrent_stream_workspaces(self):
         model = self.models[0]

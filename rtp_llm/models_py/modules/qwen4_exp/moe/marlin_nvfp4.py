@@ -143,15 +143,73 @@ def _scatter(
             tl.store(EXPERT_IDS + dst // 8, local)
 
 
+@triton.jit
+def _align_small(
+    IDS,
+    SORTED,
+    EXPERT_IDS,
+    PADDED,
+    ROUTES: tl.constexpr,
+    EXPERTS: tl.constexpr,
+    FIRST: tl.constexpr,
+    RTILE: tl.constexpr,
+    SLOTS: tl.constexpr,
+    STILE: tl.constexpr,
+    BLOCKS: tl.constexpr,
+    BTILE: tl.constexpr,
+):
+    r = tl.arange(0, RTILE)
+    ids = tl.load(IDS + r, r < ROUTES, other=-1) - FIRST
+    valid = (r < ROUTES) & (ids >= 0) & (ids < EXPERTS)
+    counts = tl.histogram(ids, EXPERTS, mask=valid)
+    padded = tl.cdiv(counts, 8) * 8
+    offsets = tl.cumsum(padded) - padded
+    original_offsets = tl.cumsum(counts) - counts
+    total = tl.sum(padded)
+    tl.store(PADDED, total)
+    s = tl.arange(0, STILE)
+    tl.store(SORTED + s, ROUTES, s < SLOTS)
+    b = tl.arange(0, BTILE)
+    tl.store(EXPERT_IDS + b, 0, b < BLOCKS)
+    # Include the original route index to keep each expert's token order stable.
+    key = tl.where(valid, ids * (ROUTES + 1) + r, 2147483647)
+    key = tl.sort(key, descending=False)
+    local = tl.where(key != 2147483647, key // (ROUTES + 1), 0)
+    route = key % (ROUTES + 1)
+    ordinal = r - tl.gather(original_offsets, local, axis=0)
+    dst = tl.gather(offsets, local, axis=0) + ordinal
+    # Padding and route writes can be issued by different threads in this CTA.
+    tl.debug_barrier()
+    tl.store(SORTED + dst, route, key != 2147483647)
+    tl.store(EXPERT_IDS + dst // 8, local, (key != 2147483647) & (ordinal % 8 == 0))
+
+
 def align(ids, experts, first):
     routes = ids.numel()
     active = min(routes, experts)
     blocks = active + (routes - active) // 8
     slots = blocks * 8
-    offsets = torch.empty(experts, device=ids.device, dtype=torch.int32)
     sorted_ids = torch.empty(slots, device=ids.device, dtype=torch.int32)
     expert_ids = torch.empty(blocks, device=ids.device, dtype=torch.int32)
     padded = torch.empty(1, device=ids.device, dtype=torch.int32)
+    if routes <= 80:
+        _align_small[(1,)](
+            ids,
+            sorted_ids,
+            expert_ids,
+            padded,
+            ROUTES=routes,
+            EXPERTS=experts,
+            FIRST=first,
+            RTILE=triton.next_power_of_2(routes),
+            SLOTS=slots,
+            STILE=triton.next_power_of_2(slots),
+            BLOCKS=blocks,
+            BTILE=triton.next_power_of_2(blocks),
+            num_warps=4,
+        )
+        return sorted_ids, expert_ids, padded
+    offsets = torch.empty(experts, device=ids.device, dtype=torch.int32)
     _count[(1,)](
         ids,
         offsets,
