@@ -4,10 +4,7 @@ import os
 import torch
 
 from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
-from ....mhc.pre_big_fuse_kernel import (
-    _mhc_fused_post_pre_fwd,
-    _mhc_pre_big_fuse,
-)
+from ....mhc.pre_big_fuse_kernel import _mhc_fused_post_pre_fwd, _mhc_pre_big_fuse
 
 _COMPILED_DISPATCH = os.environ.get("GLM53_MHC_COMPILED_DISPATCH", "0") == "1"
 
@@ -261,11 +258,11 @@ def mhc_fused_post_pre(
     mhc_post_mult_value: float,
     sinkhorn_repeat: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    """Small-token inference fusion for ``mhc_post`` + next ``mhc_pre``.
+    """Inference fusion for ``mhc_post`` + next ``mhc_pre``.
 
-    The fused FMA kernel is intentionally limited to at most 16 tokens, the
-    decode/MTP range where launch overhead dominates.  Larger shapes return
-    ``None`` so callers retain the established post/pre implementation.
+    Keep the per-token FP32 reduction identical to one-token Decode, including
+    multi-request MTP batches. Changing split-K with the batch size can cross
+    a BF16 rounding boundary in the next layer input.
     """
 
     assert residual.dtype == torch.bfloat16
@@ -281,9 +278,6 @@ def mhc_fused_post_pre(
     mhc_mult3 = mhc_mult * (mhc_mult + 2)
     outer_shape = residual.shape[:-2]
     num_tokens = residual.numel() // (mhc_mult * hidden_size)
-    if num_tokens > 16:
-        return None
-
     assert x.shape == (*outer_shape, hidden_size)
     assert post_mix.shape in (
         (*outer_shape, mhc_mult, 1),
@@ -295,9 +289,10 @@ def mhc_fused_post_pre(
     assert mhc_base.shape == (mhc_mult3,)
 
     # The vendored TileLang kernel uses one warp per block for a correct
-    # cross-warp reduction.  Split-K supplies enough blocks to fill 148 SMs.
-    tile_n = 2 if num_tokens < 8 else 3
-    n_splits = 16 if num_tokens < 8 and hidden_size <= 4096 else 8
+    # cross-warp reduction. Split-K supplies enough blocks to fill 148 SMs;
+    # its reduction order must not depend on the number of batched tokens.
+    tile_n = 2
+    n_splits = 16 if hidden_size <= 4096 else 8
     if hidden_size % (n_splits * 32) != 0:
         return None
 

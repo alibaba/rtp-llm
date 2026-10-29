@@ -1,17 +1,96 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.chatglm45_renderer import Glm53FlashRenderer
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class _Tokenizer:
+    def __len__(self):
+        return 256
+
     @staticmethod
     def encode(prompt):
         return list(range(len(prompt)))
 
 
 class Glm53FlashRendererTest(unittest.TestCase):
+    def test_endpoint_merge_preserves_explicit_extra_sampling_config(self):
+        renderer = self._template_renderer()
+        endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
+        endpoint.tokenizer = _Tokenizer()
+        endpoint.chat_renderer = renderer
+        endpoint.stop_words_str_list = []
+        endpoint.stop_words_id_list = []
+        endpoint.generate_env_config = GenerateEnvConfig()
+        for outer in (None, 0.7):
+            kwargs = {} if outer is None else {"top_p": outer}
+            request = ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                extra_configs={"top_p": 0.6},
+                **kwargs,
+            )
+            original = request.extra_configs.model_dump()
+            config = endpoint._extract_generation_config(request)
+            self.assertEqual(request.extra_configs.model_dump(), original)
+            renderer.apply_chat_completion_constraints(request, config)
+            self.assertEqual(config.top_p, 0.6 if outer is None else outer)
+
+    def test_checkpoint_top_p_default_and_explicit_overrides(self):
+        cases = (
+            ({}, 0.95),
+            ({"top_p": None}, 0.95),
+            ({"top_p": 1.0}, 1.0),
+            ({"top_p": 0.7}, 0.7),
+            ({"extra_configs": {"top_p": 0.6}}, 0.6),
+            ({"top_p": 0.7, "extra_configs": {"top_p": 0.6}}, 0.7),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text(
+                json.dumps({"top_p": 0.95})
+            )
+            renderer = self._template_renderer()
+            renderer.ckpt_path = directory
+            for kwargs, expected in cases:
+                with self.subTest(request=kwargs):
+                    request = ChatCompletionRequest(
+                        messages=[{"role": "user", "content": "hello"}], **kwargs
+                    )
+                    config = GenerateConfig()
+                    if request.top_p is not None:
+                        config.top_p = request.top_p
+                    renderer.apply_chat_completion_constraints(request, config)
+                    self.assertEqual(config.top_p, expected)
+
+    def test_checkpoint_without_top_p_keeps_api_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "generation_config.json").write_text("{}")
+            renderer = self._template_renderer()
+            renderer.ckpt_path = directory
+            config = GenerateConfig()
+            renderer.apply_chat_completion_constraints(
+                ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}]),
+                config,
+            )
+            self.assertEqual(config.top_p, 1.0)
+
+    def test_missing_generation_config_keeps_api_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            renderer = self._template_renderer()
+            renderer.ckpt_path = directory
+            config = GenerateConfig()
+            renderer.apply_chat_completion_constraints(
+                ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}]),
+                config,
+            )
+            self.assertEqual(config.top_p, 1.0)
+
     def _renderer(self):
         renderer = Glm53FlashRenderer.__new__(Glm53FlashRenderer)
         renderer.tokenizer = _Tokenizer()
@@ -30,6 +109,28 @@ class Glm53FlashRendererTest(unittest.TestCase):
             "{% if add_generation_prompt %}<|assistant|><think>{% endif %}"
         )
         return renderer
+
+    def test_tool_string_fields_are_json_quoted_and_escaped(self):
+        renderer = self._template_renderer()
+        renderer.chat_template = (
+            '{% for tool in tools %}{"name": {{ tool.function.name | tojson }},'
+            ' "description": {{ tool.function.description | tojson(ensure_ascii=False) }},'
+            ' "parameters": {{ tool.function.parameters | tojson }}}{% endfor %}'
+        )
+        tool = {
+            "name": "bash",
+            "description": 'Execute a "quoted" command\n中文',
+            "parameters": {"type": "object", "properties": {}},
+        }
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[{"type": "function", "function": tool}],
+        )
+
+        rendered = renderer.render_chat(request)
+
+        self.assertEqual(json.loads(rendered.rendered_prompt), tool)
+        self.assertIn("中文", rendered.rendered_prompt)
 
     def test_image_content_is_forwarded_to_vit(self):
         renderer = self._renderer()
@@ -128,9 +229,7 @@ class Glm53FlashRendererTest(unittest.TestCase):
 
     def test_default_generation_keeps_checkpoint_forced_think_prefix(self):
         renderer = self._template_renderer()
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "hello"}]
-        )
+        request = ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
 
         rendered = renderer.render_chat(request)
         parser = renderer._create_reasoning_parser(request)
@@ -146,9 +245,7 @@ class Glm53FlashRendererTest(unittest.TestCase):
     def test_default_think_parser_splits_implicit_reasoning(self):
         renderer = self._renderer()
         renderer._build_prompt = lambda request: "<think>"
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "hello"}]
-        )
+        request = ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
 
         parser = renderer._create_reasoning_parser(request)
         self.assertIsNotNone(parser)

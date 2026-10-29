@@ -445,3 +445,16 @@ py_test(
     srcs = ["test_pool_context.py"],
     deps = _DSV4_TEST_DEPS,
 )
+
+py_test(
+    name = "test_glm53_mhc_batch_invariance",
+    srcs = ["test_glm53_mhc_batch_invariance.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu_count": "1"},
+    env = {"GPU_COUNT": "1"},
+)

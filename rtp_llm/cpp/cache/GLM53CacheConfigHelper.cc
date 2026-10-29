@@ -21,8 +21,7 @@ uint32_t fixedRegionCpSize(const ParallelismConfig& parallelism_config) {
     if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
         return static_cast<uint32_t>(parallelism_config.tp_size);
     }
-    if (parallelism_config.role_type == RoleType::DECODE
-        && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+    if (parallelism_config.role_type == RoleType::DECODE && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.prefill_cp_config.prefill_cp_size > 1,
                                 "GLM-5.3-Flash KPool decode requires explicit prefill_cp_size when "
                                 "PREFILL_CP and kv_cache_sharded are enabled");
@@ -165,6 +164,12 @@ void GLM53CacheConfigHelper::appendIndexerPools(CacheConfig&             config,
 
     appendPool(config, indexer_layers, CacheGroupType::FULL, KVCacheRegionName::INDEXER_KV, indexer_kv);
     appendPool(config, indexer_layers, CacheGroupType::SWA, KVCacheRegionName::INDEXER_STATE, indexer_state);
+
+    // CP compacts fixed state rows across all prefill ranks. Preserve that
+    // raw-token coverage for allocation, transfer and Python slot mapping;
+    // using the ordinary physical page size addresses empty state rows.
+    config.group_seq_size_per_block.resize(config.cache_specs.size(), physical_tokens_per_block);
+    config.group_seq_size_per_block.back() = state_tokens_per_block;
 
     config.seq_size_per_block                       = physical_tokens_per_block;
     config.kernel_seq_size_per_block                = kernel_tokens_per_block;

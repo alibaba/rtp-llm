@@ -5,12 +5,17 @@ from contextvars import ContextVar
 from functools import wraps
 
 _FORWARD_METADATA = ContextVar("glm53_forward_metadata", default=None)
+_TOKENWISE_ROUTER = ContextVar("glm53_tokenwise_router", default=False)
 _SCORE_WORKSPACE_MB = 8192
 _SCORE_WORKSPACE_DEMAND = os.environ.get("GLM53_DEMAND_SCORE_BUDGET", "0") == "1"
 
 
 def metadata_cache():
     return _FORWARD_METADATA.get()
+
+
+def tokenwise_router_enabled():
+    return _TOKENWISE_ROUTER.get()
 
 
 def score_workspace_fits(device, required_bytes):
@@ -80,13 +85,20 @@ def scoped_forward_metadata(function):
         is_glm53 = getattr(config, "model_type", None) == "glm5_3_flash" or getattr(
             config, "is_glm53_mtp", False
         )
-        if (
-            not is_glm53
-            or not inputs.attention_inputs.is_prefill
-            or getattr(inputs.attention_inputs, "is_target_verify", False)
-        ):
+        if not is_glm53:
             return function(self, inputs, *args, **kwargs)
+        if not inputs.attention_inputs.is_prefill or getattr(
+            inputs.attention_inputs, "is_target_verify", False
+        ):
+            # Decode batches and MTP verification may regroup the same tokens
+            # between steps. Keep the router's FP32 reduction independent of M.
+            router_token = _TOKENWISE_ROUTER.set(True)
+            try:
+                return function(self, inputs, *args, **kwargs)
+            finally:
+                _TOKENWISE_ROUTER.reset(router_token)
         token = _FORWARD_METADATA.set({})
+        router_token = _TOKENWISE_ROUTER.set(False)
         try:
             import torch
 
@@ -108,6 +120,7 @@ def scoped_forward_metadata(function):
             # Also release metadata on exceptions and when the same inputs object
             # is reused by the executor for another forward.
             _FORWARD_METADATA.reset(token)
+            _TOKENWISE_ROUTER.reset(router_token)
 
     return wrapped
 

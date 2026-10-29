@@ -246,7 +246,11 @@ class OpenaiEndpoint(object):
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
-        config = request.extra_configs or GenerateConfig()
+        config = (
+            request.extra_configs.model_copy(deep=True)
+            if request.extra_configs is not None
+            else GenerateConfig()
+        )
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:

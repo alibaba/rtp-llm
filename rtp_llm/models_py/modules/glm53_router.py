@@ -2,8 +2,10 @@
 
 import torch
 import torch.nn.functional as F
-from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
 from torch import nn
+
+from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
+from rtp_llm.models_py.modules.dsv4.forward_metadata import tokenwise_router_enabled
 
 
 class Glm53FP32Router(nn.Module):
@@ -21,6 +23,18 @@ class Glm53FP32Router(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if torch.backends.cuda.matmul.allow_tf32:
             raise RuntimeError("GLM-5.3 FP32 router requires matmul.allow_tf32=False")
+        # Match the one-token Decode projection throughout Decode and target
+        # verification, including batches of multiple requests. cuBLAS may
+        # otherwise change its FP32 reduction with M; the last-bit differences
+        # can cross a later FP8 KV rounding boundary. Keep the small direct-call
+        # path consistent when no model-forward scope is installed.
+        if hidden_states.shape[0] > 1 and (
+            hidden_states.shape[0] <= 4 or tokenwise_router_enabled()
+        ):
+            return torch.cat(
+                [F.linear(row.float(), self.weight) for row in hidden_states.split(1)],
+                dim=0,
+            )
         if hidden_states.shape[0] <= self.chunk_rows:
             return F.linear(hidden_states.float(), self.weight)
         return torch.cat(
@@ -92,7 +106,7 @@ class Glm53FP32Router(nn.Module):
                     (chunk_end - chunk_begin, hidden_states.shape[1])
                 )
                 chunk.narrow(0, chunk_first, count).copy_(local)
-            logits = F.linear(chunk.float(), self.weight)
+            logits = self(chunk)
             output.narrow(0, local_first, count).copy_(
                 logits.narrow(0, chunk_first, count)
             )

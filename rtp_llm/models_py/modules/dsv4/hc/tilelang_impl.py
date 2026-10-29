@@ -6,6 +6,7 @@ import os
 from typing import NoReturn
 
 import torch
+
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
     tk_mhc_fused_post_pre,
@@ -169,8 +170,8 @@ class TileLangHCUnit(HCUnitBase):
                 hc_mult=self.hc_mult,
             )
         if out is None:
-            # Explicit applicability fallback: disabled fusion, unsupported
-            # shape/layout, or an MTP batch with more than 16 local tokens.
+            # Explicit applicability fallback: disabled fusion or unsupported
+            # shape/layout.
             return super()._fused_post_pre_impl(x, residual, post, comb)
         updated, y, next_post, next_comb = out
         return (

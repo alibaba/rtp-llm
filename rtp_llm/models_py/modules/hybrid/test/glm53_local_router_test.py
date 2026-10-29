@@ -13,8 +13,33 @@ from rtp_llm.models_py.distributed.sequence_parallel import (
 )
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.modules import GroupTopK
+from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    metadata_cache,
+    scoped_forward_metadata,
+    tokenwise_router_enabled,
+)
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.glm53_router import Glm53FP32Router
+
+
+class _RouterModel(nn.Module):
+    def __init__(self, gate, *, mtp=False):
+        super().__init__()
+        self.gate = gate
+        self.config = SimpleNamespace(model_type="glm5_3_flash", is_glm53_mtp=mtp)
+
+    @scoped_forward_metadata
+    def forward(self, inputs, x, layout=None, fail=False):
+        result = self.gate(x) if layout is None else self.gate.forward_shard(x, layout)
+        if fail:
+            raise RuntimeError("router scope failure")
+        return result
+
+
+def _router_inputs(*, prefill=False, verify=False):
+    return SimpleNamespace(
+        attention_inputs=SimpleNamespace(is_prefill=prefill, is_target_verify=verify)
+    )
 
 
 def route(logits, bias):
@@ -65,6 +90,97 @@ class Glm53LocalRouterTest(unittest.TestCase):
     def tearDown(self):
         torch.backends.cuda.matmul.allow_tf32 = self.old_tf32
 
+    def test_decode_grouping_and_reordering_preserve_single_token_routes(self):
+        gate = Glm53FP32Router(torch.randn(4096, 288, device="cuda") / 64)
+        bias = torch.randn(288, device="cuda") / 100
+        for dtype in (torch.bfloat16, torch.float32):
+            x = torch.randn(4, 4096, device="cuda", dtype=dtype)
+            single = torch.cat([gate(x[i : i + 1]) for i in range(4)])
+            for count in (2, 3, 4):
+                with self.subTest(dtype=dtype, tokens=count):
+                    actual = gate(x[:count])
+                    torch.testing.assert_close(actual, single[:count], rtol=0, atol=0)
+                    expected_weights, expected_ids = route(single[:count], bias)
+                    weights, ids = route(actual, bias)
+                    torch.testing.assert_close(ids, expected_ids, rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        weights, expected_weights, rtol=0, atol=0
+                    )
+                    order = torch.arange(count - 1, -1, -1, device="cuda")
+                    torch.testing.assert_close(
+                        gate(x[order]), single[order], rtol=0, atol=0
+                    )
+
+    def test_decode_and_verify_scopes_preserve_multi_request_routes(self):
+        gate = Glm53FP32Router(torch.randn(4096, 288, device="cuda") / 64)
+        bias = torch.randn(288, device="cuda") / 100
+        for dtype in (torch.bfloat16, torch.float32):
+            x = torch.randn(192, 4096, device="cuda", dtype=dtype)
+            single = torch.cat([gate(row) for row in x.split(1)])
+            for verify in (False, True):
+                model = _RouterModel(gate, mtp=verify)
+                inputs = _router_inputs(prefill=verify, verify=verify)
+                for count in (5, 8, 12, 24, 48, 96, 192):
+                    with self.subTest(dtype=dtype, verify=verify, tokens=count):
+                        order = torch.randperm(count, device="cuda")
+                        actual = model(inputs, x[order])
+                        expected = single[order]
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                        actual_weights, actual_ids = route(actual, bias)
+                        expected_weights, expected_ids = route(expected, bias)
+                        torch.testing.assert_close(
+                            actual_ids, expected_ids, rtol=0, atol=0
+                        )
+                        torch.testing.assert_close(
+                            actual_weights, expected_weights, rtol=0, atol=0
+                        )
+                        self.assertFalse(tokenwise_router_enabled())
+                        self.assertIsNone(metadata_cache())
+
+    def test_router_scope_preserves_prefill_and_resets_after_failure(self):
+        import torch.nn.functional as functional
+
+        gate = Glm53FP32Router(torch.randn(4096, 288, device="cuda") / 64)
+        model = _RouterModel(gate)
+        x = torch.randn(48, 4096, device="cuda", dtype=torch.bfloat16)
+        prefill = _router_inputs(prefill=True)
+        expected = functional.linear(x.float(), gate.weight)
+        torch.testing.assert_close(model(prefill, x), expected, rtol=0, atol=0)
+        with self.assertRaisesRegex(RuntimeError, "router scope failure"):
+            model(_router_inputs(), x, fail=True)
+        self.assertFalse(tokenwise_router_enabled())
+        self.assertIsNone(metadata_cache())
+        torch.testing.assert_close(model(prefill, x), expected, rtol=0, atol=0)
+
+    def test_decode_scope_shards_and_cuda_graph_match_single_tokens(self):
+        gate = Glm53FP32Router(torch.randn(4096, 288, device="cuda") / 64)
+        model = _RouterModel(gate)
+        inputs = _router_inputs(prefill=True, verify=True)
+        x = torch.randn(48, 4096, device="cuda", dtype=torch.bfloat16)
+        expected = torch.cat([gate(row) for row in x.split(1)])
+        for rank in range(8):
+            layout = token_shard_layout(48, 8, rank)
+            actual = model(inputs, shard_tokens(x, layout), layout=layout)
+            first, valid = layout.local_start, layout.local_valid_tokens
+            torch.testing.assert_close(
+                actual[:valid], expected[first : first + valid], rtol=0, atol=0
+            )
+            self.assertEqual(torch.count_nonzero(actual[valid:]).item(), 0)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                model(inputs, x)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = model(inputs, x)
+        x.normal_()
+        graph.replay()
+        expected = torch.cat([gate(row) for row in x.split(1)])
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertFalse(tokenwise_router_enabled())
+
     def test_global_chunk_boundaries_topk_and_padding(self):
         weight = torch.randn(4096, 288, device="cuda", dtype=torch.bfloat16).float()
         weight /= 64
@@ -74,7 +190,24 @@ class Glm53LocalRouterTest(unittest.TestCase):
         weight[0, 9] = torch.nextafter(weight[0, 9], weight.new_tensor(float("inf")))
         gate = Glm53FP32Router(weight)
         bias = torch.zeros(288, device="cuda")
-        for tokens in (0, 1, 7, 8, 9, 127, 129, 8191, 8192, 8193, 65535, 65536, 65537):
+        for tokens in (
+            0,
+            1,
+            2,
+            3,
+            4,
+            7,
+            8,
+            9,
+            127,
+            129,
+            8191,
+            8192,
+            8193,
+            65535,
+            65536,
+            65537,
+        ):
             with self.subTest(tokens=tokens):
                 x = torch.randn(tokens, 4096, device="cuda", dtype=torch.bfloat16)
                 full = gate(x)

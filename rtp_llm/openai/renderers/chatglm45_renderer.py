@@ -1,11 +1,13 @@
 import copy
 import json
 import logging
+from pathlib import Path
 from typing import List, Optional
 
 from jinja2 import Environment
 from typing_extensions import override
 
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ContentPart,
@@ -123,6 +125,41 @@ class Glm53FlashRenderer(ChatGlm45Renderer):
 
     _IMAGE_TOKEN = "<|begin_of_image|><|image|><|end_of_image|>"
     _VIDEO_TOKEN = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    @override
+    def _customize_jinja_env(self, env: Environment) -> None:
+        # The GLM-5.3 checkpoint serializes individual tool fields with tojson.
+        # Strings must retain JSON quotes and escaping in those fields.
+        env.filters["tojson"] = lambda value, **kwargs: json.dumps(
+            value, sort_keys=False, ensure_ascii=kwargs.get("ensure_ascii", False)
+        )
+
+    @override
+    def apply_chat_completion_constraints(
+        self, request: ChatCompletionRequest, generate_config: GenerateConfig
+    ) -> None:
+        super().apply_chat_completion_constraints(request, generate_config)
+        if "top_p" in request.model_fields_set and request.top_p is not None:
+            return
+        if (
+            request.extra_configs is not None
+            and "top_p" in request.extra_configs.model_fields_set
+        ):
+            generate_config.top_p = request.extra_configs.top_p
+            return
+
+        # The API schema's 1.0 default must not mask the checkpoint's nucleus
+        # sampling default when the client omits top_p.
+        if not hasattr(self, "_checkpoint_top_p"):
+            ckpt_path = getattr(self, "ckpt_path", None)
+            path = Path(ckpt_path) / "generation_config.json" if ckpt_path else None
+            defaults = json.loads(path.read_text()) if path and path.is_file() else {}
+            self._checkpoint_top_p = defaults.get("top_p")
+        if self._checkpoint_top_p is not None:
+            top_p = float(self._checkpoint_top_p)
+            if not 0 < top_p <= 1:
+                raise ValueError("checkpoint top_p must be in (0, 1]")
+            generate_config.top_p = top_p
 
     @override
     def in_think_mode(self, request: ChatCompletionRequest) -> bool:

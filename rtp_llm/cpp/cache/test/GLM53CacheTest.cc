@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
@@ -98,14 +99,117 @@ KVCacheConfig makeKvConfig() {
 
 }  // namespace
 
+TEST(GLM53CacheConfigTest, CpIndexerStateRowsPreserveRawTokenCoverage) {
+    ScopedEnvVar request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    for (int cp_size : {1, 4, 8}) {
+        for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+            for (int draft_tokens : {0, 3}) {
+                SCOPED_TRACE(testing::Message() << cp_size << "/" << static_cast<int>(role) << "/" << draft_tokens);
+                auto model                         = makeGlm53Config();
+                model.attn_config.tokens_per_block = model.attn_config.kernel_tokens_per_block = 64;
+                auto kv                                                                        = makeKvConfig();
+                kv.seq_size_per_block = kv.kernel_seq_size_per_block = 64;
+                kv.reuse_cache                                       = false;
+                ParallelismConfig pc;
+                pc.role_type = role;
+                pc.tp_size   = role == RoleType::PREFILL ? cp_size : 1;
+                pc.dp_size   = role == RoleType::DECODE ? cp_size : 1;
+                pc.ep_size = pc.world_size            = cp_size;
+                pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+                if (role == RoleType::DECODE && cp_size > 1) {
+                    pc.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
+                    pc.prefill_cp_config.prefill_cp_size = cp_size;
+                }
+                auto config = HybridPoolConfigCreator::createConfig(model, pc, kv, false, draft_tokens);
+                ASSERT_EQ(config.group_seq_size_per_block.size(), config.cache_specs.size());
+                for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+                    const bool state = config.group_region_names[gid] == KVCacheRegionName::INDEXER_STATE;
+                    EXPECT_EQ(config.group_seq_size_per_block[gid], state ? 64u * cp_size : 64u);
+                    if (state) {
+                        EXPECT_EQ(config.group_seq_size_per_block[gid], config.cache_specs[gid]->seq_size_per_block);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(GLM53CacheConfigTest, CpStatePoolUsesOpaqueStorage) {
+    ScopedEnvVar request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+    for (int cp_size : {8, 4, 1}) {
+        for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+            for (int draft_tokens : {0, 3}) {
+                SCOPED_TRACE(testing::Message() << cp_size << "/" << static_cast<int>(role) << "/" << draft_tokens);
+                auto model                         = makeGlm53Config();
+                model.attn_config.tokens_per_block = model.attn_config.kernel_tokens_per_block = 64;
+                auto kv                                                                        = makeKvConfig();
+                kv.seq_size_per_block = kv.kernel_seq_size_per_block = 64;
+                kv.reuse_cache                                       = false;
+                ParallelismConfig pc;
+                pc.role_type = role;
+                pc.tp_size   = role == RoleType::PREFILL ? cp_size : 1;
+                pc.dp_size   = role == RoleType::DECODE ? cp_size : 1;
+                pc.ep_size = pc.world_size            = cp_size;
+                pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+                if (role == RoleType::DECODE && cp_size > 1) {
+                    pc.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
+                    pc.prefill_cp_config.prefill_cp_size = cp_size;
+                }
+                auto config      = HybridPoolConfigCreator::createConfig(model, pc, kv, false, draft_tokens);
+                config.block_num = 3;
+                config.group_block_nums.assign(config.cache_specs.size(), 3);
+                for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+                    if (config.group_region_names[gid] != KVCacheRegionName::INDEXER_STATE) {
+                        continue;
+                    }
+                    const auto pool        = BlockPoolConfigHelper::createConfigForGroup(config, gid);
+                    const auto base_layout = pool.memory_layouts.front();
+                    EXPECT_FALSE(base_layout.is_mla);
+                    EXPECT_FALSE(base_layout.use_mla);
+                    EXPECT_EQ(base_layout.seq_size_per_block, 64u * cp_size);
+                    for (bool shared : {false, true}) {
+                        auto layout = base_layout;
+                        if (shared) {
+                            layout.shared_block_stride_bytes = layout.layer_num * layout.kv_block_stride_bytes + 512;
+                        }
+                        const size_t         bytes   = shared ? layout.block_num * layout.shared_block_stride_bytes :
+                                                                layout.kv_block_pool_size_bytes;
+                        auto                 backing = torch::zeros({static_cast<int64_t>(bytes)},
+                                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+                        torch::Tensor        scales;
+                        MemoryLayoutStrategy strategy;
+                        ASSERT_TRUE(strategy.init(layout, backing, scales, backing.data_ptr()));
+                        const auto views = strategy.getLayerCacheTensors();
+                        ASSERT_EQ(views.size(), layout.layer_num);
+                        for (size_t layer = 0; layer < views.size(); ++layer) {
+                            const auto& view = views[layer];
+                            // Raw-token coverage is independent of the physical FP32 state payload.
+                            EXPECT_EQ(view.numel(), layout.block_num * layout.kv_block_stride_bytes / sizeof(float));
+                            ASSERT_EQ(view.dim(), 2);
+                            EXPECT_EQ(view.size(1), layout.kv_block_stride_bytes / sizeof(float));
+                            view[1].fill_(7.0f);
+                            const size_t offset =
+                                shared ? layout.shared_block_stride_bytes + layer * layout.kv_block_stride_bytes :
+                                         (layer * layout.block_num + 1) * layout.kv_block_stride_bytes;
+                            auto stored =
+                                backing.slice(0, offset, offset + layout.kv_block_stride_bytes).view(torch::kFloat32);
+                            EXPECT_TRUE(stored.eq(7.0f).all().item<bool>());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(GLM53CacheConfigTest, PinnedMlaLeavesKdaAndKPoolOnDeviceAndBudgetsExpandedTopk) {
     ScopedEnvVar host_budget("RTP_LLM_DSA_MLA_HOST_CACHE_MB", "64");
     ScopedEnvVar resident("RTP_LLM_DSA_MLA_RESIDENT_TOKENS", "0");
     ScopedEnvVar request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
-    auto         model     = makeGlm53Config();
-    model.data_type        = DataType::TYPE_BF16;
-    auto options           = makeKvConfig();
-    options.test_block_num = 256;
+    auto         model                            = makeGlm53Config();
+    model.data_type                               = DataType::TYPE_BF16;
+    auto options                                  = makeKvConfig();
+    options.test_block_num                        = 256;
     options.linear_request_cache_avg_query_length = 128;
     RuntimeConfig runtime;
     runtime.max_generate_batch_size                      = 3;
@@ -545,7 +649,7 @@ TEST(GLM53CacheConfigTest, LinearRequestAverageLengthIsAppliedWithLiveRequestFlo
     RuntimeConfig runtime;
     runtime.max_generate_batch_size = 64;
 
-    auto kv_config = makeKvConfig();
+    auto kv_config                                  = makeKvConfig();
     kv_config.linear_request_cache_avg_query_length = 128 * 16;
     auto config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
     config.finalizeBlockNums(10000, runtime);
@@ -697,7 +801,7 @@ TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesWithAverageLeng
     kv_config.enable_memory_cache                        = true;
     kv_config.enable_memory_cache_disk                   = true;
     for (int step : {1, 3, 4}) {
-        kv_config.linear_step                      = step;
+        kv_config.linear_step                           = step;
         kv_config.linear_request_cache_avg_query_length = 0;
         auto           config      = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
         const uint32_t checkpoints = 1024 / (128 * step);
@@ -725,15 +829,15 @@ TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesWithAverageLeng
 TEST(GLM53CacheConfigTest, ReplayRequiresExplicitOptInAndValidGeometry) {
     ScopedEnvVar replay("GLM53_KDA_REPLAY", nullptr);
     ScopedEnvVar request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0");
-    auto model = makeGlm53Config();
-    model.model_type = "glm5_3_flash";
-    model.data_type = DataType::TYPE_BF16;
-    model.linear_attention_config.linear_key_head_dim = 128;
+    auto         model                                  = makeGlm53Config();
+    model.model_type                                    = "glm5_3_flash";
+    model.data_type                                     = DataType::TYPE_BF16;
+    model.linear_attention_config.linear_key_head_dim   = 128;
     model.linear_attention_config.linear_value_head_dim = 128;
-    auto options = makeKvConfig();
-    options.reuse_cache = false;
+    auto options                                        = makeKvConfig();
+    options.reuse_cache                                 = false;
     ParallelismConfig pc;
-    pc.role_type = RoleType::DECODE;
+    pc.role_type      = RoleType::DECODE;
     const auto create = [&](int drafts = 3, bool mtp = false) {
         return HybridPoolConfigCreator::createConfig(model, pc, options, mtp, drafts);
     };
@@ -745,23 +849,23 @@ TEST(GLM53CacheConfigTest, ReplayRequiresExplicitOptInAndValidGeometry) {
     EXPECT_FALSE(create(3, true).linear_replay);
     pc.role_type = RoleType::PREFILL;
     EXPECT_FALSE(create().linear_replay);
-    pc.role_type = RoleType::DECODE;
+    pc.role_type        = RoleType::DECODE;
     options.reuse_cache = true;
     EXPECT_FALSE(create().linear_replay);
     {
         ScopedEnvVar supported_reuse("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
         EXPECT_TRUE(create().linear_replay);
     }
-    options.reuse_cache = false;
+    options.reuse_cache                           = false;
     model.linear_attention_config.ssm_state_dtype = DataType::TYPE_BF16;
     EXPECT_FALSE(create().linear_replay);
-    model.linear_attention_config.ssm_state_dtype = DataType::TYPE_FP32;
-    model.linear_attention_config.linear_key_head_dim = 64;
+    model.linear_attention_config.ssm_state_dtype       = DataType::TYPE_FP32;
+    model.linear_attention_config.linear_key_head_dim   = 64;
     model.linear_attention_config.linear_value_head_dim = 64;
     EXPECT_FALSE(create().linear_replay);
-    model.linear_attention_config.linear_key_head_dim = 128;
+    model.linear_attention_config.linear_key_head_dim   = 128;
     model.linear_attention_config.linear_value_head_dim = 128;
-    model.model_type = "kimi_linear";
+    model.model_type                                    = "kimi_linear";
     EXPECT_FALSE(create().linear_replay);
     model.model_type = "glm5_3_flash";
 }

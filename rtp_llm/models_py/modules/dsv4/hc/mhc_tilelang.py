@@ -291,8 +291,8 @@ def tk_mhc_fused_post_pre(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
     """Fuse the previous unit's post with this unit's pre for decode.
 
-    ``None`` is an applicability miss (disabled, unsupported layout, or more
-    than 16 tokens); import/JIT/launch failures remain fatal and carry shape
+    ``None`` is an applicability miss (disabled or unsupported layout);
+    import/JIT/launch failures remain fatal and carry shape
     context, matching the standalone TileLang wrappers.
     """
 
@@ -301,9 +301,6 @@ def tk_mhc_fused_post_pre(
     if not _can_use_tk(residual, hc_mult):
         return None
     if x.dtype != torch.bfloat16 or not x.is_contiguous():
-        return None
-    num_tokens = residual.numel() // (int(residual.shape[-2]) * int(residual.shape[-1]))
-    if num_tokens > 16:
         return None
     try:
         if _tk_mhc_fused_post_pre is None:

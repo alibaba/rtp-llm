@@ -22,12 +22,12 @@ public:
     static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
         RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
         BlockPoolConfig config;
-        config.pool_name      = "default";
-        config.block_num      = cache_config.block_num;
+        config.pool_name        = "default";
+        config.block_num        = cache_config.block_num;
         config.mla_tiered_cache = cache_config.dsa_mla_resident_tokens > 0;
-        const bool  is_hybrid = cache_config.groupNums() > 1;
-        auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
-        const auto& main_spec = cache_config.cache_specs[0];
+        const bool  is_hybrid   = cache_config.groupNums() > 1;
+        auto        layer_num   = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
+        const auto& main_spec   = cache_config.cache_specs[0];
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
                                                                   layer_num,
@@ -243,11 +243,11 @@ private:
             RTP_LLM_CHECK_WITH_INFO(conv_type_size > 0,
                                     "invalid linear conv state dtype=%d",
                                     static_cast<int>(linear_spec->conv_state_dtype));
-            cfg.is_linear_attention = true;
+            cfg.is_linear_attention           = true;
             cfg.enable_linear_cache_partition = cache_config.use_mla;
-            cfg.linear_num_k_heads  = linear_spec->local_num_k_heads;
-            cfg.linear_num_v_heads  = linear_spec->local_num_v_heads;
-            cfg.linear_conv_history = linear_spec->conv_kernel_dim - 1;
+            cfg.linear_num_k_heads            = linear_spec->local_num_k_heads;
+            cfg.linear_num_v_heads            = linear_spec->local_num_v_heads;
+            cfg.linear_conv_history           = linear_spec->conv_kernel_dim - 1;
             cfg.linear_q_bytes_per_history =
                 static_cast<size_t>(linear_spec->local_num_k_heads) * linear_spec->head_k_dim * conv_type_size;
             cfg.linear_k_bytes_per_history = cfg.linear_q_bytes_per_history;
@@ -264,13 +264,14 @@ private:
         const bool is_dsv4_state    = std::dynamic_pointer_cast<DSV4StateSpec>(spec) != nullptr;
 
         // A mixed KDA+MLA model has a model-level use_mla flag, but independent
-        // LINEAR and typed DSV4 paged groups must never be reshaped as generic
+        // LINEAR and typed DSV4 KV/state groups must never be reshaped as generic
         // MLA. Shared HybridCache still builds its single physical layout from
         // the leading FULL spec, so this remains true for the common pool.
-        cfg.is_mla  = !cfg.is_linear_attention && !is_dsv4_paged_kv && (cache_config.use_mla || cache_config.is_sparse);
-        cfg.use_mla = !cfg.is_linear_attention && !is_dsv4_paged_kv && cache_config.use_mla;
+        cfg.is_mla = !cfg.is_linear_attention && !is_dsv4_paged_kv && !is_dsv4_state
+                     && (cache_config.use_mla || cache_config.is_sparse);
+        cfg.use_mla = !cfg.is_linear_attention && !is_dsv4_paged_kv && !is_dsv4_state && cache_config.use_mla;
         cfg.enable_kv_cache_partition = !is_dsv4_paged_kv && !is_dsv4_state;
-        cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
+        cfg.seq_size_per_block        = static_cast<size_t>(cache_config.seq_size_per_block);
 
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;
