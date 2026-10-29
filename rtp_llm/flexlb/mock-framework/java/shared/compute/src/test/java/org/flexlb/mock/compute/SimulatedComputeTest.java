@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test;
 
 class SimulatedComputeTest {
     private static NoiseModel.Sample sample(long nanos) {
-        return new NoiseModel.Sample(Duration.ofNanos(nanos), 1, 0, Duration.ofNanos(nanos));
+        return new NoiseModel.Sample(Duration.ofNanos(nanos), 0, Duration.ofNanos(nanos));
     }
 
     @Test void waitsForPlannedTimeAndReportsActualElapsed() throws Exception {

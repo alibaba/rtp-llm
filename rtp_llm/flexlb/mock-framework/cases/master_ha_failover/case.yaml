@@ -62,9 +62,9 @@ environment:
       test_block_num: 21554
       # 原 preset 的显式 Host 块容量；Host 组件接线留待后续实现。
       memory_cache_blocks: 52295
-      # 原 DSv4 legacy_unverified 校准公式；DeepSeek preset 通过 noise.scale 乘以 1.23。
+      # 原 DSv4 legacy_unverified 校准公式；DeepSeek preset 的 1.23 倍率直接乘入公式，不启用噪声。
       compute:
-        expression: max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307
+        expression: 1.23 * (max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307
           * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens
           / 1024. * computeTokens / 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015
           * sum(hitCacheTokens / 1024. * hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16,
@@ -80,9 +80,7 @@ environment:
           - 8, 0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / 1024.)
           - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize
           - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * sum(computeTokens / 1024.)
-          + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))
-        noise:
-          scale: 1.23
+          + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.)))))
   decode:
     engine: rtp
     deployment:

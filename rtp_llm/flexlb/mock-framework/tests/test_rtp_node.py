@@ -108,7 +108,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                 assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 10)
                 assert f'role="{role}"' in samples[0]
                 effective = json.loads((directory / 'effective-config.json').read_text())
-                assert effective['compute']['noise']['scale'] == 1
+                assert 'scale' not in effective['compute']['noise']
             assert (await task)['status'] == 'PASS'
         finally:
             if not task.done():

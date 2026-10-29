@@ -9,10 +9,10 @@ import org.flexlb.mock.api.model.ComputeSpec;
 
 /** One keyed draw per invocation; no shared RNG or invocation-order counter. */
 public final class NoiseModel {
-    public record Sample(Duration base, double scale, double jitterMs, Duration planned) {
+    public record Sample(Duration base, double jitterMs, Duration planned) {
         public Sample {
             if (base == null || planned == null || base.isNegative() || planned.isNegative()
-                    || !Double.isFinite(scale) || scale < 0 || !Double.isFinite(jitterMs))
+                    || !Double.isFinite(jitterMs))
                 throw new IllegalArgumentException("Invalid compute sample");
         }
     }
@@ -21,7 +21,7 @@ public final class NoiseModel {
 
     public Sample apply(Duration base, String invocationKey) {
         if (base.isNegative()) throw new IllegalArgumentException("Negative base duration");
-        double mean = base.toNanos() / 1e6 * spec.scale();
+        double mean = base.toNanos() / 1e6;
         double sigma = Math.hypot(spec.stddev_ms(), mean * spec.stddev_ratio());
         double jitter = 0;
         if (sigma > 0) {
@@ -31,7 +31,7 @@ public final class NoiseModel {
             jitter = Math.max(-spec.max_deviation_ms(), Math.min(spec.max_deviation_ms(), gaussian * sigma));
         }
         var planned = FormulaForward.milliseconds(Math.max(0, mean + jitter));
-        return new Sample(base, spec.scale(), jitter, planned);
+        return new Sample(base, jitter, planned);
     }
 
     static long keyedSeed(long seed, String key) {

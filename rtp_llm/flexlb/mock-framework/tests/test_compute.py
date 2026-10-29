@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize('compute', [
     {'expression': '1', 'unexpected': 1},
-    {'expression': '1', 'noise': {'scale': -1}},
+    {'expression': '1', 'noise': {'stddev_ms': -1}},
+    {'expression': '1', 'noise': {'scale': 2}},
+    {'expression': '1', 'scale': 2},
     {'expression': '1', 'noise': {'scale': '2'}},
     {'expression': '1', 'noise': {'seed': 1.5}},
     {'expression': '1', 'noise': {'seed': 2 ** 63}},
@@ -42,7 +44,7 @@ def test_top_level_compute_is_rejected(case_data, compile_data):
 
 def test_python_compile_to_java_formula_noise_and_timer(case_data, compile_data, tmp_path):
     case_data['environment']['prefill']['config'].update({
-        'compute.expression': 'param(baseMs, 1) + 0.5*totalComputeTokens', 'compute.noise.scale': 2,
+        'compute.expression': '2 * (param(baseMs, 1) + 0.5*totalComputeTokens)',
     })
     compiled = compile_data(case_data)
     config = tmp_path / 'component.json'
@@ -54,11 +56,11 @@ def test_python_compile_to_java_formula_noise_and_timer(case_data, compile_data,
                    capture_output=True, text=True, check=True, timeout=10)
     result = json.loads(output.read_text())
     assert result['state'] == 'COMPLETED'
-    assert result['base_ns'] == 5_000_000 and result['planned_ns'] == 10_000_000
+    assert result['base_ns'] == 10_000_000 and result['planned_ns'] == 10_000_000
     assert result['elapsed_ns'] >= 10_000_000
-    assert result['effective']['noise'] == {'scale': 2.0, 'stddev_ms': 0.0, 'stddev_ratio': 0.0,
+    assert result['effective']['noise'] == {'stddev_ms': 0.0, 'stddev_ratio': 0.0,
                                             'max_deviation_ms': 0.0, 'seed': 0}
-    assert result['effective']['expression'].startswith('param(baseMs')
+    assert result['effective']['expression'].startswith('2 * (param(baseMs')
 
 
 @pytest.mark.parametrize('key,value', [

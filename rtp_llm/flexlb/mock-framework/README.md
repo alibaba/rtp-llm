@@ -279,7 +279,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 一个真实完成的 Forward batch 记录一次耗时，不能按 batch 中请求数重复记录。请求终态按请求计数，token 按本轮实际计算和提交分别统计。新增两项 Forward 指标，不增加对应服务接口：
 
 - `rtp_llm_model_forward_us`：模拟 Forward 的实际耗时，单位微秒；对齐 real 模型 Forward 调用区间的含义，不包含请求排队或网络 TTFT。
-- `mock_model_forward_planned_us`：公式、scale 和噪声确定的本轮计划耗时，单位微秒。
+- `mock_model_forward_planned_us`：公式和可选噪声确定的本轮计划耗时，单位微秒。
 
 实际计时从提交本轮计算到公共执行层收到完成通知，包含计时器延迟和回调调度等待，在处理结果及提交 token/KV 前结束。计划和实际对同一完成 batch 各记一次，取消批次不补完成样本。差值可以揭示宿主调度/GC 等干扰，不能单独归因为 CPU 不足；Client TTFT 仍取真实接收时间。本仓 real `NormalExecutor.cc` 围绕 model_->forward 计时，`RtpLLMMetrics.cc` 将该字段注册并报告为 Gauge；本轮因此采用同名微秒 Gauge，计划耗时也用 Gauge。Gauge 保留最近一批，不能拿采样点平均值冒充逐批平均；吞吐仍使用累计 token 与耗时 Histogram 的 sum/count。KMonitor 与 Prometheus 的采样、聚合管线不据此宣称完全相同。
 
@@ -625,7 +625,6 @@ environment:
     engine: rtp
     config:
       compute.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
-      compute.noise.scale: 1
       compute.noise.stddev_ratio: 0.05
       compute.noise.max_deviation_ms: 20
       compute.noise.seed: 42
@@ -646,7 +645,7 @@ environment:
 
 公式复用生产 ArithmeticFormula 的函数、`param(name, value)`、`sum(...)`。param 初始值按解析时求值，只用常量；不新增参数映射。结果单位 ms，可保留到 ns，不设隐式 1ms 下限；未知变量、负数、非有限值和溢出报错。逐请求变量只能在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。RTP 另外绑定 cpSize、cpEnabled（0/1）、tpSize、dpSize，来自本实例实际配置；只有公式显式引用才参与求值，不自动按并行度缩放已有拟合公式。`totalComputeTokens^2` 和 `sum(computeTokens^2)` 不等价。computeTokens=input−hit，contextTokens=input+generated，stepTokens 由 Engine 提供，图片不计算特征 token。
 
-噪声先乘 scale，再加高斯；默认 scale=1，stddev_ms/stddev_ratio=0，二者按平方和开根合并。启用随机噪声须有 seed 与正的 max_deviation_ms，裁剪扰动后耗时下限为 0。按 seed、Engine 身份、角色和 batch 身份确定一次 Sample，不随调用顺序改变；不同真实 batch 使用不同身份。
+倍率直接乘入 expression，例如 `1.23 * (原公式)`；不提供独立的 scale 或 noise.scale 配置。噪声只在公式结果上加高斯扰动；默认 stddev_ms/stddev_ratio=0，二者按平方和开根合并。启用随机噪声须有 seed 与正的 max_deviation_ms，裁剪扰动后耗时下限为 0。按 seed、Engine 身份、角色和 batch 身份确定一次 Sample，不随调用顺序改变；不同真实 batch 使用不同身份。
 
 `plan()` 只算耗时，`SimulatedCompute.submit()` 才等待；Execution 可取消，唯一终态为 COMPLETED/CANCELLED。关闭取消未完成项并拒绝新任务，回调在独立虚拟线程执行。共享 Compute 不提交缓存、不释放 Engine 资源，也不把计时完成当请求成功。
 
@@ -685,7 +684,7 @@ CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明�
 | prefill_max_wait_timeout_ms | 600000 | 不配置 | P 待实现独立等待期限。 |
 | max_rpc_timeout_ms | 7200000 | 7200000 | 待实现独立 RPC 上限；已有请求总期限不因此失效。 |
 | load_cache_timeout_ms | 不配置 | 5000 | D 生效；删除 P 无效项。 |
-| compute | 原公式、scale=1.23 | 19.5+0.175*batchSize | 保留，不按 CP/TP 二次缩放。 |
+| compute | 1.23 * (原公式)，不配噪声 | 19.5+0.175*batchSize | 保留，不按 CP/TP 二次缩放。 |
 | generation | 不配置 | 不配置 | 本 Case 使用固定长度回放，不抽 EOS。 |
 | decode.tokens_per_step | 不配置 | 2.6 | D 平均进度模型，不等于真实投机参数。 |
 
@@ -718,7 +717,7 @@ EngineMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独立注册�
 | mock_engine_cache_lookup_tokens_total / mock_engine_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
 | mock_engine_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
 | rtp_llm_model_forward_us | Gauge | 最近一个完成 Forward 的实际耗时，微秒；计时到执行完成通知，不包含等待调度域锁和结果提交。 |
-| mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式、scale 和噪声。 |
+| mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
 | mock_engine_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
 | mock_engine_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
 | mock_engine_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 含可驱逐缓存，不等于 free。 |

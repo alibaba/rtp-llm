@@ -42,8 +42,8 @@ def test_ha_case_keeps_one_playback_and_full_rolling_order_without_progress_or_s
     assert (p['deployment']['replicas'], d['deployment']['replicas']) == (48, 192)
     assert (p['config']['seq_size_per_block'], d['config']['seq_size_per_block']) == (512, 128)
     assert (p['config']['test_block_num'], d['config']['test_block_num']) == (21554, 221485)
-    assert p['config']['compute']['expression'] == calibration['prefill_expression']
-    assert p['config']['compute']['noise']['scale'] == preset['prefill']['scale']
+    assert p['config']['compute']['expression'] == f"{preset['prefill']['scale']} * ({calibration['prefill_expression']})"
+    assert 'noise' not in p['config']['compute']
     assert d['config']['decode']['tokens_per_step'] == preset['decode']['tokens_per_step']
     assert p['config']['enable_memory_cache'] is True
     assert 'generation' not in p['config'] and 'generation' not in d['config']

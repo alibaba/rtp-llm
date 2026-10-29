@@ -7,16 +7,15 @@ public record ComputeSpec(String expression, @Argument(optional=true) Noise nois
     public ComputeSpec {
         if (expression == null || expression.isBlank() || expression.length() > 32768)
             throw new IllegalArgumentException("Compute expression must contain 1..32768 characters");
-        noise = noise == null ? new Noise(null, null, null, null, null) : noise;
+        noise = noise == null ? new Noise(null, null, null, null) : noise;
     }
 
-    public record Noise(@Argument(optional=true, minimum=0) Double scale,
-                        @Argument(optional=true, minimum=0) Double stddev_ms,
+    public record Noise(@Argument(optional=true, minimum=0) Double stddev_ms,
                         @Argument(optional=true, minimum=0) Double stddev_ratio,
                         @Argument(optional=true, minimum=0) Double max_deviation_ms,
                         @Argument(optional=true) Long seed) {
         public Noise {
-            scale = number(scale, 1); stddev_ms = number(stddev_ms, 0);
+            stddev_ms = number(stddev_ms, 0);
             stddev_ratio = number(stddev_ratio, 0); max_deviation_ms = number(max_deviation_ms, 0);
             boolean random = stddev_ms > 0 || stddev_ratio > 0;
             if (random && (seed == null || max_deviation_ms == 0))
