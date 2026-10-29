@@ -30,7 +30,7 @@ class GroupedQKNormTest(unittest.TestCase):
                 q = torch.randn(256, device="cuda", dtype=dtype) * 0.1
                 k = torch.randn_like(q) * 0.1
                 module = ZeroCenteredFusedQKRMSNorm(q, k, heads, 1, 256)
-                for rows in (1, 3, 4, 8, 16, 20, 24, 28, 31, 32):
+                for rows in (1, 3, 4, 7, 8, 16, 17, 28, 31, 32):
                     with self.subTest(heads=heads, gamma=dtype, rows=rows):
                         x = torch.randn(
                             rows, (heads + 2) * 256, device="cuda", dtype=torch.bfloat16
@@ -51,8 +51,8 @@ class GroupedQKNormTest(unittest.TestCase):
                         )
 
     def test_graph_refreshes_inputs_and_raw_gains(self):
-        for heads in (6, 12):
-            for rows in (1, 4, 16, 28):
+        for heads in (3, 6, 12):
+            for rows in (1, 17, 28):
                 x = torch.randn(
                     rows, (heads + 2) * 256, device="cuda", dtype=torch.bfloat16
                 )
@@ -77,7 +77,7 @@ class GroupedQKNormTest(unittest.TestCase):
                     )
 
     def test_unsupported_layout_keeps_fallback(self):
-        for heads in (6, 12):
+        for heads in (3, 6, 12):
             q = torch.randn(256, device="cuda", dtype=torch.bfloat16)
             k = q.clone()
             module = ZeroCenteredFusedQKRMSNorm(q, k, heads, 1, 256)
@@ -89,6 +89,20 @@ class GroupedQKNormTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(module(x.clone()), self.reference(x, q, k, heads))
                 )
+
+    def test_unsupported_gamma_and_dtype_use_original(self):
+        self.q = torch.randn(256, device="cuda", dtype=torch.bfloat16)
+        self.k = self.q.clone()
+        self.model = ZeroCenteredFusedQKRMSNorm(self.q, self.k, 3, 1, 256)
+        self.model.q_weight = torch.randn(512, device="cuda", dtype=torch.bfloat16)[::2]
+        for dtype in (torch.bfloat16, torch.float32):
+            x = torch.randn(7, 1280, device="cuda", dtype=dtype)
+            self.assertTrue(
+                torch.equal(
+                    self.reference(x, self.model.q_weight, self.k, 3),
+                    self.model(x.clone()),
+                )
+            )
 
 
 if __name__ == "__main__":

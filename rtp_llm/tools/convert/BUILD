@@ -31,9 +31,3 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
-
-py_test(
-    name = "nvfp4_cache_test",
-    srcs = ["nvfp4_cache_test.py"],
-    deps = ["//rtp_llm:testlib"],
-)

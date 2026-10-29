@@ -140,3 +140,14 @@ alias(
     actual = "//rtp_llm/cpp/cuda_graph/tests:cuda_graph_copy_kernel_test",
     visibility = ["//visibility:public"],
 )
+
+cc_test(
+    name = "cuda_sampler_sm120_test",
+    srcs = ["CudaSamplerSm120Test.cc"],
+    copts = copts(),
+    deps = test_deps + [
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+    ],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+    tags = ["RTX_5000_PRO_CU13"],
+)

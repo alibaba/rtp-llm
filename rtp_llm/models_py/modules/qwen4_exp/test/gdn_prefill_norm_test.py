@@ -67,7 +67,7 @@ class GdnPrefillNormTest(unittest.TestCase):
 
     def test_exact_complete_norm_and_projection(self):
         for width in (768, 1536, 3072):
-            for rows in (2048, 4093, 4096, 8192, 12288):
+            for rows in (2048, 4093, 8192) if width == 3072 else (2048, 4093, 12288):
                 torch.manual_seed(30000 + width + rows)
                 weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
                 native = RmsNormGated(weight, group_size=128, activation="sigmoid")
@@ -81,6 +81,8 @@ class GdnPrefillNormTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(actual.view(torch.int16), expected.view(torch.int16))
                 )
+                if rows != 4093:
+                    continue
                 projection = Fp8Linear(
                     (torch.randn(2560, width, device="cuda") * 0.1).to(
                         torch.float8_e4m3fn

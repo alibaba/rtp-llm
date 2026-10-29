@@ -4,12 +4,8 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
-from rtp_llm.models_py.modules.hybrid.gated_residual import (
-    inject_into_residual,
-)
-from rtp_llm.models_py.modules.qwen4_exp.test import (
-    residual_norm_fp8_test as hc_fixture,
-)
+from rtp_llm.models_py.modules.hybrid.gated_residual import inject_into_residual
+from rtp_llm.models_py.modules.hybrid.test import residual_fixtures as hc_fixture
 
 
 class _Attention(nn.Module):
@@ -27,8 +23,8 @@ class ResidualPendingTest(unittest.TestCase):
     def layer(self):
         layer = Qwen4ExpDecoderLayer.__new__(Qwen4ExpDecoderLayer)
         nn.Module.__init__(layer)
-        layer.attn_hyper_connection = hc_fixture.ResidualNormFp8Test().module()
-        layer.mlp_hyper_connection = hc_fixture.ResidualNormFp8Test().module()
+        layer.attn_hyper_connection = hc_fixture.ResidualFp8Fixture().module()
+        layer.mlp_hyper_connection = hc_fixture.ResidualFp8Fixture().module()
         layer.self_attn = _Attention()
         layer.mlp = _Mlp()
         return layer

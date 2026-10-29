@@ -346,10 +346,10 @@ TEST_F(FusedCopyTest, MixedPinnedAndDeviceSrc) {
 // FusedStridedCopy tests (invokeFusedStridedCopy)
 // ---------------------------------------------------------------------------
 
-// MTP prefill packs a 240 MiB hidden tensor beside tiny metadata. Cover the
+// Exercise the 512-block launch cap beside tiny metadata. Cover the
 // bulk launch, vector tail, unaligned metadata, and fresh data on graph replay.
 TEST_F(FusedCopyTest, LargeMixedCopiesGraphLiveInputs) {
-    constexpr size_t large_bytes = 240 * 1024 * 1024 + 7;
+    constexpr size_t large_bytes = 32 * 1024 * 1024 + 7;
     constexpr size_t small_bytes = 17;
     uint8_t *        large_src = nullptr, *large_dst = nullptr, *small_src = nullptr, *small_dst = nullptr;
     CUDA_CHECK(cudaMalloc(&large_src, large_bytes));

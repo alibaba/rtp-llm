@@ -3,14 +3,14 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test as fixture
+from rtp_llm.models_py.modules.hybrid.test import residual_fixtures as fixture
 from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class InjectProjectionContractTest(unittest.TestCase):
     def module(self):
-        return fixture.ResidualNormFp8Test().module(True)
+        return fixture.ResidualFp8Fixture().module(True)
 
     def reference_gate(self, module, x):
         normalized = module._norm(x)

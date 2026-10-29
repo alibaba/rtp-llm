@@ -1,3 +1,7 @@
+import datetime
+import os
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -83,5 +87,54 @@ class HeadIpcGatherTest(unittest.TestCase):
         self.assertIs(seen[0], local)
 
 
+def _gather_worker():
+    import torch.distributed as dist
+
+    rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", timeout=datetime.timedelta(seconds=90))
+    workspace = Qwen4HeadIpcGather(dist.group.WORLD, torch.device("cuda", rank))
+    try:
+        streams = (torch.cuda.Stream(), torch.cuda.Stream())
+        for iteration, rows in enumerate((1, 4, 32, 4)):
+            with torch.cuda.stream(streams[iteration % 2]):
+                base = torch.arange(rows * 124160, device="cuda").reshape(rows, 124160)
+                base = base.remainder(37).float() - 18 + iteration
+                local = (base + rank * 64).bfloat16()
+                actual = workspace.try_gather(local)
+                assert actual is not None, "supported input fell back"
+                expected = torch.cat(
+                    (base.bfloat16(), (base + 64).bfloat16()), dim=1
+                ).float()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        workspace.close()
+        workspace.close()
+        assert workspace.try_gather(local) is None
+        dist.destroy_process_group()
+
+
+class HeadIpcGatherIntegrationTest(unittest.TestCase):
+    def test_rank_order_live_inputs_stream_handoff_and_close(self):
+        self.assertEqual(torch.cuda.device_count(), 2)
+        self.assertEqual(torch.cuda.get_device_capability(0), (12, 0))
+        self.assertTrue(torch.cuda.can_device_access_peer(0, 1))
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                "--nproc-per-node=2",
+                __file__,
+            ],
+            check=True,
+            timeout=240,
+        )
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if "LOCAL_RANK" in os.environ:
+        _gather_worker()
+    else:
+        unittest.main()

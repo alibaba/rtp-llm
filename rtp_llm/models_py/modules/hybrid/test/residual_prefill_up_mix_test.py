@@ -4,9 +4,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
-from rtp_llm.models_py.modules.qwen4_exp.test.residual_norm_fp8_test import (
-    ResidualNormFp8Test,
-)
+from rtp_llm.models_py.modules.hybrid.test.residual_fixtures import ResidualFp8Fixture
 from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
     fused_mix_reduce,
 )
@@ -44,7 +42,7 @@ class ResidualPrefillUpMixTest(unittest.TestCase):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_complete_consumer_with_and_without_write_gate(self):
-        oracle = ResidualNormFp8Test()
+        oracle = ResidualFp8Fixture()
         for rows in (4093, 4094, 4095, 4096, 12288):
             for inject in (False, True):
                 model = oracle.module(inject)
@@ -55,7 +53,7 @@ class ResidualPrefillUpMixTest(unittest.TestCase):
                 oracle.assert_outputs(model(x), expected)
 
     def test_complete_graph_refreshes_input_raw_gamma_and_up_scale(self):
-        oracle = ResidualNormFp8Test()
+        oracle = ResidualFp8Fixture()
         for rows in (4093, 4096, 12288):
             model = oracle.module(True)
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)

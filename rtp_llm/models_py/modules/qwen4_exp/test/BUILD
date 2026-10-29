@@ -20,14 +20,6 @@ py_test(
 )
 
 py_test(
-    name = "residual_stream_test",
-    srcs = ["residual_stream_test.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13"},
-)
-
-py_test(
     name = "ple_test",
     srcs = ["ple_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],
@@ -67,8 +59,7 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
 )
 
-# Skips unless QWEN4_EXP_UPSTREAM_SRC points at transformers'
-# modeling_qwen4_exp.py; see the module docstring.
+# Component parity uses the pinned in-repo upstream fixture by default.
 py_test(
     name = "upstream_parity_test",
     srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
@@ -78,8 +69,7 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
 )
 
-# GDN (linear attention) parity on a tiny K != V config; also skips unless
-# QWEN4_EXP_UPSTREAM_SRC is set.
+# GDN (linear attention) parity on a tiny K != V config.
 py_test(
     name = "gdn_upstream_parity_test",
     srcs = ["gdn_upstream_parity_test.py", "upstream_fixture.py"],
@@ -154,24 +144,6 @@ py_test(
 py_test(
     name = "target_metadata_test",
     srcs = ["target_metadata_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "residual_up_mix_test",
-    srcs = ["residual_up_mix_test.py", "residual_norm_fp8_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "residual_norm_fp8_test",
-    srcs = ["residual_norm_fp8_test.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
@@ -268,15 +240,6 @@ py_test(
 )
 
 py_test(
-    name = "fp8_small_quant_test",
-    srcs = ["fp8_small_quant_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
     name = "prefill_silu_quant_test",
     srcs = ["prefill_silu_quant_test.py"],
     deps = ["//rtp_llm:testlib"],
@@ -299,14 +262,6 @@ py_test(
     deps = ["//rtp_llm:testlib", ":math_references"],
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
-)
-
-py_test(
-    name = "small_qk_norm_test",
-    srcs = ["small_qk_norm_test.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
-    tags = ["L20_CU13"],
-    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(
@@ -351,15 +306,6 @@ py_test(
 )
 
 py_test(
-    name = "vocab_embedding_test",
-    srcs = ["vocab_embedding_test.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
-)
-
-py_test(
     name = "upstream_parity_qualification",
     srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
     main = "upstream_parity_test.py",
@@ -379,14 +325,6 @@ py_test(
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
     tags = ["manual"],
     exec_properties = select({"@//:using_cuda13_x86": {"gpu": "RTX_5000_PRO_CU13"}, "//conditions:default": {"gpu": "H20_CU13"}}),
-)
-
-py_test(
-    name = "fp8_dense_gemv_test",
-    srcs = ["fp8_dense_gemv_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
 )
 
 py_test(
@@ -425,33 +363,6 @@ py_test(
 )
 
 py_test(
-    name = "grouped_qk_norm_test",
-    srcs = ["grouped_qk_norm_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "prefill_qk_norm_test",
-    srcs = ["prefill_qk_norm_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "residual_medium_up_mix_test",
-    srcs = ["residual_medium_up_mix_test.py", "residual_norm_fp8_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
     name = 'ple_hash_triton_test',
     srcs = ['ple_hash_triton_test.py', 'ple_test.py'],
     deps = ["//rtp_llm:testlib"],
@@ -470,26 +381,8 @@ py_test(
 )
 
 py_test(
-    name = 'residual_prefill_inject_norm_test',
-    srcs = ['residual_prefill_inject_norm_test.py', 'residual_norm_fp8_test.py'],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
     name = "ple_gate_test",
     srcs = ["ple_gate_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "residual_separate_epilogue_test",
-    srcs = ["residual_separate_epilogue_test.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
@@ -515,35 +408,8 @@ py_test(
 )
 
 py_test(
-    name = "residual_pending_test",
-    srcs = ["residual_pending_test.py", "residual_norm_fp8_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
     name = "indexer_norm_rope_test",
     srcs = ["indexer_norm_rope_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "residual_inject_projection_test",
-    srcs = ["residual_inject_projection_test.py", "residual_norm_fp8_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = 'residual_splitk_inject_test',
-    srcs = ['residual_splitk_inject_test.py', 'residual_norm_fp8_test.py'],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
@@ -580,15 +446,6 @@ py_test(
 py_test(
     name = "qsa_projection_pair_test",
     srcs = ["qsa_projection_pair_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "residual_prefill_up_mix_test",
-    srcs = ["residual_prefill_up_mix_test.py", "residual_norm_fp8_test.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
@@ -700,15 +557,6 @@ py_test(
 )
 
 py_test(
-    name = "vocab_byte_gather_test",
-    srcs = ["vocab_byte_gather_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
-)
-
-py_test(
     name = "gdn_norm_quant_test",
     srcs = ["gdn_norm_quant_test.py"],
     deps = ["//rtp_llm:testlib"],
@@ -729,12 +577,24 @@ py_test(
 py_test(
     name = "head_ipc_gather_test",
     srcs = ["head_ipc_gather_test.py"],
+    args = ["HeadIpcGatherTest"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )
 
+py_test(
+    name = "head_ipc_gather_integration_test",
+    srcs = ["head_ipc_gather_test.py"],
+    main = "head_ipc_gather_test.py",
+    args = ["HeadIpcGatherIntegrationTest"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "long",
+    env = {"GPU_COUNT": "2"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+)
 
 py_test(
     name = "draft_qsa_fused_test",

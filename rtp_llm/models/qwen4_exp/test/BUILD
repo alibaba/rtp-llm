@@ -19,6 +19,7 @@ py_test(
 py_test(
     name = "real_ckpt_mapping_test",
     srcs = ["real_ckpt_mapping_test.py"],
+    data = ["reference/config.json", "reference/model.safetensors.index.json"],
     deps = ["//rtp_llm:testlib"],
 )
 

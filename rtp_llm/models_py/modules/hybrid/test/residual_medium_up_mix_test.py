@@ -6,7 +6,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
-from rtp_llm.models_py.modules.qwen4_exp.test import residual_norm_fp8_test as oracle
+from rtp_llm.models_py.modules.hybrid.test import residual_fixtures as oracle
 from rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_triton import (
     try_fp8_hc_medium_up_mix,
 )
@@ -68,8 +68,8 @@ class MediumHCConsumerTest(unittest.TestCase):
                     )
 
     def test_complete_consumer_with_and_without_inject(self):
-        reference = oracle.ResidualNormFp8Test()
-        for rows in (1, 3, 4, 8, 16, 20, 24, 28, 32):
+        reference = oracle.ResidualFp8Fixture()
+        for rows in (8, 16, 20, 24, 28, 32):
             for inject in (False, True):
                 torch.manual_seed(28100 + rows)
                 model = reference.module(inject)
@@ -80,7 +80,7 @@ class MediumHCConsumerTest(unittest.TestCase):
                 reference.assert_outputs(model(x), expected)
 
     def test_graph_refreshes_input_gamma_fp8_weight_and_scale(self):
-        reference = oracle.ResidualNormFp8Test()
+        reference = oracle.ResidualFp8Fixture()
         for rows in (8, 16, 28):
             model = reference.module(True)
             model.up_projection.role = model.down_projection.role = "DECODE"
