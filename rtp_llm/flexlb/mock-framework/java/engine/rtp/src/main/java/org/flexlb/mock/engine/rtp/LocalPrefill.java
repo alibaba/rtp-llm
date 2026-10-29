@@ -6,19 +6,18 @@ import java.util.concurrent.CompletionStage;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.engine.rtp.cache.DeviceCache;
+import org.flexlb.mock.cache.DeviceCache;
 
 /** Native LocalGenerate boundary. Scheduling and network delivery use separate execution contexts. */
 final class LocalPrefill implements AutoCloseable {
-    static final int LIMIT = RtpScheduler.LIMIT;
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
     private final RtpConfig config;
     private final EngineLoop engine;
     private final TaskHistory history = new TaskHistory();
 
-    LocalPrefill(RtpConfig config, DeviceCache cache) {
+    LocalPrefill(RtpConfig config, DeviceCache cache, Scheduler.Factory schedulers) {
         this.config = config;
-        engine = new EngineLoop(this, new RtpScheduler(this, config, cache), config.compute(), config.role(), config.id());
+        engine = new EngineLoop(this, schedulers.create(this, cache), config.compute(), config.role(), config.id());
     }
 
     final class Session implements Scheduler.Listener {
@@ -56,7 +55,11 @@ final class LocalPrefill implements AutoCloseable {
         try {
             session.request = engine.submit(RtpTasks.input(input, Long.toString(input.getRequestId()), System.nanoTime(),
                 rpcDeadline, retained, config.blockSize()), session);
-        } catch (RequestFailure failure) { throw RtpErrors.failure(failure); }
+        } catch (RequestFailure failure) {
+            if (failure.reason() == RequestFailure.Reason.INVALID)
+                throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605);
+            throw RtpErrors.failure(failure);
+        }
         return session;
     }
 
@@ -66,7 +69,6 @@ final class LocalPrefill implements AutoCloseable {
         var generation = input.getGenerateConfig();
         RtpRequestValidation.supported(input);
         if (input.getTokenIdsCount() < 1 || (long) input.getTokenIdsCount() + 1 > config.maxSeqLen()
-                || config.maxBatchTokens() > 0 && input.getTokenIdsCount() > config.maxBatchTokens()
                 || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()
                 || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
             throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);

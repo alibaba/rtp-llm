@@ -1,10 +1,9 @@
-package org.flexlb.mock.engine.rtp.cache;
+package org.flexlb.mock.cache;
 
 import java.util.*;
-import org.flexlb.mock.cache.BlockPool;
 import static org.flexlb.mock.cache.BlockPool.Kind.*;
 
-/** RTP admission and cache publication; shared BlockPool owns every physical reference. */
+/** Block admission and prefix publication; shared BlockPool owns every physical reference. */
 public final class DeviceCache implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
     public enum EvictionPolicy { LRU, LFU, FIFO }

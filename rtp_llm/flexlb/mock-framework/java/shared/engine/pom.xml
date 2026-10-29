@@ -3,6 +3,7 @@
   <parent><groupId>org.flexlb.mock</groupId><artifactId>mock-framework</artifactId><version>1.0-SNAPSHOT</version><relativePath>../../../pom.xml</relativePath></parent>
   <artifactId>mock-engine</artifactId>
   <dependencies>
+    <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-cache</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>org.flexlb.mock</groupId><artifactId>mock-compute</artifactId><version>${project.version}</version></dependency>
     <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.8.2</version><scope>test</scope></dependency>
   </dependencies>

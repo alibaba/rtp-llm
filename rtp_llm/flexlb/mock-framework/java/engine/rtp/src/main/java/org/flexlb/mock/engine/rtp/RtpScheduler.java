@@ -4,14 +4,13 @@ import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.engine.rtp.cache.DeviceCache;
+import org.flexlb.mock.cache.DeviceCache;
 import org.flexlb.mock.metrics.EngineMetrics;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.RequestState.Phase.*;
 
 /** RTP queue policy. No RPC objects, executors or compute loop live here. */
 final class RtpScheduler implements Scheduler {
-    static final int LIMIT = 1024;
     private final Object lock;
     private final RtpConfig config;
     private final DeviceCache cache;
@@ -53,6 +52,11 @@ final class RtpScheduler implements Scheduler {
     private record Batch(List<Member> members) {}
     private record Notice(Runnable action, boolean terminal) {}
 
+    static Scheduler.Factory factory(RtpConfig config) {
+        Objects.requireNonNull(config);
+        return (lock, cache) -> new RtpScheduler(lock, config, cache);
+    }
+
     RtpScheduler(Object lock, RtpConfig config, DeviceCache cache) {
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
@@ -66,7 +70,7 @@ final class RtpScheduler implements Scheduler {
                 || prefill() && config.maxBatchTokens() > 0 && input.tokens() > config.maxBatchTokens())
             throw new RequestFailure(INVALID, "Request exceeds scheduling limits");
         if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
-        if (owned.size() >= LIMIT) throw new RequestFailure(OVERLOADED, "Request/delivery limit reached");
+        if (owned.size() >= RtpConfig.REQUEST_LIMIT) throw new RequestFailure(OVERLOADED, "Request/delivery limit reached");
         var entry = new Entry(input, Objects.requireNonNull(listener));
         active.put(input.identity(), entry);
         owned.add(entry);

@@ -7,7 +7,7 @@ import io.grpc.*;
 import io.grpc.stub.StreamObserver;
 import io.grpc.netty.NettyServerBuilder;
 import java.net.InetSocketAddress;
-import org.flexlb.mock.engine.rtp.cache.DeviceCache;
+import org.flexlb.mock.cache.DeviceCache;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -49,7 +49,7 @@ class PrefillTransferTest {
         final ManagedChannel channel;
         Harness(RtpConfig config) throws Exception {
             cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
-            service = new RtpRpcService(config, cache);
+            service = new RtpRpcService(config, cache, RtpScheduler.factory(config));
             transfer = (PrefillTransfer) service.transfer();
             var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(service);
             if (transfer != null) builder.addService(transfer);

@@ -9,7 +9,8 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.flexlb.mock.engine.rtp.cache.DeviceCache;
+import org.flexlb.mock.cache.DeviceCache;
+import org.flexlb.mock.engine.Scheduler;
 import org.flexlb.mock.runtime.ApiServer;
 
 /** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
@@ -21,10 +22,12 @@ public final class RtpNode implements AutoCloseable {
     private Server rpc;
     private ApiServer api;
 
-    private RtpNode(RtpConfig config) {
-        this.config = config;
+    private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
+        this.config = Objects.requireNonNull(config);
+        Objects.requireNonNull(schedulers);
         cache = new DeviceCache(config.deviceBlocks(), config.reserveBlocks(), config.evictionPolicy());
-        service = new RtpRpcService(config, cache);
+        try { service = new RtpRpcService(config, cache, schedulers); }
+        catch (RuntimeException error) { cache.close(); throw error; }
     }
 
     public static RtpNode start(RtpConfig config) throws IOException {
@@ -32,7 +35,15 @@ public final class RtpNode implements AutoCloseable {
     }
 
     public static RtpNode start(RtpConfig config, int rpcPort, int controlPort) throws IOException {
-        var node = new RtpNode(config);
+        return start(config, rpcPort, controlPort, RtpScheduler.factory(config));
+    }
+
+    public static RtpNode start(RtpConfig config, Scheduler.Factory schedulers) throws IOException {
+        return start(config, 0, 0, schedulers);
+    }
+
+    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, Scheduler.Factory schedulers) throws IOException {
+        var node = new RtpNode(config, schedulers);
         try {
             var builder = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", rpcPort)).addService(node.service);
             var transfer = node.service.transfer();

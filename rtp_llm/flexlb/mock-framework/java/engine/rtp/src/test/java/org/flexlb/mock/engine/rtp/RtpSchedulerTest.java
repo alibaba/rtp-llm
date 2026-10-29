@@ -8,7 +8,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import org.flexlb.mock.compute.SimulatedCompute;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.engine.rtp.cache.DeviceCache;
+import org.flexlb.mock.cache.DeviceCache;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 

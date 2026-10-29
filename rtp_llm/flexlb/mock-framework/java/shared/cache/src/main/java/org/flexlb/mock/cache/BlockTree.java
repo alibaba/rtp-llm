@@ -1,9 +1,8 @@
-package org.flexlb.mock.engine.rtp.cache;
+package org.flexlb.mock.cache;
 
 import java.util.*;
-import org.flexlb.mock.cache.BlockPool;
 
-/** RTP full-attention device tree. Called only under DeviceCache's owner monitor. */
+/** Full-attention device prefix tree. Called only under DeviceCache's owner monitor. */
 final class BlockTree {
     static final class Node {
         final long key, admission;

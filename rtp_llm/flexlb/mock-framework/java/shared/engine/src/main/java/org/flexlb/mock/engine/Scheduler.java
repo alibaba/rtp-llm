@@ -2,11 +2,18 @@ package org.flexlb.mock.engine;
 
 import java.util.List;
 import java.util.Objects;
+import org.flexlb.mock.cache.DeviceCache;
 import org.flexlb.mock.compute.ForwardBatch;
 import org.flexlb.mock.compute.SimulatedCompute;
 
 /** Called under the EngineLoop lock. Queues, reservations and result commits belong to the implementation. */
 public interface Scheduler extends AutoCloseable {
+    /** Create one fresh policy per Engine, sharing its exact domain lock and instance-owned cache. */
+    @FunctionalInterface
+    interface Factory {
+        Scheduler create(Object lock, DeviceCache cache);
+    }
+
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
                  long started, long deadline, List<Long> keys, boolean reuse, boolean retained) {
         public Input {

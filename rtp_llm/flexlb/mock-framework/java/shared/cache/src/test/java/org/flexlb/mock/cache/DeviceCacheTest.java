@@ -1,4 +1,4 @@
-package org.flexlb.mock.engine.rtp.cache;
+package org.flexlb.mock.cache;
 
 import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;

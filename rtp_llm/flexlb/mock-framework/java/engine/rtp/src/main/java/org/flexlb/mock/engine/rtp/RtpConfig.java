@@ -8,7 +8,7 @@ import java.nio.file.Path;
 import java.util.*;
 import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
-import org.flexlb.mock.engine.rtp.cache.DeviceCache.EvictionPolicy;
+import org.flexlb.mock.cache.DeviceCache.EvictionPolicy;
 import org.flexlb.mock.api.model.DecodeSpec;
 import org.flexlb.mock.api.model.StoppingSpec;
 
@@ -16,6 +16,7 @@ import org.flexlb.mock.api.model.StoppingSpec;
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxContextBatchSize, int maxGenerateBatchSize, int tpSize, int loadTimeoutMs, JsonNode business, ComputeModel compute, DecodeStepModel decodeModel, StoppingModel stoppingModel) {
+    public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
         .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -72,8 +73,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeBool(config, "disable_decode_first_malloc_device_reuse", false),
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
-            nativeInt(config, "max_context_batch_size", 1, 1, RtpScheduler.LIMIT),
-            nativeInt(config, "max_generate_batch_size", 1, 1, RtpScheduler.LIMIT),
+            nativeInt(config, "max_context_batch_size", 1, 1, REQUEST_LIMIT),
+            nativeInt(config, "max_generate_batch_size", 1, 1, REQUEST_LIMIT),
             nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE),
             loadTimeout(config), config, compute, decode, stopping);
     }
@@ -88,7 +89,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("disable_decode_first_malloc_device_reuse", disableDecodeFirstReuse)
             .put("load_cache_timeout_ms", loadTimeoutMs).put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("dp_size", 1).put("dp_rank", 0).put("tp_size", tpSize);
-        result.put("max_context_batch_size", maxContextBatchSize).put("max_generate_batch_size", maxGenerateBatchSize).put("local_request_limit", LocalPrefill.LIMIT);
+        result.put("max_context_batch_size", maxContextBatchSize).put("max_generate_batch_size", maxGenerateBatchSize).put("local_request_limit", REQUEST_LIMIT);
         result.set("config", business()); result.set("compute", compute.effectiveConfiguration());
         if (role == Role.prefill) result.set("generation", MODELS_JSON.valueToTree(stoppingModel.configuration()));
         else result.set("decode", MODELS_JSON.valueToTree(decodeModel.configuration()));

@@ -1,9 +1,9 @@
-package org.flexlb.mock.engine.rtp.cache;
+package org.flexlb.mock.cache;
 
 import java.util.*;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.flexlb.mock.engine.rtp.cache.DeviceCache.EvictionPolicy.*;
+import static org.flexlb.mock.cache.DeviceCache.EvictionPolicy.*;
 
 /** Behavioral cases mirrored from main FullEvictionTest; no reflection into implementation state. */
 class BlockTreeTest {
