@@ -9,15 +9,14 @@ DeepGEMM initializes persistent split barriers per CUDA stream. Warm up on
 the capture stream before recording a graph; an unwarmed capture stream
 retains the unfused path instead of initializing barriers during capture.
 
-The SM90 path keeps Hopper's existing
-post and prenorm arithmetic boundaries, then fuses only the materialized-mixes
-split/Sinkhorn/apply epilogue. It is enabled for guarded decode shapes.
+SM90 low-token decode uses the vLLM two-kernel boundary: post mapping and the
+next projection are fused first, followed by coefficient reduction, Sinkhorn,
+delayed readout and RMSNorm in one epilogue kernel.
 """
 
 from __future__ import annotations
 
 import importlib
-import math
 from functools import lru_cache
 from typing import Callable
 
@@ -33,7 +32,6 @@ MHCQuantizedOutput = tuple[
 ]
 
 _WARMED_STREAMS: set[tuple[int, int]] = set()
-_SM90_WARMED_STREAMS: set[tuple[int, int]] = set()
 
 
 @lru_cache(maxsize=1)
@@ -49,10 +47,10 @@ def _get_mega_mhc() -> Callable | None:
 
 
 @lru_cache(maxsize=1)
-def _get_sm90_mixes_backend():
+def _get_sm90_mega_mhc():
     try:
         return importlib.import_module(
-            "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_mega"
+            "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel"
         )
     except (ImportError, OSError):
         # Optional TileLang dependencies are not present in every build.
@@ -72,6 +70,18 @@ def _is_dense_tensor(value, shape, dtype, device) -> bool:
 def _stream_key(device: torch.device) -> tuple[int, int]:
     stream = torch.cuda.current_stream(device)
     return stream.device.index, stream.cuda_stream
+
+
+def _can_try_sm90_mega_mhc(attn_out: torch.Tensor) -> bool:
+    if (
+        not isinstance(attn_out, torch.Tensor)
+        or attn_out.device.type != "cuda"
+        or attn_out.ndim != 3
+        or attn_out.shape[-1] != 5120
+        or not 0 < attn_out.numel() // attn_out.shape[-1] <= 32
+    ):
+        return False
+    return tuple(torch.cuda.get_device_capability(attn_out.device)) == (9, 0)
 
 
 def _units_supported(previous, next_hc, norm, device) -> bool:
@@ -238,177 +248,6 @@ def is_supported(
         )
 
 
-def is_sm90_supported(
-    attn_out: torch.Tensor,
-    residual: torch.Tensor,
-    post: torch.Tensor,
-    comb: torch.Tensor,
-    previous: DelayedHCUnit,
-    next_hc: DelayedHCUnit,
-    norm: torch.nn.Module,
-) -> bool:
-    """Host-only gate for the SM90 post/prenorm/pre epilogue seam.
-
-    This gate does not import TileLang or the experimental fused-pre module.
-    Up to 256 physical decode tokens use the established DeepGEMM prenorm;
-    larger decode groups use the established TileLang prenorm. Both materialize
-    FP32 mixes before the fused epilogue. Flat prefill retains its original
-    path. The TileLang epilogue is token-major and has no Q-specific limit.
-    """
-    if torch.version.hip is not None:
-        return False
-    if (
-        not isinstance(attn_out, torch.Tensor)
-        or attn_out.device.type != "cuda"
-        or attn_out.dtype != torch.bfloat16
-        # Decode keeps [batch, speculative_tokens, hidden]. Flat [T, H]
-        # inputs are prefill and deliberately retain their established path.
-        or attn_out.ndim != 3
-        or attn_out.shape[-1] != 5120
-        or not attn_out.is_contiguous()
-    ):
-        return False
-    device = attn_out.device
-    leading = tuple(attn_out.shape[:-1])
-    tokens = attn_out.numel() // 5120
-    if tokens <= 0:
-        return False
-    if type(previous) is not DelayedHCUnit or type(next_hc) is not DelayedHCUnit:
-        return False
-    if (
-        previous.dim != 5120
-        or next_hc.dim != 5120
-        or previous.hc_mult != 4
-        or next_hc.hc_mult != 4
-        or next_hc._previous_ref is None
-        or next_hc._previous_ref() is not previous
-        or next_hc.hc_sinkhorn_iters < 1
-        or type(norm).__module__ != "rtp_llm.models_py.modules.base.cuda.norm"
-        or type(norm).__name__ != "RMSNorm"
-    ):
-        return False
-    from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
-
-    if type(norm) is not RMSNorm:
-        return False
-    contracts = (
-        (residual, leading + (4, 5120), torch.bfloat16),
-        (post, leading + (4, 1), torch.float32),
-        (comb, leading + (4, 4), torch.float32),
-        (previous.pre_mix_out, leading + (4,), torch.float32),
-        (next_hc.fn, (24, 20480), torch.float32),
-        (next_hc.scale, (3,), torch.float32),
-        (next_hc.base, (24,), torch.float32),
-        (norm.weight, (5120,), torch.bfloat16),
-    )
-    if any(
-        not _is_dense_tensor(tensor, shape, dtype, device)
-        for tensor, shape, dtype in contracts
-    ):
-        return False
-    if torch.is_grad_enabled() and (
-        attn_out.requires_grad
-        or any(tensor.requires_grad for tensor, _, _ in contracts)
-    ):
-        return False
-    if not all(
-        isinstance(eps, (int, float)) and math.isfinite(eps) and eps >= 0
-        for eps in (next_hc.norm_eps, next_hc.hc_eps, norm.variance_epsilon)
-    ):
-        return False
-    try:
-        if tuple(torch.cuda.get_device_capability(device)) != (9, 0):
-            return False
-    except Exception:
-        return False
-    from rtp_llm.models_py.modules.dsv41.hc import v41_prenorm
-
-    if tokens <= 256 and not v41_prenorm.is_supported(residual, next_hc.fn):
-        return False
-    with torch.cuda.device(device):
-        return (
-            not torch.cuda.is_current_stream_capturing()
-            or _stream_key(device) in _SM90_WARMED_STREAMS
-        )
-
-
-def _run_sm90_post_pre(
-    attn_out: torch.Tensor,
-    residual: torch.Tensor,
-    post: torch.Tensor,
-    comb: torch.Tensor,
-    previous: DelayedHCUnit,
-    next_hc: DelayedHCUnit,
-    norm: torch.nn.Module,
-):
-    """Execute the guarded SM90 seam without changing prenorm/RMSNorm trees."""
-    backend = _get_sm90_mixes_backend()
-    if backend is None:
-        return None
-    from rtp_llm.models_py.modules.dsv41.hc import mhc_sm90_post, v41_prenorm
-
-    leading = tuple(attn_out.shape[:-1])
-    tokens = attn_out.numel() // 5120
-    attn_flat = attn_out.view(tokens, 5120)
-    residual_flat = residual.view(tokens, 4, 5120)
-    post_flat = post.view(tokens, 4)
-    comb_flat = comb.view(tokens, 16)
-    previous_pre = previous.pre_mix_out.view(tokens, 4)
-    # The unfused delayed-HC post already overwrites this residual, and every
-    # guarded caller treats the pre-post value as dead.  Reuse it so captured
-    # decode graphs do not reserve another T*4*5120 BF16 buffer.
-    new_residual = residual_flat
-
-    mhc_sm90_post.post_fwd(
-        attn_flat,
-        residual_flat,
-        post_flat,
-        comb_flat,
-        out=new_residual,
-    )
-    # Preserve both the DeepGEMM projection and _reduce_prenorm_kernel output
-    # as a materialized FP32 boundary.  Only the three following memory/small
-    # reduction kernels are replaced.
-    residual_for_prenorm = new_residual.view(*leading, 4, 5120)
-    mixes = v41_prenorm.prenorm(
-        residual_for_prenorm, next_hc.fn, next_hc.norm_eps
-    )
-    if mixes is None:
-        if tokens <= 256:
-            raise RuntimeError("guarded SM90 mega_mhc prenorm contract changed")
-        # Match DelayedHCUnit._pre_impl's large-M fallback exactly.  In
-        # particular, n_splits=1 and the original FP32 weight are part of
-        # its arithmetic tree; do not substitute a DeepGEMM projection.
-        ops = importlib.import_module(
-            "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"
-        )
-        mixes = ops.mhc_pre_norm_fn(
-            residual_for_prenorm, next_hc.fn, None, next_hc.norm_eps, n_splits=1
-        )
-    new_pre, new_post, new_comb, layer_input = backend.pre_mixes_fwd(
-        mixes.view(tokens, 24),
-        new_residual,
-        previous_pre,
-        next_hc.scale,
-        next_hc.base,
-        pre_eps=next_hc.hc_eps,
-        sinkhorn_eps=next_hc.hc_eps,
-        post_mult=2.0,
-        sinkhorn_repeat=next_hc.hc_sinkhorn_iters,
-    )
-    normalized = norm(layer_input)
-    next_hc.pre_mix_out = new_pre.view(*leading, 4)
-    with torch.cuda.device(attn_out.device):
-        if not torch.cuda.is_current_stream_capturing():
-            _SM90_WARMED_STREAMS.add(_stream_key(attn_out.device))
-    return (
-        new_residual.view(*leading, 4, 5120),
-        normalized.view(*leading, 5120),
-        new_post.view(*leading, 4, 1),
-        new_comb.view(*leading, 4, 4),
-    )
-
-
 def try_fused_post_pre(
     attn_out: torch.Tensor,
     residual: torch.Tensor,
@@ -429,9 +268,8 @@ def try_fused_post_pre(
     failures propagate to the caller. ``reuse_residual`` overwrites the input
     residual after its corresponding tiles have been loaded, or the padded
     copy when padding is needed.
-    The SM90 decode seam follows the unfused delayed-post contract
-    and overwrites its dead residual input in place; it rejects the SM100-only
-    ``reuse_residual`` mode rather than allocating another graph-pool tensor.
+    SM90 low-token decode uses an out-of-place residual because the projection
+    CTAs read the old residual while one projection tile writes the new one.
     ``original_tokens`` preserves the installed backend's pre-compaction
     split heuristic using at most 512 execution rows when padding is needed.
     Returned leading-row views retain that bounded padded storage.
@@ -444,13 +282,15 @@ def try_fused_post_pre(
         original_tokens is None
         and not reuse_residual
         and not output_fp8
-        and is_sm90_supported(
-            attn_out, residual, post, comb, previous, next_hc, norm
-        )
+        and _can_try_sm90_mega_mhc(attn_out)
     ):
-        return _run_sm90_post_pre(
-            attn_out, residual, post, comb, previous, next_hc, norm
-        )
+        sm90_backend = _get_sm90_mega_mhc()
+        if sm90_backend is not None:
+            result = sm90_backend.try_vllm_two_kernel_post_pre(
+                attn_out, residual, post, comb, previous, next_hc, norm
+            )
+            if result is not None:
+                return result
     if not is_supported(attn_out, residual, post, comb, previous, next_hc, norm):
         return None
     operation = _get_mega_mhc()
@@ -543,7 +383,6 @@ def try_fused_post_pre(
 
 __all__ = [
     "can_preserve_compact_mhc",
-    "is_sm90_supported",
     "is_supported",
     "try_fused_post_pre",
 ]

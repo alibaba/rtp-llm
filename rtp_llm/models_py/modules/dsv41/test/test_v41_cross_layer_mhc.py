@@ -232,7 +232,9 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
 
         with patch.object(
             transition, "_can_quantize_attention_input", return_value=True
-        ), patch.object(transition, "try_fused_post_pre", side_effect=backend):
+        ), patch.object(transition, "is_sm90", return_value=False), patch.object(
+            transition, "try_fused_post_pre", side_effect=backend
+        ):
             got = run_blocks(blocks, self.hidden, self.ids)
         self.assertIsNone(seen[0])
         self.assertIs(seen[1], quantized)
@@ -241,6 +243,16 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
             expected = run_blocks(make_blocks(), self.hidden, self.ids)
         for value, ref in zip(got, expected):
             torch.testing.assert_close(value, ref, rtol=0, atol=0)
+
+    def test_sm90_transition_uses_bf16_consumer_contract(self):
+        def backend(*args, output_fp8=False):
+            self.assertFalse(output_fp8)
+            return reference_transition(*args)
+
+        with patch.object(
+            transition, "_can_quantize_attention_input", return_value=True
+        ), patch.object(transition, "is_sm90", return_value=True):
+            self.assertEqual(self.compare(backend=backend), 2)
 
     def test_fp8_gate_preserves_overrides_and_non_native_attention(self):
         layer = make_blocks()[0]

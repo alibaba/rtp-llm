@@ -324,7 +324,7 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             serialized.assert_called_once()
         self.assertEqual(len(warmup._WARMED_KEYS), 1)
 
-    def test_sm90_warms_small_prenorm_without_probing_sm100_mega(self):
+    def test_sm90_warms_small_prenorm_and_two_kernel_mega(self):
         with contextlib.ExitStack() as stack:
             self._mock_device(stack)
             stack.enter_context(
@@ -339,6 +339,14 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             small = stack.enter_context(patch.object(warmup, "_launch_small_prenorm"))
             tile = stack.enter_context(patch.object(warmup, "_launch_tilelang_chain"))
             mega = stack.enter_context(patch.object(warmup, "_launch_mega"))
+            sm90_probe = stack.enter_context(
+                patch.object(
+                    warmup.v41_mega_mhc, "_get_sm90_mega_mhc", return_value=Mock()
+                )
+            )
+            sm90_mega = stack.enter_context(
+                patch.object(warmup, "_launch_sm90_mega")
+            )
             warmup.warmup_v41_hc_jit(model(block()), max_m=4, device="cpu")
             self.assertEqual(
                 [call.args[1] for call in small.call_args_list], [1, 2, 3, 4]
@@ -348,6 +356,10 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             probe.assert_not_called()
             sms.assert_not_called()
             mega.assert_not_called()
+            sm90_probe.assert_called_once()
+            self.assertEqual(
+                [call.args[1] for call in sm90_mega.call_args_list], [1]
+            )
 
     def test_missing_native_backends_compile_reachable_tilelang_fallback_only(self):
         with contextlib.ExitStack() as stack:

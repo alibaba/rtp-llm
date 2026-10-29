@@ -7,6 +7,7 @@ from typing import NamedTuple
 
 import torch
 
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.models_py.modules.dsv4 import _record_tensor
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
@@ -86,6 +87,13 @@ def forward_decode_layer(
     prepared = None
     if isinstance(hidden, PendingDecodePost):
         if _enabled() and _plain_decode_block(layer) and layer.engram is None:
+            # The SM90 seam returns a BF16 normalized input. Let the existing
+            # QKV linear choose its native BF16 small-M path or its established
+            # group-32 FP8 quantizer. MegaMHC's optional FP8 output uses a
+            # different minimum scale and would change tiny-input results.
+            output_fp8 = _can_quantize_attention_input(
+                layer, hidden.output, attn_fn
+            ) and not is_sm90(hidden.output.device)
             prepared = try_fused_post_pre(
                 hidden.output,
                 hidden.residual,
@@ -94,7 +102,7 @@ def forward_decode_layer(
                 hidden.previous,
                 layer.attn_hc,
                 layer.attn_norm,
-                output_fp8=_can_quantize_attention_input(layer, hidden.output, attn_fn),
+                output_fp8=output_fp8,
             )
         hidden = hidden.materialize() if prepared is None else prepared[0]
     defer_post = can_defer_decode_post(layer, next_layer, preserve_output)

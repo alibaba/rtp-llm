@@ -189,7 +189,7 @@ def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
 
 
 def _launch_sm90_mega(pair, tokens, device):
-    """Compile the default-off materialized-mixes seam before graph capture."""
+    """Compile the vLLM two-kernel MegaMHC boundary before graph capture."""
     previous, next_hc, norm = pair
     previous.pre_mix_out = torch.full(
         (1, tokens, 4), 0.25, dtype=torch.float32, device=device
@@ -294,8 +294,7 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     sm90_mega_enabled = (
         capability == (9, 0)
         and bool(pairs)
-        and small_enabled
-        and v41_mega_mhc._get_sm90_mixes_backend() is not None
+        and v41_mega_mhc._get_sm90_mega_mhc() is not None
     )
     num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
@@ -409,27 +408,17 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         if sm90_mega_enabled:
             for config, source in pairs.items():
                 pair = _clone_pair(source, device)
-                detail = f"config={config} m=1 materialized-mixes"
-                # One runtime-M representative compiles the post Triton,
-                # unchanged DeepGEMM/reduction, and fused TileLang epilogue.
-                common._run_triton_warmup_launch_with_retry(
-                    "V41 SM90 mega_mhc",
-                    detail,
-                    partial(
-                        common._run_deepgemm_warmup_launch_with_retry,
+                # T<16 and T>=16 select different projection tile widths.
+                for tokens in (1, 16):
+                    if tokens > min(int(max_m), 32):
+                        continue
+                    detail = f"config={config} m={tokens} vllm-two-kernel"
+                    common._run_tilelang_warmup_launch_with_retry(
                         "V41 SM90 mega_mhc",
                         detail,
-                        partial(
-                            common._run_tilelang_warmup_launch_with_retry,
-                            "V41 SM90 mega_mhc",
-                            detail,
-                            partial(_launch_sm90_mega, pair, 1, device),
-                            device=device,
-                        ),
+                        partial(_launch_sm90_mega, pair, tokens, device),
                         device=device,
-                    ),
-                    device=device,
-                )
+                    )
                 del pair
                 common._sync_cuda(device)
                 common._release_cuda_cache(device)
