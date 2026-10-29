@@ -259,6 +259,12 @@ def sparse_prefill_attn(
                 f"selected index {max_selected} is outside KV sequence length {T}"
             )
 
+    from .sparse_prefill_sm90 import try_sm90_sparse_prefill
+
+    result = try_sm90_sparse_prefill(q, k, v, selected, blk_k=blk_k)
+    if result is not None:
+        return result
+
     from .sparse_prefill_bitmap import try_bitmap_prefill
 
     result = try_bitmap_prefill(q, k, v, selected)

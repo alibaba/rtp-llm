@@ -623,6 +623,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha import (
             sparse_prefill_attn,
         )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_prefill_sm90 import (
+            supports_sm90_sparse_prefill,
+        )
 
         tokens = int(qkv.shape[0])
         q, k, v = torch.split(qkv, [self.q_width, self.kv_width, self.kv_width], dim=-1)
@@ -653,22 +656,33 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         outputs = []
         offset = 0
+        used_sm90 = False
         validation_kwargs = {"validate_selected": False} if trusted_selected else {}
         for seq_len in lengths:
             end = offset + seq_len
             seq_q = q[offset:end].reshape(1, seq_len, self.head_num, self.head_dim)
             seq_k = k[offset:end].reshape(1, seq_len, self.kv_head_num, self.head_dim)
             seq_v = v[offset:end].reshape(1, seq_len, self.kv_head_num, self.head_dim)
+            seq_q, seq_k, seq_v = (
+                tensor.transpose(1, 2) for tensor in (seq_q, seq_k, seq_v)
+            )
+            seq_selected = selected_indices[offset:end].unsqueeze(0).contiguous()
+            used_sm90 = supports_sm90_sparse_prefill(seq_q, seq_k, seq_v, seq_selected)
+            if not used_sm90:
+                # Retain the existing layout contract for every other backend.
+                seq_q, seq_k, seq_v = (
+                    tensor.contiguous() for tensor in (seq_q, seq_k, seq_v)
+                )
             seq_out = sparse_prefill_attn(
-                seq_q.transpose(1, 2).contiguous(),
-                seq_k.transpose(1, 2).contiguous(),
-                seq_v.transpose(1, 2).contiguous(),
-                selected_indices[offset:end].unsqueeze(0).contiguous(),
-                **validation_kwargs,
+                seq_q, seq_k, seq_v, seq_selected, **validation_kwargs
             )
             outputs.append(seq_out.transpose(1, 2).reshape(seq_len, self.q_width))
             offset = end
-        output = torch.cat(outputs, dim=0)
+        # The adopted output already owns packed NHD storage. A single request
+        # needs neither the historical BHSD-to-NHD copy nor a one-item cat.
+        output = (
+            outputs[0] if len(outputs) == 1 and used_sm90 else torch.cat(outputs, dim=0)
+        )
         if uses_stored_selection:
             self._selected_indices = None
         return output

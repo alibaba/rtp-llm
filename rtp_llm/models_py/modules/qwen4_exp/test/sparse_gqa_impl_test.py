@@ -470,6 +470,115 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_sm90_tp2_prefill_reads_packed_views_and_ragged_offsets(self):
+        if torch.version.hip is not None or torch.cuda.get_device_capability()[0] != 9:
+            self.skipTest("requires SM90")
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_fmha
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_prefill_sm90 import (
+            supports_sm90_sparse_prefill,
+        )
+
+        heads, kv_heads, dim = 12, 1, 256
+        q_width, kv_width = heads * dim, kv_heads * dim
+        for lengths in ((129,), (129, 133), (127, 129)):
+            with self.subTest(lengths=lengths):
+                torch.manual_seed(908)
+                configs, inputs = _configs()
+                configs.head_num, configs.kv_head_num = heads, kv_heads
+                inputs.input_lengths = torch.tensor(lengths, dtype=torch.int32)
+                inputs.prefix_lengths = torch.zeros(len(lengths), dtype=torch.int32)
+                with patch.object(
+                    sparse_gqa_impl,
+                    "FusedRopeKVCachePrefillOpQKVOut",
+                    self._IdentityRopeWriter,
+                ):
+                    impl = SparseGqaFmhaImpl(configs, inputs)
+                tokens = sum(lengths)
+                backing = torch.randn(
+                    tokens + 2,
+                    q_width + 2 * kv_width,
+                    device=_DEV,
+                    dtype=torch.bfloat16,
+                )
+                qkv = backing[1 : tokens + 1]
+                self.assertGreater(qkv.storage_offset(), 0)
+                selected = torch.full(
+                    (tokens, 2051), -1, device=_DEV, dtype=torch.int32
+                )
+                expected, offset = [], 0
+                for length in lengths:
+                    for row in range(length):
+                        complete = (row + 1) // 4 * 4
+                        selected[offset + row, :complete] = torch.arange(
+                            complete, device=_DEV, dtype=torch.int32
+                        )
+                        tail = row + 1 - complete
+                        selected[offset + row, 2048 : 2048 + tail] = torch.arange(
+                            complete, row + 1, device=_DEV, dtype=torch.int32
+                        )
+                    q, k, v = torch.split(
+                        qkv[offset : offset + length], [q_width, kv_width, kv_width], -1
+                    )
+                    logical = [
+                        value.reshape(1, length, h, dim).transpose(1, 2)
+                        for value, h in ((q, heads), (k, kv_heads), (v, kv_heads))
+                    ]
+                    ref = sparse_prefill_attn_torch_reference(
+                        *(t.double() for t in logical),
+                        selected[offset : offset + length].unsqueeze(0),
+                    )
+                    expected.append(ref.transpose(1, 2).reshape(length, q_width))
+                    offset += length
+                calls = []
+                original = sparse_fmha.sparse_prefill_attn
+
+                def record_call(q, k, v, ids, **kwargs):
+                    supported = supports_sm90_sparse_prefill(q, k, v, ids)
+                    calls.append(
+                        (
+                            supported,
+                            q.data_ptr(),
+                            k.data_ptr(),
+                            v.data_ptr(),
+                            q.is_contiguous(),
+                            k.is_contiguous(),
+                            v.is_contiguous(),
+                        )
+                    )
+                    return original(q, k, v, ids, **kwargs)
+
+                impl.set_trusted_selected_indices(selected)
+                with patch.object(
+                    sparse_fmha, "sparse_prefill_attn", side_effect=record_call
+                ):
+                    actual = impl.forward(qkv)
+                torch.testing.assert_close(
+                    actual.double(), torch.cat(expected), atol=0.0078125, rtol=0.008
+                )
+                self.assertEqual(len(calls), len(lengths))
+                offset = 0
+                for length, call_info in zip(lengths, calls):
+                    supported, q_ptr, k_ptr, v_ptr, *contiguous = call_info
+                    self.assertEqual(supported, length >= 128)
+                    if supported:
+                        expected_q_ptr = (
+                            qkv.data_ptr() + offset * qkv.stride(0) * qkv.element_size()
+                        )
+                        self.assertEqual(
+                            (q_ptr, k_ptr, v_ptr),
+                            (
+                                expected_q_ptr,
+                                expected_q_ptr + q_width * 2,
+                                expected_q_ptr + (q_width + kv_width) * 2,
+                            ),
+                        )
+                        self.assertEqual(contiguous, [False, False, False])
+                    else:
+                        self.assertEqual(contiguous, [True, True, True])
+                    offset += length
+                self.assertIsNone(impl._selected_indices)
+
     def test_missing_selection_is_rejected(self):
         impl = self._impl()
         qkv = torch.zeros(8, (_H_Q + 2 * _H_KV) * _D, device=_DEV).to(torch.bfloat16)

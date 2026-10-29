@@ -203,7 +203,7 @@ py_test(
 py_test(
     name = "sparse_fmha_test",
     srcs = ["sparse_fmha_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
+    deps = ["//rtp_llm/models_py:qsa_sparse_prefill_testlib"],
     exec_properties = {'gpu':'A10'},
 )
 
@@ -247,7 +247,7 @@ py_test(
 py_test(
     name = "sparse_prefill_bitmap_test",
     srcs = ["sparse_prefill_bitmap_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
-    deps = ["//rtp_llm:testlib", ":math_references"],
+    deps = ["//rtp_llm/models_py:qsa_sparse_prefill_testlib"],
     exec_properties = {'gpu':'A10'},
 )
 
@@ -788,5 +788,15 @@ py_test(
     deps = ["//rtp_llm/models_py:ple_component_testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13", "manual"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "sparse_prefill_sm90_test",
+    srcs = ["sparse_prefill_sm90_test.py", "sparse_prefill_sm90_test_utils.py"],
+    main = "sparse_prefill_sm90_test.py",
+    deps = ["//rtp_llm/models_py:qsa_sparse_prefill_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
