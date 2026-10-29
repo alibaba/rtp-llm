@@ -42,7 +42,7 @@ py_library(
         "modules/*.py",
         "modules/**/*.py",
     ]),
-    data = [":cutlass_moe_config", "kernels/cuda/prefill_cpu_ops.cc"] + glob([
+    data = [":cutlass_moe_config", "kernels/cuda/prefill_cpu_ops.cc", "kernels/cuda/mtp_frontend.cu"] + glob([
         "modules/hybrid/hy4_cmp_kernels/cuda/**",
     ]),
     deps = [
@@ -152,7 +152,7 @@ py_library(
         "kernels/*.py",
         "kernels/**/*.py",
     ]),
-    data = ["kernels/cuda/prefill_cpu_ops.cc"],
+    data = ["kernels/cuda/prefill_cpu_ops.cc", "kernels/cuda/mtp_frontend.cu"],
 )
 
 py_library(

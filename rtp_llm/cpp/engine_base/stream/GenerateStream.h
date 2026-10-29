@@ -611,7 +611,19 @@ public:
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
     // next_seq_len, propose_tokens; epoch guards stale clears in tests.
+    // Immutable publication shared by requests from one completed MTP batch.
+    // Row identity belongs to the request, so scheduler permutation does not
+    // require splitting and concatenating these tensors again.
+    struct MtpBatchDeviceState {
+        torch::Tensor next_lengths;
+        torch::Tensor propose_tokens;
+        torch::Tensor selected_tokens;
+        torch::Tensor hidden_states;
+    };
+
     struct MtpAsyncDeviceState {
+        std::shared_ptr<const MtpBatchDeviceState> batch;
+        int64_t batch_row = -1;
         uint64_t      epoch = 0;
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;

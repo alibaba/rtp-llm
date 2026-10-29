@@ -161,6 +161,8 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_token_gather",
+            "//rtp_llm/cpp/utils:mtp_fusion",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op"
         ],
         "//conditions:default": [],

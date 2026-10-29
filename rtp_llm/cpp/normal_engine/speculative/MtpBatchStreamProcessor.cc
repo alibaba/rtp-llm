@@ -9,6 +9,10 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/MtpFusion.h"
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_token_gather.h"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -764,6 +768,50 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         return;
     }
 
+#if USING_CUDA
+    if (mtpFusionEnabled()) {
+        std::vector<MtpNextInputRow> rows;
+        rows.reserve(batch_size);
+        torch::TensorOptions options;
+        bool supported = true;
+        for (const auto& stream : stream_groups.allStreams()) {
+            const auto& state = stream->getMtpAsyncDeviceState();
+            const auto& batch = state.batch;
+            if (!batch || state.batch_row < 0) {
+                supported = false;
+                break;
+            }
+            const auto& lengths = batch->next_lengths;
+            const auto& proposals = batch->propose_tokens;
+            if (!lengths.defined() || !proposals.defined() || !lengths.is_cuda()
+                || !proposals.is_cuda() || lengths.scalar_type() != torch::kInt32
+                || proposals.scalar_type() != torch::kInt32 || !lengths.is_contiguous()
+                || !proposals.is_contiguous() || lengths.dim() != 1 || proposals.dim() != 2
+                || proposals.size(1) <= 0 || state.batch_row >= lengths.size(0)
+                || state.batch_row >= proposals.size(0) || proposals.device() != lengths.device()
+                || (!rows.empty() && lengths.device() != options.device())) {
+                supported = false;
+                break;
+            }
+            options = lengths.options();
+            rows.push_back({proposals.data_ptr<int32_t>() + (state.batch_row + 1) * proposals.size(1) - 1,
+                            lengths.data_ptr<int32_t>() + state.batch_row});
+        }
+        torch::Tensor packed;
+        if (supported && tryMtpPrepareNextInputs(rows, options, packed,
+                                                 cuda_graph::graphGetCurrentStream().stream())) {
+            model_input.combo_tokens = packed.select(0, 0);
+            model_input.sequence_lengths = packed.select(0, 1);
+            model_input.prefix_lengths = packed.select(0, 2);
+            model_input.lm_output_indexes = packed.select(0, 3);
+            // Preserve input_lengths from the scheduler; do not assume every
+            // caller uses the same empty/decode convention.
+            model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
+            return;
+        }
+    }
+#endif
+
     // Fast path: consume next-step propose tokens published by dispatchDecodeAsync.
     {
         const auto                 all_streams = stream_groups.allStreams();
@@ -985,7 +1033,8 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
-    TensorHolder&                                host_holder) {
+    TensorHolder&                                host_holder,
+    torch::Tensor*                               selected_tokens) {
     // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
@@ -993,10 +1042,29 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
-    model_input.lm_output_indexes =
-        torch::arange(
-            0, total_tokens, propose_step_ + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
-        + (accept_len_d - 1);
+#if USING_CUDA
+    if (mtpFusionEnabled()) {
+        auto options = torch::TensorOptions().dtype(torch::kInt32).device(model_input.combo_tokens.device());
+        model_input.lm_output_indexes = torch::empty({static_cast<int64_t>(batch_size)}, options);
+        torch::Tensor no_selected_tokens;
+        if (selected_tokens != nullptr) {
+            *selected_tokens = torch::empty({static_cast<int64_t>(batch_size)}, options);
+        }
+        invokeMtpPostRejectionPrepare(accept_len_d,
+                                      model_input.combo_tokens,
+                                      model_input.lm_output_indexes,
+                                      selected_tokens != nullptr ? *selected_tokens : no_selected_tokens,
+                                      propose_step_ + 1,
+                                      cuda_graph::graphGetCurrentStream().stream(),
+                                      model_input.is_fake_stream);
+    } else
+#endif
+    {
+        model_input.lm_output_indexes =
+            torch::arange(
+                0, total_tokens, propose_step_ + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
+            + (accept_len_d - 1);
+    }
     model_input.last_hidden_states = model_output.all_hidden_states;
     hidden_states_d_t              = model_input.last_hidden_states;
 }
@@ -1004,7 +1072,8 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
 void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                                               SamplerOutput&      draft_sampler_output,
                                                               torch::Tensor&      draft_token_probs_d_t,
-                                                              TensorHolder&       host_holder) {
+                                                              TensorHolder&       host_holder,
+                                                              bool                compact_point_mass) {
     const size_t batch_size      = stream_groups.size();
     auto         draft_token_ids = emptyInt32OnPreferredDevice({(int64_t)batch_size, (int64_t)propose_step_});
 
@@ -1021,11 +1090,13 @@ void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups
 
         // Prefer main-thread device-state all_probs; fallback is safe after
         // worker clear because clear runs after specUpdate writes all_probs.
-        const auto& dev_probs = stream->getDraftAllProbsGpu();
-        RTP_LLM_CHECK_WITH_INFO(dev_probs.defined() || (sp_output_buffer && sp_output_buffer->all_probs.defined()),
-                                "one-step MTP draft all_probs missing for stream %ld",
-                                stream->streamId());
-        draft_token_probs_list.push_back(dev_probs.defined() ? dev_probs : sp_output_buffer->all_probs);
+        if (!compact_point_mass) {
+            const auto& dev_probs = stream->getDraftAllProbsGpu();
+            RTP_LLM_CHECK_WITH_INFO(dev_probs.defined() || (sp_output_buffer && sp_output_buffer->all_probs.defined()),
+                                    "one-step MTP draft all_probs missing for stream %ld",
+                                    stream->streamId());
+            draft_token_probs_list.push_back(dev_probs.defined() ? dev_probs : sp_output_buffer->all_probs);
+        }
     }
 
     if (!draft_token_id_slices.empty()) {
@@ -1038,7 +1109,8 @@ void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups
         }
     }
 
-    draft_token_probs_d_t          = torch::stack(draft_token_probs_list, 0).contiguous();
+    draft_sampler_output.draft_point_mass = compact_point_mass;
+    draft_token_probs_d_t = compact_point_mass ? torch::Tensor() : torch::stack(draft_token_probs_list, 0).contiguous();
     draft_sampler_output.all_probs = draft_token_probs_d_t;
     draft_sampler_output.token_ids = std::move(draft_token_ids);
 }
@@ -1048,7 +1120,17 @@ void MtpBatchStreamProcessor::updateMultiStepDraftSamplerOutput(const StreamGrou
                                                                 torch::Tensor&              draft_token_ids_d_t,
                                                                 torch::Tensor&              spec_token_ids_d_t,
                                                                 torch::Tensor&              draft_token_probs_d_t,
-                                                                std::vector<torch::Tensor>& draft_token_probs_list) {
+                                                                std::vector<torch::Tensor>& draft_token_probs_list,
+                                                                bool                        compact_point_mass) {
+    draft_sampler_output.draft_point_mass = compact_point_mass;
+    if (compact_point_mass) {
+        RTP_LLM_CHECK(draft_token_probs_list.empty());
+        draft_token_probs_d_t          = torch::Tensor();
+        draft_sampler_output.all_probs = torch::Tensor();
+        spec_token_ids_d_t             = draft_token_ids_d_t.slice(1, 1).contiguous();
+        draft_sampler_output.token_ids = spec_token_ids_d_t;
+        return;
+    }
     std::vector<torch::Tensor> prev_draft_token_probs_list;
     for (const auto& stream : stream_groups.allStreams()) {
         auto sp_output_buffer = stream->getSPOutputBuffer();
@@ -1122,8 +1204,11 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         // speculative decoding info
-        torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        torch::Tensor propose_all_probs;
+        if (draft_sampler_output.all_probs.defined()) {
+            propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        }
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
@@ -1233,8 +1318,11 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto next_batch_size = stream->nextBatchSize();
 
         // speculative decoding info
-        torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        torch::Tensor propose_all_probs;
+        if (draft_sampler_output.all_probs.defined()) {
+            propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        }
 
         // This scalar read runs on the bookkeeping worker after accept_len is
         // ready, so it does not sync the main thread. Move to main thread only

@@ -12,6 +12,7 @@ cc_library(
         "speculative/*.cc",
     ]),
     deps = [
+        "//rtp_llm/cpp/utils:mtp_fusion",
         "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
@@ -34,6 +35,9 @@ cc_library(
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_token_gather",
+            "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [

@@ -207,6 +207,26 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillTargetLogprobsUseEmittedFirstToke
         torch::allclose(update_infos[0].top_logprobs.cpu(), target_logprobs.top_logprobs.reshape({1, 1, 2}).cpu()));
     // Draft probabilities remain the independent next-step MTP distribution.
     EXPECT_TRUE(torch::allclose(update_infos[0].draft_token_probs.cpu(), draft_output.sampler_output.all_probs));
+    draft_output.sampler_output.all_probs = torch::Tensor();
+    std::vector<StreamSpecUpdateInfo> compact_updates;
+    processor.preparePrefillSpecUpdateInfo(
+        stream_groups, target_output, draft_output, torch::Tensor(), target_logprobs, new_tokens_all, compact_updates);
+    ASSERT_EQ(compact_updates.size(), update_infos.size());
+    EXPECT_FALSE(compact_updates[0].draft_token_probs.defined());
+    EXPECT_TRUE(torch::equal(compact_updates[0].new_tokens, update_infos[0].new_tokens));
+    EXPECT_TRUE(torch::equal(compact_updates[0].token_logprobs, update_infos[0].token_logprobs));
+    // dispatchOutput normally fills the next draft token after this assembly.
+    compact_updates[0].draft_token = 3;
+    stream->specUpdate(compact_updates[0]);
+    EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
+    EXPECT_EQ(toVec<int32_t>(stream->getSPOutputBuffer()->tokens), std::vector<int32_t>({2, 3}));
+    torch::Tensor next_probs;
+    SamplerOutput next_sampler;
+    TensorHolder  holder;
+    processor.updateOneStepDraftSamplerOutput(stream_groups, next_sampler, next_probs, holder, true);
+    EXPECT_TRUE(next_sampler.draft_point_mass);
+    EXPECT_FALSE(next_sampler.all_probs.defined());
+    EXPECT_EQ(toVec<int32_t>(next_sampler.token_ids), std::vector<int32_t>({3}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillThinkingTokenNeedsNoTargetLogprobPayload) {
@@ -361,6 +381,19 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsCoverReplacementAcce
         EXPECT_TRUE(torch::allclose(update_infos[i].top_logprobs.cpu(), expected_top_logprobs.cpu()));
         EXPECT_TRUE(torch::allclose(update_infos[i].draft_token_probs.cpu(),
                                     draft_prefill_output.sampler_output.all_probs.narrow(0, i, 1)));
+    }
+    draft_prefill_output.sampler_output.all_probs = torch::Tensor();
+    std::vector<StreamSpecUpdateInfo> compact_updates;
+    processor.prepareDecodeSpecUpdateInfo(
+        stream_groups, spec_output, draft_prefill_output, target_logprobs, compact_updates);
+    ASSERT_EQ(compact_updates.size(), update_infos.size());
+    for (size_t i = 0; i < compact_updates.size(); ++i) {
+        EXPECT_FALSE(compact_updates[i].draft_token_probs.defined());
+        EXPECT_TRUE(torch::equal(compact_updates[i].new_tokens, update_infos[i].new_tokens));
+        EXPECT_TRUE(torch::equal(compact_updates[i].draft_hidden_states, update_infos[i].draft_hidden_states));
+        EXPECT_TRUE(torch::equal(compact_updates[i].token_logprobs, update_infos[i].token_logprobs));
+        EXPECT_EQ(compact_updates[i].num_new_tokens, update_infos[i].num_new_tokens);
+        EXPECT_EQ(compact_updates[i].speculative_accepted_token_num, update_infos[i].speculative_accepted_token_num);
     }
 }
 
@@ -1701,6 +1734,18 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
 
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8};
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+    // Only token IDs are needed for deterministic top-1 draft proposals.
+    for (const auto& stream : stream_groups.allStreams()) {
+        stream->getSPOutputBuffer()->all_probs = torch::Tensor();
+        auto state                             = stream->getMtpAsyncDeviceState();
+        state.draft_all_probs_gpu              = torch::Tensor();
+        stream->setMtpAsyncDeviceState(std::move(state));
+    }
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder, true);
+    EXPECT_TRUE(sampler_output.draft_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
+    EXPECT_FALSE(draft_token_probs_d_t.defined());
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDeviceState) {
@@ -1768,6 +1813,18 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
     vector<float> expect_all_probs = {0.9, 0.8, 0.7, 0.6, 0.4, 0.3, 0.2, 0.1};
     EXPECT_TRUE(sampler_output.all_probs.is_cuda());
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+    // Only token IDs are needed for deterministic top-1 draft proposals.
+    for (const auto& stream : stream_groups.allStreams()) {
+        stream->getSPOutputBuffer()->all_probs = torch::Tensor();
+        auto state                             = stream->getMtpAsyncDeviceState();
+        state.draft_all_probs_gpu              = torch::Tensor();
+        stream->setMtpAsyncDeviceState(std::move(state));
+    }
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder, true);
+    EXPECT_TRUE(sampler_output.draft_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
+    EXPECT_FALSE(draft_token_probs_d_t.defined());
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
@@ -1841,6 +1898,25 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4,
                                       0.5, 0.6, 0.7, 0.8, 1.5, 1.6, 1.7, 1.8, 2.5, 2.6, 2.7, 2.8};
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+    // Only token IDs are needed for deterministic top-1 draft proposals.
+    for (const auto& stream : stream_groups.allStreams()) {
+        stream->getSPOutputBuffer()->all_probs = torch::Tensor();
+        auto state                             = stream->getMtpAsyncDeviceState();
+        state.draft_all_probs_gpu              = torch::Tensor();
+        stream->setMtpAsyncDeviceState(std::move(state));
+    }
+    draft_token_probs_list.clear();
+    processor.updateMultiStepDraftSamplerOutput(stream_groups,
+                                                sampler_output,
+                                                draft_token_ids_d_t,
+                                                spec_token_ids_d_t,
+                                                draft_token_probs_d_t,
+                                                draft_token_probs_list,
+                                                true);
+    EXPECT_TRUE(sampler_output.draft_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
+    EXPECT_FALSE(draft_token_probs_d_t.defined());
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
 }
 
 }  // namespace rtp_llm
