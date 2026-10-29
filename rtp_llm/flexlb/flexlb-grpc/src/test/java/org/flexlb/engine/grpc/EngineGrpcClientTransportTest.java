@@ -8,11 +8,11 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
-import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.engine.grpc.monitor.GrpcReporter;
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -60,7 +60,7 @@ class EngineGrpcClientTransportTest {
     @AfterEach
     void close() throws InterruptedException {
         releaseCallbacks.countDown();
-        client.shutdownChannelPool();
+        client.shutdown();
         if (server != null) {
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }

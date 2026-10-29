@@ -1,7 +1,7 @@
 package org.flexlb.httpserver;
 
-import io.grpc.Context;
 import io.grpc.ConnectivityState;
+import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.Status;

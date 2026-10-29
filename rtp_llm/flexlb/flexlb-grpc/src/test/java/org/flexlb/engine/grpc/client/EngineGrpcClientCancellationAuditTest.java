@@ -1,22 +1,14 @@
 package org.flexlb.engine.grpc.client;
 
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.engine.grpc.core.GrpcChannelFactory;
-import org.flexlb.engine.grpc.core.GrpcTarget;
-import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
-
-import io.grpc.Context;
-import io.grpc.ClientCall;
-import io.grpc.CallOptions;
-import io.grpc.MethodDescriptor;
-import io.grpc.Metadata;
-import io.grpc.ForwardingClientCall;
-import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ForwardingListenableFuture;
-import java.util.function.Function;
+import com.google.common.util.concurrent.ListenableFuture;
+import io.grpc.CallOptions;
+import io.grpc.ClientCall;
+import io.grpc.Context;
+import io.grpc.ForwardingClientCall;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
 import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
@@ -24,17 +16,40 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.GrpcTransportObserver;
+import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
+import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-
+import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.util.List;
 import java.net.InetSocketAddress;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 @Timeout(30)
@@ -183,8 +198,7 @@ class EngineGrpcClientCancellationAuditTest {
             f.executor.execute(() -> { blocked.countDown(); await(f.release); });
             assertTrue(blocked.await(5, TimeUnit.SECONDS));
             f.executor.execute(() -> {});
-            f.serverLoop.next().execute(() -> f.firstObserver.get().onError(
-                    Status.UNAVAILABLE.withDescription("Connection reset").asRuntimeException()));
+            f.connection.get().shutdownOutput();
             assertTrue(f.factory.replacing.await(5, TimeUnit.SECONDS));
             // The failure callback runs inline on this same loop when its bounded executor is full.
             f.clientLoop.next().submit(() -> {}).get(400, TimeUnit.MILLISECONDS);
@@ -219,7 +233,7 @@ class EngineGrpcClientCancellationAuditTest {
             super(executor, loop, 2000);
             this.blockRetryCreation = blockRetryCreation;
         }
-        @Override public ManagedChannel create(GrpcTarget target) {
+        @Override public ManagedChannel create(GrpcTarget target, GrpcTransportObserver observer) {
             if (created.incrementAndGet() == 2 && blockRetryCreation) {
                 retryCreating.countDown(); await(allowRetryCreation);
             }
@@ -227,7 +241,7 @@ class EngineGrpcClientCancellationAuditTest {
                 replacementThread.set(Thread.currentThread().getName()); replacing.countDown();
             }
             long started = System.nanoTime();
-            ManagedChannel real = super.create(target);
+            ManagedChannel real = super.create(target, observer);
             replacementMillis.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
             if (created.get() != 2 || !gateRetryStart) { return real; }
             return new ManagedChannel() {
@@ -283,9 +297,8 @@ class EngineGrpcClientCancellationAuditTest {
                                 firstObserver.set(observer);
                                 firstReceived.countDown();
                                 if (closeFirst) {
-                                    // Preserve this branch's existing broken-connection retry predicate.
-                                    serverLoop.next().schedule(() -> observer.onError(
-                                            Status.UNAVAILABLE.withDescription("Connection reset").asRuntimeException()),
+                                    SocketChannel first = connection.get();
+                                    serverLoop.next().schedule(() -> { first.shutdownOutput(); },
                                             firstEofDelayMs, TimeUnit.MILLISECONDS);
                                 }
                             } else {

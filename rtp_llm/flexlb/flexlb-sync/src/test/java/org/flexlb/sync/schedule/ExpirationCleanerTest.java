@@ -42,7 +42,7 @@ class ExpirationCleanerTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus status = status("127.0.0.1", 8080);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
-        directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+        directory.currentOrDiscover(RoleType.PREFILL, status.getLogicalIpPort(), () -> status);
         ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         cleaner.retireUnavailableWorkers();
         assertTrue(status.isActiveGeneration());
@@ -72,7 +72,7 @@ class ExpirationCleanerTest {
     void logsCountsWithoutWaitingForWorkerLock() throws Exception {
         var directory = new WorkerDirectory(mock(EndpointRegistry.class));
         WorkerStatus worker = status("127.0.0.1", 8080);
-        directory.currentOrDiscover(RoleType.PREFILL, worker.getIpPort(), () -> worker);
+        directory.currentOrDiscover(RoleType.PREFILL, worker.getLogicalIpPort(), () -> worker);
         var cleaner = new ExpirationCleaner(mock(CacheAwareService.class), directory);
         var emitted = new CountDownLatch(1);
         var line = new AtomicReference<String>();

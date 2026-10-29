@@ -116,7 +116,7 @@ class CacheHitFeedbackFlowTest {
                 new CacheMatchResult(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)),
                         CacheMatchSource.LOCAL_STANDBY, 1, 100)));
         KvcmCacheMatchProvider kvcm = mock(KvcmCacheMatchProvider.class);
-        when(kvcm.findMatchingEngines(anyString(), anyList(), anyLong(), any(), anyString()))
+        when(kvcm.findMatchingEngines(anyString(), anyList(), anyLong(), any(), org.mockito.ArgumentMatchers.isNull()))
                 .thenReturn(Map.of(worker.getLogicalIpPort(), new HostCacheMatch(2, 6)));
         when(failover.activeSource()).thenReturn(CacheMatchSource.KVCM);
         var query = new CacheMatchQueryOrchestrator(mock(LocalSyncCacheMatchProvider.class), kvcm, standby,
@@ -129,7 +129,7 @@ class CacheHitFeedbackFlowTest {
         when(loops.onServer(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServerSelect(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         reporter = new EngineHealthReporter(
-                monitor, cacheMetrics, engineClient, loops, directory);
+                monitor, cacheMetrics, engineClient, loops, directory, mock(org.flexlb.service.monitor.StatusFailureReporter.class));
         strategy = new CostBasedPrefillStrategy(directory, cache, reporter);
         pv.start();
         ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger")).addAppender(pv);
@@ -201,7 +201,7 @@ class CacheHitFeedbackFlowTest {
     @Test
     void fallbackReportsStandbyWithoutPretendingItIsKvcm() throws Exception {
         when(failover.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
-        when(standby.findMatchingEngines(anyString(), anyList(), anyLong(), any(), anyString()))
+        when(standby.findMatchingEngines(anyString(), anyList(), anyLong(), any(), org.mockito.ArgumentMatchers.isNull()))
                 .thenReturn(Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(3)));
         select("1003");
         poll(worker, task("1003", true, 0), true, 2);
@@ -309,8 +309,6 @@ class CacheHitFeedbackFlowTest {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(1000);
-        request.setBlockSize(100);
-        request.setBlockCacheKeys(List.of(1L));
         request.setBlockSize(100);
         request.setBlockCacheKeys(List.of(1L));
         BalanceContext context = new BalanceContext(config);

@@ -2,8 +2,8 @@ package org.flexlb.httpserver;
 
 import io.grpc.Context;
 import io.grpc.Status;
-import io.grpc.stub.StreamObserver;
 import io.grpc.stub.ServerCallStreamObserver;
+import io.grpc.stub.StreamObserver;
 import io.opentelemetry.api.trace.Span;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;

@@ -276,7 +276,7 @@ class PrefillStateSnapshotTest {
 
         clock.set(150);
         assertTrue(state.terminalizeCommittedItem(a.execution()));
-        assertEquals(List.of(2L, 3L), state.committedSnapshot().batches().getFirst().requestIds());
+        assertEquals(List.of("2", "3"), state.committedSnapshot().batches().getFirst().requestIds());
         assertEquals(250L, remainingWork());
         clock.set(190);
         assertTrue(state.terminalizeCommittedItem(b.execution()));

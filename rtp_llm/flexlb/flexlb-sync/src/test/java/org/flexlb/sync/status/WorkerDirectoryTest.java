@@ -55,34 +55,34 @@ class WorkerDirectoryTest {
                 var status = RunnerTestSupport.discovered(RoleType.PREFILL, null,
                         "127.0.0." + (index + 1), 8080, 8081, "test");
                 statuses.add(status);
-                directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> status);
+                directory.currentOrDiscover(RoleType.PREFILL, status.getLogicalIpPort(), () -> status);
                 status.lock.lock();
                 try {
-                    directory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST");
+                    directory.beginRetirement(RoleType.PREFILL, status.getLogicalIpPort(), status, "TEST");
                 } finally {
                     status.lock.unlock();
                 }
                 health.submit(() -> directory.completeRetirementAsync(RoleType.PREFILL,
-                        status.getIpPort(), status, null, cache, logger))
+                        status.getLogicalIpPort(), status, null, cache, logger))
                         .get(1, java.util.concurrent.TimeUnit.SECONDS);
             }
             assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS), "all four cleanup threads blocked");
             var survivor = RunnerTestSupport.discovered(RoleType.DECODE, null, "127.0.0.20", 8080, 8081, "test");
-            directory.currentOrDiscover(RoleType.DECODE, survivor.getIpPort(), () -> survivor);
+            directory.currentOrDiscover(RoleType.DECODE, survivor.getLogicalIpPort(), () -> survivor);
             var grpc = Mockito.mock(org.flexlb.service.grpc.EngineGrpcService.class);
             Mockito.when(grpc.getWorkerStatusAsync(Mockito.anyString(), Mockito.anyInt(), Mockito.anyLong(), Mockito.anyLong(), Mockito.any()))
                     .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(
                             org.flexlb.engine.grpc.EngineRpcService.WorkerStatusPB.newBuilder()
                                     .setAlive(true).setRole("DECODE").setStatusVersion(1L).build()));
-            health.submit(() -> new org.flexlb.sync.runner.GrpcWorkerStatusRunner("model", survivor.getIpPort(),
+            health.submit(() -> new org.flexlb.sync.runner.GrpcWorkerStatusRunner("model", survivor.getLogicalIpPort(),
                     "test", RoleType.DECODE, null, survivor, survivor.tryBeginStatusPoll(1L), directory,
                     Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class), grpc, 1000L,
                     cache, Runnable::run).run()).get(1, java.util.concurrent.TimeUnit.SECONDS);
             assertEquals(1L, survivor.appliedStatusCursor().statusVersion());
-            assertNotNull(directory.exactEndpoint(RoleType.DECODE, survivor.getIpPort(), survivor));
+            assertNotNull(directory.exactEndpoint(RoleType.DECODE, survivor.getLogicalIpPort(), survivor));
             assertEquals(5, directory.discoveredCount(RoleType.PREFILL));
             for (var status : statuses) {
-                assertSame(status, directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+                assertSame(status, directory.currentOrDiscover(RoleType.PREFILL, status.getLogicalIpPort(), () -> {
                     throw new AssertionError("replacement must wait for exact cleanup");
                 }));
             }
@@ -111,14 +111,14 @@ class WorkerDirectoryTest {
             status.lock.lock();
             EndpointRegistry.DetachedGeneration detached;
             try {
-                detached = workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status,
+                detached = workerDirectory.beginRetirement(RoleType.PREFILL, status.getLogicalIpPort(), status,
                         "DISCOVERY_REMOVED");
             } finally {
                 status.lock.unlock();
             }
-            workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status,
+            workerDirectory.completeRetirement(RoleType.PREFILL, status.getLogicalIpPort(), status,
                     detached, cache, logger);
-            assertTrue(logs.lines.stream().anyMatch(line -> line.contains(status.getIpPort())));
+            assertTrue(logs.lines.stream().anyMatch(line -> line.contains(status.getLogicalIpPort())));
             assertTrue(logs.lines.stream().anyMatch(line -> line.contains("operation=RETIREMENT")
                     && line.contains("result=ERROR")), "cache cleanup failure must not be reported as successful retirement");
             var snapshot = status.trace().snapshot();
@@ -126,10 +126,10 @@ class WorkerDirectoryTest {
             assertEquals("RPC_COMPLETED", snapshot.statusPoll().failureStage());
             assertTrue(snapshot.error().contains("cache cleanup failed"));
             assertTrue(snapshot.gateClosedAtMs() >= snapshot.decidedAtMs());
-            assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()),
+            assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getLogicalIpPort()),
                     "failed cleanup must prevent same-address replacement");
             Mockito.doNothing().when(cache).removeEngineBlockCache(status, status.trace());
-            workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status, null, cache, logger);
+            workerDirectory.completeRetirement(RoleType.PREFILL, status.getLogicalIpPort(), status, null, cache, logger);
             assertTrue(workerDirectory.statusSnapshot(RoleType.PREFILL).isEmpty());
         } finally {
             workerDirectory.close();
@@ -145,7 +145,7 @@ class WorkerDirectoryTest {
         var attempts = new java.util.concurrent.atomic.AtomicInteger();
         var cache = Mockito.mock(org.flexlb.cache.match.CacheAwareService.class);
         Mockito.doAnswer(call -> {
-            assertSame(status, workerDirectory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+            assertSame(status, workerDirectory.currentOrDiscover(RoleType.PREFILL, status.getLogicalIpPort(), () -> {
                 throw new AssertionError("replacement before successful cleanup");
             }));
             assertFalse(status.lock.isHeldByCurrentThread());
@@ -155,14 +155,14 @@ class WorkerDirectoryTest {
         }).when(cache).removeEngineBlockCache(status, status.trace());
         status.lock.lock();
         try {
-            workerDirectory.beginRetirement(RoleType.PREFILL, status.getIpPort(), status, "TEST");
+            workerDirectory.beginRetirement(RoleType.PREFILL, status.getLogicalIpPort(), status, "TEST");
         } finally {
             status.lock.unlock();
         }
         try {
-            workerDirectory.completeRetirement(RoleType.PREFILL, status.getIpPort(), status, null,
+            workerDirectory.completeRetirement(RoleType.PREFILL, status.getLogicalIpPort(), status, null,
                     cache, Mockito.mock(org.slf4j.Logger.class));
-            assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()));
+            assertSame(status, workerDirectory.statusSnapshot(RoleType.PREFILL).get(status.getLogicalIpPort()));
             assertTrue(retried.await(3, java.util.concurrent.TimeUnit.SECONDS));
             // Serializes with the retry through its last directory removal.
             status.cacheMutationLock.lock();
@@ -278,7 +278,7 @@ class WorkerDirectoryTest {
                         RoleType.VIT, "nonExistentGroup");
 
         assertTrue(result.isEmpty());
-        assertEquals(List.of(status.getIpPort()),
+        assertEquals(List.of(status.getLogicalIpPort()),
                 capturedAddresses(
                         RoleType.VIT, null));
     }
@@ -327,7 +327,7 @@ class WorkerDirectoryTest {
         RunnerTestSupport.publishEndpoint(registry,
                 RoleType.DECODE, filtered.getLogicalIpPort(), filtered);
 
-        assertEquals(List.of(matching.getIpPort()),
+        assertEquals(List.of(matching.getLogicalIpPort()),
                 capturedAddresses(
                         RoleType.DECODE, "group1"));
         assertEquals(2,

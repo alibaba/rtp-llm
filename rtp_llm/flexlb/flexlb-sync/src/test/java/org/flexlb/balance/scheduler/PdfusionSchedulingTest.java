@@ -23,10 +23,10 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
@@ -102,7 +102,7 @@ class PdfusionSchedulingTest {
         status.setMaxBatchTokensSize(10000L);
         worker.lock.lock();
         try {
-            endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
+            endpoints.publishPreparedEndpoint(worker.getLogicalIpPort(), worker,
                     WorkerStatusTestFixtures.prepare(worker, WorkerStatusTestFixtures.observation(worker, status)));
         } finally {
             worker.lock.unlock();

@@ -40,8 +40,8 @@ class EngineSyncRunnerTraceTest {
                 RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, null);
         WorkerStatus healthy = RunnerTestSupport.alive(
                 RoleType.PREFILL, "", "127.0.0.2", 8080, 8081, null);
-        directory.currentOrDiscover(RoleType.PREFILL, retiring.getIpPort(), () -> retiring);
-        directory.currentOrDiscover(RoleType.PREFILL, healthy.getIpPort(), () -> healthy);
+        directory.currentOrDiscover(RoleType.PREFILL, retiring.getLogicalIpPort(), () -> retiring);
+        directory.currentOrDiscover(RoleType.PREFILL, healthy.getLogicalIpPort(), () -> healthy);
         when(addresses.getEngineWorkerList("model", RoleType.PREFILL))
                 .thenReturn(List.of(WorkerHost.of(healthy.getIp(), healthy.getPort())));
         var cleanupEntered = new CountDownLatch(1);

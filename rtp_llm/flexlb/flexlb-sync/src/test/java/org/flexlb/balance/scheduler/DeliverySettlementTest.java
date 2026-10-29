@@ -12,10 +12,10 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -148,7 +148,7 @@ class DeliverySettlementTest {
             boolean prefillCleanupFailsThenFinishes) throws Exception {
         config.getRequestLifecycle().getRequest().setTimeoutMs(TimeUnit.MINUTES.toMillis(1));
         var decode = new DecodeEndpoint(WorkerStatus.createDiscovered(
-                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry));
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry, org.mockito.Mockito.mock(org.flexlb.service.monitor.StatusFailureReporter.class)));
         try {
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {

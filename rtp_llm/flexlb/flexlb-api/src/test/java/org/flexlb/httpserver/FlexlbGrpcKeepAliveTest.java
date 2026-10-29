@@ -5,6 +5,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -94,7 +95,7 @@ class FlexlbGrpcKeepAliveTest {
             var environment = new MockEnvironment().withProperty("server.port",
                     String.valueOf(port - FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET));
             grpc = new FlexlbGrpcServer(service, configService, environment, new NioEventLoopGroup(1),
-                    null, new GrpcServerTimingInterceptor(),
+                    NoOpFlexMonitor.getInstance(), new GrpcServerTimingInterceptor(),
                     new GrpcQosHeaderInterceptor());
             grpc.start();
         }

@@ -741,7 +741,7 @@ class DefaultRouterTest {
                             result.failure(), result.blocker() == null ? null : new PlacementKey(result.blocker(), group),
                             result.diagnostics()));
             case DECODE -> when(decodeSelector.select(
-                    DecodeBinding.capture(context), group)).thenReturn(result);
+                    context, DecodeBinding.capture(context), group)).thenReturn(result);
             case VIT -> when(vitSelector.select(context, role, group))
                     .thenReturn(result.value());
             case FRONTEND -> throw new IllegalArgumentException();

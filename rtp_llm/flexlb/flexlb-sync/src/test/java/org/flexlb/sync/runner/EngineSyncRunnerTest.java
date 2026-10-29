@@ -73,7 +73,7 @@ class EngineSyncRunnerTest {
         verify(health).submit(any(GrpcWorkerStatusRunner.class));
         verify(health, never()).submit(any(GrpcCacheStatusCheckRunner.class));
         verify(cache).submit(any(GrpcCacheStatusCheckRunner.class));
-        WorkerStatus status = directory.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:8080");
+        WorkerStatus status = directory.statusSnapshot(RoleType.PREFILL).get("127.0.0.1:8080@0");
         WorkerStatus.PollLease lease = status.tryBeginCachePoll(1L);
         org.junit.jupiter.api.Assertions.assertNotNull(lease, "cache rejection must allow retry");
         lease.close();
@@ -169,7 +169,7 @@ class EngineSyncRunnerTest {
 
     @Test
     void discoveredWorkerRemainsUnknownUntilItsFirstStatusResponse() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         EngineSyncRunner runner = new EngineSyncRunner(
@@ -259,7 +259,7 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status = RunnerTestSupport.discovered(
                 RoleType.PREFILL, null, "127.0.0.1",
                 8080, 8081, "test-site");
@@ -321,7 +321,7 @@ class EngineSyncRunnerTest {
                     RoleType.PREFILL, "", host.getIp(), host.getHttpPort(), host.getGrpcPort(), ""));
             // Make removal eligible if discovery mistakenly drops this worker.
             Mockito.lenient().when(status.pollHealth()).thenReturn(new WorkerStatus.PollHealth(
-                    System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true));
+                    System.nanoTime() / 1_000 - 2_000_000L, 20_000L, 0L, true, true));
             discover(directory, status);
             RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, status);
             WorkerEndpoint originalEndpoint = registry.get(RoleType.PREFILL, ipPort);
@@ -356,7 +356,7 @@ class EngineSyncRunnerTest {
                     RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "site");
             discover(directory, status);
             WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
-                    registry, RoleType.PREFILL, status.getIpPort(), status);
+                    registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
             when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                     .thenThrow(new IllegalStateException("VIP unavailable"));
             EngineSyncRunner runner = new EngineSyncRunner(
@@ -369,8 +369,8 @@ class EngineSyncRunnerTest {
             runner.run();
 
             assertTrue(status.isActiveGeneration());
-            assertTrue(directory.statusSnapshot(RoleType.PREFILL).get(status.getIpPort()) == status);
-            assertTrue(registry.get(RoleType.PREFILL, status.getIpPort()) == endpoint);
+            assertTrue(directory.statusSnapshot(RoleType.PREFILL).get(status.getLogicalIpPort()) == status);
+            assertTrue(registry.get(RoleType.PREFILL, status.getLogicalIpPort()) == endpoint);
             verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
             verify(statusCheckExecutor).submit(any(GrpcCacheStatusCheckRunner.class));
             verify(cacheAwareService, never()).removeEngineBlockCache(any(), any());
@@ -389,7 +389,7 @@ class EngineSyncRunnerTest {
             WorkerStatus status = RunnerTestSupport.discovered(
                     RoleType.PREFILL, "group", "127.0.0.1", 8080, 8081, "site");
             discover(directory, status);
-            RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, status.getIpPort(), status);
+            RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
             when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                     .thenReturn(List.of()).thenThrow(new IllegalStateException("VIP unavailable"));
             EngineSyncRunner runner = new EngineSyncRunner(
@@ -403,7 +403,7 @@ class EngineSyncRunnerTest {
                 executor.submit(runner).get(5, TimeUnit.SECONDS);
                 assertEquals(WorkerStatus.RetirementReason.DISCOVERY_REMOVED, status.retirementReason());
                 assertFalse(status.isAvailableForScheduling());
-                assertTrue(directory.isCurrentStatus(RoleType.PREFILL, status.getIpPort(), status));
+                assertTrue(directory.isCurrentStatus(RoleType.PREFILL, status.getLogicalIpPort(), status));
 
                 executor.submit(runner).get(5, TimeUnit.SECONDS);
                 assertEquals(WorkerStatus.RetirementReason.DISCOVERY_REMOVED, status.retirementReason());
@@ -415,8 +415,8 @@ class EngineSyncRunnerTest {
 
             new ExpirationCleaner(cacheAwareService, directory).retireUnavailableWorkers();
 
-            assertFalse(directory.isCurrentStatus(RoleType.PREFILL, status.getIpPort(), status));
-            assertNull(registry.get(RoleType.PREFILL, status.getIpPort()));
+            assertFalse(directory.isCurrentStatus(RoleType.PREFILL, status.getLogicalIpPort(), status));
+            assertNull(registry.get(RoleType.PREFILL, status.getLogicalIpPort()));
             verify(cacheAwareService).removeEngineBlockCache(status, status.trace());
         } finally {
             registry.close();
@@ -554,7 +554,7 @@ class EngineSyncRunnerTest {
                 .thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry registry = RunnerTestSupport.endpointRegistry(configService);
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
-        String ipPort = "127.0.0.1:61000";
+        String ipPort = "127.0.0.1:61000@0";
         WorkerStatus oldStatus = RunnerTestSupport.discovered(
                 RoleType.PREFILL, oldGroup, "127.0.0.1",
                 61000, 61001, "site-a");

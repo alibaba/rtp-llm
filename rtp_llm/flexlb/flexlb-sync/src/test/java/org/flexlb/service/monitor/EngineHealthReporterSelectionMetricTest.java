@@ -3,10 +3,10 @@ package org.flexlb.service.monitor;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.dao.master.EndpointTrace.Stage;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.GrpcFailure;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -20,10 +20,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.netty.resources.LoopResources;
 
-import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
-import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
+import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
+import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doThrow;
@@ -99,7 +99,7 @@ class EngineHealthReporterSelectionMetricTest {
         reportFailure(cache, status, failure);
 
         verify(monitor).report(cache ? CACHE_STATUS_CHECK_FAIL : ENGINE_STATUS_CHECK_FAIL,
-                FlexMetricTags.of("model", "test-model", "code", String.valueOf(status.getCode()),
+                FlexMetricTags.of("engineIp", "10.0.0.1:8080", "code", String.valueOf(status.getCode()),
                         "role", RoleType.PREFILL.getCode()), 1.0);
         verify(statusFailureReporter).report(RoleType.PREFILL, cache ? "cache_status" : "worker_status",
                 Stage.STATUS_PROJECTION_FAILED, "STATUS_PROJECTION_FAILED", failure);
@@ -113,7 +113,7 @@ class EngineHealthReporterSelectionMetricTest {
                 : BalanceStatusEnum.MASTER_STATUS_PROCESSING_FAILED;
         var exportFailure = new IllegalStateException("metric unavailable");
         FlexMetricTags tags = FlexMetricTags.of(
-                "model", "test-model", "code", String.valueOf(status.getCode()),
+                "engineIp", "10.0.0.1:8080", "code", String.valueOf(status.getCode()),
                 "role", RoleType.PREFILL.getCode());
         doThrow(exportFailure).when(monitor)
                 .report(cache ? CACHE_STATUS_CHECK_FAIL : ENGINE_STATUS_CHECK_FAIL, tags, 1.0);
@@ -127,10 +127,10 @@ class EngineHealthReporterSelectionMetricTest {
 
     private void reportFailure(boolean cache, BalanceStatusEnum status, GrpcFailure.Analysis failure) {
         if (cache) {
-            reporter.reportCacheStatusCheckerFail("test-model", status, RoleType.PREFILL,
+            reporter.reportCacheStatusCheckerFail("10.0.0.1:8080", status, RoleType.PREFILL,
                     Stage.STATUS_PROJECTION_FAILED, "STATUS_PROJECTION_FAILED", failure);
         } else {
-            reporter.reportStatusCheckerFail("test-model", status, RoleType.PREFILL,
+            reporter.reportStatusCheckerFail("10.0.0.1:8080", status, RoleType.PREFILL,
                     Stage.STATUS_PROJECTION_FAILED, "STATUS_PROJECTION_FAILED", failure);
         }
     }

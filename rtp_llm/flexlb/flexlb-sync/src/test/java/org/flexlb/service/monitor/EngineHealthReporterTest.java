@@ -71,7 +71,7 @@ class EngineHealthReporterTest {
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(mock(EventLoopGroup.class));
         reporter = new EngineHealthReporter(
                 monitor, cacheMetricsReporter, engineGrpcClient,
-                loopResources, workerDirectory);
+                loopResources, workerDirectory, mock(StatusFailureReporter.class));
     }
 
     @Test
@@ -849,7 +849,12 @@ class EngineHealthReporterTest {
         workerStatus.lock.lock();
         try {
             if (cacheStatus != null) {
-                workerStatus.publishCacheStatus(cacheStatus);
+                workerStatus.cacheMutationLock.lock();
+                try {
+                    workerStatus.publishCacheStatus(cacheStatus);
+                } finally {
+                    workerStatus.cacheMutationLock.unlock();
+                }
             }
             WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(workerStatus, WorkerStatusTestFixtures.observation(workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);

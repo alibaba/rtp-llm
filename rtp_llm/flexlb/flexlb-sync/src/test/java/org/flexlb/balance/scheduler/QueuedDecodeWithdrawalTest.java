@@ -97,7 +97,7 @@ class QueuedDecodeWithdrawalTest {
         decode.close();
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.DECODE, null,
                 "127.0.0.1", 8000, 8001, null);
-        decode = new DecodeEndpoint(status, new EndpointEventProjector(registry));
+        decode = new DecodeEndpoint(status, new EndpointEventProjector(registry, org.mockito.Mockito.mock(org.flexlb.service.monitor.StatusFailureReporter.class)));
         applyStatus(Map.of(), Map.of());
         var item = queued(42);
         var slot = registry.requestSlot("42");

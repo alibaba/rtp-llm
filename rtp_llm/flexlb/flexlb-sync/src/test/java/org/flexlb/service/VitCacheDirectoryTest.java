@@ -4,10 +4,9 @@ import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.EndpointRegistry.VitRoutingEntry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.balance.endpoint.EndpointRegistry.VitRoutingEntry;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
@@ -33,26 +32,26 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 class VitCacheDirectoryTest {
@@ -137,8 +136,8 @@ class VitCacheDirectoryTest {
             clearInvocations(workers);
             assertEquals(b.getIp(), fastSelector.select(ctx, null).getServerIp());
             verifyNoInteractions(unusedDirectory);
-            verify(workers, times(1)).captureEndpoint(RoleType.VIT, b.getIpPort());
-            verify(workers, never()).captureEndpoint(RoleType.VIT, a.getIpPort());
+            verify(workers, times(1)).captureEndpoint(RoleType.VIT, b.getLogicalIpPort());
+            verify(workers, never()).captureEndpoint(RoleType.VIT, a.getLogicalIpPort());
             verify(workers, never()).statusSnapshot(any());
             verify(workers, never()).endpointAddressSnapshot(any());
         } finally {
@@ -173,7 +172,7 @@ class VitCacheDirectoryTest {
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var captures = new AtomicInteger();
-        when(workers.captureEndpoint(RoleType.VIT, a.getIpPort())).thenAnswer(call -> {
+        when(workers.captureEndpoint(RoleType.VIT, a.getLogicalIpPort())).thenAnswer(call -> {
             if (captures.incrementAndGet() == 1) {
                 entered.countDown();
                 assertTrue(release.await(5, TimeUnit.SECONDS));
@@ -201,7 +200,7 @@ class VitCacheDirectoryTest {
         var oldFleet = workers.vitRoutingSnapshot();
         snapshot(a, "old", "image");
         when(workers.vitRoutingSnapshot()).thenReturn(oldFleet);
-        live.put(a.getIpPort(), worker(a.getIp(), "one"));
+        live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
         for (boolean affinity : List.of(false, true)) {
             var ctx = context("image");
             ctx.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(affinity);
@@ -217,11 +216,11 @@ class VitCacheDirectoryTest {
         verify(workers, never()).captureEndpoint(any(), any());
         snapshot(a, "a2");
         var after = directory.candidates(null, List.of("image"));
-        assertEquals(1, before.get(a.getIpPort()).hashHits());
-        assertTrue(before.get(a.getIpPort()).hashKeys().contains("image"));
-        assertEquals(0, after.get(a.getIpPort()).hashHits());
+        assertEquals(1, before.get(a.getLogicalIpPort()).hashHits());
+        assertTrue(before.get(a.getLogicalIpPort()).hashKeys().contains("image"));
+        assertEquals(0, after.get(a.getLogicalIpPort()).hashHits());
         assertThrows(UnsupportedOperationException.class,
-                () -> before.get(a.getIpPort()).hashKeys().add("other"));
+                () -> before.get(a.getLogicalIpPort()).hashKeys().add("other"));
     }
 
     @Test
@@ -271,7 +270,7 @@ class VitCacheDirectoryTest {
         // Increase the age budget after expiring A, leaving B fresh.
         ctx.getConfig().getRouter().getRoles().getVit().setLoadMaxAgeMs(10);
         assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
-        assertTrue(live.containsKey(a.getIpPort()));
+        assertTrue(live.containsKey(a.getLogicalIpPort()));
     }
 
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {

@@ -1482,7 +1482,7 @@ class PrefillEndpointTest {
                 requestRuntime.prefillRetirements().stream()
                         .findFirst()
                         .orElseThrow();
-        assertEquals(List.of(100L, 200L), retirement.ownedItems().stream()
+        assertEquals(List.of("100", "200"), retirement.ownedItems().stream()
                 .map(RequestExecution::requestId).sorted().toList(),
                 "both immediate and queued routes retain their canonical retirement owner");
         assertTrue(retirement.ownedItems().contains(route.execution()));

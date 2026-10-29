@@ -1,7 +1,6 @@
 package org.flexlb.sync.runner;
 
 import io.grpc.Status;
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.CacheAwareService;
@@ -71,19 +70,19 @@ class GrpcCacheStatusCheckRunnerTest {
                 anyLong(), anyLong(), eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(first),
                         CompletableFuture.failedFuture(cause), CompletableFuture.completedFuture(next));
-        when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any()))
+        when(localKvCacheAwareManager.updateFromWorkerStatus(eq(status), any()))
                 .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
         try {
-            runCachePoll(status.getIpPort(), status, directory, false);
+            runCachePoll(status.getLogicalIpPort(), status, directory, false);
             var cache = status.cacheIndexSnapshot();
             var health = status.pollHealth();
             assertEquals(1L, health.consecutiveWorkerFailures());
 
-            runCachePoll(status.getIpPort(), status, directory, false);
+            runCachePoll(status.getLogicalIpPort(), status, directory, false);
 
             var detail = org.mockito.ArgumentCaptor.forClass(GrpcFailure.Analysis.class);
             verify(engineHealthReporter).reportCacheStatusCheckerFail(
-                    eq("test-model"), eq(coarseStatus), eq(RoleType.PREFILL),
+                    eq(status.getMetricIpPort()), eq(coarseStatus), eq(RoleType.PREFILL),
                     eq(EndpointTrace.Stage.RPC_COMPLETED), eq(kind.name()), detail.capture());
             assertEquals(kind, detail.getValue().kind());
             assertEquals(grpcCode, detail.getValue().grpcCode());
@@ -97,12 +96,12 @@ class GrpcCacheStatusCheckRunnerTest {
             org.junit.jupiter.api.Assertions.assertSame(health, status.pollHealth());
             org.junit.jupiter.api.Assertions.assertTrue(status.isActiveGeneration());
             org.junit.jupiter.api.Assertions.assertSame(status,
-                    directory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
+                    directory.currentOrDiscover(RoleType.PREFILL, status.getLogicalIpPort(), () -> {
                         throw new AssertionError("cache RPC failure must keep the generation");
                     }));
             org.junit.jupiter.api.Assertions.assertTrue(status.trace().snapshot().cachePoll().leaseReleased());
 
-            runCachePoll(status.getIpPort(), status, directory, false);
+            runCachePoll(status.getLogicalIpPort(), status, directory, false);
             assertEquals(8, status.cacheIndexSnapshot().indexedVersion(), "the next poll must still publish");
         } finally {
             directory.close();
@@ -173,7 +172,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 anyLong(), anyLong(), eq(RoleType.PREFILL)))
                 .thenReturn(CompletableFuture.completedFuture(
                         EngineRpcService.CacheStatusPB.newBuilder().setVersion(7).build()));
-        var update = when(localKvCacheAwareManager.updateEngineBlockCache(eq(status), any()));
+        var update = when(localKvCacheAwareManager.updateFromWorkerStatus(eq(status), any()));
         if (failurePoint.equals("THREW")) {
             update.thenThrow(new IllegalStateException("index unavailable"));
         } else {
@@ -182,7 +181,7 @@ class GrpcCacheStatusCheckRunnerTest {
         }
         try {
             var health = status.pollHealth();
-            runCachePoll(status.getIpPort(), status, directory, false);
+            runCachePoll(status.getLogicalIpPort(), status, directory, false);
 
             String reason = switch (failurePoint) {
                 case "NULL_RESULT" -> "NULL_RESULT";
@@ -191,7 +190,7 @@ class GrpcCacheStatusCheckRunnerTest {
             };
             var detail = org.mockito.ArgumentCaptor.forClass(GrpcFailure.Analysis.class);
             verify(engineHealthReporter).reportCacheStatusCheckerFail(
-                    eq("test-model"), eq(BalanceStatusEnum.CACHE_UPDATE_FAILED), eq(RoleType.PREFILL),
+                    eq(status.getMetricIpPort()), eq(BalanceStatusEnum.CACHE_UPDATE_FAILED), eq(RoleType.PREFILL),
                     eq(EndpointTrace.Stage.CACHE_INDEX_UPDATE_FAILED),
                     eq(reason), detail.capture());
             if (failurePoint.equals("THREW")) {
@@ -221,10 +220,10 @@ class GrpcCacheStatusCheckRunnerTest {
                 .when(engineHealthReporter).reportCacheStatusCheckerFail(
                         anyString(), any(), any(), any(), anyString(), any());
         try {
-            runCachePoll(status.getIpPort(), status, directory, false);
+            runCachePoll(status.getLogicalIpPort(), status, directory, false);
 
             verify(engineHealthReporter, times(1)).reportCacheStatusCheckerFail(
-                    eq("test-model"), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
+                    eq(status.getMetricIpPort()), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE),
                     eq(RoleType.PREFILL), eq(EndpointTrace.Stage.CONVERSION_FAILED),
                     eq("CONVERSION_FAILED"), any());
             verify(engineHealthReporter, never()).reportCacheStatusCheckerFail(
@@ -436,13 +435,13 @@ class GrpcCacheStatusCheckRunnerTest {
             assertEquals("OK", snapshot.rpcResult());
             org.junit.jupiter.api.Assertions.assertTrue(snapshot.times().convertStartMs() >= 0);
             verify(engineHealthReporter).reportCacheStatusCheckerFail(
-                    eq("test-model"), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE), eq(RoleType.PREFILL),
+                    eq(status.getMetricIpPort()), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE), eq(RoleType.PREFILL),
                     eq(EndpointTrace.Stage.CONVERSION_FAILED), eq("CONVERSION_FAILED"), any());
         }
         if (failurePoint.equals("CALLBACK_REJECTED")) {
             assertEquals(-1, snapshot.times().callbackStartMs());
             verify(engineHealthReporter).reportCacheStatusCheckerFail(
-                    eq("test-model"), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE), eq(RoleType.PREFILL),
+                    eq(status.getMetricIpPort()), eq(BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE), eq(RoleType.PREFILL),
                     eq(EndpointTrace.Stage.CALLBACK_SUBMISSION_FAILED), eq("LOCAL_EXECUTOR_REJECTED"), any());
         }
         verifyNoInteractions(localKvCacheAwareManager);

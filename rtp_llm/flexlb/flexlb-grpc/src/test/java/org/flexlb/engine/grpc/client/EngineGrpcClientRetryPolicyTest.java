@@ -1,10 +1,9 @@
 package org.flexlb.engine.grpc.client;
 
-import org.flexlb.engine.grpc.GrpcFailure;
-import org.flexlb.engine.grpc.GrpcCallTrace;
-
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
+import org.flexlb.engine.grpc.GrpcCallTrace;
+import org.flexlb.engine.grpc.GrpcFailure;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;

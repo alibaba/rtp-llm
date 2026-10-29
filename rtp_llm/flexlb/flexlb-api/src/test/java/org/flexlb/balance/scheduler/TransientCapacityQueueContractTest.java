@@ -80,7 +80,8 @@ import static org.mockito.Mockito.withSettings;
 /** External contract for temporary P/D capacity pressure. */
 class TransientCapacityQueueContractTest {
     private static CacheMatchResult cacheMatches(Map<String, Integer> matches) {
-        return new CacheMatchResult(org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+        return new CacheMatchResult(org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches.entrySet().stream()
+                .collect(java.util.stream.Collectors.toMap(entry -> entry.getKey() + "@0", Map.Entry::getValue))),
                 CacheMatchSource.KVCM, 0L, 100L);
     }
 
@@ -131,13 +132,13 @@ class TransientCapacityQueueContractTest {
             assertTrue(response.isSuccess());
             assertEquals(Fixture.PREFILL_ADDRESS, prefillAddress(response));
             assertEquals("127.0.0.2:18081", decodeAddress(response));
-            assertEquals(List.of(996_002L), fixture.submission.requestIds());
+            assertEquals(List.of("996002"), fixture.submission.requestIds());
             assertFalse(a.isDone());
             assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
             fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
 
             assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(996_002L, 996_001L), fixture.submission.requestIds());
+            assertEquals(List.of("996002", "996001"), fixture.submission.requestIds());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
         }
     }
@@ -172,7 +173,7 @@ class TransientCapacityQueueContractTest {
                     "127.0.0.3:18081", initializedStatus(RoleType.DECODE, "127.0.0.3", 18081));
             var c = fixture.runtime.scheduler().submit(fixture.context(999_003L, 80));
             assertTrue(c.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(999_003L), fixture.submission.requestIds());
+            assertEquals(List.of("999003"), fixture.submission.requestIds());
             assertFalse(a.isDone());
             assertFalse(b.isDone());
             fixture.runtime.scheduler().cancelRequest("999002", 0L, CancelReason.CLIENT_CANCELLED);
@@ -240,13 +241,13 @@ class TransientCapacityQueueContractTest {
                     statusResponse(RoleType.DECODE, 13L, false));
             assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess(),
                     "D1 recovery must run A without waiting for B's KV or another P event");
-            assertEquals(List.of(993_101L), fixture.submission.requestIds());
+            assertEquals(List.of("993101"), fixture.submission.requestIds());
             if (recovery.equals("recover")) {
                 assertFalse(b.isDone());
                 fixture.runtime.applyStatus(fixture.prefillStatus,
                         statusResponse(RoleType.PREFILL, 3L, false));
                 assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
-                assertEquals(List.of(993_101L, 993_102L), fixture.submission.requestIds());
+                assertEquals(List.of("993101", "993102"), fixture.submission.requestIds());
             }
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
         }
@@ -301,7 +302,7 @@ class TransientCapacityQueueContractTest {
             fixture.submission.unblockPreparation();
             assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
             assertTrue(b.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(998_001L, 998_002L), fixture.submission.requestIds());
+            assertEquals(List.of("998001", "998002"), fixture.submission.requestIds());
             assertEquals(1, d2.routingView().totalLoad());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(0, d2.resourceSnapshot().activeDispatchPermits());
@@ -359,13 +360,13 @@ class TransientCapacityQueueContractTest {
                 WorkerStatusResponse finished =
                         prefillStatusWithFinishedAndUnknownRunning(2L, List.of(997_002L), 0);
                 finished.getFinishedTaskInfo().get("997002").setBatchId(
-                        fixture.submission.batchIds.get(997_002L));
+                        fixture.submission.batchIds.get("997002"));
                 fixture.runtime.applyStatus(fixture.prefillStatus, finished);
             }
             assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(middlePriority > 60 && !cancelMiddle
-                    ? List.of(997_002L, 997_003L, 997_001L)
-                    : List.of(997_003L, 997_001L), fixture.submission.requestIds());
+                    ? List.of("997002", "997003", "997001")
+                    : List.of("997003", "997001"), fixture.submission.requestIds());
         }
     }
 
@@ -474,7 +475,7 @@ class TransientCapacityQueueContractTest {
                 assertEquals(Fixture.PREFILL_ADDRESS, prefillAddress(delivered));
                 assertEquals(0, colder.observedRequestCount());
                 assertEquals(enqueueSequence, context.getWorkerEnqueueSequence());
-                assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of(994_001L) : List.of(),
+                assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of("994001") : List.of(),
                         fixture.submission.requestIds());
             }
         }
@@ -522,7 +523,7 @@ class TransientCapacityQueueContractTest {
                 assertEquals(Fixture.PREFILL_ADDRESS, prefillAddress(response),
                         "B precedes A and must not inherit A's D1 blocker or choose a colder P");
                 assertEquals("127.0.0.2:18081", decodeAddress(response));
-                assertEquals(List.of(995_002L), fixture.submission.requestIds());
+                assertEquals(List.of("995002"), fixture.submission.requestIds());
                 assertFalse(a.isDone());
                 return;
             }
@@ -538,9 +539,10 @@ class TransientCapacityQueueContractTest {
 
             if (recovery.equals("other_prefill")) {
                 when(fixture.cache.findMatchingEngines(any())).thenAnswer(invocation -> {
-                    List<Long> keys = invocation.getArgument(0);
-                    return keys != null && !keys.isEmpty() && keys.getFirst() == 2L
-                            ? Map.of("127.0.0.2:18080", 9) : Map.of(Fixture.PREFILL_ADDRESS, 9);
+                    org.flexlb.cache.domain.CacheMatchQuery query = invocation.getArgument(0);
+                    List<Long> keys = query.blockCacheKeys();
+                    return cacheMatches(keys != null && !keys.isEmpty() && keys.getFirst() == 2L
+                            ? Map.of("127.0.0.2:18080", 9) : Map.of(Fixture.PREFILL_ADDRESS, 9));
                 });
                 fixture.submission.blockPreparation();
                 var cContext = fixture.context(995_003L, 20, 1_000L);
@@ -564,13 +566,13 @@ class TransientCapacityQueueContractTest {
                 assertTrue(response.isSuccess());
                 assertEquals("127.0.0.2:18080", prefillAddress(response));
                 assertFalse(b.isDone(), "P2 progress must not move B away from its cache leader P1");
-                assertEquals(List.of(995_004L), fixture.submission.requestIds());
+                assertEquals(List.of("995004"), fixture.submission.requestIds());
             } else if (recovery.equals("retire_prefill")) {
                 EndpointRegistry.DetachedGeneration detached;
                 fixture.prefillStatus.lock.lock();
                 try {
                     detached = fixture.runtime.endpointRegistry().detachAndBeginRetirement(
-                            RoleType.PREFILL, Fixture.PREFILL_ADDRESS, fixture.prefillStatus);
+                            RoleType.PREFILL, fixture.prefillStatus.getLogicalIpPort(), fixture.prefillStatus);
                 } finally {
                     fixture.prefillStatus.lock.unlock();
                 }
@@ -587,7 +589,7 @@ class TransientCapacityQueueContractTest {
                 fixture.runtime.applyStatus(fixture.decodeStatus, statusResponse(RoleType.DECODE, 3L, false));
                 assertTrue(a.get(2, TimeUnit.SECONDS).isSuccess());
                 assertFalse(fixture.submission.awaitCommands(2, 100, TimeUnit.MILLISECONDS));
-                assertEquals(List.of(995_001L), fixture.submission.requestIds());
+                assertEquals(List.of("995001"), fixture.submission.requestIds());
                 assertEquals(0, d2.routingView().totalLoad());
             } else {
                 boolean cancelHead = recovery.equals("cancel_head") || recovery.equals("cache_changed");
@@ -606,7 +608,7 @@ class TransientCapacityQueueContractTest {
                 assertTrue(response.isSuccess());
                 assertEquals(recovery.equals("cache_changed") ? "127.0.0.2:18080" : Fixture.PREFILL_ADDRESS,
                         prefillAddress(response), "a wakeup must recompute cache matches rather than pin B to P1");
-                assertEquals(cancelHead ? List.of(995_002L) : List.of(995_001L, 995_002L),
+                assertEquals(cancelHead ? List.of("995002") : List.of("995001", "995002"),
                         fixture.submission.requestIds());
             }
         }
@@ -1511,7 +1513,6 @@ class TransientCapacityQueueContractTest {
 
             WorkerDirectory workers =
                     new WorkerDirectory(runtime.endpointRegistry());
-            CacheAwareService cache = mock(CacheAwareService.class);
             when(cache.findMatchingEngines(any()))
                     .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
             CostBasedPrefillStrategy prefillSelector =
@@ -2016,10 +2017,10 @@ class TransientCapacityQueueContractTest {
     private static final class RecordingSubmissionPort {
         private final List<List<ScheduledRequest>> submittedItems =
                 new CopyOnWriteArrayList<>();
-        private final Map<Long, Long> batchIds = new ConcurrentHashMap<>();
+        private final Map<String, Long> batchIds = new ConcurrentHashMap<>();
         private final Semaphore commandSignals = new Semaphore(0);
         private final Semaphore preparationSignals = new Semaphore(0);
-        private final CountDownLatch preparationReleases =
+        private volatile CountDownLatch preparationReleases =
                 new CountDownLatch(1);
         private final AtomicBoolean holdCompletions = new AtomicBoolean();
         private final AtomicBoolean blockPreparation = new AtomicBoolean();
@@ -2055,7 +2056,7 @@ class TransientCapacityQueueContractTest {
                             submitted = true;
                             delivery.run((exactItems, batchId, predictedMs, decisionReason, observer) -> {
                                 for (ScheduledRequest item : exactItems) {
-                                    batchIds.put(Long.parseLong(item.requestId()), batchId);
+                                    batchIds.put(item.requestId(), batchId);
                                 }
                                 submittedItems.add(List.copyOf(exactItems));
                                 commandSignals.release();
@@ -2093,6 +2094,8 @@ class TransientCapacityQueueContractTest {
         }
 
         private void blockPreparation() {
+            preparationSignals.drainPermits();
+            preparationReleases = new CountDownLatch(1);
             blockPreparation.set(true);
         }
 

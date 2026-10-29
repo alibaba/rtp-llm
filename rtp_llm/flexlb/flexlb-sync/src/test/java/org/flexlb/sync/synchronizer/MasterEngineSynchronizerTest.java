@@ -61,7 +61,7 @@ class MasterEngineSynchronizerTest {
             failedPolls.countDown();
             return null;
         }).when(reporter).reportStatusCheckerFail(
-                eq("model"), eq(BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT), eq(RoleType.DECODE),
+                eq("127.0.0.1:8080"), eq(BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT), eq(RoleType.DECODE),
                 any(), eq("DEADLINE_EXCEEDED"), any());
         var response = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole("DECODE").setStatusVersion(1L).setAlive(true).build();
@@ -101,7 +101,7 @@ class MasterEngineSynchronizerTest {
                 assertTrue(occupied.await(5, TimeUnit.SECONDS));
                 discovered.set(true);
                 assertTrue(successfulPolls.await(5, TimeUnit.SECONDS), "RPCs continue with every application thread occupied");
-                WorkerStatus status = directory.statusSnapshot(RoleType.DECODE).get("127.0.0.1:8080");
+                WorkerStatus status = directory.statusSnapshot(RoleType.DECODE).get("127.0.0.1:8080@0");
                 assertNotNull(status);
                 assertEquals(1, applications.getQueue().size(), "only one response per generation may wait");
                 assertEquals(-1L, status.appliedStatusCursor().statusVersion());
@@ -116,7 +116,7 @@ class MasterEngineSynchronizerTest {
                 applications.shutdown();
                 assertTrue(applications.awaitTermination(5, TimeUnit.SECONDS));
                 assertEquals(1L, status.appliedStatusCursor().statusVersion(), "known resource state may still finish applying");
-                assertNotNull(registry.get(RoleType.DECODE, status.getIpPort()));
+                assertNotNull(registry.get(RoleType.DECODE, status.getLogicalIpPort()));
                 assertTrue(status.isAvailableForScheduling(), "neither local backlog nor a timeout proves worker failure");
             } finally {
                 releaseApplications.countDown();

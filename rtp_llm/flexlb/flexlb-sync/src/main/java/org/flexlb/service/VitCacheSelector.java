@@ -23,9 +23,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 /** Least-inflight-media routing, optionally preceded by cache affinity. */
@@ -96,7 +96,7 @@ public class VitCacheSelector {
         Map<String, Candidate> candidates = directory.candidates(null, List.of());
         long now = System.currentTimeMillis();
         pending.asMap().entrySet().removeIf(entry ->
-                !entry.getValue().matches(candidates.get(entry.getValue().worker().getIpPort()), now));
+                !entry.getValue().matches(candidates.get(entry.getValue().worker().getLogicalIpPort()), now));
         pending.cleanUp();
     }
 
@@ -190,7 +190,7 @@ public class VitCacheSelector {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
-        ServerStatus result = checkedStatus(selected.worker(), selected.worker().getIpPort(), ctx.getRequestId(), group);
+        ServerStatus result = checkedStatus(selected.worker(), selected.worker().getLogicalIpPort(), ctx.getRequestId(), group);
         if (!result.isSuccess()) {
             return result;
         }
@@ -205,7 +205,7 @@ public class VitCacheSelector {
         return result;
     }
 
-    private ServerStatus checkedStatus(WorkerStatus selected, String address, long requestId, String group) {
+    private ServerStatus checkedStatus(WorkerStatus selected, String address, String requestId, String group) {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }

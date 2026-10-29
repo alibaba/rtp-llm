@@ -38,7 +38,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.Function;
 
-
 /**
  * Engine gRPC client for status, batch enqueue, and cancel requests.
  */

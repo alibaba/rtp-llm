@@ -41,7 +41,7 @@ class EngineGrpcClientTest {
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
         CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
         List<ManagedChannel> createdChannels = new ArrayList<>();
-        when(channelFactory.create(any()))
+        when(channelFactory.create(any(), any()))
                 .thenAnswer(invocation -> {
                     ManagedChannel channel = mock(ManagedChannel.class);
                     createdChannels.add(channel);
@@ -60,8 +60,8 @@ class EngineGrpcClientTest {
         listener.getValue().onAddressUpdate(List.of(host));
         listener.getValue().onAddressUpdate(List.of(host));
 
-        verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
-        verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
+        verify(channelFactory, times(2)).create(eq(new GrpcTarget("10.0.0.1", 8081)), any());
+        verify(channelFactory, times(4)).create(eq(new GrpcTarget("10.0.0.1", 18002)), any());
 
         listener.getValue().onAddressUpdate(List.of());
         for (ManagedChannel channel : createdChannels) {
@@ -78,7 +78,7 @@ class EngineGrpcClientTest {
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
         CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
         when(cacheMatchConfiguration.isKvcmEnabled()).thenReturn(true);
-        when(channelFactory.create(any())).thenReturn(mock(ManagedChannel.class));
+        when(channelFactory.create(any(), any())).thenReturn(mock(ManagedChannel.class));
 
         EngineGrpcClient client = new EngineGrpcClient(
                 addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
@@ -89,8 +89,8 @@ class EngineGrpcClientTest {
         listener.getValue().onAddressUpdate(List.of(new WorkerHost(
                 "10.0.0.1", 8080, 8081, 8085, 18002, "", "", "")));
 
-        verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
-        verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 18002));
+        verify(channelFactory, times(2)).create(eq(new GrpcTarget("10.0.0.1", 8081)), any());
+        verify(channelFactory, times(2)).create(eq(new GrpcTarget("10.0.0.1", 18002)), any());
 
         client.shutdown();
     }
@@ -101,7 +101,7 @@ class EngineGrpcClientTest {
         GrpcChannelFactory channelFactory = mock(GrpcChannelFactory.class);
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
         CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
-        when(channelFactory.create(any())).thenReturn(mock(ManagedChannel.class));
+        when(channelFactory.create(any(), any())).thenReturn(mock(ManagedChannel.class));
         EngineGrpcClient client = new EngineGrpcClient(
                 addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
         ArgumentCaptor<EngineAddressResolver.Listener> listener =
@@ -116,9 +116,9 @@ class EngineGrpcClientTest {
                         "10.0.0.1", 8080, 8081, 8085, 18003,
                         "", "", "", 1, 2)));
 
-        verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
-        verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
-        verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18003));
+        verify(channelFactory, times(2)).create(eq(new GrpcTarget("10.0.0.1", 8081)), any());
+        verify(channelFactory, times(4)).create(eq(new GrpcTarget("10.0.0.1", 18002)), any());
+        verify(channelFactory, times(4)).create(eq(new GrpcTarget("10.0.0.1", 18003)), any());
         client.shutdown();
     }
 
@@ -141,8 +141,8 @@ class EngineGrpcClientTest {
         GrpcChannelFactory channelFactory = mock(GrpcChannelFactory.class);
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
         CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
-        when(channelFactory.create(any())).thenAnswer(invocation ->
-                InProcessChannelBuilder.forName(serverName).directExecutor().build());
+        when(channelFactory.create(any(), any())).thenAnswer(invocation ->
+                InProcessChannelBuilder.forName(serverName).propagateCauseWithStatus(true).directExecutor().build());
         EngineGrpcClient client = new EngineGrpcClient(
                 addressResolver, channelFactory, grpcReporter, cacheMatchConfiguration);
         ArgumentCaptor<EngineAddressResolver.Listener> listener =
@@ -160,7 +160,7 @@ class EngineGrpcClientTest {
                             1000)
                     .get(2, TimeUnit.SECONDS)
                     .getAlive());
-            verify(channelFactory, times(4)).create(new GrpcTarget("10.0.0.1", 18002));
+            verify(channelFactory, times(4)).create(eq(new GrpcTarget("10.0.0.1", 18002)), any());
         } finally {
             client.shutdown();
             server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
@@ -181,7 +181,7 @@ class EngineGrpcClientTest {
                             StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
                         if (workerStatusCalls.incrementAndGet() == 1) {
                             observer.onError(io.grpc.Status.INTERNAL
-                                    .withDescription("Connection reset")
+                                    .withCause(new java.net.SocketException("Connection reset"))
                                     .asRuntimeException());
                             return;
                         }
@@ -197,7 +197,7 @@ class EngineGrpcClientTest {
                             StreamObserver<EngineRpcService.EnqueueBatchResponsePB> observer) {
                         batchCalls.incrementAndGet();
                         observer.onError(io.grpc.Status.INTERNAL
-                                .withDescription("Connection reset")
+                                .withCause(new java.net.SocketException("Connection reset"))
                                 .asRuntimeException());
                     }
 
@@ -207,15 +207,15 @@ class EngineGrpcClientTest {
                             StreamObserver<EngineRpcService.CancelResponsePB> observer) {
                         cancelCalls.incrementAndGet();
                         observer.onError(io.grpc.Status.INTERNAL
-                                .withDescription("Connection reset")
+                                .withCause(new java.net.SocketException("Connection reset"))
                                 .asRuntimeException());
                     }
                 }).build().start();
         EngineAddressResolver addressResolver = mock(EngineAddressResolver.class);
         GrpcChannelFactory channelFactory = mock(GrpcChannelFactory.class);
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
-        when(channelFactory.create(any())).thenAnswer(invocation ->
-                InProcessChannelBuilder.forName(serverName).directExecutor().build());
+        when(channelFactory.create(any(), any())).thenAnswer(invocation ->
+                InProcessChannelBuilder.forName(serverName).propagateCauseWithStatus(true).directExecutor().build());
         EngineGrpcClient client = new EngineGrpcClient(
                 addressResolver,
                 channelFactory,
@@ -255,8 +255,8 @@ class EngineGrpcClientTest {
             verify(grpcReporter).reportConnectionDuration(eq("GetWorkerStatus"), anyLong());
             verify(grpcReporter).reportCallMetrics(
                     eq("GetWorkerStatus"), anyLong(), eq(true));
-            verify(channelFactory, times(5)).create(new GrpcTarget("10.0.0.1", 18002));
-            verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 8081));
+            verify(channelFactory, times(5)).create(eq(new GrpcTarget("10.0.0.1", 18002)), any());
+            verify(channelFactory, times(2)).create(eq(new GrpcTarget("10.0.0.1", 8081)), any());
         } finally {
             client.shutdown();
             server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);

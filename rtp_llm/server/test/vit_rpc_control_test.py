@@ -78,8 +78,8 @@ class VitRpcControlTest(unittest.TestCase):
         self.assertEqual(restored.mm_inflight_inputs.value, 0)
 
     def test_wire_load_contract_matches_java_fixture(self):
-        # Shared with GrpcWorkerStatusRunnerTest: field 23, Int64Value(7).
-        wire = bytes.fromhex("ba01020807")
+        # Shared with GrpcWorkerStatusRunnerTest: field 28, Int64Value(7).
+        wire = bytes.fromhex("e201020807")
         restored = WorkerStatusPB.FromString(wire)
         self.assertTrue(restored.HasField("mm_inflight_inputs"))
         self.assertEqual(restored.mm_inflight_inputs.value, 7)

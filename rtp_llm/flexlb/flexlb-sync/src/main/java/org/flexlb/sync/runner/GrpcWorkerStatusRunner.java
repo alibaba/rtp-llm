@@ -220,7 +220,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
         try {
             if (observation == null) {
                 logger.debug("query engine worker status via gRPC, response body is null");
-                reportStatusCheckFailure(BalanceStatusEnum.RESPONSE_NULL, startTime);
+                engineHealthReporter.reportStatusCheckerFail(BalanceStatusEnum.RESPONSE_NULL,
+                        workerStatus.getMetricIpPort(), roleType);
+                engineHealthReporter.reportStatusCheckFailureLatency(BalanceStatusEnum.RESPONSE_NULL,
+                        workerStatus.getMetricIpPort(), roleType, Math.max(0L, System.nanoTime() / 1000 - startTime));
                 return;
             }
             if (!workerDirectory.isCurrentStatus(
