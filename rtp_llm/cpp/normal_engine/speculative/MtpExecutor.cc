@@ -2381,8 +2381,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // target model sample
             CHECK_AND_RETURN_REF(
                 sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(
-                    stream_groups, sampler_model_output, *spec_logits_result, draft_sampler_output.token_ids));
+                // DSpARK produces draft_sampler_output before this event, so the
+                // copy-stream expansion can be ordered against it and overlap the
+                // target-verify forward. The non-DSpARK MTP path assigns its draft
+                // tokens after the forward and passes no event.
+                batch_stream_processor_->gatherSpecSamplerInput(stream_groups,
+                                                                sampler_model_output,
+                                                                *spec_logits_result,
+                                                                draft_sampler_output.token_ids,
+                                                                is_dspark_ ? draft_tokens_ready_event : nullptr));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,

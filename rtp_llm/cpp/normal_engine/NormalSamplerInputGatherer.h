@@ -21,10 +21,15 @@ public:
                                          const GptModelInputs&  model_inputs,
                                          const GptModelOutputs& model_output) const;
 
+    // `materialize_host_token_ids=false` skips the full-width pinned token
+    // snapshot. The MTP verify path builds its token matrix on the device from
+    // one history row per request, so that snapshot would only be allocated and
+    // never read.
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
                                         size_t              total_batch_size_in,
                                         size_t              total_batch_size_out,
-                                        size_t              propose_step = 0) const;
+                                        size_t              propose_step               = 0,
+                                        bool                materialize_host_token_ids = true) const;
 
     void fillSamplerCommonInputs(SamplerInputs&                sampler_inputs,
                                  std::list<GenerateStreamPtr>& all_streams,

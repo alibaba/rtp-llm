@@ -300,7 +300,11 @@ void warmAsyncSamplerInput(AsyncSamplerInputCase& data, cuda_graph::GraphStream 
         inputs.push_back(gatherAsyncSamplerInput(data));
         clones.push_back(inputs.back().token_ids.clone());
     }
-    const auto                 sizes = inputs.front().token_ids.sizes().vec();
+    const auto sizes = inputs.front().token_ids.sizes().vec();
+    // The pinned history snapshot is one row per request, not one per verify
+    // row; PyTorch's host allocator bins by exact size, so it needs its own
+    // pressure shape or the matrix shape never reuses the snapshot block.
+    const std::vector<int64_t> history_sizes = {static_cast<int64_t>(data.streams.size()), sizes[1]};
     std::vector<torch::Tensor> device_reserve;
     std::vector<torch::Tensor> host_reserve;
     {
@@ -309,6 +313,8 @@ void warmAsyncSamplerInput(AsyncSamplerInputCase& data, cuda_graph::GraphStream 
             device_reserve.push_back(torch::empty(sizes, inputs.front().token_ids.options()));
             host_reserve.push_back(
                 torch::empty(sizes, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true)));
+            host_reserve.push_back(torch::empty(
+                history_sizes, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true)));
         }
     }
     copy_stream.synchronize();
@@ -361,11 +367,17 @@ TEST_F(MtpBatchStreamProcessorTest, AsyncSamplerUploadOwnsPinnedHistorySnapshot)
         stream->completeTokenIds().fill_(-99);
     }
     std::vector<torch::Tensor> host_pressure;
+    const auto                 matrix_sizes  = inputs.token_ids.sizes().vec();
+    const std::vector<int64_t> history_sizes = {static_cast<int64_t>(data.streams.size()), matrix_sizes[1]};
     for (int i = 0; i < 32; ++i) {
         auto tensor = torch::empty(inputs.token_ids.sizes(),
                                    torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
         tensor.fill_(-777);
         host_pressure.push_back(std::move(tensor));
+        auto history = torch::empty(
+            history_sizes, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+        history.fill_(-777);
+        host_pressure.push_back(std::move(history));
     }
     copy_gate.release();
     expectAsyncSamplerHistory(inputs.token_ids, {{5, 6, 7}, {8, 9, 10, 11, 12}}, 21);

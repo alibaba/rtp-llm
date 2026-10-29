@@ -82,6 +82,25 @@ void invokeMtpPositionGather(const std::vector<const int32_t*>& rows, torch::Ten
 // bases may have a non-contiguous row stride; its factor dimension is contiguous.
 void invokeMtpPositionExpand(const torch::Tensor& bases, torch::Tensor& output, int64_t width, cudaStream_t stream);
 
+// Materializes the speculative sampler token matrix in one launch.
+//
+// Every verify row of a request shares the same token history; only the `gamma`
+// columns starting at `base_lengths[b]` differ, holding that request's draft
+// proposal. Building the matrix row by row on the host copies the history
+// `rows` times, so this expands one history row per request instead:
+//   output[b, r, c] = c < base_lengths[b]         ? history[b, c]
+//                   : c < base_lengths[b] + gamma ? draft[b, c - base_lengths[b]]
+//                   :                               0
+// history is CUDA int32 [B, width]; draft is CUDA int32 [B, gamma];
+// base_lengths is CUDA int64 [B]; output is contiguous CUDA int32
+// [B, rows, width] with width == history.size(1).
+void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
+                                     const torch::Tensor& draft,
+                                     const torch::Tensor& base_lengths,
+                                     torch::Tensor&       output,
+                                     int64_t              gamma,
+                                     cudaStream_t         stream);
+
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       input_lengths,
                                   torch::Tensor&       prefix_lengths,

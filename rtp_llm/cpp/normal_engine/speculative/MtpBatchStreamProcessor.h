@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
@@ -178,10 +179,17 @@ public:
                                                       const std::vector<CacheGroupType>& group_types,
                                                       int64_t                            seq_size_per_block);
 
-    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
-                                                         const GptModelOutputs&                      model_output,
-                                                         const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                         const torch::Tensor& draft_token_ids) const;
+    // `draft_tokens_ready` is recorded on the main stream after the proposal
+    // that produced `draft_token_ids`. When it is supplied the token-matrix
+    // expansion runs on the copy stream, ordered by that event, and overlaps the
+    // target-verify forward. The non-DSpARK MTP path assigns its draft tokens
+    // after the forward, so it passes nullptr and expands on the main stream.
+    absl::StatusOr<SamplerInputs>
+    gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                           const GptModelOutputs&                      model_output,
+                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                           const torch::Tensor&                        draft_token_ids,
+                           const std::shared_ptr<torch::Event>&        draft_tokens_ready = nullptr) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,

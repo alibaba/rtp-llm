@@ -691,16 +691,20 @@ torch::Tensor interleaveTokenPairs(const torch::Tensor& first, const torch::Tens
     return torch::stack({first, second}, /*dim=*/1).reshape({-1});
 }
 
-void copyScoreSamplerTokenIds(torch::Tensor&       token_ids,
+// Copies one request's history prefix. Every verify row of a request shares
+// this prefix, so only one row is materialized here; the device expansion in
+// gatherSpecSamplerInput broadcasts it to all rows and writes the proposal
+// tail. Copying `score_len` identical rows on the host was pure memcpy
+// overhead (about 240 MB/step at bs48/gamma5).
+void copyScoreSamplerTokenIds(torch::Tensor&       history,
                               const torch::Tensor& complete_token_ids,
-                              int64_t              batch_idx,
-                              int64_t              score_len,
+                              int64_t              stream_idx,
                               int64_t              seq_len) {
-    if (score_len <= 0 || seq_len <= 0) {
+    if (seq_len <= 0) {
         return;
     }
-    auto dst = token_ids.narrow(0, batch_idx, score_len).narrow(1, 0, seq_len);
-    auto src = complete_token_ids.narrow(0, 0, 1).narrow(1, 0, seq_len).expand({score_len, seq_len});
+    auto dst = history.narrow(0, stream_idx, 1).narrow(1, 0, seq_len);
+    auto src = complete_token_ids.narrow(0, 0, 1).narrow(1, 0, seq_len);
     dst.copy_(src);
 }
 
@@ -1449,7 +1453,8 @@ absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                 const GptModelOutputs&                      model_output,
                                                 const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                const torch::Tensor&                        draft_token_ids) const {
+                                                const torch::Tensor&                        draft_token_ids,
+                                                const std::shared_ptr<torch::Event>&        draft_tokens_ready) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
@@ -1462,8 +1467,10 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     size_t score_len        = propose_step_ + 1;
     size_t total_batch_size = stream_groups.size() * score_len;
 
+    // The token matrix is built on the device from one history row per request,
+    // so the full-width pinned snapshot is never read here.
     SamplerInputs sampler_inputs =
-        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
+        allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_, false);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
 
     // Without history readers, only the final token column is live. The CUDA
@@ -1493,20 +1500,29 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     }
 #endif
 
-    int64_t batch_idx = 0;
+    // One history row per request; the device expansion broadcasts it. A fresh
+    // pinned snapshot per round is required, not merely convenient: the H2D runs
+    // asynchronously on the copy stream, so reusing one buffer would let the next
+    // round overwrite it before the copy lands. PyTorch's pinned allocator defers
+    // reuse until that copy completes, which is what made the previous per-round
+    // `torch::empty` snapshot safe.
+    torch::Tensor sampler_history_host;
+    if (!sampler_token_matrix_dead) {
+        sampler_history_host =
+            torch::empty({static_cast<int64_t>(stream_groups.size()), static_cast<int64_t>(sampler_inputs.step + 1)},
+                         torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    }
+
+    int64_t stream_idx = 0;
     for (auto& stream : all_streams) {
         auto seq_len = static_cast<int64_t>(stream->seqLength());
 
         // Gate-on rounds never upload the pinned snapshot (dead
         // sampler-input elision above), so the O(batch*context) fill is
         // skipped with it. The width bound still guards the materialized
-        // path's proposal scatter columns below.
+        // path's proposal columns below.
         if (!sampler_token_matrix_dead) {
-            copyScoreSamplerTokenIds(sampler_inputs.token_ids,
-                                     stream->completeTokenIds(),
-                                     batch_idx,
-                                     static_cast<int64_t>(score_len),
-                                     seq_len);
+            copyScoreSamplerTokenIds(sampler_history_host, stream->completeTokenIds(), stream_idx, seq_len);
         }
         RTP_LLM_CHECK_WITH_INFO(
             seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
@@ -1514,11 +1530,12 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
             seq_len,
             propose_step_,
             sampler_inputs.step);
-        batch_idx += static_cast<int64_t>(score_len);
+        ++stream_idx;
         if (!sampler_token_matrix_dead) {
-            RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                              stream->streamLogTag().c_str(),
-                              tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
+            RTP_LLM_LOG_DEBUG(
+                "stream [%s], sampler inputs token ids = [%s]",
+                stream->streamLogTag().c_str(),
+                tensorDebugStringWithData<int32_t>(sampler_history_host.narrow(0, stream_idx - 1, 1)).c_str());
         }
     }
 
@@ -1578,6 +1595,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
             torch::empty({static_cast<int64_t>(total_batch_size), static_cast<int64_t>(sampler_inputs.step + 1)},
                          torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     } else {
+        const int64_t history_width = static_cast<int64_t>(sampler_inputs.step + 1);
 #if USING_CUDA
         const auto main_stream = cuda_graph::graphGetCurrentStream();
         if (!sampler_input_copy_stream_ || sampler_input_copy_stream_->device_index() != main_stream.device_index()
@@ -1586,38 +1604,71 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                 sampler_input_copy_stream_ = cuda_graph::graphGetStreamFromPool(false);
             } while (*sampler_input_copy_stream_ == main_stream);
         }
-        const auto copy_stream   = cuda_graph::toGraphStream(*sampler_input_copy_stream_);
-        auto       history_ready = cuda_graph::makeGraphEvent();
+        const auto    copy_stream   = cuda_graph::toGraphStream(*sampler_input_copy_stream_);
+        auto          history_ready = cuda_graph::makeGraphEvent();
+        torch::Tensor history_gpu;
+        // One launch replaces the host-side row replication, the full-width H2D,
+        // and the arange/add/expand/scatter chain that wrote the proposal tail.
+        // Columns beyond base_lengths + gamma are never read by the sampler.
+        auto expand = [&](cudaStream_t stream) {
+            auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                                    .select(1, 0)
+                                    .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true);
+            auto draft_gpu = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
+            auto matrix    = token_ids_gpu.view({batch_size, rows, history_width});
+            invokeMtpSpecSamplerTokenMatrix(history_gpu, draft_gpu, base_lengths, matrix, gamma, stream);
+        };
         {
             cuda_graph::GraphStreamGuard guard(copy_stream);
-            // Upload a fresh full snapshot each round; ATen tracks the pinned
-            // source until DMA completes, including after gate transitions.
-            token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+            if (draft_tokens_ready) {
+                // The proposal that produced draft_token_ids ran on the main
+                // stream before this event was recorded, so waiting on it here
+                // orders the expansion without serializing behind the
+                // target-verify forward. Everything below then rides the copy
+                // stream and overlaps that forward.
+                draft_tokens_ready->block(copy_stream);
+            }
+            history_gpu   = sampler_history_host.to(torch::kCUDA, /*non_blocking=*/true);
+            token_ids_gpu = torch::empty({static_cast<int64_t>(total_batch_size), history_width},
+                                         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            if (draft_tokens_ready) {
+                expand(copy_stream.stream());
+            }
             history_ready.record(copy_stream);
         }
-#else
-        token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-#endif
-        auto histories = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
-        auto proposals = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
-                             .contiguous()
-                             .view({batch_size, 1, gamma})
-                             .expand({batch_size, rows, gamma});
-        auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
-                                .select(1, 0)
-                                .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
-                                .view({batch_size, 1, 1});
-        auto proposal_offsets =
-            torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
-                .view({1, 1, gamma});
-        auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
-#if USING_CUDA
-        // Join at the first consumer and retain the allocation through all
-        // main-stream sampler/rejection uses.
+        // Join before the sampler reads the matrix, and retain both copy-stream
+        // allocations through their main-stream use.
         history_ready.block(main_stream);
+        history_gpu.record_stream(main_stream);
         token_ids_gpu.record_stream(main_stream);
+        if (!draft_tokens_ready) {
+            // Non-DSpARK MTP assigns draft_token_ids after the target-verify
+            // forward, so there is no event to order the copy stream against it;
+            // the expansion runs on the main stream where ordering is automatic.
+            expand(cuda_graph::graphGetCurrentStream().stream());
+        }
+#else
+        token_ids_gpu = torch::empty({static_cast<int64_t>(total_batch_size), history_width},
+                                     torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        {
+            auto histories = token_ids_gpu.view({batch_size, rows, history_width});
+            histories.copy_(
+                sampler_history_host.view({batch_size, 1, history_width}).expand({batch_size, rows, history_width}),
+                /*non_blocking=*/true);
+            auto proposals = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+                                 .contiguous()
+                                 .view({batch_size, 1, gamma})
+                                 .expand({batch_size, rows, gamma});
+            auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                                    .select(1, 0)
+                                    .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                                    .view({batch_size, 1, 1});
+            auto proposal_offsets =
+                torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
+                    .view({1, 1, gamma});
+            histories.scatter_(2, (base_lengths + proposal_offsets).expand({batch_size, rows, gamma}), proposals);
+        }
 #endif
-        histories.scatter_(2, proposal_columns, proposals);
     }
     sampler_inputs.token_ids = std::move(token_ids_gpu);
 
