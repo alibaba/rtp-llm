@@ -495,6 +495,9 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     run_model_if_eligible();
     EXPECT_TRUE(stream->isFinished());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(stream->firstError().error.code(), ErrorCode::MALLOC_FAILED);
+    stream->reportError(ErrorCode::CANCELLED, "later cancellation");
+    EXPECT_EQ(stream->firstError().error.code(), ErrorCode::MALLOC_FAILED);
     EXPECT_NE(stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(model_entry_count, 0u);
     EXPECT_EQ(tracked_abort_count, 1u);

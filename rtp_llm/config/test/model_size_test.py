@@ -1,6 +1,9 @@
 import unittest
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import torch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -10,6 +13,53 @@ from rtp_llm.ops import ProfilingDebugLoggingConfig, VitSeparation
 
 
 class ModelSizeTest(unittest.TestCase):
+    def test_v4_packed_experts_avoid_false_cpu_loading_fallback(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        for moe_style in (1, 2):
+            with self.subTest(moe_style=moe_style):
+                config = ModelConfig()
+                config.model_type = "other_fp8_model"
+                config.hidden_size = 64
+                config.vocab_size = 128
+                config.num_layers = 2
+                config.inter_size = 32
+                config.moe_inter_size = 32
+                config.expert_num = 16
+                config.moe_style = moe_style
+                config.moe_layer_index = [0, 1]
+                config.attn_config.kv_head_num = 1
+                config.attn_config.size_per_head = 16
+                config.quant_algo.setQuantAlgo("fp8", 8, 128)
+                fp8_size = config.eval_model_weight_size()
+                projections = 3 if config.isGatedActivation() else 2
+                shape = (2, 16, projections, 64)
+                fp8_experts = torch.empty((*shape, 32), dtype=torch.int8)
+                fp4_experts = torch.empty((*shape, 16), dtype=torch.int8)
+                fp4_scales = torch.empty((*shape, 1), dtype=torch.uint8)
+                expected = fp8_size - fp8_experts.nbytes
+                expected += fp4_experts.nbytes + fp4_scales.nbytes
+
+                config.model_type = "deepseek_v4"
+                self.assertEqual(config.eval_model_weight_size(), expected)
+                free_bytes = (expected + fp8_size) / 2 / 0.9
+                loader = ModelLoader.__new__(ModelLoader)
+                loader._weights_info = SimpleNamespace(model_config=config)
+                loader._load_config = SimpleNamespace(
+                    force_cpu_load_weights=False,
+                    ep_size=1,
+                    tp_size=1,
+                    exported_device=SimpleNamespace(
+                        get_mem_info=Mock(return_value=SimpleNamespace(free=free_bytes))
+                    ),
+                )
+                self.assertEqual(loader._choose_weight_convert_device("cuda:0"), "cuda:0")
+                config.model_type = "other_fp8_model"
+                self.assertEqual(loader._choose_weight_convert_device("cuda:0"), "cpu")
+                config.model_type = "deepseek_v4"
+                loader._load_config.force_cpu_load_weights = True
+                self.assertEqual(loader._choose_weight_convert_device("cuda:0"), "cpu")
+
     def test_visual_estimation_matches_deployment(self):
         modes = (
             (None, True),

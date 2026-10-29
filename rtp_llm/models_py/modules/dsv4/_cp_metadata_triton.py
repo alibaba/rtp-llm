@@ -68,9 +68,11 @@ if _TRITON_AVAILABLE:
             & (offsets < local_start + req_chunk)
         )
         max_real_position = tl.maximum(req_len - 1, 0)
-        clamped_relative = tl.minimum(relative, max_real_position)
+        # C++ publishes absolute positions; padding addresses remain request-relative.
+        request_relative = relative - prefix
+        clamped_relative = tl.minimum(request_relative, max_real_position)
         padded_position = tl.where(
-            is_local_request, padded_start + relative, padded_position
+            is_local_request, padded_start + request_relative, padded_position
         )
         local_position = tl.where(is_local_request, clamped_relative, local_position)
         global_position = tl.where(

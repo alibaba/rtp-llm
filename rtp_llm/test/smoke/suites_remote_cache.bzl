@@ -62,10 +62,29 @@ def remote_cache_suites():
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
                 smoke_args = {
+                    "frontend": "--max_seq_len 2048 --role_type FRONTEND --warm_up 0",
                     "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                     "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --load_cache_timeout_ms 120000 --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 },
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json",
+            ),
+            smoke_test(
+                name = "remote_cache_pd_decode_entrance",
+                data = ["//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin"],
+                gpu_type = ["L20"],
+                kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
+                sleep_time_qr = 20,
+                envs = {
+                    "prefill": [
+                    ],
+                    "decode": [
+                    ],
+                },
+                smoke_args = {
+                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                },
+                task_info = "data/model/qwen25/q_r_l20_remote_cache_pd_sep_decode_entrance.json",
             ),
             smoke_test(
                 name = "remote_cache_match_fail",

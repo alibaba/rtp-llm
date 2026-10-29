@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
+#include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 
 namespace rtp_llm {
 
@@ -57,6 +58,8 @@ public:
     virtual void                             setStream(const std::shared_ptr<GenerateStream>& stream);
     virtual std::shared_ptr<GenerateStream>& getStream();
     void                                     markRpcHandlingCompleted();
+    void                                     recordRpcFailure(const ErrorInfo& error);
+    void                                     synthesizeTracePhases(telemetry::PhaseRole role, bool exception_unwinding);
 
 public:
     int64_t                               request_id;
@@ -71,6 +74,7 @@ public:
     RequestDeadline                       retry_deadline;
     ErrorInfo                             error_info;
     grpc::Status                          error_status = grpc::Status::OK;
+    FirstError::Snapshot                   dependency_failure;
     RequestInfo                           request_info;
     grpc::ServerContext*                  server_context;
     kmonitor::MetricsReporterPtr          metrics_reporter;

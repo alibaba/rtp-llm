@@ -39,6 +39,7 @@ cc_test(
 )
 
 exec_ops_test_deps = [
+    "//rtp_llm/cpp/cache:batch_kv_cache_resource",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache:cache_config",
     "//rtp_llm/models_py/bindings:op_defs",

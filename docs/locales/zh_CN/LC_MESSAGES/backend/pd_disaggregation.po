@@ -85,24 +85,8 @@ msgid "Default"
 msgstr ""
 
 #: ../../backend/pd_disaggregation.ipynb:131
-msgid "**PREFILL_RETRY_TIMES**"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:131
-msgid "Number of retries for prefill process, 0 means retry disabled"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:131
 #: ../../backend/pd_disaggregation.ipynb:133
 msgid "``0``"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:133
-msgid "**PREFILL_RETRY_TIMEOUT_MS**"
-msgstr ""
-
-#: ../../backend/pd_disaggregation.ipynb:133
-msgid "Total timeout for prefill retries (milliseconds)"
 msgstr ""
 
 #: ../../backend/pd_disaggregation.ipynb:135
@@ -213,3 +197,7 @@ msgstr "``false``"
 #~ msgid "``50``"
 #~ msgstr "``50``"
 
+
+
+msgid "The Decode-entry P2P path no longer accepts `PREFILL_RETRY_TIMES` or `PREFILL_RETRY_TIMEOUT_MS`. Multimodal preprocessing errors are returned immediately; these removed settings do not enable retries."
+msgstr "Decode 入口的 P2P 路径已移除 PREFILL_RETRY_TIMES 和 PREFILL_RETRY_TIMEOUT_MS。多模态预处理失败直接返回；这些已删除的配置不能启用重试。"

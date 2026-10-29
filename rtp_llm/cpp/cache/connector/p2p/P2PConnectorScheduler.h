@@ -3,8 +3,8 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/support/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -18,7 +18,7 @@ namespace rtp_llm {
 /// @brief Facade: 统一外部接口，内部委托给 Prefill / Decode 子对象
 class P2PConnectorScheduler {
 public:
-    using AsyncReadResult = P2PConnectorSchedulerDecode::AsyncReadResult;
+    using AsyncReadResult = P2PSchedulerDecodeRead::AsyncReadResult;
 
     P2PConnectorScheduler(P2PConnectorSchedulerConfig config, const kmonitor::MetricsReporterPtr& metrics_reporter);
     ~P2PConnectorScheduler();
@@ -45,8 +45,8 @@ private:
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient> tp_broadcast_client_;
 
-    std::unique_ptr<P2PConnectorSchedulerPrefill> prefill_;
-    std::unique_ptr<P2PConnectorSchedulerDecode>  decode_;
+    std::unique_ptr<P2PSchedulerPrefillRead> prefill_;
+    std::unique_ptr<P2PSchedulerDecodeRead>  decode_;
 };
 
 }  // namespace rtp_llm
