@@ -1471,7 +1471,7 @@ TEST_F(BlockTreeCacheFactoryTest, UnsupportedProductionEvictionPolicyFailsClosed
     using PolicyField = std::string                        KVCacheConfig::*;
     const std::vector<std::pair<const char*, PolicyField>> policy_fields = {
         {"device", &KVCacheConfig::device_eviction_policy},
-        {"memory", &KVCacheConfig::memory_eviction_policy},
+        {"host", &KVCacheConfig::memory_eviction_policy},
         {"disk", &KVCacheConfig::disk_eviction_policy},
     };
 
@@ -2488,11 +2488,11 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsOverflowingTierBudgetsBeforeAllocating)
     const auto config = makeSingleConfig();
     // This previously wrapped to exactly 1 MiB and could create a tiny pool.
     const int64_t overflowing_mb = static_cast<int64_t>(std::numeric_limits<size_t>::max() / (1024UL * 1024UL)) + 2;
-    for (bool memory : {true, false}) {
+    for (bool host : {true, false}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_memory_cache  = memory;
-        kv_cache_config.enable_disk_cache    = !memory;
+        kv_cache_config.enable_memory_cache  = host;
+        kv_cache_config.enable_disk_cache    = !host;
         kv_cache_config.memory_cache_size_mb = overflowing_mb;
         kv_cache_config.disk_cache_size_mb   = overflowing_mb;
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_budget_overflow");

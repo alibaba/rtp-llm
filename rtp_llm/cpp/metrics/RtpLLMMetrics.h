@@ -1163,10 +1163,10 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheCopyErrorMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* transfer_qps_metric             = nullptr;
-    kmonitor::MutableMetric* transfer_failed_qps_metric      = nullptr;
-    kmonitor::MutableMetric* memory_cache_copy_error_qps_metric = nullptr;
-    kmonitor::MutableMetric* descriptors_per_transfer_metric = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric         = nullptr;
+    kmonitor::MutableMetric* host_cache_copy_error_qps_metric   = nullptr;
+    kmonitor::MutableMetric* descriptors_per_transfer_metric    = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
