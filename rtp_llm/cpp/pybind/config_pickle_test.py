@@ -99,7 +99,6 @@ class _InvalidTypePDSepConfig:
         return _new_config, (PDSepConfig,), tuple(state)
 
 
-
 class MoeConfigPickleTest(unittest.TestCase):
     def test_non_default_fp4_moe_op_round_trip(self):
         config = MoeConfig()
@@ -126,7 +125,6 @@ class PDSepConfigPickleTest(unittest.TestCase):
 
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
         self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
-
 
     def test_rejects_invalid_state_length(self):
         for size in (20, 21, 23):
@@ -232,6 +230,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.decode_capture_batch_sizes = [2, 7]
         config.disable_dpc_random = True
         config.rocm_disable_custom_ag = True
+        config.enable_dynamic_decode_backend = True
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -253,6 +252,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
         self.assertTrue(restored.disable_dpc_random)
         self.assertTrue(restored.rocm_disable_custom_ag)
+        self.assertTrue(restored.enable_dynamic_decode_backend)
 
     def test_legacy_14_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
@@ -261,13 +261,25 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.prefill_capture_seq_lens, [64, 128])
         self.assertEqual(restored.decode_capture_batch_sizes, [1, 8])
         self.assertEqual(restored.num_native_cuda_graph, 37)
+        self.assertFalse(restored.enable_dynamic_decode_backend)
         self.assertEqual(
             restored.generation_prefill_capture_token_buckets,
             HWKernelConfig().generation_prefill_capture_token_buckets,
         )
 
+    def test_previous_16_tuple_defaults_dynamic_decode_to_off(self):
+        state = _LegacyHWKernelConfig().__reduce__()[2] + (5, [32, 64, 96])
+        restored = _new_hw_kernel_config()
+        restored.__setstate__(state)
+
+        self.assertEqual(restored.generation_prefill_cuda_graph_max_requests, 5)
+        self.assertEqual(
+            restored.generation_prefill_capture_token_buckets, [32, 64, 96]
+        )
+        self.assertFalse(restored.enable_dynamic_decode_backend)
+
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (15, 17, 18):
+        for size in (13, 15, 18):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
@@ -292,6 +304,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
             True,
             "not-an-integer",
             [32, 64],
+            True,
         )
         with self.assertRaisesRegex(RuntimeError, "HWKernelConfig unpickle error"):
             config = _new_hw_kernel_config()

@@ -611,6 +611,7 @@ class GrpcConfig:
     def to_string(self) -> str:
         ...
 class HWKernelConfig:
+    enable_dynamic_decode_backend: bool
     generation_prefill_cuda_graph_max_capture_buckets: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_capture_tokens: typing.ClassVar[int]
     generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
@@ -1678,6 +1679,7 @@ class RopeStyle:
     def value(self) -> int:
         ...
 class RuntimeConfig:
+    enable_accuracy_check: bool
     output_dispatcher_worker_count: int
     max_block_size_per_item: int
     max_generate_batch_size: int

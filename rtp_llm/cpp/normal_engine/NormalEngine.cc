@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/normal_engine/accuracy/AccuracyChecker.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -34,6 +35,7 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #include "c10/cuda/CUDAGuard.h"
@@ -277,6 +279,15 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 #else
     RTP_LLM_LOG_INFO("skip warm up on non-CUDA platform.");
 #endif
+    if (runtime_config.enable_accuracy_check || params.hw_kernel_config.enable_dynamic_decode_backend) {
+        auto status = runAttentionAccuracyCheck(params);
+        if (!status.ok()) {
+            if (params.hw_kernel_config.enable_dynamic_decode_backend) {
+                RTP_LLM_FAIL("dynamic decode precision gate failed: %s", status.ToString().c_str());
+            }
+            RTP_LLM_LOG_WARNING("accuracy recording failed: %s", status.ToString().c_str());
+        }
+    }
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
@@ -779,6 +790,78 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
     kv_cache_group_num             = cache_config.groupNums();
     resource_context.cache_manager = std::move(cache_manager);
     resource_context.role_type     = role_type;
+}
+
+absl::Status NormalEngine::runAttentionAccuracyCheck(const EngineInitParams& params) {
+#if !USING_CUDA
+    return absl::UnimplementedError("attention accuracy check requires CUDA");
+#else
+    const bool dynamic = params.hw_kernel_config.enable_dynamic_decode_backend;
+    if (params.moe_config.use_deepep_moe && params.moe_config.use_deepep_low_latency) {
+        return absl::FailedPreconditionError(
+            "Hongmin recorder does not chunk golden bootstrap for DeepEP low-latency token limits");
+    }
+    if (params.py_model.is_none() || propose_params_ || sp_config.type != SP_TYPE_NONE
+        || model_config_.mm_model_config.is_multimodal || model_config_.attn_config.use_mla
+        || model_config_.data_type != DataType::TYPE_BF16 || parallelism_config.pp_size != 1
+        || parallelism_config.prefill_cp_config.is_enabled()
+        || parallelism_config.prefill_cp_config.is_prefill_enabled() || ffn_disaggregate_config.enable_ffn_disaggregate
+        || (dynamic && !params.hw_kernel_config.enable_cuda_graph)) {
+        return absl::FailedPreconditionError("attention accuracy check requires BF16 MHA without speculation or CP/PP");
+    }
+    auto check_config                = kv_cache_config;
+    check_config.reuse_cache         = false;
+    check_config.enable_device_cache = false;
+    check_config.enable_memory_cache = false;
+    check_config.enable_disk_cache   = false;
+    check_config.enable_remote_cache = false;
+    auto cache_config = CacheConfigCreator::createConfig(model_config_, parallelism_config, check_config);
+    if (cache_config.groupNums() != 1
+        || cache_config.topology().groups().front().policy.group_type != CacheGroupType::FULL) {
+        return absl::FailedPreconditionError("attention accuracy check requires one FULL KV cache group");
+    }
+    cache_config.finalizeBlockNums(AccuracyChecker::computeTemporaryBlockNum(model_config_, check_config),
+                                   runtime_config);
+    ResourceContext check_context;
+    check_context.initCacheConfig(check_config);
+    check_context.role_type = pd_sep_config.role_type;
+    absl::Status status;
+    bool         cache_ready = false;
+    try {
+        check_context.cache_manager = std::make_shared<KVCacheManager>(
+            cache_config, false, nullptr, check_config, parallelism_config, runtime_config);
+        cache_ready = check_context.cache_manager->init();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("accuracy temporary cache setup failed: %s", e.what());
+    }
+    cudaSyncAndCheck();
+    if (parallelism_config.world_size > 1) {
+        auto ready  = torch::tensor({cache_ready ? 1 : 0}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+        ready       = execAllReduce({ready, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
+        cache_ready = ready.item<int>() != 0;
+    }
+    if (!cache_ready) {
+        return absl::InternalError("accuracy temporary cache setup failed on at least one rank");
+    }
+    try {
+        NormalExecutor check_executor(
+            params, check_context.cache_manager, false, false, 0, mla_ops_type_, nullptr, nullptr, false);
+        auto check_runtime                                     = runtime_config;
+        check_runtime.fifo_scheduler_config.prefill_chunk_size = 0;
+        AccuracyChecker checker(model_config_, check_runtime, parallelism_config, dynamic);
+        status = checker.runAll(&check_executor, check_context);
+    } catch (const std::exception& e) {
+        status = absl::InternalError(e.what());
+    }
+    {
+        py::gil_scoped_acquire gil;
+        params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+    }
+    check_context.cache_manager.reset();
+    cudaSyncAndCheck();
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    return status;
+#endif
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {

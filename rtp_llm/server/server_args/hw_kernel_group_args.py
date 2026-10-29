@@ -112,6 +112,14 @@ def validate_hw_kernel_group_args(
 
 
 def init_hw_kernel_group_args(parser, hw_kernel_config):
+    parser.add_argument(
+        "--enable_dynamic_decode_backend",
+        env_name="ENABLE_DYNAMIC_DECODE_BACKEND",
+        bind_to=(hw_kernel_config, "enable_dynamic_decode_backend"),
+        type=str2bool,
+        default=False,
+        help="Validate and benchmark decode attention backends before graph capture",
+    )
     ##############################################################################################################
     # 硬件/Kernel 特定优化
     ##############################################################################################################
