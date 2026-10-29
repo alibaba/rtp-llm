@@ -34,6 +34,8 @@ per-request nonce.
 
 `pd_cost_model.py`: measured P and D instance capacities (32K input; 5kpro CEP4PP2 / PPU TP4 / PPU TP8 prefill per prefix-hit ratio, PPU DEP8 / 5kpro TP4 decode at TPOT 15 ms) turned into, per hit ratio: prefill cost efficiency per GPU (5kpro vs PPU), QPS per GPU and per cost unit at the ideal P:D ratio for homogeneous 5kpro PD, heterogeneous 5kpro P -> PPU D and homogeneous PPU PD (with the heterogeneous gain over each), and the best whole-machine mix within the available machines with its idle share (over-provisioned side and whole system, cost-weighted). Options: `--out-tokens`, `--price-5kpro` (default 1), `--price-ppu` (default 1.6), `--5kpro-hosts`, `--ppu-hosts`. The capacities are constants at the top of the script; update them when re-measured.
 
+`prefill_sla_queue.py`: how much of a P instance's saturation rate is usable under a TTFT percentile SLA, from the measured start interval (1 / saturation req/s) and single-request TTFT, for k instances behind an ideal load balancer, with uniform or Poisson arrivals. Queueing never raises the saturation rate itself (P prefills one request at a time); the SLA only decides how close to it bursty traffic can run.
+
 ## Wire sampling
 
 `pd_wire_sampler.py --peer <decode-host-ip> [--rdma-dev erdma_0] --interval 0.002`
