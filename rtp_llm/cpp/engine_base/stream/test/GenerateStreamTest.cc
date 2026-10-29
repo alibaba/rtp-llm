@@ -1687,7 +1687,7 @@ TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
 }
 
-TEST_F(GenerateStreamTest, testShortMultimodalContextUsesNormalPrefill) {
+TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
     GenerateStreamBuilder builder;
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
         for (const int input_length : {7, 8, 9}) {
@@ -1697,17 +1697,124 @@ TEST_F(GenerateStreamTest, testShortMultimodalContextUsesNormalPrefill) {
                 makeInputIds(input_length), role, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig&) {
                     input.multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
                 });
-            EXPECT_FALSE(stream->chunkedPrefillEnabled());
-            EXPECT_EQ(stream->hasError(), input_length > 8);
+            EXPECT_EQ(stream->chunkedPrefillEnabled(), input_length > 8);
+            ASSERT_FALSE(stream->hasError());
+            markRunning(stream);
             if (input_length > 8) {
-                EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: multimodal");
+                expectChunkWindow(stream, /*prefix=*/0, /*length=*/8, /*is_last=*/false);
+                updateOneToken(stream, 101);
+                EXPECT_EQ(stream->seqLength(), input_length);
+                expectChunkWindow(stream, /*prefix=*/8, /*length=*/1, /*is_last=*/true);
             } else {
-                markRunning(stream);
                 EXPECT_FALSE(stream->useChunkWindow());
                 EXPECT_EQ(stream->contextLength(), input_length);
-                updateOneToken(stream, 101);
-                EXPECT_FALSE(stream->isContextStream());
-                EXPECT_EQ(stream->seqLength(), input_length + 1);
+            }
+            updateOneToken(stream, 101);
+            EXPECT_FALSE(stream->isContextStream());
+            EXPECT_EQ(stream->seqLength(), input_length + 1);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testBidirectionalMultimodalContextRequiresUnchunkedPrefill) {
+    for (const int input_length : {7, 9}) {
+        auto input                 = std::make_shared<GenerateInput>();
+        input->input_ids           = torch::arange(input_length, torch::kInt32);
+        input->generate_config     = std::make_shared<GenerateConfig>();
+        input->multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+        ModelConfig model;
+        model.max_seq_len           = 64;
+        model.vocab_size            = 64;
+        model.attn_config.is_causal = false;
+        RuntimeConfig runtime;
+        runtime.fifo_scheduler_config.prefill_chunk_size = 8;
+        ResourceContext resource;
+        resource.role_type = RoleType::PDFUSION;
+        auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+        EXPECT_FALSE(stream->chunkedPrefillEnabled());
+        EXPECT_EQ(stream->hasError(), input_length > 8);
+        if (input_length > 8) {
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testBidirectionalTextContextRequiresUnchunkedPrefill) {
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int chunk_size : {0, 8}) {
+            SCOPED_TRACE(static_cast<int>(role));
+            SCOPED_TRACE(chunk_size);
+            auto input             = std::make_shared<GenerateInput>();
+            input->input_ids       = torch::arange(9, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            ModelConfig model;
+            model.max_seq_len           = 64;
+            model.vocab_size            = 64;
+            model.attn_config.is_causal = false;
+            RuntimeConfig runtime;
+            runtime.fifo_scheduler_config.prefill_chunk_size = chunk_size;
+            ResourceContext resource;
+            resource.role_type = role;
+            auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+            EXPECT_FALSE(stream->chunkedPrefillEnabled());
+            EXPECT_EQ(stream->hasError(), chunk_size > 0);
+            if (chunk_size > 0) {
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
+            }
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillReturnsOnlyCommittedTokenProbabilities) {
+    GenerateStreamBuilder builder;
+    const ChunkedInputConfigurer modes[] = {
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; },
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::ORIGINAL; },
+    };
+    for (const auto configure : modes) {
+        for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+            auto stream = builder.createChunkedContextStream(makeInputIds(18), role, 8, configure);
+            ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+            ASSERT_TRUE(stream->chunkedPrefillEnabled());
+            stream->generateConfig()->is_streaming = true;
+            stream->generateConfig()->max_new_tokens = 2;
+            markRunning(stream);
+
+            // Neither intermediate chunk may publish a token or its probabilities.
+            for (int chunk = 0; chunk < 2; ++chunk) {
+                ASSERT_TRUE(stream->isMiddleChunk());
+                updateOneToken(stream, 100);
+                EXPECT_EQ(stream->seqLength(), 18);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+            ASSERT_TRUE(stream->isLastChunk());
+            for (int step = 0; step < 2; ++step) {
+                auto probs = torch::zeros({1, 1024}, torch::kFloat32);
+                probs[0][101 + step] = 0.75f;
+                probs[0][99] = 0.25f;
+                StreamUpdateInfo update{torch::full({1, 1}, 101 + step, torch::kInt32),
+                                        1,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        probs,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor()};
+                stream->update(update);
+                ASSERT_TRUE(stream->hasOutput());
+                auto result = stream->nextOutput(100);
+                ASSERT_TRUE(result.ok()) << result.status().ToString();
+                ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                const auto& output = result.value().generate_outputs[0];
+                EXPECT_EQ(output.output_ids.item<int32_t>(), 101 + step);
+                ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, update.all_probs));
+                EXPECT_EQ(output.finished, step == 1);
+                EXPECT_FALSE(stream->hasOutput());
             }
         }
     }
@@ -1783,14 +1890,8 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
         {"return_hidden_states", [](GenerateInput&, GenerateConfig& config) { config.return_hidden_states = true; }},
         {"return_all_hidden_states",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
-        {"return_all_probs",
-         [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
         {"custom_output",
          [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
-        {"multimodal",
-         [](GenerateInput& input, GenerateConfig&) {
-             input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};
-         }},
     };
     for (const auto& test_case : rejection_cases) {
         SCOPED_TRACE(test_case.name);

@@ -68,6 +68,110 @@ class _CpuEmbeddingBoundary:
         return torch.cat(shards, dim=0)
 
 
+def _consecutive_image_chunks(image_a, image_b):
+    """Literal producer windows for images at [3, 7) and [9, 12).
+
+    Each tuple is (ids, text mask, features, locations). The draft consumes
+    the already shifted C++ window, including the next image row at its tail.
+    Padding is text and follows the logical rows of each window.
+    """
+    image_hash = 2**31 - 1
+    return [
+        (
+            0,
+            3,
+            ([0, 1, 2, 0], [1, 1, 1, 1], [], []),
+            ([1, 2, image_hash, 0], [1, 1, 0, 1], [image_a[0:1]], [2]),
+        ),
+        (
+            3,
+            3,
+            ([image_hash] * 3 + [0], [0, 0, 0, 1], [image_a[0:3]], [0]),
+            ([image_hash] * 3 + [0], [0, 0, 0, 1], [image_a[1:4]], [0]),
+        ),
+        (
+            6,
+            3,
+            ([image_hash, 3, 1, 0], [0, 1, 1, 1], [image_a[3:4]], [0]),
+            ([3, 1, image_hash, 0], [1, 1, 0, 1], [image_b[0:1]], [2]),
+        ),
+        (
+            9,
+            3,
+            ([image_hash] * 3 + [0], [0, 0, 0, 1], [image_b[0:3]], [0]),
+            ([image_hash, image_hash, 0, 0], [0, 0, 1, 1], [image_b[1:3]], [0]),
+        ),
+        (12, 1, ([0, 0], [1, 1], [], []), ([3, 0], [1, 1], [], [])),
+    ]
+
+
+def _chunk_inputs(fields, start, logical_rows, device):
+    ids, mask, features, locations = fields
+    physical_rows = len(ids)
+    return SimpleNamespace(
+        input_ids=torch.tensor(ids, dtype=torch.int32, device=device),
+        combo_position_ids=torch.tensor(
+            list(range(start, start + logical_rows))
+            + [0] * (physical_rows - logical_rows),
+            dtype=torch.int32,
+            device=device,
+        ),
+        input_hiddens=None,
+        embedding_inputs=SimpleNamespace(
+            combo_tokens_type_ids=None,
+            text_tokens_mask=torch.tensor(mask, dtype=torch.int32, device=device),
+        ),
+        multimodal_inputs=SimpleNamespace(
+            multimodal_features=features,
+            mm_features_locs=torch.tensor(locations, dtype=torch.int32, device=device),
+        ),
+        attention_inputs={
+            "default": SimpleNamespace(
+                is_prefill=False,
+                is_target_verify=False,
+                valid_token_mask=torch.tensor(
+                    [True] * logical_rows + [False] * (physical_rows - logical_rows),
+                    device=device,
+                ),
+            )
+        },
+    )
+
+
+def _check_consecutive_chunks(test, expected_target, expected_mtp, target, draft):
+    images = [expected_target[3:7].clone(), expected_target[9:12].clone()]
+    originals = [image.clone() for image in images]
+    device = expected_target.device
+    for start, logical, target_fields, draft_fields in _consecutive_image_chunks(
+        *images
+    ):
+        with test.subTest(chunk_start=start):
+            inputs = _chunk_inputs(target_fields, start, logical, device)
+            original_ids = inputs.input_ids.clone()
+            hidden = target(inputs)
+            torch.testing.assert_close(
+                hidden[:logical],
+                expected_target[start : start + logical],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(inputs.input_ids, original_ids, rtol=0, atol=0)
+            inputs = _chunk_inputs(draft_fields, start + 1, logical, device)
+            # C++ pads the target hidden input with zeros for the next SP pass.
+            inputs.input_hiddens = hidden.clone()
+            inputs.input_hiddens[logical:].zero_()
+            original_ids = inputs.input_ids.clone()
+            torch.testing.assert_close(
+                draft(inputs)[:logical],
+                expected_mtp[start : start + logical],
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(inputs.input_ids, original_ids, rtol=0, atol=0)
+    for current, original in zip(images, originals):
+        torch.testing.assert_close(current, original, rtol=0, atol=0)
+
+
 class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
     def _inputs(self, images):
         if images:
@@ -429,6 +533,86 @@ class KimiK3MultimodalEmbeddingCpuTest(unittest.TestCase):
                         inputs.input_ids, original_ids, rtol=0, atol=0
                     )
 
+    def test_consecutive_chunks_keep_target_images_and_native_mtp_rows_aligned(self):
+        expected_target = torch.tensor(
+            [
+                [0.0, 1.0, 4.0, -2.0],
+                [3.0, -1.0, 2.0, 5.0],
+                [-4.0, 2.0, 7.0, 1.0],
+                [100.0, -30.0, 7.0, 12.0],
+                [-8.0, 23.0, 5.0, -100.0],
+                [9.0, 0.0, 71.0, -11.0],
+                [4.0, 8.0, -4.0, 13.0],
+                [6.0, 0.0, -3.0, 2.0],
+                [3.0, -1.0, 2.0, 5.0],
+                [50.0, 4.0, -9.0, 2.0],
+                [-12.0, 11.0, 18.0, -3.0],
+                [17.0, -6.0, 2.0, 90.0],
+                [0.0, 1.0, 4.0, -2.0],
+            ]
+        )
+        # eh_proj is [I, 2I], with identity normalization. These hand-calculated
+        # rows combine E(next text/media token) with twice the target hidden.
+        expected_mtp = torch.tensor(
+            [
+                [3.0, 1.0, 10.0, 1.0],
+                [2.0, 0.0, 11.0, 11.0],
+                [-12.0, 6.0, 21.0, 3.0],
+                [196.0, -58.0, 21.0, 25.0],
+                [-20.0, 48.0, 17.0, -199.0],
+                [14.0, 2.0, 149.0, -21.0],
+                [14.0, 16.0, -11.0, 28.0],
+                [15.0, -1.0, -4.0, 9.0],
+                [2.0, 0.0, 11.0, 11.0],
+                [96.0, 10.0, -11.0, 5.0],
+                [-28.0, 24.0, 43.0, -5.0],
+                [34.0, -11.0, 8.0, 178.0],
+                [6.0, 2.0, 5.0, -2.0],
+            ]
+        )
+        targets = [self._model(KimiK3Model, rank) for rank in range(2)]
+        drafts = [self._model(KimiK3MtpModel, rank) for rank in range(2)]
+        for model, _ in drafts:
+            model.enorm = nn.Identity()
+
+        def forward(inputs, *, draft=False):
+            outputs = []
+            for model, boundary in drafts if draft else targets:
+                with (
+                    patch.object(
+                        embedding_module.rtp_llm_ops, "embedding", new=boundary.lookup
+                    ),
+                    patch.object(
+                        embedding_module,
+                        "all_gather",
+                        side_effect=(
+                            AssertionError(
+                                "native MTP must use its modeling-boundary gather"
+                            )
+                            if draft
+                            else boundary.gather
+                        ),
+                    ),
+                ):
+                    outputs.append(
+                        model._project_local_mtp_input(inputs)
+                        if draft
+                        else model._forward_layers(
+                            None, inputs, object(), gather_output=False
+                        )
+                    )
+            return torch.cat(outputs)
+
+        _check_consecutive_chunks(
+            self,
+            expected_target,
+            expected_mtp,
+            forward,
+            lambda inputs: forward(inputs, draft=True),
+        )
+        for _, boundary in targets + drafts:
+            self.assertEqual(boundary.gather_count, 5)
+
 
 class TextOnlyMultimodalInputs:
     multimodal_features = ()
@@ -583,6 +767,47 @@ class KimiK3MultimodalEmbeddingCudaTest(unittest.TestCase):
                 actual, full.narrow(0, rank * 4, 4), rtol=0, atol=0
             )
         torch.testing.assert_close(inputs.input_ids, original_ids, rtol=0, atol=0)
+
+    def test_consecutive_chunks_run_real_embedding_and_native_mtp_projection(self):
+        # Constant row values keep every expected projection exactly representable
+        # in BF16, including media-token lookup and target image rows.
+        self.weight = (
+            torch.arange(16, device="cuda", dtype=torch.bfloat16)[:, None]
+            .expand(16, 8)
+            .contiguous()
+            * 16
+        )
+        target = self.make_model()
+        draft = self.make_model(KimiK3MtpModel)
+        draft.enorm = nn.Identity()
+        draft.hnorm = nn.Identity()
+        draft.eh_proj = nn.Linear(
+            16, 8, bias=False, device="cuda", dtype=torch.bfloat16
+        )
+        with torch.no_grad():
+            draft.eh_proj.weight.copy_(
+                torch.cat(
+                    (torch.eye(8, device="cuda"), 2 * torch.eye(8, device="cuda")),
+                    dim=1,
+                )
+            )
+        expected_target = torch.tensor(
+            [0, 16, 32, 512, 544, 576, 608, 48, 16, 768, 800, 832, 0],
+            device="cuda",
+            dtype=torch.bfloat16,
+        )[:, None].expand(13, 8)
+        expected_mtp = torch.tensor(
+            [16, 64, 240, 1200, 1264, 1328, 1264, 112, 208, 1712, 1776, 1664, 48],
+            device="cuda",
+            dtype=torch.bfloat16,
+        )[:, None].expand(13, 8)
+        _check_consecutive_chunks(
+            self,
+            expected_target,
+            expected_mtp,
+            target._embed_inputs,
+            draft._project_local_mtp_input,
+        )
 
     def test_text_embedding_keeps_graph_capture_without_multimodal_work(self):
         for cls in (KimiK3Model, KimiK3MtpModel):
