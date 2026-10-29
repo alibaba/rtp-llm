@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import unittest
+from itertools import product
 
 import torch
 import torch.nn.functional as F
@@ -26,17 +27,19 @@ logging.basicConfig(
     force=True,
 )
 
-# Kimi Linear per-TP config
-H = 16  # local_num_heads (32 / TP=2)
+# Explicit KDA operator geometry; this is not a full-model configuration.
+H = 16
 K = 128  # head_k_dim
 V = 128  # head_v_dim
 DEVICE = "cuda"
 DTYPE = torch.bfloat16
 COS_THRESH = 0.99
+# Pinned cuLA prefill supports the bounded-gate formulation in [-5, 0).
+SAFE_GATE_LOWER_BOUND = -5.0
 
 
 def make_kda_inputs(batch, seq_len, seed=42):
-    """Create random KDA inputs matching Kimi Linear's actual shapes."""
+    """Create deterministic BF16 inputs for the H=16, K=V=128 operator case."""
     torch.manual_seed(seed)
     q = torch.randn(batch, seq_len, H, K, device=DEVICE, dtype=DTYPE)
     k = torch.randn(batch, seq_len, H, K, device=DEVICE, dtype=DTYPE)
@@ -61,7 +64,9 @@ def cos_sim(a: torch.Tensor, b: torch.Tensor) -> float:
 # ============================================================================
 
 
-def naive_recurrent_kda(q, k, v, g, beta, scale, initial_state, A_log, dt_bias):
+def naive_recurrent_kda(
+    q, k, v, g, beta, scale, initial_state, A_log, dt_bias, *, lower_bound=None
+):
     """Naive token-by-token KDA recurrent (reference for both prefill and decode).
 
     Args:
@@ -73,6 +78,7 @@ def naive_recurrent_kda(q, k, v, g, beta, scale, initial_state, A_log, dt_bias):
         initial_state: [B, H, K, V]
         A_log: [H]
         dt_bias: [H*K] or None
+        lower_bound: None for softplus gates, or the negative sigmoid gate bound
     Returns:
         output: [B, T, H, V], final_state: [B, H, K, V]
     """
@@ -91,7 +97,13 @@ def naive_recurrent_kda(q, k, v, g, beta, scale, initial_state, A_log, dt_bias):
         gi = g_flat[t]  # [H, K]
         if dt_bias_reshaped is not None:
             gi = gi + dt_bias_reshaped
-        gate_list.append(-torch.exp(A_log.float()).unsqueeze(-1) * F.softplus(gi))
+        rate = torch.exp(A_log.float()).unsqueeze(-1)
+        if lower_bound is None:
+            gate_list.append(-rate * F.softplus(gi))
+        else:
+            # Independent FP32 reference for the bounded gate, not a clamp of
+            # the softplus gate and not a call into either tested kernel.
+            gate_list.append(lower_bound * torch.sigmoid(rate * gi))
     gk = torch.stack(gate_list).reshape(B, T, Hd, Kd)  # [B, T, H, K]
 
     state = initial_state.clone().float()
@@ -122,9 +134,19 @@ def naive_recurrent_kda(q, k, v, g, beta, scale, initial_state, A_log, dt_bias):
 class TestKdaOps(unittest.TestCase):
 
     def test_decode_vs_naive(self):
-        for B in [1, 4, 8]:
-            with self.subTest(B=B):
+        for B, lower_bound, nonzero_state, transpose_state_layout in product(
+            (1, 4, 8), (None, SAFE_GATE_LOWER_BOUND), (False, True), (False, True)
+        ):
+            with self.subTest(
+                B=B,
+                lower_bound=lower_bound,
+                nonzero_state=nonzero_state,
+                transpose_state_layout=transpose_state_layout,
+            ):
                 q, k, v, g_raw, beta, A_log, dt_bias, state = make_kda_inputs(B, 1)
+                if nonzero_state:
+                    # A one-token update from zero cannot observe the gate.
+                    state = torch.randn_like(state) * 0.125
                 scale = K**-0.5
 
                 state_for_kernel = state.clone()
@@ -137,9 +159,11 @@ class TestKdaOps(unittest.TestCase):
                     initial_state=state_for_kernel,
                     A_log=A_log,
                     dt_bias=dt_bias,
+                    lower_bound=lower_bound,
                     inplace_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     use_gate_in_kernel=True,
+                    transpose_state_layout=transpose_state_layout,
                 )
 
                 o_naive, fs_naive = naive_recurrent_kda(
@@ -152,23 +176,33 @@ class TestKdaOps(unittest.TestCase):
                     state.clone(),
                     A_log,
                     dt_bias,
+                    lower_bound=lower_bound,
                 )
 
                 sim_o = cos_sim(o_kernel, o_naive)
                 sim_s = cos_sim(fs_kernel, fs_naive)
                 self.assertGreater(
-                    sim_o, COS_THRESH, f"Decode output cos_sim={sim_o:.6f} (B={B})"
+                    sim_o,
+                    COS_THRESH,
+                    f"Decode output cos_sim={sim_o:.6f} (B={B}, lower_bound={lower_bound})",
                 )
                 self.assertGreater(
-                    sim_s, COS_THRESH, f"Decode state cos_sim={sim_s:.6f} (B={B})"
+                    sim_s,
+                    COS_THRESH,
+                    f"Decode state cos_sim={sim_s:.6f} (B={B}, lower_bound={lower_bound})",
                 )
                 logging.info(
-                    f"test_decode_vs_naive PASSED B={B} (o={sim_o:.6f}, s={sim_s:.6f})"
+                    f"test_decode_vs_naive PASSED B={B} lower_bound={lower_bound} "
+                    f"(o={sim_o:.6f}, s={sim_s:.6f})"
                 )
 
     @torch.inference_mode()
     def test_prefill_vs_naive(self):
+        from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+        setup_cutlass_import_path()
         from cula.kda import chunk_kda
+
         for B, seq_len in [(1, 11), (1, 64), (1, 128), (2, 11), (2, 64), (2, 128)]:
             with self.subTest(B=B, seq_len=seq_len):
                 q, k, v, g_raw, beta, A_log, dt_bias, state = make_kda_inputs(
@@ -188,7 +222,8 @@ class TestKdaOps(unittest.TestCase):
                     use_gate_in_kernel=True,
                     return_intermediate_states=True,
                     use_beta_sigmoid_in_kernel=False,
-                    safe_gate=False,
+                    safe_gate=True,
+                    lower_bound=SAFE_GATE_LOWER_BOUND,
                     A_log=A_log,
                     dt_bias=dt_bias,
                 )
@@ -203,6 +238,7 @@ class TestKdaOps(unittest.TestCase):
                     state.clone(),
                     A_log,
                     dt_bias,
+                    lower_bound=SAFE_GATE_LOWER_BOUND,
                 )
 
                 sim_o = cos_sim(o_kernel, o_naive)
@@ -223,10 +259,24 @@ class TestKdaOps(unittest.TestCase):
 
     @torch.inference_mode()
     def test_chunked_prefill_then_decode_preserves_state(self):
+        from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+        setup_cutlass_import_path()
+        from cula.kda import chunk_kda
+
         q, k, v, g, beta, A_log, dt_bias, initial = make_kda_inputs(2, 274)
         initial.normal_(std=0.1)
         reference, ref_state = naive_recurrent_kda(
-            q, k, v, g, beta, K**-0.5, initial.clone(), A_log, dt_bias
+            q,
+            k,
+            v,
+            g,
+            beta,
+            K**-0.5,
+            initial.clone(),
+            A_log,
+            dt_bias,
+            lower_bound=SAFE_GATE_LOWER_BOUND,
         )
         for chunk_tokens in (128, 256):
             with self.subTest(chunk_tokens=chunk_tokens):
@@ -245,7 +295,8 @@ class TestKdaOps(unittest.TestCase):
                         use_gate_in_kernel=True,
                         return_intermediate_states=True,
                         use_beta_sigmoid_in_kernel=False,
-                        safe_gate=False,
+                        safe_gate=True,
+                        lower_bound=SAFE_GATE_LOWER_BOUND,
                         A_log=A_log,
                         dt_bias=dt_bias,
                     )
@@ -267,6 +318,7 @@ class TestKdaOps(unittest.TestCase):
                     initial_state=state,
                     A_log=A_log,
                     dt_bias=dt_bias,
+                    lower_bound=SAFE_GATE_LOWER_BOUND,
                     inplace_final_state=False,
                     use_qk_l2norm_in_kernel=True,
                     use_gate_in_kernel=True,
@@ -276,7 +328,11 @@ class TestKdaOps(unittest.TestCase):
 
     @torch.inference_mode()
     def test_prefill_then_decode(self):
+        from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+        setup_cutlass_import_path()
         from cula.kda import chunk_kda
+
         q_all, k_all, v_all, g_all, beta_all, A_log, dt_bias, state = make_kda_inputs(
             1, 12
         )
@@ -293,12 +349,13 @@ class TestKdaOps(unittest.TestCase):
             use_gate_in_kernel=True,
             return_intermediate_states=True,
             use_beta_sigmoid_in_kernel=False,
-            safe_gate=False,
+            safe_gate=True,
+            lower_bound=SAFE_GATE_LOWER_BOUND,
             A_log=A_log,
             dt_bias=dt_bias,
         )
 
-        o_dec, _ = fused_recurrent_kda(
+        o_dec, final_state_dec = fused_recurrent_kda(
             q_all[:, 11:12],
             k_all[:, 11:12],
             v_all[:, 11:12],
@@ -307,6 +364,7 @@ class TestKdaOps(unittest.TestCase):
             initial_state=final_state_pf.clone(),
             A_log=A_log,
             dt_bias=dt_bias,
+            lower_bound=SAFE_GATE_LOWER_BOUND,
             inplace_final_state=False,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
@@ -324,11 +382,34 @@ class TestKdaOps(unittest.TestCase):
             use_gate_in_kernel=True,
             return_intermediate_states=True,
             use_beta_sigmoid_in_kernel=False,
-            safe_gate=False,
+            safe_gate=True,
+            lower_bound=SAFE_GATE_LOWER_BOUND,
             A_log=A_log,
             dt_bias=dt_bias,
         )
 
+        o_naive, final_state_naive = naive_recurrent_kda(
+            q_all,
+            k_all,
+            v_all,
+            g_all,
+            beta_all,
+            K**-0.5,
+            state.clone(),
+            A_log,
+            dt_bias,
+            lower_bound=SAFE_GATE_LOWER_BOUND,
+        )
+        self.assertGreater(
+            cos_sim(o_dec, o_naive[:, 11:12]),
+            COS_THRESH,
+            "Prefill-decode output differs from the bounded FP32 recurrence",
+        )
+        self.assertGreater(
+            cos_sim(final_state_dec, final_state_naive),
+            COS_THRESH,
+            "Prefill-decode state differs from the bounded FP32 recurrence",
+        )
         sim = cos_sim(o_dec, o_full[:, 11:12])
         self.assertGreater(
             sim, COS_THRESH, f"Prefill-decode consistency failed: cos_sim={sim:.6f}"
