@@ -356,7 +356,7 @@ protected:
     void prepareLinearHistoryResource(bool enable_reclaim = true) {
         auto config = test::makeSimpleHybridMhaCacheConfig(
             /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/2, DataType::TYPE_FP16);
-        config.linear_step                 = 1;
+        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
         config.enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
@@ -558,7 +558,7 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimPreservesBorrowedResourcesAn
 
 TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastIncludesFutureDecodeForFreshContext) {
     auto config                        = test::makeSimpleLinearCacheConfig(1, 64, 2, DataType::TYPE_FP16);
-    config.linear_step                 = 1;
+    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
     config.enable_linear_cache_reclaim = true;
     prepareResourceWithCacheConfig(config, {1, 2}, true, RoleType::PDFUSION, {}, 1, 64);
     stream_->generateConfig()->reuse_cache = true;
@@ -649,7 +649,7 @@ TEST_F(StreamCacheResourceTest, PDLinearTailHandoffKeepsInitialAdmissionEqualToA
     for (bool enable_reclaim : {false, true}) {
         SCOPED_TRACE(enable_reclaim);
         auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-        config.linear_step                 = 1;
+        config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
         config.enable_linear_cache_reclaim = enable_reclaim;
         prepareResourceWithCacheConfig(
             config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
@@ -682,7 +682,7 @@ TEST_F(StreamCacheResourceTest, LinearCacheSwitchCombinationsPreserveRoleOwnersh
                 SCOPED_TRACE(testing::Message() << "role=" << roleTypeToString(role) << " reclaim=" << enable_reclaim
                                                 << " tail=" << enable_tail_only);
                 auto config        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
-                config.linear_step = 1;
+                config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
                 config.enable_linear_cache_reclaim = enable_reclaim;
                 prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, role, {}, 1, 64);
                 auto& resource                                 = stream_->streamCacheResource();
@@ -839,6 +839,7 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
 TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReuseState) {
     for (const int tail_blocks : {2, 8}) {
         SCOPED_TRACE(tail_blocks);
+// Full-checkpoint materialization window (pre-#1574 linear_step=1).
         auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
         config.reuse_cache_tail_blocks = tail_blocks;
         KVCacheConfig tiered_config;

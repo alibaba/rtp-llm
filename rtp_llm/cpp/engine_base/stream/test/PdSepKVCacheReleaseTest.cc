@@ -1040,7 +1040,14 @@ TEST_F(PdSepKVCacheReleaseTest, WeightedPoolsTransferHybridMtpBytesAcrossUnequal
     for (const auto& tag : decode_config.groupTags()) {
         const auto& src = prefill_resource->blocks(0, tag);
         const auto& dst = decode_resource->blocks(0, tag);
-        ASSERT_GT(dst.size(), static_cast<size_t>(prompt_blocks));
+        // Since #1574 the prefill-shaped LINEAR malloc appends no speculative
+        // scratch (the row stays at prompt blocks), while the Full pool also
+        // materializes the MTP reserve window beyond the prompt.
+        if (tag == "linear") {
+            ASSERT_EQ(dst.size(), static_cast<size_t>(prompt_blocks));
+        } else {
+            ASSERT_GT(dst.size(), static_cast<size_t>(prompt_blocks));
+        }
         ASSERT_NE(src[prompt_blocks - 1], dst[prompt_blocks - 1]);
         if (tag == "linear") {
             for (int pos = 0; pos < prompt_blocks - 1; ++pos) {
