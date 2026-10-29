@@ -81,6 +81,8 @@ def requirement(names):
             )
             continue
         cuda13_x86_deps = [] if name in _CUDA13_X86_DEFERRED else [requirement_gpu_cuda13(name)]
+        if name == "nvidia-cutlass-dsl":
+            cuda13_x86_deps.append(requirement_gpu_cuda13("nvidia-cutlass-dsl-libs-cu13"))
         cuda13_arm_deps = [] if name in _CUDA13_ARM_DEFERRED else [requirement_cuda13_arm(name)]
         ppu_deps = [] if name in _PPU_LOCK_SKIPPED else [requirement_ppu(name)]
         if name in _DSV4_PLATFORM_ONLY:
@@ -153,8 +155,9 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
-            # flash_attn_3 / nvidia_cutlass_dsl: deferred rebuild for
-            # torch2.11+cu130, omitted from cuda13 lock.
+            "nvidia-cutlass-dsl==4.4.2",
+            "nvidia-cutlass-dsl-libs-cu13==4.4.2",
+            # flash_attn_3 remains deferred for torch2.11+cu130.
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
