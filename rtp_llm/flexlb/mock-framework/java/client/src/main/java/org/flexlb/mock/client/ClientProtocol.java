@@ -17,17 +17,25 @@ public interface ClientProtocol {
         }
     }
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record Start(@Argument(optional=true) List<String> masters, List<Input> requests, double qps, int concurrency, int queue_capacity,
+    record Start(@Argument(optional=true) List<String> masters, @Argument(optional=true) List<Input> requests,
+                 @Argument(optional=true) String requests_file, double qps, int concurrency, int queue_capacity,
                  long request_timeout_ms, long drain_timeout_ms) {
         public Start {
-            requests = List.copyOf(requests);
+            if ((requests == null) == (requests_file == null))
+                throw new IllegalArgumentException("Specify exactly one of requests or requests_file");
+            if (requests != null) {
+                requests = List.copyOf(requests);
+                if (requests.isEmpty() || requests.size() / qps > 86400)
+                    throw new IllegalArgumentException("Invalid request count (maximum 24 hours)");
+            }
+            if (requests_file != null && (requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute()))
+                throw new IllegalArgumentException("requests_file must be an absolute local path");
             if (masters != null) {
                 masters = List.copyOf(masters);
                 if (masters.isEmpty() || new HashSet<>(masters).size() != masters.size() || masters.stream().anyMatch(String::isBlank))
                     throw new IllegalArgumentException("masters must be nonempty and unique when supplied");
             }
-            if (requests.isEmpty() || !Double.isFinite(qps) || qps <= 0
-                    || requests.size() / qps > 86400 || concurrency < 1 || queue_capacity < 1 || queue_capacity > 100000
+            if (!Double.isFinite(qps) || qps <= 0 || concurrency < 1 || queue_capacity < 1 || queue_capacity > 100000
                     || request_timeout_ms < 1 || request_timeout_ms > 3600000 || drain_timeout_ms < 1 || drain_timeout_ms > 3600000)
                 throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
         }
@@ -36,14 +44,18 @@ public interface ClientProtocol {
         public Item { if (request_id <= 0 || index < 0) throw new IllegalArgumentException("Invalid request identity"); }
     }
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record Shard(long sequence, @Argument(optional=true) List<String> masters, List<Item> requests, double qps, int concurrency,
-                 int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
+    record Shard(long sequence, @Argument(optional=true) List<String> masters, String requests_file,
+                 long count, long first_index, int stride, long first_request_id, String sha256,
+                 double qps, int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
         public Shard {
-            requests = List.copyOf(requests);
-            if (sequence < 1 || requests.isEmpty()) throw new IllegalArgumentException("Empty/invalid shard");
+            new Start(masters, null, requests_file, qps, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms);
             masters = masters == null ? null : List.copyOf(masters);
-            new Start(masters, requests.stream().map(Item::input).toList(), qps, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms);
-            if (requests.getLast().index() / qps > 86400) throw new IllegalArgumentException("Playback exceeds 24 hours");
+            if (sequence < 1 || count < 1 || first_index < 0 || stride < 1 || first_index >= stride || first_request_id < 1
+                    || sha256 == null || !sha256.matches("[0-9a-f]{64}"))
+                throw new IllegalArgumentException("Invalid shard");
+            long last = Math.addExact(first_index, Math.multiplyExact(count - 1, stride));
+            Math.addExact(first_request_id, last);
+            if (last / qps > 86400) throw new IllegalArgumentException("Playback exceeds 24 hours");
         }
     }
     record Begin(long sequence, long start_epoch_ms) {}

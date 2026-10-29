@@ -42,9 +42,10 @@ final class LoadClient implements AutoCloseable {
         begun = true;
         long start = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay);
         player = Thread.ofVirtual().name("client-player").start(() -> {
-            try { Player.play(plan.requests(), plan.qps(), start, this::offer); }
+            try { Player.play(plan, start, this::offer); }
             catch (InterruptedException interrupted) { if (!isStopped()) fail("Player interrupted unexpectedly"); }
-            catch (RuntimeException error) { fail(error.toString()); }
+            catch (java.io.InterruptedIOException interrupted) { if (!isStopped()) fail(interrupted.toString()); }
+            catch (java.io.IOException | RuntimeException error) { fail(error.toString()); }
             finally { synchronized (LoadClient.this) { finishInput(); } }
         });
         LockSupport.unpark(dispatcher);
@@ -127,7 +128,7 @@ final class LoadClient implements AutoCloseable {
         }
     }
     private State snapshot(boolean done) {
-        return new State(done, stopped, produced.get(), issued, finished, plan.requests().size() - issued,
+        return new State(done, stopped, produced.get(), issued, finished, plan.count() - issued,
             queue.size(), active.size(), Map.copyOf(outcomes), List.copyOf(errors));
     }
     synchronized State state() { return completion.isDone() ? completion.join() : snapshot(false); }

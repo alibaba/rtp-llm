@@ -12,10 +12,10 @@ import org.flexlb.mock.client.ClientProtocol.*;
 class PlaybackTest {
     @TempDir Path directory;
     static Input input() { return new Input(List.of(1, 2, 3), 3, 20); }
-    static Shard shard(String master, int count, double qps, int slots, int queue) {
-        var requests = new ArrayList<Item>();
-        for (int i = 0; i < count; i++) requests.add(new Item(i + 1, i, input()));
-        return new Shard(1, List.of(master), requests, qps, slots, queue, 3000, 1000);
+    Shard shard(String master, int count, double qps, int slots, int queue) throws Exception {
+        var start = new Start(List.of(master), Collections.nCopies(count, input()), null, qps, slots, queue, 3000, 1000);
+        var part = RequestFiles.split(start, directory.resolve(UUID.randomUUID().toString()), 1, () -> false).getFirst();
+        return new Shard(1, start.masters(), part.path(), part.count(), 0, 1, 1, part.sha256(), qps, slots, queue, 3000, 1000);
     }
     Path topology(NativeClientTest.Harness h) throws Exception {
         var path = directory.resolve(UUID.randomUUID() + ".json");
@@ -58,7 +58,7 @@ class PlaybackTest {
         try (var h = new NativeClientTest.Harness()) {
             h.tokenDelay = 5000;
             var plan = shard(master(h), 10, 20, 1, 10);
-            plan = new Shard(1, plan.masters(), plan.requests(), plan.qps(), 1, 10, 10000, 80);
+            plan = new Shard(1, plan.masters(), plan.requests_file(), plan.count(), 0, 1, 1, plan.sha256(), plan.qps(), 1, 10, 10000, 80);
             try (var load = new LoadClient(plan, new ClientMetrics(), topology(h))) {
                 load.begin(System.currentTimeMillis() + 30);
                 assertTrue(h.scheduleEntered.await(2, TimeUnit.SECONDS));
@@ -89,7 +89,7 @@ class PlaybackTest {
              var two = new ClientNode("client-2", topology, directory.resolve("two"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url()), Map.of("role", "client", "control", two.url())));
-            var start = new Start(null, Collections.nCopies(7, input()), 10, 4, 4, 3000, 1000);
+            var start = new Start(null, Collections.nCopies(7, input()), null, 10, 4, 4, 3000, 1000);
             assertThrows(IllegalStateException.class, () -> one.start(start));
             zero.start(start);
             assertThrows(IllegalStateException.class, () -> zero.start(start));
@@ -113,7 +113,7 @@ class PlaybackTest {
             h.tokenDelay = 500;
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-            zero.start(new Start(List.of(master(h)), Collections.nCopies(100, input()), 500, 2, 1, 3000, 1000));
+            zero.start(new Start(List.of(master(h)), Collections.nCopies(100, input()), null, 500, 2, 1, 3000, 1000));
             eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
             var result = zero.stop(new Empty());
             assertFalse(result.errors().isEmpty()); assertTrue(result.clients().values().stream().allMatch(State::done));
@@ -127,7 +127,7 @@ class PlaybackTest {
              var one = new ClientNode("client-1", topology, directory.resolve("one"))) {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-            zero.start(new Start(List.of(master(h)), Collections.nCopies(20, input()), 2, 2, 4, 3000, 1000));
+            zero.start(new Start(List.of(master(h)), Collections.nCopies(20, input()), null, 2, 2, 4, 3000, 1000));
             one.close();
             eventually(() -> zero.state(new Sequence(1)).done());
             var result = zero.stop(new Empty());
@@ -136,9 +136,38 @@ class PlaybackTest {
             assertTrue(zero.state(new Sequence(1)).issued() < 10);
         }
     }
+    @Test void malformedFileFailsBeforeAnyWorkerStarts() throws Exception {
+        Path topology = directory.resolve("topology.json"), input = directory.resolve("bad.jsonl");
+        Files.writeString(input, "{\"token_ids\":[1],\"max_new_tokens\":2}\nnot-json\n");
+        try (var h = new NativeClientTest.Harness(); var zero = new ClientNode("client-0", topology, directory.resolve("zero"))) {
+            new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(), Map.of("role", "client", "control", zero.url())));
+            assertThrows(java.io.IOException.class, () -> zero.start(new Start(null, null, input.toString(), 10, 1, 4, 3000, 1000)));
+            assertFalse(zero.stop(new Empty()).errors().isEmpty());
+            assertEquals(0, h.schedules.get());
+            assertFalse(Files.exists(directory.resolve("zero/playback/1/plan.json")));
+        }
+    }
+    @Test void truncatedPreparedShardStopsTheWholeGroup() throws Exception {
+        Path topology = directory.resolve("topology.json"), input = directory.resolve("input.jsonl");
+        Files.writeString(input, ("{\"token_ids\":[" + String.join(",", Collections.nCopies(20000, "1")) + "],\"max_new_tokens\":2}\n").repeat(20));
+        try (var h = new NativeClientTest.Harness();
+             var zero = new ClientNode("client-0", topology, directory.resolve("zero"));
+             var one = new ClientNode("client-1", topology, directory.resolve("one"))) {
+            new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
+                Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
+            zero.start(new Start(null, null, input.toString(), 2, 2, 4, 3000, 1000));
+            // A large record prevents the reader's buffer from hiding the entire truncated suffix.
+            Files.writeString(directory.resolve("zero/coordinator/1/shards/1.jsonl"), "");
+            eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
+            var result = zero.stop(new Empty());
+            assertFalse(result.errors().isEmpty());
+            assertTrue(result.clients().values().stream().allMatch(State::stopped));
+            assertTrue(result.clients().values().stream().mapToLong(State::issued).sum() < 20);
+        }
+    }
     @Test void impossiblePlansAreRejectedBeforeThreadsStart() {
-        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), List.of(input()), Double.NaN, 1, 1, 100, 100));
-        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), List.of(input()), 0, 1, 1, 100, 100));
+        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), List.of(input()), null, Double.NaN, 1, 1, 100, 100));
+        assertThrows(IllegalArgumentException.class, () -> new Start(List.of("m:1"), List.of(input()), null, 0, 1, 1, 100, 100));
         assertThrows(IllegalArgumentException.class, () -> new Input(List.of(), 1, 20));
     }
 }

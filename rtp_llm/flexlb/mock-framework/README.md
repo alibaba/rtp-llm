@@ -2,11 +2,11 @@
 
 这是独立重写的实验框架。当前版本由 Python 编译 Case、编排进程、执行步骤和门禁，Python 函数定义 Case 接口，Java 实现组件和实例协议。RTP Mock 使用生产协议，真实 Master 使用生产调度与 ZK 选举；共享组件不依赖旧 Mock 或 online_eval。
 
-当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、显式文本请求列表播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；数据集读取、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
+当前已接通本机真实 Master、新 RTP P/D、Client 原生收发核心、文本请求列表/文件播放、client0 多 JVM 协调和 Prometheus。Engine 默认共享一个宿主 JVM，也支持每实例独立 JVM，实例间统一使用网络 gRPC。Master 停启、替换及 Client 主备发现已接通；旧采集数据格式转换、ViT/vLLM 及历史查看服务尚未接通；未实现的能力不登记为可调用 Case 接口。已有验证是小流量功能接线，不能替代开发机/CI 的规模和压力验收。
 
 ## 设计边界
 
-本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通显式文本请求列表播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
+本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通文本请求列表/文件播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
 
 ### Python Case 操作与 Java 实例能力
 
@@ -166,13 +166,21 @@ Client 取快了就在队列为空时等待；取慢了允许小队列暂时积�
 
 Python 在 stop 或最终清理时收集异常，不增加实时发压监控。开始响应丢失也必须尝试最终 stop，不能据此重发 start。Runner 原有进程退出监视保留。收尾先停 Client、获取结果，再做 Prometheus 最后采样和进程清理；不能遗漏 stop 后仍给出虚假的成功。收尾超时取消剩余调用，记录执行错误，不补造远端释放事实。
 
-#### 第一批可运行范围
+#### 当前可运行范围
 
-当前输入是显式文本请求列表：每项包含 token_ids、max_new_tokens 和可选 priority（默认 50）。不复制旧数据解码器，不做数据生成、数据集读取、循环、多轮、trace、ramp 或动态参与者。每次控制请求受现有 1 MiB 限制，这个入口用于功能接线，不能冒充大规模流式数据播放。后续数据读取接在 Player 的内容来源处，Client 的发送/并发/生命周期边界不变。
+输入二选一：`requests` 为显式文本请求列表，`requests_file` 为本地 UTF-8 JSONL 文件。文件路径相对 Case YAML 所在目录解析，也接受绝对路径；当前所有 Client 位于同一机器并共享文件系统，不支持 URL 或跨机器分发。每行一个请求对象，包含非空 `token_ids`、正整数 `max_new_tokens` 和可选非负 `priority`（默认 50）；整数必须在 int32 范围内，token ID 非负。空行、重复键、未知字段、多轮字段和非法值均报错。每条原始/规范化记录最多 1 MiB，整个文件不受控制请求的 1 MiB 限制。内联 requests 仍受该控制请求限制，不自动切换输入方式。
 
-启动参数：masters 可省略，默认持续发现本实验的全部 Master；显式填写时是非空、无重复的已知地址列表，播放期间只在这个固定范围内选主备。`masters: {ref: globals.masters}` 也会固定为该 step 执行时的列表，后续补回实例不会自动加入该列表；需要跟随扩容/替换时省略 masters。requests 是非空请求列表；qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16 条，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h。容量默认值仅用于接线，尚未经过压力校准。
+client0 在 start 的步骤预算内逐条校验输入，并按全局序号 `k % Client 数` 写入本轮独立分片；所有输入校验完、分片关闭并发布后才 prepare/begin。每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点和 SHA-256，不携带全部请求。请求 ID 在一次实验的多轮 start 之间单调分配，主动停止留下的未发请求不重新分配给后续轮次。播放器逐条读取自己的分片，保留一个待发送记录和原有有界小队列；client0 不参与发压时的数据转发。内联输入也走同一分片和播放流程。
 
-Master 在本轮固定，不动态跟随主节点。单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。当前只支持本机多 JVM；开始时间经本机墙钟转换为各 JVM 的单调时钟，未承诺跨机器时钟同步。准备后 30s 未收到开始命令的 Client 自行报错退出本轮。
+分片保存在 `components/client-0/coordinator/<轮次>/shards/`，先写 `.part` 再原子发布 `.jsonl`，`input.json` 记录条数及各分片摘要；各 Client 的 plan 指向自己的分片。准备失败不启动播放，已产生的部分文件保留供诊断。源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错，准备后只使用分片快照。播放时读取失败、条数不符或自然读完后的校验和不符使整组失败；主动 stop 不读取和校验未消费的后缀，剩余请求计入 unsent。文件写入/关闭失败及准备取消同样不能产生 PASS。
+
+不复制旧数据解码器，不做数据生成、tokenizer、旧 prefix-lineage 采集格式转换、循环、多轮、trace、ramp 或动态参与者。该 JSONL 是规范化的单轮输入，不表示已经支持旧数据集格式。磁盘须容纳输入及各轮保留的分片；准备时间计入 start 的 within/phase timeout，大文件应明确配置足够的预算。
+
+`RequestFilesTest` 用独立 48 MiB 堆的 JVM 分片并完整读取超过 64 MiB 的文件，并覆盖坏行、截断、内容变化和准备取消。`tests/test_client_interfaces.py` 用相同文件在 1/2 个 Client JVM 中播放 720 个请求，按发压期间的窗口检查合计 24 QPS；Master 生命周期测试使用文件输入持续接流。它们验证有界读取、总量和接线，不测量最大可达 QPS。
+
+启动参数：masters 可省略，默认持续发现本实验的全部 Master；显式填写时是非空、无重复的已知地址列表，播放期间只在这个固定范围内选主备。`masters: {ref: globals.masters}` 也会固定为该 step 执行时的列表，后续补回实例不会自动加入该列表；需要跟随扩容/替换时省略 masters。requests 与 requests_file 必须恰好指定一个，文件总请求数在准备阶段校验；qps 和 concurrency 是全局预算。queue_capacity 默认每 Client 16 条，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h。容量默认值仅用于接线，尚未经过压力校准。
+
+参与发压的 Client 在本轮固定；Master 按下文主备发现规则动态选择。单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。当前只支持本机多 JVM；开始时间经本机墙钟转换为各 JVM 的单调时钟，未承诺跨机器时钟同步。准备后 30s 未收到开始命令的 Client 自行报错退出本轮。
 
 ```yaml
 # environment 增加 client: {deployment: {replicas: 2}, config: {}}
@@ -192,15 +200,34 @@ Master 在本轮固定，不动态跟随主节点。单请求 timeout 从 Native
   interface: client/stop
 ```
 
+文件播放示例（`traffic.jsonl` 放在 Case YAML 旁边）：
+
+```yaml
+- id: traffic
+  describe: 从文件分片播放，全体 Client 合计 24 QPS
+  interface: client/start
+  within: 60s
+  args:
+    requests_file: traffic.jsonl
+    qps: 24
+    concurrency: 16
+  wait_after: 10s
+```
+
+```jsonl
+{"token_ids":[1,2,3],"max_new_tokens":16}
+{"token_ids":[4,5,6],"max_new_tokens":8,"priority":20}
+```
+
 启动配方中的 client 使用 `java -jar <framework>/java/client/target/mock-client-1.0-SNAPSHOT-all.jar`，仍由 Runner 注入配置、拓扑和独立输出目录。
 
 `client/qps` 复用公共 Python 指标查询，统计 `mock_client_requests_issued_total`，不是完成 QPS。沿用 targets 和 range 参数；最终检查必须选择实际发压窗口，不能用包含空闲和收尾的整个实验时长稀释目标。latest 在自然结束后可能已经为零，all 尚不支持。没有第二套“发压有效性”自动门禁。
 
 各 Client 只上报自己的 issued/finished、TTFT 和请求耗时；client0 不把全局汇总重复上报。缺实例或采样不足按公共查询规则报错。Client 执行结果包含 produced/issued/finished/unsent、在途/队列余量、各终态计数和异常，不把业务错误计数当成执行异常。
 
-每个 Client 在自己的 `playback/<轮次>/` 保存计划与结果；client0 另在 `coordinator/<轮次>/` 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和下一轮不会覆盖旧结果。当前仅落盘计划和汇总，逐请求完整记录及查询仍待实现。
+每个 Client 在自己的 `playback/<轮次>/` 保存计划与结果；client0 另在 `coordinator/<轮次>/` 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和下一轮不会覆盖旧结果。当前落盘输入分片、计划和汇总，逐请求执行记录及查询仍待实现。输入分片不是实际发送/完成的证据。
 
-剩余待讨论项收敛为：实际数据集如何读取/分片，是否需要部分停止，逐请求记录格式，以及适合真实负载的队列/并发默认值。QPS 的容忍度和窗口由 Case 检查指定，不在 Client 再定义一份。
+剩余待讨论项收敛为：旧采集数据如何转换成规范化输入，是否需要部分停止，逐请求记录格式，以及适合真实负载的队列/并发默认值。QPS 的容忍度和窗口由 Case 检查指定，不在 Client 再定义一份。
 
 ### Python 指标查询与公共指标
 
@@ -224,7 +251,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 1. 从 LocalPrefill/DecodeAdmission 分离协议、调度域和公共执行组件，保留现有超时、取消、P/D 交接及清理行为；先让 RTP 使用公共 Engine。
 2. 把队列、容量等待、选批和完成后的重新入队一起移入 Scheduler，不能只抽 `advance()`。用第二种明确的调度行为验证边界，再按选定版本实现 vLLM 策略；当前 RTP 有界合批不等于完整 RTP/vLLM 调度。
 3. 将 Case 级接口与 Prometheus 查询迁移到 Python，保留实例协议、Java 指标产生及既有校验。迁移完成后删除旧查询服务和重复定义，不长期维护两条调用链。
-4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 已接通上述第一批能力，后续按剩余边界推进数据输入和记录。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
+4. Engine 两种放置方式、动态上下线和发现更新已接通；Client 已接通上述第一批能力，文本文件输入和有界分片已接通，后续按剩余边界推进采集格式转换和请求执行记录。每批改动同时补齐对应调用方、配置、测试和文档，避免旧入口继续承载另一套语义。
 
 本批落实公共 Scheduler 操作、私有队列、持续 running、有界多请求 Forward、部分批次取消和 PD 确认后释放。强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本及 connector 范围仍待确定。
 
@@ -556,7 +583,7 @@ StoppingModel 只配在 P 的 generation，默认 eos_probability=0，随机概�
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 
-协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。显式请求列表的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。数据集读取与完整逐请求持久化尚未接通。
+协议测试使用夹具，真实接线测试使用生产 Master，二者都真实消费 P/D 输出。文本请求列表/文件的 Player、LoadClient、client0 协调和 start/stop 已接通，主备发送只改变 Schedule 目标选择与传输失败重试边界。旧采集格式转换与完整逐请求执行记录尚未接通。
 
 ## 指标、采集和查询
 

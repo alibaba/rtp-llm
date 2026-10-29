@@ -22,7 +22,8 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private LoadClient worker;
     private long workerSequence, sequence, nextRequestId = 1;
     private Group group;
-    private boolean collected = true, closed;
+    private boolean collected = true;
+    private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
         this.id = id; this.topology = topology; this.directory = directory;
@@ -79,25 +80,33 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             var peers = new ArrayList<String>();
             for (var node : nodes) if (node.path("role").asText().equals("client")) peers.add(node.path("control").asText());
             if (peers.isEmpty() || new HashSet<>(peers).size() != peers.size() || !peers.contains(url())
-                    || args.requests().size() < peers.size() || args.concurrency() < peers.size())
+                    || args.concurrency() < peers.size())
                 throw new IllegalArgumentException("Need unique Client endpoints and at least one request/concurrency slot per Client");
             long firstId = nextRequestId;
-            nextRequestId = Math.addExact(firstId, args.requests().size());
             created = new Group(++sequence, List.copyOf(peers), args, firstId);
             group = created; collected = false;
         }
         try {
             save(directory.resolve("coordinator/" + created.number + "/plan.json"), Map.of("clients", created.peers, "config", args));
+            var parts = RequestFiles.split(args, directory.resolve("coordinator/" + created.number + "/shards"), created.peers.size(), () -> created.stop || closed);
+            long total = parts.stream().mapToLong(RequestFiles.Part::count).reduce(0, Math::addExact);
+            synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
+            save(directory.resolve("coordinator/" + created.number + "/input.json"), Map.of("count", total, "shards", parts));
             for (int i = 0; i < created.peers.size(); i++) {
-                var items = new ArrayList<Item>();
-                for (int k = i; k < args.requests().size(); k += created.peers.size())
-                    items.add(new Item(created.firstId + k, k, args.requests().get(k)));
+                RequestFiles.checkInterrupted();
+                if (created.stop || closed) throw new IOException("Client start stopped during preparation");
+                var part = parts.get(i);
                 int slots = args.concurrency() / created.peers.size() + (i < args.concurrency() % created.peers.size() ? 1 : 0);
-                call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.masters(), items, args.qps(), slots,
+                call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.masters(), part.path(),
+                    part.count(), i, created.peers.size(), created.firstId, part.sha256(), args.qps(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms()));
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
-            for (String peer : created.peers) call(peer, "worker/begin", new Begin(created.number, startAt));
+            for (String peer : created.peers) {
+                RequestFiles.checkInterrupted();
+                if (created.stop || closed) throw new IOException("Client start stopped before begin");
+                call(peer, "worker/begin", new Begin(created.number, startAt));
+            }
             created.thread = Thread.ofVirtual().name("client-coordinator").start(created::supervise);
             return new Ack(true);
         } catch (Exception error) {

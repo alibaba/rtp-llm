@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass
 import json
 import math
+from pathlib import Path
 from typing import Annotated
 
 from ..config.registry import Bounds, case_interface
@@ -22,9 +23,10 @@ class Request:
 
 @dataclass(frozen=True)
 class Start:
-    requests: list[Request]
     qps: float
     concurrency: Annotated[int, Bounds(minimum=1, maximum=2147483647)]
+    requests: list[Request] | None = None
+    requests_file: str | None = None
     masters: list[str] | None = None
     queue_capacity: Annotated[int, Bounds(minimum=1, maximum=100000)] = 16
     request_timeout: Annotated[str, 'duration'] = '30s'
@@ -33,8 +35,14 @@ class Start:
     def __post_init__(self):
         if self.masters is not None and (not self.masters or len(set(self.masters)) != len(self.masters) or any(not v.strip() for v in self.masters)):
             raise ValueError('masters must be nonempty and unique when supplied')
-        if not self.requests or not math.isfinite(self.qps) or self.qps <= 0 or len(self.requests) / self.qps > 86400:
-            raise ValueError('A nonempty text request list and positive QPS (at most 24h playback) are required')
+        if (self.requests is None) == (self.requests_file is None):
+            raise ValueError('Specify exactly one of requests or requests_file')
+        if not math.isfinite(self.qps) or self.qps <= 0:
+            raise ValueError('Positive finite QPS is required')
+        if self.requests is not None and (not self.requests or len(self.requests) / self.qps > 86400):
+            raise ValueError('A nonempty text request list with at most 24h playback is required')
+        if self.requests_file is not None and (not self.requests_file.strip() or '://' in self.requests_file):
+            raise ValueError('requests_file must be a local file path')
         for value in (self.request_timeout, self.drain_timeout):
             millis = duration(value, positive=True) * 1000
             if millis != int(millis) or not 1 <= millis <= 3600000:
@@ -71,7 +79,7 @@ async def control(processes, operation, args, query_time, timeout):
     envelope = {'interface': operation, 'args': args, 'context': {'run': 'foreground',
                 'query_time': query_time, 'observation': None, 'timeout_ms': max(1, int(timeout * 1000))}}
     if len(json.dumps(envelope).encode()) > 1024 * 1024:
-        raise ExecutionError('Inline Client requests exceed the 1 MiB control limit; dataset streaming is not implemented')
+        raise ExecutionError('Inline Client requests exceed the 1 MiB control limit; use requests_file for larger inputs')
     return await post(coordinator(processes), envelope)
 
 
@@ -79,16 +87,19 @@ async def control(processes, operation, args, query_time, timeout):
 async def start(ctx, args: Start) -> bool:
     """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
     clients = [node for node in ctx.processes.topology if node['role'] == 'client']
-    if not clients or args.concurrency < len(clients) or len(args.requests) < len(clients):
+    if not clients or args.concurrency < len(clients) or args.requests is not None and len(args.requests) < len(clients):
         raise ExecutionError('Need at least one request and concurrency slot per Client')
     available = {node['rpc'] for node in ctx.processes.topology if node['role'] == 'master'}
     if not available or args.masters is not None and set(args.masters) - available:
         raise ExecutionError('Unknown Master address')
     if ctx.processes.client_pending:
         raise ExecutionError('Collect previous playback with client/stop before starting again')
-    body = asdict(args)
-    if body['masters'] is None:
-        del body['masters']
+    body = {key: value for key, value in asdict(args).items() if value is not None}
+    if args.requests_file is not None:
+        path = (ctx.processes.case.directory / Path(args.requests_file)).resolve()
+        if not path.is_file():
+            raise ExecutionError(f'Client requests_file is not a regular file: {path}')
+        body['requests_file'] = str(path)
     body['request_timeout_ms'] = int(duration(body.pop('request_timeout')) * 1000)
     body['drain_timeout_ms'] = int(duration(body.pop('drain_timeout')) * 1000)
     # A lost start response can still leave Java sending: teardown must always attempt stop.
