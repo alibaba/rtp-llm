@@ -6101,7 +6101,7 @@ class AttentionFP8(nn.Module):
             common = self._prefill_common_setup(x, positions)
             qkv = self._prefill_compute_qkv(x, common, kv_only=True)
             qkv = self._ensure_prefill_kv_full(qkv, common)
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
+            self._prefill_store_swa(common, qkv)
 
     def _materialize_prefill_q(
         self, qkv: PrefillQKV, common: PrefillMeta

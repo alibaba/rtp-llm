@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 import torch
@@ -46,5 +47,28 @@ class KVOnlyTests(unittest.TestCase):
             self.assertIs(out,h)
         self.assertEqual(len(a.calls),2)
         self.assertTrue(torch.equal(a.calls[0],a.calls[1]))
+
+    def test_kv_only_write_uses_packed_cp_kv(self):
+        packed = torch.zeros(3, dtype=torch.uint8)
+        for kv_full, kv_packed in [(torch.randn(5, 8), None), (None, packed)]:
+            with self.subTest(packed=kv_packed is not None):
+                writes = []
+                qkv = attention_module.PrefillQKV(
+                    qr=torch.empty(0), q=None, kv_full=kv_full, kv_full_handle=None, kv_full_packed=kv_packed
+                )
+                obj = SimpleNamespace(
+                    compress_ratio=0,
+                    _prefill_common_setup=lambda x, p: "common",
+                    _prefill_compute_qkv=lambda x, c, kv_only: qkv,
+                    _ensure_prefill_kv_full=lambda q, c: q,
+                    _prefill_write_swa_fp8_paged=lambda c, kv, packed=None: writes.append((kv, packed)),
+                )
+                obj._prefill_store_swa = lambda c, q: AttentionFP8._prefill_store_swa(obj, c, q)
+                with patch.object(attention_module, "bind_attn_cache", lambda *a: nullcontext()):
+                    AttentionFP8.forward_prefill_kv_only(obj, torch.randn(5, 16), torch.arange(5))
+                self.assertEqual(len(writes), 1)
+                self.assertIs(writes[0][0], kv_full)
+                self.assertIs(writes[0][1], kv_packed)
+
 
 if __name__=='__main__':unittest.main()
