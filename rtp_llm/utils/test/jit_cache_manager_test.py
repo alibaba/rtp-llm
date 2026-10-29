@@ -310,21 +310,32 @@ class StoreTest(JitCacheTestBase):
             next(item for item in jit.COMPONENTS if item.name == "triton"),
             local_dir=self.root / "local" / "triton",
         )
+        entry = component.local_dir / "hash"
+        entry.mkdir(parents=True)
+        products = {
+            "kernel.hgbin": b"ppu-binary",
+            "kernel.json": b'{"name": "kernel"}',
+            "__grp__kernel.json": json.dumps(
+                {
+                    "child_paths": {
+                        name: str(entry / name)
+                        for name in ("kernel.json", "kernel.hgbin")
+                    }
+                }
+            ).encode(),
+        }
+        for name, payload in products.items():
+            (entry / name).write_bytes(payload)
         manager = jit.JitCacheManager(
             jit.Scope("test", component.local_dir.parent, (component,)), ""
         )
-        expected = {
-            "triton/hash/kernel.json": b"{}",
-            "triton/hash/kernel.hgbin": b"ppu-binary",
-        }
-        for rel, payload in expected.items():
-            path = component.local_dir.parent / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(payload)
         snap_store = self.make_store()
         snap_store.publish_snapshot(manager._snapshot_files())
         restored = snap_store.prepare_restore(self.root / "restored")
-        self.assertEqual(contents(restored.staging), expected)
+        self.assertEqual(
+            contents(restored.staging),
+            {f"triton/hash/{name}": payload for name, payload in products.items()},
+        )
 
     def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
         component = replace(
@@ -718,6 +729,25 @@ class ScopeTest(JitCacheTestBase):
         with _fake_probes(pkg=missing):
             triton_only = jit.resolve_scope(self.root)
         self.assertEqual([x.name for x in triton_only.components], ["triton"])
+
+    def test_artifact_rules_fork_scope_from_incomplete_old_snapshots(self):
+        current = self.scope_id()
+        old_components = tuple(
+            (
+                replace(
+                    item,
+                    rules=(
+                        jit.rule(frozenset(), ".autotune.json"),
+                        jit.rule(jit.CREATED, ".json", ".cubin", ".hsaco", ".so"),
+                    ),
+                )
+                if item.name == "triton"
+                else item
+            )
+            for item in jit.COMPONENTS
+        )
+        with mock.patch.object(jit, "COMPONENTS", old_components):
+            self.assertNotEqual(current, self.scope_id())
 
     def test_torch_extensions_scope_tracks_rtp_kernel_build(self):
         def with_kernel(version):
