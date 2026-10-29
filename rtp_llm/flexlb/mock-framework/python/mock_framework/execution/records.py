@@ -29,6 +29,11 @@ class Records:
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=False)
         write_json(self.directory / 'configuration.json', {'case': asdict(case), 'launch': launch})
+        if case.view is not None:
+            view = json.loads(case.view.read_text(encoding='utf-8'))
+            if not isinstance(view, dict) or not isinstance(view.get('panels'), list) or not view.get('title'):
+                raise ValueError('view must be a native Grafana dashboard JSON with title and panels')
+            write_json(self.directory / 'view.json', view)
         source = case.source
         if source.is_file():
             (self.directory / 'case.yaml').write_bytes(source.read_bytes())

@@ -131,6 +131,7 @@ async def counter_history(ctx, name, labels, targets, at, millis):
 async def metric(ctx, args, role, numerator, denominator=None, *, kind=None):
     at, millis, operation = window(ctx, args)
     labels, targets = scope(ctx, args, role)
+    ctx.records.emit(event='metric_window', query_time=ctx.query_time, start=at - millis / 1000, end=at)
     # Every selected instance must contribute the counter history; aggregate alone hides missing peers.
     for name in [numerator] + ([denominator] if denominator else []):
         check_labels = labels + (f',kind={json.dumps(kind)}' if name == numerator and kind else '')

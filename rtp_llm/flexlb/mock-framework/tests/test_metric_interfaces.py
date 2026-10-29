@@ -54,6 +54,7 @@ def context():
         {'role': 'prefill', 'rpc': '127.0.0.1:1001'},
         {'role': 'prefill', 'rpc': '127.0.0.1:1002'}]
     return SimpleNamespace(query_time='2026-10-28T00:00:00Z', nodes=nodes,
+        records=SimpleNamespace(emit=lambda **event: None),
         runtime=SimpleNamespace(topology=SimpleNamespace(active=lambda role=None: [node for node in nodes if role is None or node['role'] == role])))
 
 

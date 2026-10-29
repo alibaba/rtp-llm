@@ -392,6 +392,36 @@ uv run --locked mock-case run cases/basic/case.yaml \
 
 `shared` 把 P/D 放进一个 Engine JVM；改为 `--engine-mode isolated` 可生成每实例独立 JVM 的配方，Case 不变。Master 与 ZK 始终独立 JVM。Client 按当前拓扑自行发现主 Master。输出包括 result.json、gates.jsonl、组件日志、Client 请求证据及 Prometheus 数据；异常会中断并执行统一清理。
 
+## 实验结束后查看基础 view
+
+基础 Case 在末尾用 `view: ../../views/default.json` 引用通用的原生 Grafana 大盘 JSON，独立于 environment。执行时把这份 view 保存为结果目录下的 view.json，避免以后修改源文件改变已完成实验的展示。配置仍由配置加载器负责，view 不参与发压、调度或门禁判定。
+
+```sh
+uv run --locked mock-view /tmp/basic-result \
+  --output /tmp/basic-view \
+  --prometheus "$PROMETHEUS_BIN" \
+  --grafana-home "$GRAFANA_HOME"
+```
+
+`GRAFANA_HOME` 是包含 bin/grafana、conf 和 public 的 Grafana 安装目录；输出目录必须是新的、位于实验目录之外的目录。命令先在回环地址提供回看页面并打印 URL，再启动独立的 Prometheus 与 Grafana。页面显示指标服务的启动状态，启动失败仍可查看配置和门禁。Ctrl+C 或 SIGTERM 统一回收页面服务和所拥有的子进程；页面关闭不等于停止服务。端口冲突直接报错，不连接其他查看会话或已有服务。
+
+查看服务复制已完成实验的 TSDB，原始结果与数据不被重新打开写入；它不启动任何 Engine/Master/Client、不重新执行检查。多个查看会话使用不同输出目录和端口，可以独立查看同一份实验。
+
+一个页面展示原始 Case、完整配置/启动配方、组件生效配置、代码版本/工作区差异、Phase/Step 时间线、保存的门禁，以及 Grafana 在线曲线。默认大盘覆盖现有 Client 和 Engine 的发送/终态速率、成功率、TTFT/请求耗时、TPS、队列、KV、缓存命中、实际/理论 Forward 耗时和采集状态。每实例曲线保留 instance/role 等原有标签，支持 Grafana 自己的缩放与曲线选择。
+
+点击门禁卡片定位其保存的指标窗口；执行侧 metric_window 事件记录真正使用的起止时间，展示层不根据当前实现重新计算。原始 PromQL 与非指标检查只标记查询点，图表显示附近上下文，不解析表达式推导窗口。Phase/Step 事件作为竖线导入 Grafana，门禁窗口作为区域标记导入；曲线仍在线查询 TSDB，不固化进 HTML。
+
+实验判定、产物完整性和查看服务状态分别展示：
+
+- result.json 是核心记录，必须含有效的 status、带时区的 started_at/finished_at；缺失或损坏时命令报告文件和字段，拒绝猜测实验结果。只查看已完成实验。
+- 配置、代码版本、接口元数据、采集记录和事件/门禁日志属于附加记录。缺失或损坏时显示具体文件；JSONL 中损坏的行标出行号，保留其他有效行。页面说明记录不完整，不把缺失门禁当作通过。没有配置也能按保存的 step 名展示门禁。
+- TSDB、view.json 或依赖程序不可用，或指标进程启动失败/运行中退出时，指标区域说明原因，配置、门禁和时间线仍可读。已启动的指标进程统一回收，不自动重试。完整异常和进程 stdout/stderr 留在查看目录；修复后重新运行查看命令，使用新输出目录。
+- ERROR/FAIL/CANCELLED、清理错误、采集不完整以及缺失指标均如实显示，缺失数据不补零。即使查看服务故障，也不改写实验的 PASS/FAIL/ERROR/CANCELLED。
+
+实现分为 CLI（view/__main__.py）、服务生命周期与固定只读 HTTP 路由（view/service.py）、产物读取（view/records.py）、Grafana 配置与事件导入（view/grafana.py）、页面（view/page.html）。进程生命周期直接复用现有 ProcessSupervisor，不复制进程管理实现；Runner 只保存实验事实和 view 快照，不依赖展示层。
+
+查看只读取指定的一次实验，不增加实验索引、实例历史台账或运行中控制。页面只轮询查看服务自身的指标服务状态，不轮询 Case 接口或重新判定门禁。自定义 view 继续使用原生 Grafana JSON；复用线上大盘时，需要把查询和标签改为本地实际存在的指标，不自动兼容线上 VIP 或 KMonitor。
+
 ## Case 配置和编译
 
 ```sh
