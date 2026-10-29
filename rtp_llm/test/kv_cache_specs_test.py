@@ -233,6 +233,19 @@ class HybridKVCacheSpecTest(TestCase):
     def test_qwen4_exp_48_layers_from_layer_types(self):
         config = ModelConfig()
         config.num_layers = 48
+        config.hidden_size = 8
+        Qwen4Exp._parse_extra_text_config(
+            {
+                "hc_count": 4,
+                "ple_layer_ids": [1],
+                "ngram_size": 2,
+                "ple_conv_kernel_size": 4,
+                "ngram_vocab_size_base": 17,
+                "ple_embed_dim": 8,
+                "heads_per_ngram": 1,
+            },
+            config,
+        )
         layer_types = [
             "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
             for i in range(48)
@@ -254,11 +267,20 @@ class HybridKVCacheSpecTest(TestCase):
         tags = [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
         self.assertEqual(len(tags), 48)
         self.assertEqual(tags.count("full"), 12)
-        self.assertEqual(tags.count("linear0"), 12)
-        self.assertEqual(tags.count("linear1"), 12)
-        self.assertEqual(tags.count("linear2"), 12)
+        self.assertEqual(tags.count("linear"), 36)
+        self.assertEqual(
+            tags,
+            [
+                "full" if layer_type == "full_attention" else "linear"
+                for layer_type in layer_types
+            ],
+        )
         self.assertEqual(tags[3], "full")
-        self.assertEqual(tags[4], "linear0")
+        self.assertEqual(tags[4], "linear")
+        self.assertEqual(
+            [desc.tag for desc in config.kv_cache_spec_descs[0]],
+            ["linear", "ple_conv_state", "ple_ngram_ctx"],
+        )
         for tag, layer_descs in zip(tags, config.kv_cache_spec_descs):
             expected = KVCacheSpecType.MHA if tag == "full" else KVCacheSpecType.LINEAR
             self.assertEqual(layer_descs[0].cache_type, expected)

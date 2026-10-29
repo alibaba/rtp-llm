@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from libth_transformer_config import AttentionConfigs, RopeStyle
 
+from rtp_llm.ops import AttentionConfigs, RopeStyle
 from rtp_llm.ops.fused_rope_kvcache_op import (
     FusedRopeKVCacheDecodeOp,
     _get_fused_rope_kvcache,
