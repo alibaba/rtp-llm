@@ -138,7 +138,7 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
             std::vector<size_t>             indices(group.indices.begin() + begin, group.indices.begin() + end);
             stage_state->addBatch();
             try {
-                auto context = executeMultiRank(task.subtask(std::move(batch)));
+                auto context = executeMultiRank(task.rpcSubtask(std::move(batch)));
                 if (context == nullptr) {
                     stage_state->completeBatch(
                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"), indices);
