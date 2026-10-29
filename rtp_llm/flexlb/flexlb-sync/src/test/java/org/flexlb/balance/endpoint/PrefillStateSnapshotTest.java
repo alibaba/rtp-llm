@@ -103,6 +103,60 @@ class PrefillStateSnapshotTest {
         assertTrue(reconcile(Map.of("77", terminal), Map.of(), ignored -> 0L).batchCompletions().isEmpty());
     }
 
+    private RequestRoute commitIndividual(long id) {
+        var route = item(id);
+        when(route.prefillWorkMs()).thenReturn(10L);
+        var lease = state.reserveUnqueuedRoute(route, 10L, 0L).reservation();
+        try (var preparation = EndpointTestSupport.preparation(lease);
+             var handoff = EndpointTestSupport.commitRoutes(state, List.of(route), List.of(lease), generation.tryAcquireHandoff())) { }
+        return route;
+    }
+
+    private static TaskInfo individualTerminal(long id, long duration, long end) {
+        var terminal = task(id, null, 0L, duration);
+        terminal.setBatchId(-1L);
+        terminal.setEndTimeMs(end);
+        return terminal;
+    }
+
+    @ParameterizedTest
+    @CsvSource({"140,140,40", "140,160,60", "140,180,80", "140,200,80"})
+    void individualFeedbackUnionsSharedTimeButExcludesIdleGaps(long firstEnd, long secondEnd, long expected) {
+        commitIndividual(1); commitIndividual(2);
+        assertTrue(reconcile(Map.of("1", individualTerminal(1, 40, firstEnd)), Map.of(), ignored -> 0).batchCompletions().isEmpty());
+        var completed = reconcile(Map.of("2", individualTerminal(2, 40, secondEnd)), Map.of(), ignored -> 0).batchCompletions();
+        assertEquals(1, completed.size());
+        assertEquals(2, completed.getFirst().originalFeatures().batchSize());
+        assertEquals(expected, completed.getFirst().actualWorkMs());
+        assertSame(PrefillExecutionFeedback.EMPTY, state.nonBatchFeedback);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"failure", "release", "unknown", "missingTime", "zeroDuration"})
+    void ambiguousIndividualExecutionDoesNotTrainAndNextCleanSampleRecovers(String fault) {
+        commitIndividual(1); var second = commitIndividual(2);
+        var first = individualTerminal(1, fault.equals("zeroDuration") ? 0 : 40, fault.equals("missingTime") ? 0 : 140);
+        if (fault.equals("failure")) { first.setErrorCode(1L); }
+        var unknown = fault.equals("unknown") ? Map.of("99", task(99, TaskPhase.RUNNING, 0, 0)) : Map.<String, TaskInfo>of();
+        assertTrue(reconcile(Map.of("1", first), unknown, ignored -> 0).batchCompletions().isEmpty());
+        if (fault.equals("release")) { state.release(null, second); }
+        assertTrue(reconcile(Map.of("2", individualTerminal(2, 40, 140)), Map.of(), ignored -> 0).batchCompletions().isEmpty());
+        commitIndividual(3);
+        assertEquals(1, reconcile(Map.of("3", individualTerminal(3, 40, 200)), Map.of(), ignored -> 0).batchCompletions().size());
+    }
+
+    @Test
+    void continuousIndividualFeedbackIsBoundedAndRetirementClearsIt() {
+        commitIndividual(1);
+        for (long id = 2; id <= PrefillExecutionFeedback.MAX_ITEMS + 2; id++) {
+            commitIndividual(id);
+            assertTrue(reconcile(Map.of(Long.toString(id - 1), individualTerminal(id - 1, 40, id * 40)), Map.of(), ignored -> 0).batchCompletions().isEmpty());
+        }
+        assertSame(PrefillExecutionFeedback.INVALID, state.nonBatchFeedback);
+        state.retireGenerationOwnership();
+        assertSame(PrefillExecutionFeedback.EMPTY, state.nonBatchFeedback);
+    }
+
     @Test
     void stableAdmissionSummaryIsReusedOnlyForTheExactInputs() {
         var first = state.admissionSummary(50, 1L);

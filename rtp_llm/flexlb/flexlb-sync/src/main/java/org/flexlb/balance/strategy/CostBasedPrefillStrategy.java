@@ -706,7 +706,7 @@ public class CostBasedPrefillStrategy {
                     var work = ep.ownership.tokenWorkload();
                     plannedMs = work.plannedExecutionMs();
                     outstandingComputeTokens = work.score();
-                    plannedTargetMs = work.earliestPlannedTargetMs();
+                    plannedTargetMs = Math.min(work.earliestPlannedTargetMs(), ep.ownership.earliestRequestTargetMs(ttftSloMs));
                     idle = plannedMs == 0 && work.plannedTokens() == 0
                             && ep.ownership.progress().outstandingRequests() == 0
                             && projectionInputs.queue().activeItems().isEmpty()
@@ -749,9 +749,20 @@ public class CostBasedPrefillStrategy {
                 continue;
             }
 
+            if (ttftSloMs > 0 && "NON_BATCH".equals(deliveryMode)
+                    && predictor instanceof org.flexlb.balance.prediction.LearningPredictor
+                    && !idle && outstandingComputeTokens > 0 && ep.observedComputeMs(1) == 0) {
+                rejections.merge("PREFILL_CALIBRATION_PENDING", 1, Integer::sum);
+                continue;
+            }
+            long admissionTtftMs = projection.projectedTtftMsValue();
+            if (ttftSloMs > 0 && admissionTtftMs >= 0) {
+                admissionTtftMs = Math.max(saturatedAdd(admissionTtftMs, plannedMs),
+                        ep.observedComputeMs(outstandingComputeTokens + Math.max(0L, request.getSeqLen() - cacheHit)));
+            }
             if (ttftSloMs > 0 && (!PrefillSloPolicy.admits(ttftSloMs, createdAtMs, planningAtMs,
-                    projection.projectedTtftMsValue(), plannedMs, projectionInputs, idle)
-                    || plannedTargetMs != Long.MAX_VALUE && saturatedAdd(projection.projectedTtftMsValue(), plannedMs)
+                    admissionTtftMs, 0L, projectionInputs, idle)
+                    || plannedTargetMs != Long.MAX_VALUE && admissionTtftMs
                             > plannedTargetMs - planningAtMs - ttftSloMs / 10)) {
                 rejections.merge("TTFT_SLO_BUDGET", 1, Integer::sum);
                 continue;

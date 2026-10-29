@@ -41,6 +41,10 @@ class PrefillSloRoutingTest {
                 {"ttftSloMs":%d,"dispatcher":{"type":"%s"},
                  "router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA","expression":"sum(computeTokens) / 70"}}}}}
                 """.formatted(sloMs, dispatch));
+        initialize();
+    }
+
+    void initialize() {
         registry=StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
         cache=mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(),any(),any())).thenReturn(Map.of());
@@ -65,6 +69,48 @@ class PrefillSloRoutingTest {
         route.close(); return null;
     }
     @AfterEach void close() { held.forEach(RequestRoute::close); if(registry!=null) registry.close(); }
+
+    @Test
+    void uncalibratedLearningWorkerObtainsAnIsolatedExecutionSample() {
+        config = ConfigService.parse("{\"ttftSloMs\":30000}");
+        initialize();
+        assertNotNull(select(70_000, 0, null));
+        assertNull(select(70_000, 0, null), "a fresh worker must finish its first compute sample before accumulating a queue");
+        var other = publish("10.0.0.2");
+        assertSame(other, select(70_000, 0, null).prefillEp(), "other idle workers can calibrate concurrently");
+        var capacity = (PrefillComputeCapacity) org.springframework.test.util.ReflectionTestUtils.getField(worker, "computeCapacity");
+        capacity.observe(70_000, 1000);
+        assertNotNull(select(70_000, 0, null), "known capacity removes the startup gate");
+    }
+
+    @ParameterizedTest @ValueSource(strings={"NON_BATCH","BATCH"})
+    void observedComputeWorkBoundsOptimisticPredictionsWithoutCountingPlansTwice(String mode) {
+        setup(mode);
+        var capacity = (PrefillComputeCapacity) org.springframework.test.util.ReflectionTestUtils.getField(worker, "computeCapacity");
+        capacity.observe(70_000, 2000); // observed 35K TPS; configured predictor still assumes 70K
+        assertNotNull(select(70_000, 0, null));
+        assertNotNull(select(14_000, 0, null)); // 2.4s total, including unpublished plans
+        assertNull(select(14_000, 0, null)); // 2.8s exceeds the 2.7s budget despite a 1.4s prediction
+        assertNull(select(700, 1000, null)); // measured work also consumes the aged request's remaining budget
+    }
+
+    @Test
+    void committedEngineWorkRetainsItsOriginalSloAgainstLaterBatchMembers() {
+        setup("NON_BATCH", 30000);
+        var first = select(70_000, 25000, null);
+        assertNotNull(first);
+        org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(worker, first);
+        try (var pin = worker.tryPinGeneration()) {
+            var reservation = worker.reserveUnqueuedRoute(pin, first, 1000).reservation();
+            try (var preparation = org.flexlb.balance.endpoint.EndpointTestSupport.preparation(reservation);
+                 var handoff = worker.commit(new org.flexlb.balance.endpoint.PrefillState.CommitPlan(
+                         org.flexlb.balance.endpoint.PrefillState.CommitKind.DIRECT,
+                         List.of(first), List.of(reservation), null, new long[0], null, System.currentTimeMillis()))) { }
+        }
+        assertEquals(0, worker.ownership.tokenWorkload().plannedExecutionMs());
+        assertNull(select(140_000, 0, null), "Engine batching cannot extend the old request's remaining 2s budget");
+        assertNotNull(select(700, 0, null));
+    }
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({"NON_BATCH,100", "BATCH,100", "NON_BATCH,1000", "BATCH,1000", "NON_BATCH,10000", "BATCH,10000"})

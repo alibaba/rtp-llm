@@ -219,6 +219,7 @@ public final class PrefillState {
     static final class RequestEntry {
         OwnershipStage ownership;
         final RequestRoute route;
+        final long createdAtMs;
         Phase individualPhase;
         long remainingWorkMs;
         long phaseBaseMs;
@@ -227,6 +228,8 @@ public final class PrefillState {
         private RequestEntry(RequestRoute route, OwnershipStage ownership) {
             this.ownership = ownership;
             this.route = Objects.requireNonNull(route, "route");
+            var context = route.ctx();
+            this.createdAtMs = context == null ? Long.MAX_VALUE : context.createdAtMs();
         }
 
     }
@@ -276,7 +279,7 @@ public final class PrefillState {
         }
     }
 
-    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode, long computeTokens, long inputTokens,
+    record TerminalObservation(RequestEntry owner, long executionTimeMs, long endTimeMs, long errorCode, long computeTokens, long inputTokens,
             PriorityPreemptionProgress preemptionProgress) { }
 
     public final ReentrantLock lock;
@@ -284,6 +287,7 @@ public final class PrefillState {
     private PrefillActiveIndex activeIndex;
     /** Canonical request ownership, changed only under the endpoint lock. */
     final Map<Long, RequestEntry> requests = new HashMap<>();
+    PrefillExecutionFeedback nonBatchFeedback = PrefillExecutionFeedback.EMPTY;
     final LongSupplier clock;
     private org.flexlb.balance.strategy.PrefillTokenWorkload tokenWorkload;
     private LongSupplier pendingTokenLimit;
@@ -313,6 +317,18 @@ public final class PrefillState {
             return tokenWorkload == null
                     ? new org.flexlb.balance.strategy.PrefillTokenWorkload.CacheWork(0, 0)
                     : tokenWorkload.cacheWorkAtOrAbove(priority);
+        } finally { lock.unlock(); }
+    }
+
+    /** Engine-side coalescing must retain the original targets of already committed requests. */
+    public long earliestRequestTargetMs(long sloMs) {
+        lock.lock();
+        try {
+            long target = Long.MAX_VALUE;
+            for (var entry : requests.values()) {
+                target = Math.min(target, saturatedAdd(entry.createdAtMs, sloMs));
+            }
+            return target;
         } finally { lock.unlock(); }
     }
 
@@ -428,6 +444,9 @@ public final class PrefillState {
     /** Remove a known exact owner and its non-owning indexes; batch leases keep their own preparation. */
     private boolean removeEntry(RequestEntry entry) {
         if (requests.get(entry.route.requestId()) != entry) { return false; }
+        if (entry.batch == null && entry.ownership == OwnershipStage.COMMITTED) {
+            nonBatchFeedback = PrefillExecutionFeedback.INVALID;
+        }
         if (entry.ownership == OwnershipStage.QUEUED) {
             checkState(activeIndex.remove(entry.route), "canonical queued owner lost its index");
         }
@@ -822,9 +841,11 @@ public final class PrefillState {
         long unknownRequests;
         Map<Long, List<RequestRoute>> predictionInputs;
         StatusReconciliation result;
+        PrefillExecutionFeedback nonBatchFeedback;
 
         StatusReduction(PrefillState owner, Map<Long, TerminalObservation> terminals) {
             this.owner = owner;
+            this.nonBatchFeedback = owner.nonBatchFeedback;
             this.terminals = terminals;
             this.batchOutcomes = terminals.isEmpty() ? Map.of() : new IdentityHashMap<>();
         }
@@ -870,6 +891,7 @@ public final class PrefillState {
         for (TerminalObservation terminal : reduction.terminals.values()) {
             removeEntry(terminal.owner);
         }
+        nonBatchFeedback = reduction.nonBatchFeedback;
         for (var phase : reduction.individualPhases.entrySet()) {
             var entry = phase.getKey();
             entry.remainingWorkMs = remainingWorkAt(entry.individualPhase, entry.remainingWorkMs, entry.phaseBaseMs, reduction.nowMs);
@@ -944,6 +966,7 @@ public final class PrefillState {
             }
             for (PrefillBatch batch : batches.values()) { if (batch.preparation == null) { batch.members.clear(); } }
             requests.clear();
+            nonBatchFeedback = PrefillExecutionFeedback.EMPTY;
             batches.clear();
             committedBatchCount = 0;
             activeIndex.clear();

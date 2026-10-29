@@ -39,7 +39,7 @@ public final class RequestContext {
     private Snapshot state;
     private Update cachedNoChange;
     private long sequence;
-    private long createdAtMs;
+    private volatile long createdAtMs = Long.MAX_VALUE;
     private long lastWorkerAtMs;
     private long absoluteDeadline;
     private boolean requestDeadlineConsumed;
@@ -58,6 +58,9 @@ public final class RequestContext {
     }
 
     public RequestData data() { return data; }
+
+    /** Registration time is write-once; ownership may read it without taking the Context monitor. */
+    public long createdAtMs() { return createdAtMs; }
 
     public synchronized Update register(long requestId, long nowMs, long expiresAtMs, long inactivityTimeoutMs) {
         var before = state;

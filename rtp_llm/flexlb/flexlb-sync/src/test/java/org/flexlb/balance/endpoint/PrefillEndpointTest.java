@@ -947,6 +947,35 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void nonBatchSharedExecutionAcrossStatusReportsCountsWorkerTimeOnce() {
+        FlexlbConfig config = org.flexlb.config.ConfigService.parse("{\"ttftSloMs\":30000}");
+        PrefillEndpoint target = routeEndpoint(config, "127.0.0.8");
+        try {
+            for (long id = 1; id <= 8; id++) {
+                var route = createRequestRoute(target, config, id, 70_000L, 0L);
+                var reservation = EndpointTestSupport.reserveUnqueued(target, route, 1000L);
+                try (var preparation = EndpointTestSupport.preparation(reservation);
+                     var handoff = target.commit(new PrefillState.CommitPlan(PrefillState.CommitKind.DIRECT,
+                             List.of(route), List.of(reservation), null, new long[0], null, System.currentTimeMillis()))) { }
+            }
+            long end = System.currentTimeMillis();
+            for (long id = 1; id <= 8; id++) {
+                var task = taskInfo(id, -1L, null, 0, 8000L);
+                task.setInputLength(70_000L);
+                task.setEndTimeMs(end);
+                var response = new WorkerStatusResponse();
+                response.setFinishedTaskInfo(Map.of(Long.toString(id), task));
+                response.setRunningTaskInfo(Map.of());
+                EndpointTestSupport.applyStatus(target, response).run();
+                if (id < 8) {
+                    assertEquals(0L, target.observedComputeMs(560_000), "partial shared execution is not a singleton sample");
+                }
+            }
+            assertEquals(8000L, target.observedComputeMs(560_000), "8 co-executing requests consume 8s, not 64s");
+        } finally { target.close(); }
+    }
+
+    @Test
     void nonBatchLearnsOnlyOnceFromEachAuthoritativeSuccessfulCompletion() {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
         config.setDispatcher(ConfigTestSupport.nonBatch());

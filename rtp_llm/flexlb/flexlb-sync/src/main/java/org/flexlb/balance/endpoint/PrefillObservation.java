@@ -2,7 +2,6 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -49,16 +48,7 @@ public final class PrefillObservation {
         reduction.nowMs = full ? nowMs : state.clock.getAsLong();
         Map<Long, List<RequestRoute>> inputs = reduction.batchOutcomes.isEmpty() ? Map.of() : new HashMap<>();
         List<BatchCompletion> completions = new ArrayList<>();
-        // NON_BATCH owns singleton decisions too. Learn only from authoritative successful terminals;
-        // settlement removes their exact owner, so duplicate status reports cannot train twice.
-        for (var terminal : reduction.terminals.values()) {
-            if (terminal.owner().batch == null && terminal.errorCode() == 0L && terminal.executionTimeMs() > 0L) {
-                var features = new PrefillBatchFeatures(List.of(new PrefillBatchFeatures.Item(
-                        terminal.inputTokens(), terminal.inputTokens() - terminal.computeTokens())));
-                completions.add(new BatchCompletion(-1L, features, terminal.owner().route.prefillWorkMs(),
-                        terminal.executionTimeMs(), true, true));
-            }
-        }
+        if (full) { collectNonBatchFeedback(state, reduction, completions); }
         for (var change : reduction.batchOutcomes.entrySet()) {
             var batch = change.getKey(); var outcome = change.getValue();
             List<RequestRoute> survivors = new ArrayList<>(batch.members.size());
@@ -81,6 +71,27 @@ public final class PrefillObservation {
         return reduction;
     }
 
+    private static void collectNonBatchFeedback(PrefillState state, StatusReduction reduction, List<BatchCompletion> completions) {
+        long remaining = 0L;
+        boolean foreignWork = reduction.unknownRequests > 0L;
+        for (var entry : state.requests.values()) {
+            if (entry.ownership != OwnershipStage.COMMITTED || reduction.terminals.containsKey(entry.route.requestId())) { continue; }
+            if (entry.batch == null) { remaining++; }
+            else { foreignWork = true; }
+        }
+        var feedback = foreignWork ? PrefillExecutionFeedback.INVALID : state.nonBatchFeedback;
+        boolean solitary = remaining == 0L && reduction.terminals.size() == 1;
+        for (var terminal : reduction.terminals.values()) {
+            if (terminal.owner().batch == null) { feedback = feedback.append(terminal, solitary); }
+        }
+        if (remaining == 0L && !foreignWork) {
+            var completion = feedback.completion();
+            if (completion != null) { completions.add(completion); }
+            feedback = PrefillExecutionFeedback.EMPTY;
+        }
+        reduction.nonBatchFeedback = feedback;
+    }
+
     private static Map<Long, TerminalObservation> terminals(PrefillState state, Map<String, WorkerStatus.TaskObservation> tasks) {
         Map<Long, TerminalObservation> facts = new HashMap<>();
         for (var task : tasks.values()) {
@@ -92,9 +103,9 @@ public final class PrefillObservation {
             long input = task.inputLength() > 0L ? task.inputLength() : Math.max(0L, entry.route.seqLen());
             long hit = task.inputLength() > 0L ? task.prefixLength() : entry.route.hitCache();
             long compute = input - Math.clamp(hit, 0L, input);
-            var next = new TerminalObservation(entry, task.executionTimeMs(), task.errorCode(), compute, input, task.priorityPreemptionProgress());
+            var next = new TerminalObservation(entry, task.executionTimeMs(), task.endTimeMs(), task.errorCode(), compute, input, task.priorityPreemptionProgress());
             facts.merge(task.requestId(), next, (first, other) -> new TerminalObservation(first.owner(),
-                    Math.max(first.executionTimeMs(), other.executionTimeMs()), first.errorCode() != 0L ? first.errorCode() : other.errorCode(),
+                    Math.max(first.executionTimeMs(), other.executionTimeMs()), Math.max(first.endTimeMs(), other.endTimeMs()), first.errorCode() != 0L ? first.errorCode() : other.errorCode(),
                     Math.max(first.computeTokens(), other.computeTokens()), Math.max(first.inputTokens(), other.inputTokens()),
                     PriorityPreemptionProgress.merge(first.preemptionProgress(), other.preemptionProgress())));
         }
