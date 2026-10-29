@@ -146,6 +146,10 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+    // Producer-ordering proof, not a host completion timestamp. For CP this
+    // means the returned output depends on the existing post-model collective
+    // on every rank. A consumer must still complete its output stream.
+    bool context_kv_has_rank_completion_dependency = false;
 };
 
 struct CopyParams {

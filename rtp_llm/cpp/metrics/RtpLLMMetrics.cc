@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
+#include <string_view>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -37,7 +39,12 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCachePayloadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodePublicationMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodeCacheTokenMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteRestoreLatencyMetrics);
 
 bool RtpLLMGrpcConnectFailureMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(connect_failed_qps_metric, "rtp_llm_rank_broadcast_grpc_connect_failed_qps");
@@ -904,6 +911,136 @@ void RtpLLMTierStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMTie
     store_publish_block_qps_metric->Report(&tier_tags, collector->block_count);
 }
 
+bool RtpLLMDecodePublicationMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(pending_bytes_metric, "rtp_llm_decode_publish_pending_charge_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(pending_jobs_metric, "rtp_llm_decode_publish_pending_jobs");
+    REGISTER_GAUGE_MUTABLE_METRIC(queued_jobs_metric, "rtp_llm_decode_publish_queued_jobs");
+    REGISTER_GAUGE_MUTABLE_METRIC(running_jobs_metric, "rtp_llm_decode_publish_running_jobs");
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_jobs_metric, "rtp_llm_decode_publish_quarantined_jobs");
+    REGISTER_GAUGE_MUTABLE_METRIC(byte_limit_metric, "rtp_llm_decode_publish_pending_bytes_limit");
+    REGISTER_GAUGE_MUTABLE_METRIC(job_limit_metric, "rtp_llm_decode_publish_pending_jobs_limit");
+    REGISTER_GAUGE_MUTABLE_METRIC(oldest_age_us_metric, "rtp_llm_decode_publish_oldest_pending_age_us");
+    REGISTER_QPS_MUTABLE_METRIC(outcome_qps_metric, "rtp_llm_decode_publish_outcome_qps");
+    REGISTER_QPS_MUTABLE_METRIC(budget_skip_qps_metric, "rtp_llm_decode_publish_budget_skip_qps");
+    REGISTER_QPS_MUTABLE_METRIC(eos_latency_bucket_qps_metric, "rtp_llm_decode_publish_eos_latency_bucket_qps");
+    REGISTER_QPS_MUTABLE_METRIC(eos_latency_sum_us_qps_metric, "rtp_llm_decode_publish_eos_latency_sum_us_qps");
+    return true;
+}
+
+void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags*                  tags,
+                                            RtpLLMDecodePublicationStateMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(pending_bytes_metric, collector->pending_bytes);
+    REPORT_MUTABLE_METRIC(pending_jobs_metric, collector->pending_jobs);
+    REPORT_MUTABLE_METRIC(queued_jobs_metric, collector->queued_jobs);
+    REPORT_MUTABLE_METRIC(running_jobs_metric, collector->running_jobs);
+    REPORT_MUTABLE_METRIC(quarantined_jobs_metric, collector->quarantined_jobs);
+    REPORT_MUTABLE_METRIC(byte_limit_metric, collector->byte_limit);
+    REPORT_MUTABLE_METRIC(job_limit_metric, collector->job_limit);
+    REPORT_MUTABLE_METRIC(oldest_age_us_metric, collector->oldest_age_us);
+}
+
+void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags*                  tags,
+                                            RtpLLMDecodePublicationEventMetricsCollector* collector) {
+    if (std::string_view(collector->outcome) == "budget_skipped") {
+        budget_skip_qps_metric->Report(tags, 1);
+        return;
+    }
+    kmonitor::MetricsTags outcome_tags = tags ? *tags : kmonitor::MetricsTags{};
+    outcome_tags.AddTag("outcome", collector->outcome);
+    outcome_qps_metric->Report(&outcome_tags, 1);
+    if (!collector->eos_to_commit_us)
+        return;
+    const int64_t latency = *collector->eos_to_commit_us;
+    // Fixed cumulative buckets support approximate quantiles; a GAUGE average
+    // alone cannot supply P50/P95. +Inf is the observation denominator.
+    static const int64_t bounds[] = {100,
+                                     500,
+                                     1000,
+                                     5000,
+                                     10000,
+                                     20000,
+                                     50000,
+                                     100000,
+                                     250000,
+                                     500000,
+                                     1000000,
+                                     2000000,
+                                     5000000,
+                                     10000000,
+                                     60000000};
+    for (const auto upper : bounds) {
+        kmonitor::MetricsTags bucket_tags = tags ? *tags : kmonitor::MetricsTags{};
+        bucket_tags.AddTag("le_us", std::to_string(upper));
+        eos_latency_bucket_qps_metric->Report(&bucket_tags, latency <= upper ? 1 : 0);
+    }
+    kmonitor::MetricsTags all_tags = tags ? *tags : kmonitor::MetricsTags{};
+    all_tags.AddTag("le_us", "+Inf");
+    eos_latency_bucket_qps_metric->Report(&all_tags, 1);
+    eos_latency_sum_us_qps_metric->Report(tags, latency);
+}
+
+bool RtpLLMRemoteRestoreLatencyMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(latency_bucket_qps_metric, "rtp_llm_remote_restore_latency_bucket_qps");
+    REGISTER_QPS_MUTABLE_METRIC(latency_sum_us_qps_metric, "rtp_llm_remote_restore_latency_sum_us_qps");
+    return true;
+}
+
+void RtpLLMRemoteRestoreLatencyMetrics::report(const kmonitor::MetricsTags*                tags,
+                                               RtpLLMRemoteRestoreLatencyMetricsCollector* collector) {
+    kmonitor::MetricsTags mode_tags = tags ? *tags : kmonitor::MetricsTags{};
+    mode_tags.AddTag("mode", collector->mode);
+    static const int64_t bounds[] = {100,
+                                     500,
+                                     1000,
+                                     5000,
+                                     10000,
+                                     20000,
+                                     50000,
+                                     100000,
+                                     250000,
+                                     500000,
+                                     1000000,
+                                     2000000,
+                                     5000000,
+                                     10000000,
+                                     60000000};
+    for (const auto upper : bounds) {
+        auto bucket_tags = mode_tags;
+        bucket_tags.AddTag("le_us", std::to_string(upper));
+        latency_bucket_qps_metric->Report(&bucket_tags, collector->latency_us <= upper ? 1 : 0);
+    }
+    auto all_tags = mode_tags;
+    all_tags.AddTag("le_us", "+Inf");
+    latency_bucket_qps_metric->Report(&all_tags, 1);
+    latency_sum_us_qps_metric->Report(&mode_tags, collector->latency_us);
+}
+
+bool RtpLLMRemoteCacheOutcomeMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(outcome_qps_metric, "rtp_llm_remote_cache_outcome_qps");
+    return true;
+}
+
+bool RtpLLMDecodeCacheTokenMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(logical_tokens_qps_metric, "rtp_llm_decode_cache_logical_tokens_qps");
+    return true;
+}
+
+void RtpLLMDecodeCacheTokenMetrics::report(const kmonitor::MetricsTags*            tags,
+                                           RtpLLMDecodeCacheTokenMetricsCollector* collector) {
+    kmonitor::MetricsTags source_tags = tags ? *tags : kmonitor::MetricsTags{};
+    source_tags.AddTag("stage", collector->stage);
+    source_tags.AddTag("tier", collector->tier);
+    logical_tokens_qps_metric->Report(&source_tags, collector->logical_tokens);
+}
+
+void RtpLLMRemoteCacheOutcomeMetrics::report(const kmonitor::MetricsTags*              tags,
+                                             RtpLLMRemoteCacheOutcomeMetricsCollector* collector) {
+    kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
+    event_tags.AddTag("stage", collector->stage);
+    event_tags.AddTag("outcome", collector->outcome);
+    outcome_qps_metric->Report(&event_tags, 1);
+}
+
 bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(remote_match_qps_metric, "rtp_llm_remote_match_qps");
     REGISTER_QPS_MUTABLE_METRIC(remote_match_fail_qps_metric, "rtp_llm_remote_match_fail_qps");
@@ -961,6 +1098,19 @@ void RtpLLMRemoteCacheWriteMetrics::report(const kmonitor::MetricsTags*         
     REPORT_MUTABLE_METRIC(remote_get_write_location_time_us_metric, collector->remote_get_write_location_time_us);
     REPORT_MUTABLE_METRIC(remote_write_broadcast_time_us_metric, collector->remote_write_broadcast_time_us);
     REPORT_MUTABLE_METRIC(remote_finish_write_time_us_metric, collector->remote_finish_write_time_us);
+}
+
+bool RtpLLMRemoteCachePayloadMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(completed_payload_bytes_qps_metric, "rtp_llm_remote_completed_payload_bytes_qps");
+    REGISTER_QPS_MUTABLE_METRIC(completion_unknown_qps_metric, "rtp_llm_remote_payload_completion_unknown_qps");
+    return true;
+}
+
+void RtpLLMRemoteCachePayloadMetrics::report(const kmonitor::MetricsTags*              tags,
+                                             RtpLLMRemoteCachePayloadMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(completed_payload_bytes_qps_metric, collector->completed_payload_bytes);
+    if (collector->completion_unknown)
+        completion_unknown_qps_metric->Report(tags, 1);
 }
 
 bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -1229,7 +1379,25 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
 #undef REPORT_QPS
 #undef REPORT_GAUGE
 
-bool initKmonitorFactory() {
+namespace {
+// The process owner stops the factory only after all backends/reporters drain.
+// Backends share it; no backend owns global factory shutdown.
+std::mutex kmonitor_factory_mutex;
+
+bool initKmonitorFactoryLocked(bool with_builtin_metrics) {
+    if (kmonitor::KMonitorFactory::GetConfig()->inited()) {
+        // Init overwrites the global config, including tags/sinks. Reuse an
+        // already configured factory, even if it has not been started yet.
+        if (with_builtin_metrics && !kmonitor::KMonitorFactory::GetKMonitorMap()->count("buildinmetric")) {
+            KmonParam param;
+            param.init();
+            kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
+        }
+        if (!kmonitor::KMonitorFactory::IsStarted()) {
+            kmonitor::KMonitorFactory::Start();
+        }
+        return kmonitor::KMonitorFactory::IsStarted();
+    }
     KmonParam param;
     param.init();
     if (!param.kmonitorMetricsReporterCacheLimit.empty()) {
@@ -1269,16 +1437,52 @@ bool initKmonitorFactory() {
         return false;
     }
 
-    // registerBuildInMetrics to refresh sg_buildin_kmonitor for KMonitorWorker::Start
-    kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
-    RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
+    if (with_builtin_metrics) {
+        kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
+        RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
+    }
 
     kmonitor::KMonitorFactory::Start();
     RTP_LLM_LOG_INFO("KMonitorFactory::Start() finished");
-    return true;
+    return kmonitor::KMonitorFactory::IsStarted();
+}
+}  // namespace
+
+bool initKmonitorFactory() {
+    std::lock_guard<std::mutex> lock(kmonitor_factory_mutex);
+    return initKmonitorFactoryLocked(/*with_builtin_metrics=*/true);
+}
+
+kmonitor::MetricsReporterPtr
+remoteCachePayloadReporter(bool enabled, int64_t tp_rank, const kmonitor::MetricsReporterPtr& existing_reporter) {
+    // In particular, GetConfig/GetWorker instantiate a factory: do not call
+    // them (or construct tags/reporters) when the feature is disabled.
+    if (!enabled) {
+        return nullptr;
+    }
+    if (existing_reporter) {
+        return existing_reporter;
+    }
+    if (tp_rank <= 0) {
+        return nullptr;
+    }
+    try {
+        std::lock_guard<std::mutex> lock(kmonitor_factory_mutex);
+        if (!initKmonitorFactoryLocked(/*with_builtin_metrics=*/false)) {
+            RTP_LLM_LOG_WARNING("KVCM payload metrics factory unavailable, tp_rank=%ld", tp_rank);
+            return nullptr;
+        }
+        // This reporter is captured only by the SDK observer. Never put it in
+        // EngineInitParams or enable unrelated per-rank metrics/samplers.
+        return std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("KVCM payload metrics unavailable, tp_rank=%ld: %s", tp_rank, error.what());
+        return nullptr;
+    }
 }
 
 void stopKmonitorFactory() {
+    std::lock_guard<std::mutex> lock(kmonitor_factory_mutex);
     kmonitor::KMonitorFactory::Shutdown();
 }
 

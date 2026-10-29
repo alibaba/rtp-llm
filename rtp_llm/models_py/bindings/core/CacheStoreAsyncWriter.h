@@ -39,6 +39,11 @@ public:
                                    std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt);
     ~CacheStoreAsyncWriter() override;
 
+    // The model owner calls this after forward/dispatch drain. Python attention
+    // metadata may retain this writer after the native engine is destroyed;
+    // those aliases must not keep allocator/network reporters alive past KMonitor.
+    void shutdown();
+
     void                    init(bool track_store_completions = false);
     StoreCompletionCallback registerStoreCompletion(std::shared_ptr<KVCacheResource> publication_lease = nullptr);
     void                    sealSubmissions();
@@ -70,7 +75,8 @@ private:
     enum class State {
         IDLE,
         RUNNING,
-        SEALED
+        SEALED,
+        CLOSED
     };
 
     struct StoreCompletionState {
@@ -104,6 +110,7 @@ private:
     autil::ThreadPoolBasePtr              thread_pool_;
     std::atomic<int64_t>                  pending_count_{0};
     std::mutex                            state_mutex_;
+    std::mutex                            shutdown_mutex_;
     std::mutex                            wait_mutex_;
     std::condition_variable               wait_cv_;
     std::mutex                            exception_mutex_;

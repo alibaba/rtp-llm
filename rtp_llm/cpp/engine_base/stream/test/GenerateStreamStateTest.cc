@@ -122,6 +122,28 @@ protected:
 // 1. Initial state and basic state checks
 // ============================================================================
 
+TEST_F(GenerateStreamStateTest, DecodePublicationClockComesFromFirstGenerateDoneEvent) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    auto            stream = createStream({1, 2, 3, 4}, true, RoleType::DECODE);
+    const auto      before = DecodePublicationLifecycle::Clock::now();
+    EXPECT_FALSE(stream->kvCache().decodeCompletionLifecycle().eosAt());
+    stream->reportEvent(StreamEvents::GenerateDone);
+    const auto after = DecodePublicationLifecycle::Clock::now();
+    const auto eos   = stream->kvCache().decodeCompletionLifecycle().eosAt();
+    ASSERT_TRUE(eos);
+    EXPECT_GE(*eos, before);
+    EXPECT_LE(*eos, after);
+    stream->reportEvent(StreamEvents::GenerateDone);
+    EXPECT_EQ(stream->kvCache().decodeCompletionLifecycle().eosAt(), eos);
+}
+
+TEST_F(GenerateStreamStateTest, DisabledPublicationDoesNotRecordDecodeEosClock) {
+    autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    auto            stream = createStream({1, 2, 3, 4}, true, RoleType::DECODE);
+    stream->reportEvent(StreamEvents::GenerateDone);
+    EXPECT_FALSE(stream->kvCache().decodeCompletionLifecycle().eosAt());
+}
+
 TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {
     auto stream = createStream();
     ASSERT_TRUE(stream->getStatus() == StreamState::WAITING);

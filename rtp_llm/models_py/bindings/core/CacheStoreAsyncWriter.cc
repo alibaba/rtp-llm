@@ -106,14 +106,23 @@ void CacheStoreAsyncWriter::terminateStoreCompletions(const std::shared_ptr<Stor
 }
 
 CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
+    shutdown();
+}
+
+void CacheStoreAsyncWriter::shutdown() {
+    std::lock_guard<std::mutex>           shutdown_lock(shutdown_mutex_);
     bool                                  unfinished = false;
     std::shared_ptr<StoreCompletionState> active_completion_state;
     std::shared_ptr<StoreCompletionState> finished_completion_state;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        if (state_ == State::CLOSED) {
+            return;
+        }
         unfinished                = state_ != State::IDLE || finished_store_completion_state_ != nullptr;
         active_completion_state   = active_store_completion_state_;
         finished_completion_state = finished_store_completion_state_;
+        state_                    = State::CLOSED;
     }
     if (unfinished) {
         RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed with unfinished cache-store work - "
@@ -126,6 +135,12 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
         std::make_exception_ptr(std::runtime_error("cache-store publication cancelled during writer shutdown"));
     terminateStoreCompletions(active_completion_state, shutdown_exception);
     terminateStoreCompletions(finished_completion_state, shutdown_exception);
+    thread_pool_.reset();
+    active_store_completion_state_.reset();
+    finished_store_completion_state_.reset();
+    active_cache_store_.reset();
+    cache_config_.reset();  // aliasing shared_ptr also retains cache_manager_
+    cache_manager_.reset();
 }
 
 // IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.

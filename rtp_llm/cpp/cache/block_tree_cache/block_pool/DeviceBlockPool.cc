@@ -221,6 +221,9 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
             auto& change     = changes[reclaimable[i]];
             change.new_count = 1;
             replacements.push_back(change.block);
+            // This donor stays allocated but will hold a replacement value.
+            // An unchanged numeric ID must not preserve the old provenance.
+            beginDecodeOriginIncarnationNoLock(change.block);
         }
         replacements.insert(replacements.end(), fresh_blocks->begin(), fresh_blocks->end());
 

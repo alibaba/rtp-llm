@@ -17,6 +17,8 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -35,6 +37,7 @@ struct StorageBlockHandle {
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
+    DecodeReuseSourcesPtr decode_sources;
 };
 
 enum class StorageQuarantineReason {
@@ -42,6 +45,7 @@ enum class StorageQuarantineReason {
     RPC_TIMEOUT,
     RPC_ERROR,
     INVALID_RESPONSE,
+    SDK_ERROR,
 };
 
 struct StorageQuarantineCounts {
@@ -50,7 +54,7 @@ struct StorageQuarantineCounts {
 };
 
 // Read/write rows and StorageQuarantineReason columns share one state snapshot.
-using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 4>, 2>;
+using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 5>, 2>;
 
 // The backend accepted an operation but cannot prove that DMA/RDMA has
 // stopped touching its buffers. StorageBackend replaces request pins with
@@ -101,6 +105,7 @@ struct StorageRequest {
     size_t published_tokens{0};
     std::optional<int64_t> prefill_computed_tokens;
     std::shared_ptr<void> completion_budget_lease;
+    std::shared_ptr<StorageCompletionAdmission> completion_admission;
 
     bool empty() const {
         for (const auto& key_handles : handles) {

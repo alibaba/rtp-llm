@@ -342,6 +342,42 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     EXPECT_EQ(writer.cp_size_, 1);
 }
 
+TEST_F(CacheStoreAsyncWriterTest, ShutdownReleasesAllocatorWhileAttentionAliasSurvives) {
+    auto manager                        = std::make_shared<KVCacheManager>(makeWriterTestCacheConfig("main", 16), true);
+    std::weak_ptr<KVCacheManager> owner = manager;
+    auto                          writer          = std::make_shared<CacheStoreAsyncWriter>(-1, manager);
+    auto                          attention_alias = writer;
+    manager.reset();
+    EXPECT_FALSE(owner.expired());
+    writer->shutdown();
+    EXPECT_TRUE(owner.expired());
+    writer.reset();
+    ASSERT_NE(attention_alias, nullptr);
+    attention_alias->shutdown();
+    EXPECT_ANY_THROW(attention_alias->init());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, ShutdownJoinsSubmittedWorkAndRejectsReuse) {
+    CacheStoreAsyncWriter writer;
+    std::promise<void>    entered, release;
+    auto                  released = release.get_future().share();
+    writer.init(true);
+    auto completed = writer.registerStoreCompletion();
+    writer.submit([&] {
+        entered.set_value();
+        released.wait();
+    });
+    entered.get_future().wait();
+    auto stopped = std::async(std::launch::async, [&] { writer.shutdown(); });
+    EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    release.set_value();
+    ASSERT_EQ(stopped.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    stopped.get();
+    EXPECT_NO_THROW(completed(nullptr));
+    EXPECT_NO_THROW(writer.shutdown());
+    EXPECT_ANY_THROW(writer.init());
+}
+
 TEST_F(CacheStoreAsyncWriterTest, UsesPhysicalCpTopologyFromAllocatorMapper) {
     auto              config = makeWriterTestCacheConfig("default", /*kv_stride=*/16);
     ParallelismConfig parallelism;

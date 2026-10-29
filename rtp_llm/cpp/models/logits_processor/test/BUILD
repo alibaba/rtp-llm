@@ -144,3 +144,19 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+# Real grammar compiler and KMonitor ownership, CPU-only lifecycle regression.
+cc_test(
+    name = "grammar_factory_shutdown_test",
+    srcs = ["GrammarFactoryShutdownTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/models:logits_processor",
+        "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/config:model_config",
+        "@com_google_googletest//:gtest_main",
+        "@xgrammar",
+    ] + torch_deps(),
+    timeout = "short",
+)

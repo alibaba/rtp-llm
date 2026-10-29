@@ -644,7 +644,7 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
 
-TEST_F(PrefillCompletionRpcTest, HandoffRequiresMatchingIdentityAndSuccessfulAllRankLoad) {
+TEST_F(PrefillCompletionRpcTest, HandoffOriginRequiresMatchingIdentityAndSuccessfulAllRankLoad) {
     class HandoffEngine final: public EngineBase {
     public:
         HandoffEngine(): EngineBase(EngineInitParams{}) {}
@@ -721,8 +721,6 @@ TEST_F(PrefillCompletionRpcTest, HandoffRequiresMatchingIdentityAndSuccessfulAll
         builder.RegisterService(&service);
         auto server = builder.BuildAndStart();
         ASSERT_NE(server, nullptr);
-        // The running server must use its startup flag, not per-request getenv.
-        setenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "1" : "0", 1);
         auto stub = RpcService::NewStub(
             grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
         grpc::ClientContext context;

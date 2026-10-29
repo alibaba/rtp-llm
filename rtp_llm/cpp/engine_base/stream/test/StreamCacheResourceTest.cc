@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -181,21 +182,6 @@ public:
         return match_calls_;
     }
 
-    bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t end, bool finished) override {
-        ++capture_calls;
-        captured_end = end;
-        capture_saw_blocks = resource.curBlocksNum() > 0;
-        EXPECT_TRUE(finished);
-        if (fail_capture) {
-            throw std::runtime_error("injected publication admission failure");
-        }
-        return true;
-    }
-    size_t capture_calls{0};
-    size_t captured_end{0};
-    bool capture_saw_blocks{false};
-    bool fail_capture{false};
-
 protected:
     bool initImpl() override {
         return true;
@@ -284,8 +270,7 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {},
-                                        int                     return_sequences = 2) {
+                                        const KVCacheConfig&    kv_cache_config = {}) {
         cache_manager_ = std::make_shared<KVCacheManager>(
             cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager_->init());
@@ -301,7 +286,7 @@ protected:
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        generate_config->num_return_sequences = return_sequences;
+        generate_config->num_return_sequences = 2;
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
@@ -317,8 +302,7 @@ protected:
     std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool     block_matches,
                                                                             bool     seed_host     = false,
                                                                             RoleType role_type     = RoleType::PDFUSION,
-                                                                            bool     seed_resident = false,
-                                                                            int      return_sequences = 2) {
+                                                                            bool     seed_resident = false) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
         kv_cache_config.enable_memory_cache   = seed_host;
@@ -328,7 +312,7 @@ protected:
         // replaces its BlockTreeCache with the controllable fake backend.
         manager_kv_cache_config.enable_remote_cache = false;
         prepareResourceWithCacheConfig(
-            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config, return_sequences);
+            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config);
 
         auto backend = std::make_shared<StreamReadStorageBackend>();
         if (block_matches) {
@@ -423,100 +407,6 @@ TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitch
     }
 }
 
-TEST_F(StreamCacheResourceTest, DecodePublicationConfigIsSnapshottedBeforeStreams) {
-    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    autil::EnvGuard synchronous("RTP_LLM_STREAM_ASYNC", "0");
-    ResourceContext context;
-    context.initCacheConfig(KVCacheConfig{});
-    ASSERT_TRUE(context.enable_decode_publication);
-    {
-        autil::EnvGuard changed("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
-        EXPECT_TRUE(context.enable_decode_publication);
-        ResourceContext disabled;
-        disabled.initCacheConfig(KVCacheConfig{});
-        EXPECT_FALSE(disabled.enable_decode_publication);
-    }
-    {
-        autil::EnvGuard asynchronous("RTP_LLM_STREAM_ASYNC", "1");
-        ResourceContext disabled;
-        disabled.initCacheConfig(KVCacheConfig{});
-        EXPECT_FALSE(disabled.enable_decode_publication);
-    }
-}
-
-TEST_F(StreamCacheResourceTest, DecodePublicationOnlyCapturesSuccessfulReusableDecodeBeforeFree) {
-    for (const bool enabled : {false, true}) {
-        for (const bool request_reuse : {false, true}) {
-            for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
-                for (const auto status : {StreamState::RUNNING, StreamState::FINISHED}) {
-                    SCOPED_TRACE("enabled=" + std::to_string(enabled) + " reuse=" + std::to_string(request_reuse)
-                                 + " role=" + std::to_string(static_cast<int>(role))
-                                 + " state=" + StreamStateToString(status));
-                    auto backend = prepareStorageBackendResource(false, false, role, false, 1);
-                    auto& resource = stream_->streamCacheResource();
-                    // Prevent remote lookup from supplying this fixture's pages.
-                    resource.resource_context_.reuse_cache = false;
-                    ASSERT_TRUE(resource.initKVBlock().ok());
-                    ASSERT_GT(resource.curBlocksNum(), 0);
-                    resource.resource_context_.reuse_cache = true;
-                    resource.resource_context_.enable_decode_publication = enabled;
-                    stream_->generateConfig()->reuse_cache = request_reuse;
-                    stream_->setSeqLength(7);
-                    stream_->generate_status_->status = status;
-                    stream_->releaseResource();
-                    const bool captured = enabled && request_reuse && role == RoleType::DECODE
-                                          && status == StreamState::FINISHED;
-                    EXPECT_EQ(backend->capture_calls, captured ? 1u : 0u);
-                    if (captured) {
-                        EXPECT_EQ(backend->captured_end, 6u);
-                        EXPECT_TRUE(backend->capture_saw_blocks);
-                    }
-                    EXPECT_EQ(resource.curBlocksNum(), 0);
-                    backend->shutdown();
-                }
-            }
-        }
-    }
-}
-
-TEST_F(StreamCacheResourceTest, DecodePublicationAdmissionFailurePreservesNormalRelease) {
-    auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false, 1);
-    auto& resource = stream_->streamCacheResource();
-    resource.resource_context_.reuse_cache = false;
-    ASSERT_TRUE(resource.initKVBlock().ok());
-    resource.resource_context_.reuse_cache = true;
-    resource.resource_context_.enable_decode_publication = true;
-    stream_->generateConfig()->reuse_cache = true;
-    stream_->setSeqLength(7);
-    stream_->generate_status_->status = StreamState::FINISHED;
-    backend->fail_capture = true;
-    EXPECT_NO_THROW(stream_->releaseResource());
-    EXPECT_EQ(backend->capture_calls, 1u);
-    EXPECT_TRUE(backend->capture_saw_blocks);
-    EXPECT_EQ(resource.curBlocksNum(), 0);
-    backend->shutdown();
-}
-
-TEST_F(StreamCacheResourceTest, DecodePublicationSkipsBeamAndMultipleReturnRequests) {
-    for (const bool beams : {false, true}) {
-        auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false, 1);
-        auto& resource = stream_->streamCacheResource();
-        resource.resource_context_.reuse_cache = false;
-        ASSERT_TRUE(resource.initKVBlock().ok());
-        resource.resource_context_.reuse_cache = true;
-        resource.resource_context_.enable_decode_publication = true;
-        auto config = stream_->generateConfig();
-        config->reuse_cache = true;
-        if (beams) { config->num_beams = 2; }
-        else { config->num_return_sequences = 2; }
-        stream_->generate_status_->status = StreamState::FINISHED;
-        stream_->releaseResource();
-        EXPECT_EQ(backend->capture_calls, 0u);
-        EXPECT_EQ(resource.curBlocksNum(), 0);
-        backend->shutdown();
-    }
-}
-
 TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     ResourceContext resource_context;
     ModelConfig     model_config;
@@ -565,7 +455,8 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
     }
 }
 
-TEST_F(StreamCacheResourceTest, testAllocateResource) {
+TEST_F(StreamCacheResourceTest, testAllocateResourceIgnoresObsoleteBenchmarkSwitch) {
+    autil::EnvGuard obsolete_benchmark("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", "1");
     for (const bool with_backend : {false, true}) {
         for (const bool ignore_request_switches : {false, true}) {
             for (const bool request_reuse : {false, true}) {
@@ -1349,7 +1240,16 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         auto  backend  = prepareStorageBackendResource(false, true, RoleType::PREFILL, resident);
         auto& resource = stream_->streamCacheResource();
         initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
-        const auto retry_keys = resource.kvCache().cacheKeys(0);
+        auto cache = cache_manager_->block_tree_cache_;
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto group_id   = cache->groupSets().front()->groupSetId();
+        const auto prefix_key = resource.batch_kv_cache_resource_->cacheKeys(0).front();
+        const auto prefix     = cache->tree()->findNode({prefix_key});
+        ASSERT_EQ(prefix.size(), 1u);
+        ASSERT_TRUE(prefix.back()->group_set_resources[group_id].hasTier(Tier::HOST));
+        // The helper seeds the tree directly. Register its HOST candidate as
+        // a production insertion would, rather than silently omitting the heap.
+        block_tree_cache_test::BlockTreeCacheTestPeer::refreshCandidateForTest(*cache, prefix.back(), group_id);
         backend->blockReads();
         block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
         backend->timeoutNextRead();
@@ -1370,32 +1270,33 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         EXPECT_TRUE(absl::IsUnavailable(resource.waitForAllocatorLoad()));
         EXPECT_EQ(resource.curBlocksNum(), 0);
         EXPECT_EQ(stream_->reuseLength(), 0);
-        pool->decRef(*held);
-        release_held.dismiss();
-        // Request-reference release does not require eviction of a tree-owned
-        // ordinary prefix. Read the settled physical state before retry rather
-        // than inferring eviction from the residency policy alone.
-        bool device_prefix_available = false;
-        {
-            auto& cache = cache_manager_->block_tree_cache_;
-            std::lock_guard<std::mutex> lock(cache->mutex_);
-            const auto path = cache->tree()->findNode(retry_keys);
-            if (!path.empty()) {
-                ASSERT_EQ(path.front()->group_set_resources.size(), 1u);
-                const auto& cached = path.front()->group_set_resources.front();
-                EXPECT_FALSE(cached.hasTier(Tier::HOST));
-                EXPECT_FALSE(cached.hasTier(Tier::DISK));
-                device_prefix_available = cached.isMatchUsable() && cached.hasCompleteDeviceValue();
+        EXPECT_TRUE(resource.skip_remote_cache_);
+        // Finished loads may still own source tickets through this inspection
+        // reference. Release them before exercising production eviction.
+        context.reset();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        for (const auto tier : {Tier::DEVICE, Tier::HOST}) {
+            const bool dropped = block_tree_cache_test::BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+                *cache, group_id, tier, /*force_drop=*/true);
+            if (resident) {
+                EXPECT_FALSE(dropped);
             }
         }
-        if (resident) {
-            ASSERT_TRUE(device_prefix_available);
-        }
+        const auto remaining              = cache->tree()->findNode({prefix_key});
+        const bool local_prefix_available = !remaining.empty()
+                                            && (remaining.back()->group_set_resources[group_id].hasTier(Tier::DEVICE)
+                                                || remaining.back()->group_set_resources[group_id].hasTier(Tier::HOST)
+                                                || remaining.back()->group_set_resources[group_id].hasTier(Tier::DISK));
+        ASSERT_EQ(local_prefix_available, resident);
+        pool->decRef(*held);
+        release_held.dismiss();
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
         EXPECT_EQ(backend->matchCalls(), 1u);
-        EXPECT_EQ(stream_->reuseLength(), device_prefix_available ? 2 : 0);
-        EXPECT_EQ(stream_->deviceReuseLength(), device_prefix_available ? 2 : 0);
+        // Retry sees the explicitly evicted ordinary prefix or the preserved
+        // resident prefix. DEVICE pressure alone need not remove the HOST copy.
+        EXPECT_EQ(stream_->reuseLength(), resident ? 2 : 0);
+        EXPECT_EQ(stream_->deviceReuseLength(), resident ? 2 : 0);
         EXPECT_EQ(stream_->remoteReuseLength(), 0);
     }
 }

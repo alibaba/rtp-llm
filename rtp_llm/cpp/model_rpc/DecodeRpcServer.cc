@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
@@ -629,7 +630,7 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, client_error);
         return;
     }
-    if (decode_publication_enabled_) {
+    if (remoteCacheDecodePublicationEnabled()) {
         // No sampled token has been appended on D yet. Successful all-rank
         // loading establishes the bound against which P's assertion is checked.
         decode_context.loaded_prefill_kv_end = decode_context.getStream()->seqLength();
@@ -684,7 +685,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
         return;
     }
-    if (decode_publication_enabled_ && generate_request.has_prefill_kv_handoff()) {
+    if (remoteCacheDecodePublicationEnabled() && generate_request.has_prefill_kv_handoff()) {
         GRPC_RET_IF_ERROR(decode_context,
                           generate_request.request_id() == decode_context.request_id
                               && generate_request.client_id() == decode_context.allocate_request.client_id(),

@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 
 namespace rtp_llm {
 
@@ -29,9 +30,11 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     storage_request_(std::move(storage_request)),
     need_backend_match_(storage_backend_ && !storage_request_.empty()),
     backend_pending_(need_backend_match_),
-    remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
-        return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
-    })) {
+    remaining_transfer_count_(std::count_if(
+        load_descs_.begin(),
+        load_descs_.end(),
+        [](const auto& desc) { return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK; })),
+    track_remote_restore_(need_backend_match_ && remoteCacheDecodePublicationEnabled()) {
     remaining_join_count_.store(static_cast<size_t>(std::count(joined_load_.begin(), joined_load_.end(), true)),
                                 std::memory_order_relaxed);
     rebuildMatchedBlocksByTier();
@@ -182,14 +185,22 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         return;
     }
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
-    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak](ErrorInfo error) {
+    if (track_remote_restore_) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_.load() == State::PENDING) {
+            remote_read_started_at_ = RemoteRestoreTiming::Clock::now();
+        }
+    }
+    auto source_meta = track_remote_restore_ ? match_meta : nullptr;
+    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak, source_meta](ErrorInfo error) {
         if (auto context = weak.lock()) {
-            context->onBackendRead(std::move(error));
+            auto sources = error.ok() && source_meta ? source_meta->decode_sources : DecodeReuseSourcesPtr{};
+            context->onBackendRead(std::move(error), std::move(sources));
         }
     });
 }
 
-void LoadAsyncContext::onBackendRead(ErrorInfo error) {
+void LoadAsyncContext::onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources) {
     bool                    notify = false;
     SettlementReadyCallback settlement_ready_callback;
     {
@@ -199,6 +210,7 @@ void LoadAsyncContext::onBackendRead(ErrorInfo error) {
         }
         if (error.ok()) {
             matched_blocks_ = backend_matched_blocks_;
+            remote_decode_sources_ = std::move(sources);
         } else {
             backend_error_ = error;
             error_info_  = std::move(error);
@@ -207,6 +219,24 @@ void LoadAsyncContext::onBackendRead(ErrorInfo error) {
         finishIfReadyLocked(notify, settlement_ready_callback);
     }
     dispatchCompletion(notify, std::move(settlement_ready_callback));
+}
+
+void LoadAsyncContext::setLocalDecodeSources(DecodeReuseSourcesPtr sources) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    local_decode_sources_ = std::move(sources);
+}
+
+DecodeReuseSourcesPtr LoadAsyncContext::decodeSources(bool local_only) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.load() == State::PENDING || !local_load_succeeded_)
+        return {};
+    if (local_only || state_.load() != State::SUCCEEDED || !remote_decode_sources_)
+        return local_decode_sources_;
+    if (!local_decode_sources_)
+        return remote_decode_sources_;
+    auto result = std::make_shared<DecodeReuseSources>(*local_decode_sources_);
+    result->insert(result->end(), remote_decode_sources_->begin(), remote_decode_sources_->end());
+    return result;
 }
 
 void LoadAsyncContext::failBeforeCommit() {
@@ -339,6 +369,14 @@ bool LoadAsyncContext::backendTimedOut() const {
     return backend_error_.code() == ErrorCode::DEADLINE_EXCEEDED;
 }
 
+std::optional<RemoteRestoreTiming> LoadAsyncContext::remoteRestoreTiming() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.load() != State::SUCCEEDED || !remote_read_started_at_ || !remote_gpu_ready_at_) {
+        return std::nullopt;
+    }
+    return RemoteRestoreTiming{*remote_read_started_at_, *remote_gpu_ready_at_};
+}
+
 bool LoadAsyncContext::settle(bool success) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -347,6 +385,9 @@ bool LoadAsyncContext::settle(bool success) {
         }
         local_load_succeeded_             = success && !has_local_failure_;
         const bool completed_successfully = local_load_succeeded_ && backend_error_.ok();
+        if (completed_successfully && remote_read_started_at_) {
+            remote_gpu_ready_at_ = RemoteRestoreTiming::Clock::now();
+        }
         if (!completed_successfully && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
         }
@@ -388,6 +429,9 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
         return;
     }
     local_load_succeeded_ = !has_local_failure_;
+    if (local_load_succeeded_ && backend_error_.ok() && remote_read_started_at_) {
+        remote_gpu_ready_at_ = RemoteRestoreTiming::Clock::now();
+    }
     state_.store(local_load_succeeded_ && backend_error_.ok() ? State::SUCCEEDED : State::FAILED);
     notify = true;
 }

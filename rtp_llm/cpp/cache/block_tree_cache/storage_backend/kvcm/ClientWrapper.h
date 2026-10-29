@@ -10,11 +10,13 @@
 #include <atomic>
 #include <condition_variable>
 #include <optional>
+#include <functional>
 #include <thread>
 #include "kvcm_client/meta_client.h"
 #include "kvcm_client/transfer_client.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
 
 namespace rtp_llm {
 namespace kvcm {
@@ -22,10 +24,6 @@ class Subscriber;
 
 class ClientWrapper {
 public:
-    // This describes the payload call, not metadata commit or durability. The
-    // owner must retain pages, their pools and this client while UNKNOWN.
-    enum class TransferCompletion { NOT_SUBMITTED, PAYLOAD_COMPLETE, UNKNOWN };
-
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
     explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>());
     virtual ~ClientWrapper();
@@ -41,6 +39,21 @@ public:
                               const std::vector<PoolRegistration>& registrations,
                               const std::vector<std::string>&      tags);
     virtual void shutdown() noexcept;
+    // Internal optional telemetry: completed logical payload per SDK chunk,
+    // or completion-unknown for an attempted failed/throwing SDK call. The
+    // observer must be thread-safe and must not reenter this wrapper.
+    using TransferObserver = SdkTransferObserver;
+    void setTransferObserver(TransferObserver observer);
+    // Internal outcome proof, not an SDK ABI extension. NOT_STARTED is set
+    // only by local pre-I/O checks. A normal SDK error is not DMA completion.
+    enum class TransferCompletion {
+        NOT_STARTED,
+        BUFFER_SAFE,
+        NOT_SUBMITTED = NOT_STARTED,
+        PAYLOAD_COMPLETE = BUFFER_SAFE,
+        UNKNOWN
+    };
+    static TransferCompletion sdkResultCompletion(kv_cache_manager::ClientErrorCode ec);
     // for meta client
     virtual std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
                                                                const std::string&                      trace_id,
@@ -89,19 +102,18 @@ public:
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  kv_cache_manager::BlockBuffers&                             buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
-                                 TransferCompletion*                                        completion = nullptr);
+                                 TransferCompletion*                                         completion = nullptr);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
                        const kv_cache_manager::BlockBuffers&                       buffers,
                        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
     virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
-    saveKvCachesForTagWithStatus(
-        const std::string&                                          tag,
-        const kv_cache_manager::UriStrVec&                          uris,
-        const kv_cache_manager::BlockBuffers&                       buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
-        TransferCompletion*                                        completion = nullptr);
+    saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 const kv_cache_manager::BlockBuffers&                       buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
+                                 TransferCompletion*                                         completion = nullptr);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,
@@ -120,6 +132,7 @@ private:
     void                                          reinitWorkerLoop() noexcept;
     bool                                          reinitAllMetaClients();
     bool                                          waitForRetry(int sleep_time_ms);
+    void observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept;
 
     kv_cache_manager::InitParams init_params_;
     // InitParams carries a pointer, so retain the descriptor for every later
@@ -140,6 +153,20 @@ private:
     // Transfer I/O remains available while metadata clients are re-registering.
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
+    TransferObserver  transfer_observer_;
+    // Borrowed URI/IOV/trace descriptors must survive an SDK error or throw
+    // whose payload completion is unknown, together with the registered client.
+    struct PendingTransfer {
+        kv_cache_manager::UriStrVec uris;
+        kv_cache_manager::BlockBuffers buffers;
+        std::shared_ptr<kv_cache_manager::TransferTraceInfo> trace;
+        std::shared_ptr<PendingTransfer> next;
+    };
+    void retainTransfer(const std::shared_ptr<PendingTransfer>& transfer);
+    void releaseTransfer(const std::shared_ptr<PendingTransfer>& transfer);
+    std::mutex pending_transfer_mutex_;
+    std::shared_ptr<PendingTransfer> pending_transfers_;
+
 
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};

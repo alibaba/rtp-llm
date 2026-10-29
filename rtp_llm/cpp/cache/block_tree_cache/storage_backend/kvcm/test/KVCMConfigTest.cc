@@ -60,6 +60,51 @@ TEST(KVCMConfigTest, PreservesPaceBackendConfiguration) {
     EXPECT_EQ(autil::legacy::ToJsonString(restored), serialized);
 }
 
+TEST(KVCMConfigTest, PreservesExplicitPaceSsdWireBackend) {
+    SdkWrapperConfig config;
+    ASSERT_NO_THROW(config.parseBackendConfigs(R"([{"type":"pace_ssd","sdk_log_level":"INFO"}])"));
+    ASSERT_EQ(config.sdk_backend_configs().size(), 1u);
+    const auto serialized = autil::legacy::ToJsonString(config);
+    EXPECT_NE(serialized.find("pace_ssd"), std::string::npos);
+    EXPECT_NE(serialized.find("INFO"), std::string::npos);
+    SdkWrapperConfig restored;
+    ASSERT_NO_THROW(autil::legacy::FromJsonString(restored, serialized));
+    EXPECT_EQ(autil::legacy::ToJsonString(restored), serialized);
+}
+
+TEST(KVCMConfigTest, RoundTripsSsdThroughCompleteModelClientConfig) {
+    auto sdk = std::make_shared<SdkWrapperConfig>();
+    ASSERT_NO_THROW(sdk->parseBackendConfigs(R"([{"type":"pace_ssd"}])"));
+    auto infos = std::make_shared<KVCMConfig::LocationSpecInfoMap>();
+    infos->emplace("tp0_Ffull", 4096);
+    auto groups = std::make_shared<KVCMConfig::LocationSpecGroups>();
+    groups->emplace("Ffull", std::vector<std::string>{"tp0_Ffull"});
+    KVCMConfig config(false,
+                      "",
+                      128,
+                      "decode_remote_test",
+                      "fixture",
+                      {"127.0.0.1:1"},
+                      infos,
+                      std::make_shared<MetaChannelConfig>(),
+                      sdk,
+                      groups,
+                      ModelDeployment("fixture", "fp16", false, 2, 1, 1, "", ""));
+    const auto serialized = autil::legacy::ToJsonString(config);
+    KVCMConfig restored;
+    ASSERT_NO_THROW(autil::legacy::FromJsonString(restored, serialized));
+    EXPECT_EQ(autil::legacy::ToJsonString(restored), serialized);
+    EXPECT_NE(serialized.find("pace_ssd"), std::string::npos);
+}
+
+TEST(KVCMConfigTest, RejectsUnknownSsdNameWithoutReplacingValidState) {
+    SdkWrapperConfig config;
+    ASSERT_NO_THROW(config.parseBackendConfigs(R"([{"type":"pace_ssd"}])"));
+    const auto original = autil::legacy::ToJsonString(config);
+    EXPECT_THROW(config.parseBackendConfigs(R"([{"type":"pace_ssd_typo"}])"), autil::legacy::ExceptionBase);
+    EXPECT_EQ(autil::legacy::ToJsonString(config), original);
+}
+
 }  // namespace
 }  // namespace kvcm
 }  // namespace rtp_llm
