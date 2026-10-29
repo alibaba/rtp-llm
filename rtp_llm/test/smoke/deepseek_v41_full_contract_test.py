@@ -5,7 +5,6 @@ import logging
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from rtp_llm.test.smoke import deepseek_v41_dspark_contract_test as dspark
 from rtp_llm.test.smoke import deepseek_v41_pd_contract_test as pd
@@ -16,7 +15,6 @@ class DeepSeekV41FullContractTest(
 ):
     prefill_cp_size = 2
     decode_dp_size = 2
-    jit_cache_root = "/tmp/rtp-llm/.jit_cache_deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm"
     short_prompt = (
         "Write the numbers from one to twenty, separated by commas: one, two,"
     )
@@ -24,11 +22,6 @@ class DeepSeekV41FullContractTest(
     # Keep the PD token/text repeatability and CED checks, and the DSpark
     # acceptance and verify-graph checks inherited from the two runners.
     compare_generation_logits = False
-
-    def start_servers(self):
-        with patch.dict(os.environ):
-            os.environ.pop("DG_JIT_CACHE_DIR", None)
-            super().start_servers()
 
     def test_graph_engram_and_prefix_reuse(self):
         super().test_graph_engram_and_prefix_reuse()
