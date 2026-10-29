@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/LinearReplay.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
 #include <optional>
@@ -50,6 +51,7 @@ struct GptModelInputs {
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
     torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    std::optional<LinearReplayInputs> linear_replay;
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -64,7 +66,10 @@ struct GptModelInputs {
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
-    std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
+    // Payload rows follow strictly increasing tag order, independent of local
+    // cache group IDs. Producers and MTP snapshots share this order; TP sends
+    // the numeric payload directly without transmitting tags or reordering rows.
+    std::vector<std::string> kv_cache_group_tags;
     torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
 
@@ -115,6 +120,11 @@ struct GptModelInputs {
     std::vector<std::string> trace_ids;
 
 public:
+    // Metadata stays with the round; only target verification consumes it.
+    const LinearReplayInputs* targetLinearReplay() const {
+        return is_target_verify && linear_replay ? &*linear_replay : nullptr;
+    }
+
     std::string debugString(bool force = false) const;
 };
 

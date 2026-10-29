@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/cuda_graph/mtp_draft_prefill_capacity.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace py = pybind11;
@@ -60,6 +61,7 @@ public:
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
+        linear_replay_group_count_(graph_params.linear_replay_group_count),
         sequence_parallel_size_(graph_params.sequence_parallel_size),
         max_seq_len_(graph_params.max_seq_len),
         hidden_size_(graph_params.hidden_size),
@@ -204,13 +206,19 @@ private:
     bool isGenerationPrefillCudaGraph() const {
         return role_ == CudaGraphRole::GENERATION_PREFILL;
     }
-    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        // DSpARK propose/commit now run as construction-time-role decode graphs
-        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
-        // prefill keeps the fixed-capacity Python path: slicing its output buffer
-        // would mismatch the forward_decode [B * q_len, dim] result in
-        // captureOneGraphInstance.
+    bool requiresRectangularMtpDraftPrefillLayout() const {
+        // The HC MTP backend runs forward_decode with rectangular B*Q rows.
+        // DSpARK propose/commit use their own decode graph roles.
         return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+    }
+    int mtpDraftPrefillBatchCapacity(int tokens) const {
+        if (!isMtpDraftPrefillCudaGraph())
+            return static_cast<int>(max_bs_);
+        return mtpDraftPrefillRequestCapacity(tokens,
+                                              static_cast<int>(max_bs_),
+                                              num_tokens_per_bs_,
+                                              sequence_parallel_size_,
+                                              requiresRectangularMtpDraftPrefillLayout());
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -249,6 +257,7 @@ private:
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
+    int                     linear_replay_group_count_{0};
     int                     sequence_parallel_size_{1};
     int                     max_num_token_{1};
     int64_t                 max_kernel_block_table_width_{0};

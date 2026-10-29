@@ -167,6 +167,15 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_linear_replay_wiring_test",
+    srcs = ["kimi_k3_linear_replay_wiring_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "kimi_k3_rope_cpu_test",
     srcs = ["kimi_k3_rope_test.py"],
     main = "kimi_k3_rope_test.py",

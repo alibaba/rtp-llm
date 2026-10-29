@@ -473,23 +473,24 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsPreserveReceivedOrderAcrossTopologies) 
     auto topology =
         CacheTopology::create({makeRpcGroup("linear"), makeRpcGroup("full")}, {{0, {"linear"}}, {1, {"full"}}});
     BroadcastLoadRequestPB request;
-    auto*                  full = request.add_tagged_group_block_ids();
-    full->set_tag("full");
-    full->add_block_ids(10);
     auto* linear = request.add_tagged_group_block_ids();
     linear->set_tag("linear");
     linear->add_block_ids(20);
+    auto* full = request.add_tagged_group_block_ids();
+    full->set_tag("full");
+    full->add_block_ids(10);
 
     const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
-    EXPECT_EQ(blocks.orderedTags(), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
+    EXPECT_NE(blocks.orderedTags(), topology->groupTags());
     EXPECT_EQ(blocks.blocks("full"), (BlockIndicesType{10}));
     EXPECT_EQ(blocks.blocks("linear"), (BlockIndicesType{20}));
 
     auto reordered =
         CacheTopology::create({makeRpcGroup("full"), makeRpcGroup("linear")}, {{0, {"linear"}}, {1, {"full"}}});
-    EXPECT_NE(topology->groupTags(), reordered->groupTags());
+    EXPECT_EQ(topology->groupTags(), reordered->groupTags());
     const auto reordered_blocks = DecodeRpcServer::decodeGroupBlockIds(request, *reordered);
-    EXPECT_EQ(reordered_blocks.orderedTags(), (std::vector<std::string>{"full", "linear"}));
+    EXPECT_EQ(reordered_blocks.orderedTags(), (std::vector<std::string>{"linear", "full"}));
     EXPECT_EQ(reordered_blocks.blocks("full"), blocks.blocks("full"));
     EXPECT_EQ(DecodeRpcServer::makeTaggedRequestKey(42, 1, topology->group("full").tag),
               DecodeRpcServer::makeTaggedRequestKey(42, 1, reordered->group("full").tag));
@@ -525,9 +526,13 @@ TEST(DecodeRpcServerTest, ResourceRowsKeepTheirOwnOrderAndSharedLifetime) {
         CacheTopology::create({makeRpcGroup("linear"), makeRpcGroup("full")}, {{0, {"full", "linear"}}}));
     resource->mutableBlockIds("linear").assign({20});
     resource->mutableBlockIds("full").assign({10});
-    auto context = makeLoadContext("request", {"peer"}, {}, resource->groupBlockIds(), 1);
+    // Received row order is independent of canonical topology IDs. Keep the
+    // resource's shared holders while giving the context a noncanonical index.
+    GroupBlockIds received{{{"linear", 0}, {"full", 1}},
+                           {resource->groupBlockIds("linear"), resource->groupBlockIds("full")}};
+    auto context = makeLoadContext("request", {"peer"}, {}, received, 1);
     EXPECT_NE(&context.groupBlockIds().tag_to_index_, &resource->groupBlockIds().tag_to_index_);
-    EXPECT_EQ(context.groupBlockIds().rows_[1], resource->groupBlockIds().rows_[1]);
+    EXPECT_EQ(context.groupBlockIds().rows_[1], resource->groupBlockIds("full"));
     resource->mutableBlockIds("full").assign({11, NULL_BLOCK_IDX});
     resource.reset();
     auto sender_topology =
@@ -1060,6 +1065,42 @@ TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
 
     EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {4, 2}}));
     EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+}
+
+TEST(DecodeRpcServerTest, FullBlockSourcePeerMatchesProducerAcrossSpansAndShards) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    for (const size_t key_span : {1u, 2u, 3u}) {
+        for (const size_t key_count : {17u, 18u}) {
+            const size_t logical_blocks = (key_count + key_span - 1) / key_span;
+            for (const int prefill_cp : {2, 3, 4}) {
+                SCOPED_TRACE(::testing::Message() << "span=" << key_span << " keys=" << key_count
+                                                 << " prefill_cp=" << prefill_cp);
+                std::vector<int> published_by(key_count, -1);
+                for (int peer = 0; peer < prefill_cp; ++peer) {
+                    const auto published = buildCacheStorePlan(
+                        policy, logical_blocks, 0, true, peer, prefill_cp, key_span, key_count);
+                    for (const auto& pair : published) {
+                        ASSERT_EQ(published_by[pair.key_index], -1);
+                        published_by[pair.key_index] = peer;
+                    }
+                }
+                for (const int decode_cp : {1, 2, 4}) {
+                    const size_t local_blocks = (logical_blocks + decode_cp - 1) / decode_cp;
+                    for (int rank = 0; rank < decode_cp; ++rank) {
+                        const auto loaded = DecodeRpcServer::buildGroupLoadPlan(
+                            policy, local_blocks, key_count, 0, true,
+                            /*group_seq_size_per_block=*/4 * key_span,
+                            /*base_seq_size_per_block=*/4, rank, decode_cp);
+                        for (const auto& pair : loaded) {
+                            ASSERT_GE(published_by[pair.key_index], 0);
+                            EXPECT_EQ(DecodeRpcServer::fullBlockSourcePeer(pair.key_index, key_span, prefill_cp),
+                                      static_cast<size_t>(published_by[pair.key_index]));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
