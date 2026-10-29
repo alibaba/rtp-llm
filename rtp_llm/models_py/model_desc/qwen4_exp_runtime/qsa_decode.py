@@ -6,7 +6,6 @@ import math
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -86,8 +85,12 @@ def select_decode_tokens(
         if sequence_lengths.device.type == "cpu"
         else None
     )
-    sequence_lengths = sequence_lengths.to(
-        device=q.device, dtype=torch.int32, non_blocking=True
+    # Replay refreshes this device tensor before launching the captured graph.
+    # Reading the pinned mirror inside capture would freeze an H2D dependency.
+    sequence_lengths = (
+        self.main_inputs.sequence_lengths_plus_1_device - 1
+        if graph_decode
+        else sequence_lengths.to(device=q.device, dtype=torch.int32, non_blocking=True)
     ).contiguous()
     invalid_lengths = (
         bool(torch.any(sequence_lengths < 0).item())
@@ -145,7 +148,7 @@ def select_decode_tokens(
                 inv_freq=frequency,
             )
         elif graph_decode:
-            # Exact-batch Graph capture uses the engine's canonical text
+            # Graph capture uses the engine's canonical text
             # positions. The C++ graph owner refreshes lengths before replay.
             current_cos, current_sin = build_qsa_rope_from_logical_positions(
                 sequence_lengths,
@@ -209,9 +212,14 @@ def select_decode_tokens(
         device=q.device,
     )
 
+    active = state_table.ne(0).any(dim=1) if self.main_inputs.is_s_padded else None
+
     if prepared is None:
         visible_token_lengths = sequence_lengths + 1
         compressed_lengths = visible_token_lengths // ratio
+    if active is not None:
+        visible_token_lengths = torch.where(active, visible_token_lengths, 0)
+        compressed_lengths = torch.where(active, compressed_lengths, 0)
     compressed_capacity = int(kv_table.shape[1]) * kv_entries_per_block
     exceeds_capacity = (
         host_max_compressed > compressed_capacity

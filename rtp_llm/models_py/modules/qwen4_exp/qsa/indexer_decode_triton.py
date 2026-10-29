@@ -8,7 +8,6 @@ launch geometry is stable across CUDA Graph replays.
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
 
 
@@ -46,7 +45,7 @@ def _write_decode_key(
         mask=active & (position >= 0) & (state_column < STATE_TABLE_WIDTH),
         other=0,
     )
-    state_valid = (state_id > 0) & (state_id < STATE_POOL_BLOCKS)
+    state_valid = (position >= 0) & (state_id > 0) & (state_id < STATE_POOL_BLOCKS)
     raw = tl.load(raw_ptr + request * D + d, mask=active, other=0).to(tl.float32)
     tl.store(
         state_pool_ptr + (state_id * 8 + position % 8) * D + d,
@@ -299,13 +298,27 @@ def write_decode_key_with_undo_(
     )
     original_state = state_pool.flatten(0, 1).index_select(0, state_slots).clone()
     original_kv = kv_pool.flatten(0, 1).index_select(0, kv_slots).clone()
+    state_live = (
+        (pos >= 0)
+        & (pos // 128 < state_table.shape[1])
+        & (state_ids > 0)
+        & (state_ids < state_pool.shape[0])
+    )
+    kv_live = (
+        completed
+        & (pos >= 0)
+        & (pos // 128 < kv_table.shape[1])
+        & (kv_ids > 0)
+        & (kv_ids < kv_pool.shape[0])
+    )
     undo = IndexerCacheUndo(
         state_pool=state_pool,
-        state_slots=state_slots,
+        state_slots=torch.where(state_live, state_slots, -1),
         original_state=original_state,
         kv_pool=kv_pool,
-        kv_slots=kv_slots,
+        kv_slots=torch.where(kv_live, kv_slots, -1),
         original_kv=original_kv,
+        padded_slots=True,
     )
     write_decode_key_(
         raw_keys,
@@ -411,13 +424,27 @@ def write_target_window_with_undo_(
         kv_ids * 32 + (completion // 4).remainder(32),
         0,
     ).clamp(0, kv_pool.shape[0] * 32 - 1)
+    state_live = (
+        (positions >= 0)
+        & (positions // 128 < state_table.shape[1])
+        & (state_ids > 0)
+        & (state_ids < state_pool.shape[0])
+    )
+    kv_live = (
+        (completion < prefixes + query_len)
+        & (completion >= 0)
+        & (completion // 128 < kv_table.shape[1])
+        & (kv_ids > 0)
+        & (kv_ids < kv_pool.shape[0])
+    )
     undo = IndexerCacheUndo(
         state_pool=state_pool,
-        state_slots=state_slots,
+        state_slots=torch.where(state_live.reshape(-1), state_slots, -1),
         original_state=state_pool.flatten(0, 1).index_select(0, state_slots).clone(),
         kv_pool=kv_pool,
-        kv_slots=kv_slots,
+        kv_slots=torch.where(kv_live, kv_slots, -1),
         original_kv=kv_pool.flatten(0, 1).index_select(0, kv_slots).clone(),
+        padded_slots=True,
     )
     keys = raw_keys.reshape(batch, query_len, 128).transpose(0, 1).contiguous()
     cos = rope_cos.reshape(batch, query_len, 64).transpose(0, 1).contiguous()

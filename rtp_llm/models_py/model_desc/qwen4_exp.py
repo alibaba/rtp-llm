@@ -3,8 +3,6 @@ from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.qwen4_exp_config import IndexerGeometry
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -77,6 +75,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 
 class Qwen4ExpAttention(Qwen3NextAttention):
@@ -958,12 +957,6 @@ class Qwen4ExpModel(Qwen35Model):
             init_resource.is_speculative or getattr(self.config, "is_mtp", False)
         )
         return initialized
-
-    def requires_exact_cuda_graph_batch(self) -> bool:
-        """Decode side-cache writes need exact batches; draft prefill masks rows."""
-        return bool(self.ple_layers) or bool(
-            getattr(self.config, "enable_qwen4_qsa", False)
-        )
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = getattr(self, "_mtp_target_hidden_states", None)

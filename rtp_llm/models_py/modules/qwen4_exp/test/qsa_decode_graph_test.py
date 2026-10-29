@@ -2,7 +2,6 @@ from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -19,6 +18,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         torch.manual_seed(13)
         self.device = torch.device("cuda")
         self.lengths = torch.tensor([7], dtype=torch.int32).pin_memory()
+        self.lengths_device = (self.lengths + 1).cuda()
         self.input_lengths = torch.tensor([1], dtype=torch.int32).pin_memory()
         self.prefixes = torch.empty(0, dtype=torch.int32).pin_memory()
         self.positions = torch.tensor([7, 7, 7], dtype=torch.int32, device="cuda")
@@ -52,19 +52,19 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.q = torch.randn(1, 4, 128, dtype=torch.bfloat16, device="cuda")
         self.raw = torch.randn(1, 128, dtype=torch.bfloat16, device="cuda")
 
-    def _context(self, graph, kv=None, state=None, *, exact=True, draft=False):
+    def _context(self, graph, kv=None, state=None, *, draft=False):
         def inputs(kv_map=None, state_map=None):
             return SimpleNamespace(
                 is_prefill=False,
                 is_target_verify=False,
                 is_cuda_graph=graph,
-                is_exact_cuda_graph_batch=exact if graph else False,
                 is_s_padded=graph,
                 context_parallel_info=None,
                 cache_store_inputs=None,
                 input_lengths=self.input_lengths,
                 prefix_lengths=self.prefixes,
                 sequence_lengths=self.lengths,
+                sequence_lengths_plus_1_device=self.lengths_device,
                 cu_seqlens_device=None,
                 cu_kv_seqlens_device=None,
                 combo_position_ids=self.positions,
@@ -90,17 +90,170 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             is_mtp_draft=draft,
         )
 
-    def test_graph_requires_exact_batch(self):
-        with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
-            self._context(True, exact=False).select_decode_tokens(
-                self.q, self.raw, indexer=self.indexer, rope_config=self.rope
-            )
+    def test_graph_supports_rounded_batch(self):
+        context = self._context(True)
+        context.select_decode_tokens(
+            self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+        )
+        context.rollback_side_cache()
 
     def test_draft_graph_replays_engine_positions_and_side_cache(self):
         self._check_draft_graph_replay(False)
 
+    def test_decode_padding_replay_preserves_pools_and_rollback(self):
+        self.lengths = torch.tensor([7, 8], dtype=torch.int32).pin_memory()
+        self.lengths_device = (self.lengths + 1).cuda()
+        self.input_lengths = torch.ones(2, dtype=torch.int32).pin_memory()
+        self.positions = self.lengths.cuda().repeat_interleave(3)
+        self.kv_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device="cuda")
+        self.state_table = self.kv_table.clone()
+        self.kv = torch.randn(5, 32 * 128, device="cuda").bfloat16().view(torch.uint8)
+        self.state = torch.randn(5, 8 * 128, device="cuda")
+        self.q = torch.randn(2, 4, 128, dtype=torch.bfloat16, device="cuda")
+        self.raw = torch.randn(2, 128, dtype=torch.bfloat16, device="cuda")
+        initial_kv, initial_state = self.kv.clone(), self.state.clone()
+        table = self.kv_table.clone()
+        context = self._context(True)
+        context.select_decode_tokens(
+            self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+        )
+        context.finalize_side_cache()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            selected = context.select_decode_tokens(
+                self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+            )
+        undo = context._side_cache_undo
+        context.finalize_side_cache()
+        for live_batch, position in ((1, 7), (2, 127), (1, 128), (0, 0)):
+            self.kv.copy_(initial_kv)
+            self.state.copy_(initial_state)
+            self.kv_table.copy_(table)
+            self.state_table.copy_(table)
+            self.kv_table[live_batch:].zero_()
+            self.state_table[live_batch:].zero_()
+            self.lengths_device.fill_(1)
+            self.lengths_device[:live_batch].fill_(position + 1)
+            graph.replay()
+            torch.testing.assert_close(self.kv[0], initial_kv[0], rtol=0, atol=0)
+            torch.testing.assert_close(self.state[0], initial_state[0], rtol=0, atol=0)
+            self.assertTrue(bool((selected[live_batch:] == -1).all().item()))
+            # Snapshot slots are graph-owned tensors updated on every replay.
+            # Reuse the captured undo record to simulate a main-attention error.
+            if live_batch == 0:
+                torch.testing.assert_close(self.kv, initial_kv, rtol=0, atol=0)
+                torch.testing.assert_close(self.state, initial_state, rtol=0, atol=0)
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+                restore_indexer_cache,
+            )
+
+            restore_indexer_cache(undo)
+            torch.testing.assert_close(self.kv, initial_kv, rtol=0, atol=0)
+            torch.testing.assert_close(self.state, initial_state, rtol=0, atol=0)
+
     def test_draft_graph_cached_frequency_preserves_selected_and_cache_bytes(self):
         self._check_draft_graph_replay(True)
+
+    def test_target_padding_replay_matches_live_batch_and_rollback(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+            restore_indexer_cache,
+        )
+
+        query = 3
+        prefixes = torch.tensor([7, 127], dtype=torch.int32).pin_memory()
+        prefix_device = prefixes.cuda()
+        lengths = torch.full((2,), query, dtype=torch.int32).pin_memory()
+        empty = torch.empty(0, dtype=torch.int32).pin_memory()
+        table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32, device="cuda")
+        self.kv_table, self.state_table = table.clone(), table.clone()
+        initial_kv = (
+            torch.randn(5, 32 * 128, device="cuda").bfloat16().view(torch.uint8)
+        )
+        initial_state = torch.randn(5, 8 * 128, device="cuda")
+        self.kv, self.state = initial_kv.clone(), initial_state.clone()
+        q = torch.randn(2 * query, 4, 128, dtype=torch.bfloat16, device="cuda")
+        raw = torch.randn(2 * query, 128, dtype=torch.bfloat16, device="cuda")
+        cu_q = torch.arange(0, 3 * query, query, dtype=torch.int32, device="cuda")
+        cu_kv = torch.tensor([0, 10, 140], dtype=torch.int32, device="cuda")
+        positions = (
+            (prefix_device[:, None] + torch.arange(query, device="cuda"))
+            .flatten()
+            .repeat_interleave(3)
+        )
+
+        def context(graph, kv, state, batch=2):
+            def inputs(kv_map=None, state_map=None):
+                return SimpleNamespace(
+                    is_prefill=True,
+                    is_target_verify=True,
+                    is_cuda_graph=graph,
+                    is_s_padded=graph,
+                    context_parallel_info=None,
+                    cache_store_inputs=None,
+                    input_lengths=lengths[:batch],
+                    prefix_lengths=prefixes[:batch],
+                    prefix_lengths_device=prefix_device[:batch],
+                    sequence_lengths=empty,
+                    cu_seqlens_device=cu_q[: batch + 1],
+                    cu_kv_seqlens_device=cu_kv[: batch + 1],
+                    combo_position_ids=positions[: batch * query * 3],
+                    kv_cache_kernel_block_id_device=kv_map,
+                    kv_cache_block_id_device=state_map,
+                )
+
+            return Qwen4ExpQSARuntimeContext(
+                main_cache=SimpleNamespace(tag="full"),
+                main_inputs=inputs(),
+                indexer_kv_cache=SimpleNamespace(
+                    tag=INDEXER_KV_TAG, kv_cache_base=kv, seq_size_per_block=128
+                ),
+                indexer_kv_inputs=inputs(kv_map=self.kv_table[:batch]),
+                indexer_state_cache=SimpleNamespace(
+                    tag=INDEXER_STATE_TAG, kv_cache_base=state, seq_size_per_block=128
+                ),
+                indexer_state_inputs=inputs(state_map=self.state_table[:batch]),
+            )
+
+        captured = context(True, self.kv, self.state)
+        captured.select_target_verify_tokens(
+            q, raw, indexer=self.indexer, rope_config=self.rope
+        )
+        captured.finalize_side_cache()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            selected = captured.select_target_verify_tokens(
+                q, raw, indexer=self.indexer, rope_config=self.rope
+            )
+        undo = captured._side_cache_undo
+        captured.finalize_side_cache()
+        for live_batch in (1, 2, 1):
+            self.kv.copy_(initial_kv)
+            self.state.copy_(initial_state)
+            self.kv_table.copy_(table)
+            self.state_table.copy_(table)
+            self.kv_table[live_batch:].zero_()
+            self.state_table[live_batch:].zero_()
+            prefix_device.copy_(prefixes.cuda())
+            prefix_device[live_batch:].zero_()
+            graph.replay()
+            expected_kv, expected_state = initial_kv.clone(), initial_state.clone()
+            eager = context(False, expected_kv, expected_state, live_batch)
+            expected = eager.select_target_verify_tokens(
+                q[: live_batch * query],
+                raw[: live_batch * query],
+                indexer=self.indexer,
+                rope_config=self.rope,
+            )
+            eager.finalize_side_cache()
+            torch.testing.assert_close(
+                selected[: live_batch * query], expected, rtol=0, atol=0
+            )
+            self.assertTrue(bool((selected[live_batch * query :] == -1).all().item()))
+            torch.testing.assert_close(self.kv, expected_kv, rtol=0, atol=0)
+            torch.testing.assert_close(self.state, expected_state, rtol=0, atol=0)
+            restore_indexer_cache(undo)
+            torch.testing.assert_close(self.kv, initial_kv, rtol=0, atol=0)
+            torch.testing.assert_close(self.state, initial_state, rtol=0, atol=0)
 
     def _check_draft_graph_replay(self, use_cached_frequency):
         self.raw = torch.randn(1, 256, dtype=torch.bfloat16, device="cuda")[:, ::2]
@@ -140,6 +293,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.q.copy_(torch.randn_like(self.q.float()).bfloat16())
         self.raw.copy_(torch.randn_like(self.raw.float()).bfloat16())
         self.lengths[0] = 8
+        self.lengths_device.copy_((self.lengths + 1).cuda())
         self.positions.fill_(17)
         graph.replay()
 
@@ -177,6 +331,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.q.copy_(torch.randn_like(self.q.float()).bfloat16())
         self.raw.copy_(torch.randn_like(self.raw.float()).bfloat16())
         self.lengths[0] = 8
+        self.lengths_device.copy_((self.lengths + 1).cuda())
         self.positions.fill_(8)
         graph.replay()
 
@@ -192,6 +347,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
 
     def test_target_graph_replays_updated_prefix_and_side_cache(self):
         prefix = torch.tensor([11], dtype=torch.int32).pin_memory()
+        prefix_device = prefix.cuda()
         target_lengths = torch.tensor([4], dtype=torch.int32).pin_memory()
         empty_sequence = torch.empty(0, dtype=torch.int32).pin_memory()
         cu_q = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
@@ -210,12 +366,12 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
                     is_prefill=True,
                     is_target_verify=True,
                     is_cuda_graph=graph,
-                    is_exact_cuda_graph_batch=graph,
                     is_s_padded=graph,
                     context_parallel_info=None,
                     cache_store_inputs=None,
                     input_lengths=target_lengths,
                     prefix_lengths=prefix,
+                    prefix_lengths_device=prefix_device,
                     sequence_lengths=empty_sequence,
                     cu_seqlens_device=cu_q,
                     cu_kv_seqlens_device=cu_kv,
@@ -262,6 +418,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         q.copy_(torch.randn_like(q.float()).bfloat16())
         raw.copy_(torch.randn_like(raw.float()).bfloat16())
         prefix[0] = 8
+        prefix_device.copy_(prefix.cuda())
         positions.copy_(
             torch.arange(8, 12, dtype=torch.int32, device="cuda").repeat_interleave(3)
         )

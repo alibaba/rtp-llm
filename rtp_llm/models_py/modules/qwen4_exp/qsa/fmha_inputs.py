@@ -3,7 +3,6 @@
 from typing import Optional
 
 import torch
-
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 from .fmha_plans import IncrementalPrefillInputs, PagedInputs, PrefillRequest
@@ -98,7 +97,14 @@ def _prepare_paged_inputs(
         ):
             raise RuntimeError("qwen4_exp main target metadata owner/geometry changed")
     else:
-        sequence_lengths = lengths_source.to(
+        device_source = lengths_source
+        if graph_paged:
+            device_source = (
+                self.attn_inputs.prefix_lengths_device
+                if self.is_target_verify
+                else self.attn_inputs.sequence_lengths_plus_1_device - 1
+            )
+        sequence_lengths = device_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
         if not graph_paged and bool(torch.any(sequence_lengths < 0).item()):
@@ -114,6 +120,8 @@ def _prepare_paged_inputs(
     page_size, cache_blocks = _validate_main_cache_layout(
         self, kv_cache.kv_cache_base, block_table, batch, qkv.device
     )
+    if self.attn_inputs.is_s_padded:
+        kv_lens = torch.where(block_table.ne(0).any(dim=1, keepdim=True), kv_lens, 0)
 
     if not graph_paged:
         required_columns = (kv_lens[:, -1] + page_size - 1) // page_size

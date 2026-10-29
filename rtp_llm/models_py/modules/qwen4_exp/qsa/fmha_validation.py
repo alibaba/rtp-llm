@@ -135,6 +135,9 @@ def _validate_main_paged_geometry(
         )
     visible_ends = sequence_bases + query_lengths
     required_columns = (visible_ends + page_size - 1) // page_size
+    if self.attn_inputs.is_s_padded and not graph_capture:
+        active = block_table.ne(0).any(dim=1).to(device=required_columns.device)
+        required_columns = torch.where(active, required_columns, 0)
     if bool(torch.any(required_columns > int(block_table.shape[1])).item()):
         raise RuntimeError(
             "qwen4_exp QSA paged main block table does not cover the visible KV"

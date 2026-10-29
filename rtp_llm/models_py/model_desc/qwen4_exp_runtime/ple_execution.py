@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
@@ -55,10 +54,6 @@ class PLEExecution:
         is_cuda_graph = bool(getattr(attention_inputs, "is_cuda_graph", False))
         if is_cuda_graph and bool(attention_inputs.is_prefill) and not is_target_verify:
             raise RuntimeError("qwen4_exp PLE prefill does not support CUDA Graph")
-        # C++ chooses an exact batch graph for any Qwen side cache;
-        # is_s_padded also labels that exact-batch graph.
-        if getattr(attention_inputs, "is_s_padded", False) and not is_cuda_graph:
-            raise RuntimeError("qwen4_exp PLE does not support padded execution yet")
         if getattr(attention_inputs, "context_parallel_info", None) is not None:
             raise RuntimeError("qwen4_exp PLE does not support context parallelism yet")
         cp = self.parallelism_config.prefill_cp_config
@@ -163,7 +158,10 @@ class PLEExecution:
                 lengths = ctx_inputs.sequence_lengths.to(
                     device=ids.device, dtype=torch.long
                 )
-                if ids.numel() != lengths.numel() or bool((lengths <= 0).any().item()):
+                padded = bool(ctx_inputs.is_s_padded)
+                if ids.numel() != lengths.numel() or bool(
+                    (lengths < (0 if padded else 1)).any().item()
+                ):
                     raise RuntimeError("PLE decode prefetch metadata is inconsistent")
                 pool = self._fixed_state_pool(
                     cache, torch.int64, embedding.context_len, 1
@@ -175,6 +173,7 @@ class PLEExecution:
                     pages,
                     int(pool.shape[0]),
                     pool.device,
+                    graph_capture=padded,
                 )
                 history = torch.cat(
                     (pool.index_select(0, blocks), ids.view(-1, 1)), dim=1
@@ -214,7 +213,7 @@ class PLEExecution:
                     raise RuntimeError(
                         "PLE CPU graph requires uniform nonempty query rows"
                     )
-                prefixes = ctx_inputs.prefix_lengths.to(
+                prefixes = ctx_inputs.prefix_lengths_device.to(
                     device=ids.device, dtype=torch.long
                 )
                 pages = torch.div(
@@ -237,6 +236,12 @@ class PLEExecution:
                 graph_capture=True,
             )
             context = pool.index_select(0, blocks)
+            active = (prefixes > 0) if ctx_inputs.is_prefill else (sequence_lengths > 0)
+            context = torch.where(
+                active.unsqueeze(1),
+                context,
+                torch.full_like(context, embedding.eos_token_id),
+            )
             if ctx_inputs.is_prefill and not ctx_inputs.is_target_verify:
                 context = torch.where(
                     (prefixes > 0).unsqueeze(1),
@@ -659,7 +664,10 @@ class PLEExecution:
                 sequence_lengths = sequence_plus_one_device.to(torch.long) - 1
             else:
                 sequence_lengths = sequence_lengths.to(dtype=torch.long)
-            if not graph_capture and bool((sequence_lengths <= 0).any().item()):
+            padded = bool(state_inputs.is_s_padded)
+            if not graph_capture and bool(
+                (sequence_lengths < (0 if padded else 1)).any().item()
+            ):
                 raise RuntimeError(
                     "qwen4_exp PLE decode requires a non-empty prefill history"
                 )
@@ -673,7 +681,7 @@ class PLEExecution:
                 read_pages,
                 int(state_pool.shape[0]),
                 state_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             ctx_read_blocks = self._physical_blocks(
                 ctx_inputs,
@@ -681,7 +689,7 @@ class PLEExecution:
                 read_pages,
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             state_write_blocks = self._physical_blocks(
                 state_inputs,
@@ -689,7 +697,7 @@ class PLEExecution:
                 write_pages,
                 int(state_pool.shape[0]),
                 state_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             ctx_write_blocks = self._physical_blocks(
                 ctx_inputs,
@@ -697,10 +705,15 @@ class PLEExecution:
                 write_pages,
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
-                graph_capture=graph_capture,
+                graph_capture=graph_capture or padded,
             )
             conv_buffer = state_pool.index_select(0, state_read_blocks)
             context = ctx_pool.index_select(0, ctx_read_blocks)
+            live = sequence_lengths.to(device=state_pool.device) > 0
+            conv_buffer = torch.where(live[:, None, None], conv_buffer, 0)
+            context = torch.where(live[:, None], context, eos)
+            state_write_blocks = torch.where(live, state_write_blocks, 0)
+            ctx_write_blocks = torch.where(live, ctx_write_blocks, 0)
             history = torch.cat([context, ids.view(batch, 1)], dim=1)
             output, new_state = ple.decode_step(
                 hyper_states.view(batch, 1, -1),
@@ -712,14 +725,12 @@ class PLEExecution:
                     else None
                 ),
             )
-            state_pool.index_copy_(
-                0, state_write_blocks, new_state.to(state_pool.dtype)
+            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+                store_decode_rows,
             )
-            ctx_pool.index_copy_(
-                0,
-                ctx_write_blocks,
-                history[:, -context_len:].to(ctx_pool.dtype),
-            )
+
+            store_decode_rows(state_pool, state_write_blocks, new_state)
+            store_decode_rows(ctx_pool, ctx_write_blocks, history[:, -context_len:])
             return hyper_states + output.squeeze(1)
 
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:

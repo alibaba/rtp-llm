@@ -18,7 +18,7 @@ Scope of this restricted production bridge:
   prefix and candidate window from the main paged K/V cache;
 * ordinary decode can read selected tokens from the main paged K/V cache.
 
-Target verification is bounded by one compression group. Exact-batch decode,
+Target verification is bounded by one compression group. Padded-batch decode,
 target verification and bounded draft prefill support CUDA Graph. Layout and
 publication preflights complete before either side or main-cache writes.
 """
@@ -26,7 +26,6 @@ publication preflights complete before either side or main-cache writes.
 from typing import Optional
 
 import torch
-
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
@@ -100,15 +99,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError(
                 "qwen4_exp sparse GQA target verification must use context-style prefill"
             )
-        graph_paged = bool(inputs.is_cuda_graph)
-        if graph_paged and not bool(
-            getattr(inputs, "is_exact_cuda_graph_batch", False)
-        ):
-            raise RuntimeError(
-                "qwen4_exp sparse GQA Graph decode requires an exact batch graph"
-            )
-        if inputs.is_s_padded and not graph_paged:
-            raise RuntimeError("qwen4_exp sparse GQA does not support padded execution")
         if inputs.context_parallel_info is not None:
             raise RuntimeError(
                 "qwen4_exp sparse GQA does not support context parallelism"

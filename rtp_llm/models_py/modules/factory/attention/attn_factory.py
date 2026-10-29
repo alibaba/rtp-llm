@@ -351,20 +351,15 @@ def get_sparse_gqa_impl(
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
     )
-    exact_decode_or_target_graph = (
-        selection_mode == CudaGraphSelectionMode.DECODE_GRAPH
-        and bool(getattr(attn_inputs, "is_exact_cuda_graph_batch", False))
-    )
     if (
         selection_mode != CudaGraphSelectionMode.EAGER
-        and not exact_decode_or_target_graph
+        and selection_mode != CudaGraphSelectionMode.DECODE_GRAPH
     ):
         raise RuntimeError(
-            "qwen4_exp sparse GQA requires exact-batch decode/target or opted-in draft CUDA Graph "
+            "qwen4_exp sparse GQA requires decode/target or opted-in draft CUDA Graph "
             f"(selection mode: {selection_mode.value}, "
             f"prefill={attn_inputs.is_prefill}, "
-            f"target_verify={attn_inputs.is_target_verify}, "
-            f"exact_batch={getattr(attn_inputs, 'is_exact_cuda_graph_batch', False)})"
+            f"target_verify={attn_inputs.is_target_verify})"
         )
     attn_inputs.is_cuda_graph = is_cuda_graph
     from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (

@@ -315,7 +315,6 @@ struct PyAttentionInputs {
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
-    bool is_exact_cuda_graph_batch = false;  // Graph owner rejects padded batch replay.
 
     std::optional<PyContextParallelParams> context_parallel_info;
 

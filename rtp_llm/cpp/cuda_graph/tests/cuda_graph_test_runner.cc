@@ -139,12 +139,10 @@ public:
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
                      int64_t                  position_id_len_factor,
-                     int64_t                  max_context_batch_size,
-                     bool                     exact_batch_only) {
+                     int64_t                  max_context_batch_size) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
-        params.exact_batch_only             = exact_batch_only;
         params.enable_cuda_graph_debug_mode = false;
         params.is_prefill_cuda_graph_mode   = false;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
@@ -291,8 +289,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("is_target_verify")       = false,
              py::arg("num_tokens_per_bs")      = 1,
              py::arg("position_id_len_factor") = 0,
-             py::arg("max_context_batch_size") = 128,
-             py::arg("exact_batch_only")        = false)
+             py::arg("max_context_batch_size") = 128)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

@@ -50,4 +50,9 @@ class DraftHeadGraph:
             raise RuntimeError(
                 "draft graph head rows do not cover the live hidden rows"
             )
-        return logits[: hidden.shape[0]]
+        # FP8 input quantization computes one scale over all captured rows.
+        # A smaller live batch must recompute its head using only those rows;
+        # cropping the captured logits would retain the dummy rows' scale.
+        if hidden.shape[0] != logits.shape[0]:
+            return None
+        return logits

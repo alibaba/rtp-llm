@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
@@ -426,7 +425,8 @@ def _target_verify_geometry(
         raise RuntimeError(
             "qwen4_exp QSA target-verify prefix lengths must be non-negative"
         )
-    prefixes_device = prefixes.to(
+    prefix_source = self.main_inputs.prefix_lengths_device if graph_target else prefixes
+    prefixes_device = prefix_source.to(
         device=device, dtype=torch.int32, non_blocking=True
     ).contiguous()
     if not graph_target and bool(torch.any(prefixes_device < 0).item()):
@@ -498,11 +498,12 @@ def _target_verify_geometry(
         # positions rely on the position generator's uniform-axis contract;
         # see docs/design/qwen3.8_flash_next_tp8_bringup_handoff.md §3.
         host_offsets = torch.arange(query_len, dtype=torch.int32)
-        host_positions = positions.to(dtype=torch.int32).reshape(batch_size, query_len, 3)
-        expected_positions = (
-            prefixes.to(dtype=torch.int32).reshape(batch_size, 1, 1)
-            + host_offsets.reshape(1, query_len, 1)
+        host_positions = positions.to(dtype=torch.int32).reshape(
+            batch_size, query_len, 3
         )
+        expected_positions = prefixes.to(dtype=torch.int32).reshape(
+            batch_size, 1, 1
+        ) + host_offsets.reshape(1, query_len, 1)
         if not bool(torch.equal(host_positions, expected_positions.expand(-1, -1, 3))):
             raise RuntimeError(
                 "qwen4_exp QSA target-verify only supports contiguous text-only "
@@ -567,6 +568,10 @@ def _target_verify_geometry(
         compressed_lengths = visible_lengths // ratio
     else:
         visible_lengths, compressed_lengths, query_positions, block_starts = metadata
+    if self.main_inputs.is_s_padded:
+        active = state_table.ne(0).any(dim=1, keepdim=True)
+        visible_lengths = torch.where(active, visible_lengths, 0)
+        compressed_lengths = torch.where(active, compressed_lengths, 0)
     max_ctx_len = (
         (int(prefixes.max().item()) + query_len) // ratio
         if prefixes.device.type == "cpu"

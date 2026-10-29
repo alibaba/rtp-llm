@@ -5,10 +5,11 @@ The C++ executor owns TP consensus. Captured stages retain their addresses in
 """
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
-
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpPLELayer
 from rtp_llm.ops.compute_ops import PyAttentionInputs
@@ -94,7 +95,10 @@ class PLETransactionCoordinator:
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires int32 prefix_lengths [B]"
             )
-        prefixes_device = prefixes.to(
+        prefix_source = (
+            state_inputs.prefix_lengths_device if graph_capture else prefixes
+        )
+        prefixes_device = prefix_source.to(
             device=hyper_states.device, dtype=torch.long, non_blocking=True
         ).contiguous()
         if not graph_capture and bool(torch.any(prefixes_device <= 0).item()):
@@ -236,7 +240,7 @@ class PLETransactionCoordinator:
         self.active_transaction = None
 
     def save_speculative_target_graph_capture(self, graph_key: int) -> None:
-        """Retain graph-owned stage tensors for later replay of this exact batch."""
+        """Retain graph-owned stage tensors for replay at this request capacity."""
         if graph_key <= 0 or graph_key in self.captured_transactions:
             raise RuntimeError("invalid or duplicate PLE target graph key")
         transaction = self.active_transaction
@@ -306,11 +310,51 @@ class PLETransactionCoordinator:
             not isinstance(accept_len, torch.Tensor)
             or accept_len.dim() != 1
             or accept_len.dtype != torch.int32
-            or int(accept_len.numel()) != transaction.batch_size
+            or not 0 < int(accept_len.numel()) <= transaction.batch_size
+            or (
+                transaction.graph_key is None
+                and int(accept_len.numel()) != transaction.batch_size
+            )
             or accept_len.device != transaction.prefixes.device
         ):
             raise RuntimeError(
                 "qwen4_exp PLE target commit requires device-local int32 accept_len [B]"
+            )
+        owner = transaction
+        if accept_len.numel() < transaction.batch_size:
+            # Captured tensors keep their full capacity and stable addresses.
+            # The executor's acceptance vector names only live leading rows;
+            # build views for prepare/undo so dummy rows never enter a commit.
+            batch = accept_len.numel()
+
+            def live_inputs(inputs):
+                return SimpleNamespace(
+                    **{
+                        name: (
+                            value[:batch] if isinstance(value, torch.Tensor) else value
+                        )
+                        for name in ("kv_cache_block_id_device", "kv_cache_block_id")
+                        for value in (getattr(inputs, name, None),)
+                    }
+                )
+
+            transaction = replace(
+                transaction,
+                batch_size=batch,
+                prefixes=transaction.prefixes[:batch],
+                stages={
+                    layer: replace(
+                        stage,
+                        prefixes=stage.prefixes[:batch],
+                        state_inputs=live_inputs(stage.state_inputs),
+                        ctx_inputs=live_inputs(stage.ctx_inputs),
+                        initial_state=stage.initial_state[:batch],
+                        initial_context=stage.initial_context[:batch],
+                        candidate_state_inputs=stage.candidate_state_inputs[:batch],
+                        candidate_ids=stage.candidate_ids[:batch],
+                    )
+                    for layer, stage in transaction.stages.items()
+                },
             )
         from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
             begin_accepted_pair_resolution,
@@ -429,7 +473,7 @@ class PLETransactionCoordinator:
         if resolution is not None:
             resolution.verify()
         self._synchronize_ple_transaction(transaction)
-        transaction.prepared_writes = prepared_writes
+        owner.prepared_writes = prepared_writes
 
     def _prepare_boundary_slots(
         self,
