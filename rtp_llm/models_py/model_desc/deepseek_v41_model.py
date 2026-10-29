@@ -53,6 +53,15 @@ class DeepSeekV41Model(DeepSeekV4Model):
         return 4
 
     def _load_extra_weights(self, weights) -> None:
+        import faulthandler
+
+        faulthandler.dump_traceback_later(300, repeat=True)
+        try:
+            self._diagnose_load_extra_weights(weights)
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+
+    def _diagnose_load_extra_weights(self, weights) -> None:
         from rtp_llm.models_py.modules.dsv41.engram import (
             Engram,
             EngramLayout,
