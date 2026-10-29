@@ -304,11 +304,6 @@ void processLogits(const GreedyParams&  params,
 
 }  // anonymous namespace
 
-static bool topPOneRenormEnabled() {
-    const char* value = std::getenv("RTP_LLM_TOP_P_ONE_RENORM");
-    return value != nullptr && std::strcmp(value, "1") == 0;
-}
-
 static bool topPOneCategoricalEnabled() {
     const char* value = std::getenv("RTP_LLM_TOP_P_ONE_CATEGORICAL");
     return value != nullptr && std::strcmp(value, "1") == 0;
@@ -413,7 +408,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams&  params,
                                       (int64_t)cur_stream);
         }
         if (need_renorm_probs) {
-            if (exact_top_p_one && topPOneRenormEnabled()) {
+            if (exact_top_p_one) {
                 // Softmax probabilities are nonnegative and have positive row
                 // sums. Renormalize explicitly; returning the original softmax
                 // would change the distribution consumed by rejection sampling.
