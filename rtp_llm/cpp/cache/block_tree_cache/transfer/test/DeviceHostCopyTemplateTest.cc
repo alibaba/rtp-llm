@@ -193,7 +193,22 @@ void verifyHostBackingPadding(size_t first_path, size_t end_path) {
 }
 
 TEST(DeviceHostCopyTemplateTest, LegacyCopyStrategiesPreserveHostBackingPadding) {
-    verifyHostBackingPadding(1, 4);
+    verifyHostBackingPadding(2, 4);
+}
+
+TEST(DeviceHostCopyTemplateTest, CudaBatchPreservesHostBackingPadding) {
+#if CUDART_VERSION < 12080
+    GTEST_SKIP() << "cudaMemcpyBatchAsync requires CUDA 12.8 or newer";
+#else
+    int       driver_version = 0, runtime_version = 0;
+    const int required_driver_version = CUDART_VERSION >= 13000 ? 13000 : 12080;
+    if (cudaDriverGetVersion(&driver_version) != cudaSuccess || cudaRuntimeGetVersion(&runtime_version) != cudaSuccess
+        || driver_version < required_driver_version || runtime_version < 12080
+        || (CUDART_VERSION >= 13000) != (runtime_version >= 13000)) {
+        GTEST_SKIP() << "cudaMemcpyBatchAsync ABI is unavailable on this CUDA runtime/driver";
+    }
+    verifyHostBackingPadding(1, 2);
+#endif
 }
 
 TEST(DeviceHostCopyTemplateTest, ThreeDBatchPreservesHostBackingPadding) {
