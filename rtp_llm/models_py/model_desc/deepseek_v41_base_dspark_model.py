@@ -39,6 +39,7 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v41_base_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv41 import _profiler
+from rtp_llm.models_py.modules.dsv41._dspark_commit_wkv import prepare_dspark_commit_wkv
 from rtp_llm.models_py.modules.dsv41._dspark_metadata_triton import (
     DSparkMetadata,
     try_build_dspark_metadata,
@@ -271,6 +272,22 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self.main_proj = _v4_fp8_linear(
             gw[W.v4_dspark_main_proj_w], gw[W.v4_dspark_main_proj_s]
         )
+        linears = [layer.attn.wkv for layer in self.v4.layers]
+        projection = getattr(self, "_commit_wkv_projection", None)
+        if projection is not None:
+            if not projection.matches(linears):
+                raise RuntimeError(
+                    "DSpark WKV ownership changed; rebuild model and graphs"
+                )
+            projection.reload(weights.weights)
+        else:
+            self._commit_wkv_projection = prepare_dspark_commit_wkv(
+                linears,
+                layer_weights=weights.weights,
+                merged_linears=[
+                    getattr(layer.attn, "wq_a_wkv", None) for layer in self.v4.layers
+                ],
+            )
 
     # ------------------------------------------------------------------
     # DSparkProposerMixin hooks
@@ -572,6 +589,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         cp_ctx: Any = None,
         metadata_by_geometry: Optional[dict] = None,
         host_block_table: Optional[torch.Tensor] = None,
+        projected_kv: Optional[torch.Tensor] = None,
     ) -> None:
         """Insert committed target features through one layer's own
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
@@ -599,9 +617,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             )
             metadata = None
             if metadata_by_geometry is not None:
-                # Build before this layer's WKV/all-gather: the fallback
-                # compaction has a data-dependent size and would otherwise
-                # synchronize behind that unrelated GPU work on layer zero.
+                # Build before this layer's RoPE/all-gather and fallback WKV.
+                # Shared/stacked WKV may already be projected before the loop;
+                # fallback compaction can synchronize behind that projection.
                 metadata = self._commit_slot_metadata(
                     attn,
                     block_table,
@@ -618,7 +636,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 0, safe_context_pos
             ).contiguous()
             context_kv = fused_rmsnorm_rope(
-                attn._lin(attn.wkv, main_x).contiguous(),
+                (
+                    attn._lin(attn.wkv, main_x).contiguous()
+                    if projected_kv is None
+                    else projected_kv
+                ),
                 attn.kv_norm,
                 context_freqs,
                 int(attn.rope_head_dim),
@@ -789,6 +811,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 attention_inputs,
                 cached_swa_region(self, self.kv_cache, 0),
             )
+        projection = getattr(self, "_commit_wkv_projection", None)
+        projected = None
+        if projection is not None and projection.matches(
+            [layer.attn.wkv for layer in self.v4.layers]
+        ):
+            projected = projection.project(main_x)
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx in range(len(self.v4.layers)):
             with layer_forward_range(layer_idx):
@@ -806,6 +834,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     cp_ctx=commit_ctx,
                     metadata_by_geometry=metadata_by_geometry,
                     host_block_table=host_block_table,
+                    projected_kv=None if projected is None else projected[layer_idx],
                 )
                 # PD-separated prefill publishes each committed draft-layer
                 # cache from the commit call: the published range is exactly

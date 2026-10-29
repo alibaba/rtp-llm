@@ -20,8 +20,8 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #if USING_CUDA
 #include <cuda.h>
-#include <nvml.h>
 #include <cublas_v2.h>
+#include "rtp_llm/models_py/bindings/cuda/NvmlCompat.h"
 #endif
 #include <mutex>
 #include <unordered_map>

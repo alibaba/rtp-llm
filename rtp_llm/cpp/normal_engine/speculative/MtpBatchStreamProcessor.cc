@@ -912,7 +912,9 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
 
 absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                                                TensorHolder&       host_holder) const {
-    auto model_input = NormalBatchStreamProcessor::gatherModelInput(stream_groups, host_holder);
+    // This processor publishes both page tables below, after choosing device
+    // snapshots versus host rows. Other gather callers retain eager publication.
+    auto model_input = model_input_gatherer_->gather(stream_groups, host_holder, /*defer_page_tables=*/true);
 
     RTP_LLM_CHECK(model_input.ok());
 
@@ -983,7 +985,31 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
     }
 
     if (buckets.empty()) {
+        if (model_input.combo_tokens.defined() && model_input.combo_tokens.is_cuda()) {
+            model_input.kv_cache_block_id        = toCudaInt32(model_input.kv_cache_block_id, host_holder);
+            model_input.kv_cache_kernel_block_id = toCudaInt32(model_input.kv_cache_kernel_block_id, host_holder);
+        }
         return;
+    }
+    if (stream_groups.totalContextBatchSize() == 0 && buckets.size() == 1) {
+        const auto& [widths, bucket] = *buckets.begin();
+        const auto& physical         = model_input.kv_cache_block_id;
+        const auto& kernel           = model_input.kv_cache_kernel_block_id;
+        bool        full_coverage = physical.defined() && kernel.defined() && physical.dim() == 3 && kernel.dim() == 3
+                             && physical.size(1) == static_cast<int64_t>(bucket.rows.size())
+                             && kernel.size(1) == physical.size(1) && physical.size(2) == widths.first
+                             && kernel.size(2) == widths.second;
+        for (size_t i = 0; full_coverage && i < bucket.rows.size(); ++i) {
+            full_coverage = bucket.rows[i] == static_cast<int64_t>(i)
+                            && bucket.physical_tables[i].size(0) == physical.size(0)
+                            && bucket.kernel_tables[i].size(0) == kernel.size(0);
+        }
+        if (full_coverage) {
+            RTP_LLM_PROFILE_SCOPE("mtp.page_tables_snapshot_concat");
+            model_input.kv_cache_block_id        = torch::cat(bucket.physical_tables, 1);
+            model_input.kv_cache_kernel_block_id = torch::cat(bucket.kernel_tables, 1);
+            return;
+        }
     }
     // Generic gathering produces pinned host tables. Move the complete mixed
     // batch once, preserving freshly admitted host rows, then replace only the
@@ -1047,9 +1073,12 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     // Without history readers, only the final token column is live. The CUDA
     // sampler writes it directly before rejection sampling and accept-length
-    // capping read it. Penalties, ngram bans, processors, beams and the legacy
-    // top-k=1 path without all_probs still require the full history.
-    // Proposal columns share those readers and never include the final column.
+    // capping read it. Penalties, ngram bans, inline sampler processors and
+    // beams still require the full history. SpecLogitsVerifyRunner processors
+    // are different: they have already reduced their state to a packed vocab
+    // mask applied to logits below and never read sampler_inputs.token_ids.
+    // CUDA top-k=1 writes only the final column. Proposal columns share the
+    // history readers above and never include the final column.
     bool sampler_token_matrix_dead = false;
 #if USING_CUDA
     {
@@ -1061,8 +1090,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         auto*      beams_out_ptr  = sampler_inputs.num_beams_out.data_ptr<int64_t>();
         const auto count          = static_cast<int64_t>(total_batch_size);
         sampler_token_matrix_dead =
-            return_all_probs != ReturnAllProbsMode::NONE && !spec_logits_result.has_active_processor
-            && sampler_inputs.logits_processor_states_ptr == nullptr
+            sampler_inputs.logits_processor_states_ptr == nullptr
             && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
             && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
             && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
@@ -1223,12 +1251,18 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
             && model_output.logits.dim() == 2 && model_output.logits.size(1) == static_cast<int64_t>(vocab_size_)
             && model_output.logits.is_cuda() && model_output.logits.is_contiguous()
             && model_output.logits.scalar_type() == torch::kFloat32
-            && std::all_of(temperature_ptr, temperature_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
-            && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
+            && std::all_of(
+                temperature_ptr, temperature_ptr + count, [](float v) { return v == 1.0f; })
+            && std::all_of(
+                repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
+            && std::all_of(
+                presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
+            && std::all_of(
+                frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
+            && std::all_of(
+                ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
+            && std::all_of(
+                beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
             && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
     }
 #endif

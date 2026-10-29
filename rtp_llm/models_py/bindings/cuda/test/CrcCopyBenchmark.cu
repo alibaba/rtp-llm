@@ -1,13 +1,13 @@
 // Manual end-to-end cache-copy microbenchmark. See crc_copy_benchmark_test.
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/CopyTileKernel.h"
+#include "rtp_llm/models_py/bindings/core/CudaProfilerCompat.h"
 #include "rtp_llm/models_py/bindings/cuda/test/CrcCopyBenchmarkSupport.h"
 #ifdef RTP_LLM_STAGED_MEMCPY_PROFILE
 #include "rtp_llm/models_py/bindings/cuda/test/StagedMemcpyProfiler.h"
 #endif
 
 #include <cuda_runtime.h>
-#include <cuda_profiler_api.h>
 
 #include <algorithm>
 #include <chrono>
@@ -264,12 +264,12 @@ struct Benchmark {
         // specific list of pool/layer counts. The per-call builder rechecks them.
         const auto& tiles = w.plans.front()->items.front().tiles;
         for (size_t first = 0; first < tiles.size();) {
-            const auto& head = tiles[first];
-            const auto begin = reinterpret_cast<uintptr_t>(head.device);
-            size_t rows = 1, pitch = head.bytes;
+            const auto& head  = tiles[first];
+            const auto  begin = reinterpret_cast<uintptr_t>(head.device);
+            size_t      rows = 1, pitch = head.bytes;
             if (first + 1 < tiles.size()) {
-                const auto& next = tiles[first + 1];
-                const auto next_address = reinterpret_cast<uintptr_t>(next.device);
+                const auto& next         = tiles[first + 1];
+                const auto  next_address = reinterpret_cast<uintptr_t>(next.device);
                 if (next.bytes == head.bytes && next.offset == head.offset + head.bytes
                     && next_address >= begin + head.bytes) {
                     pitch = next_address - begin;
@@ -355,10 +355,10 @@ struct Benchmark {
             size_t first = 0;
             for (size_t rows : groupRows) {
                 requireSync(rows >= 1 && first + rows <= item.tiles.size(), "invalid 3D affine span");
-                const auto& head  = item.tiles[first];
-                const auto  begin = reinterpret_cast<uintptr_t>(head.device);
-                const size_t pitch = rows == 1 ? head.bytes :
-                                     reinterpret_cast<uintptr_t>(item.tiles[first + 1].device) - begin;
+                const auto&  head  = item.tiles[first];
+                const auto   begin = reinterpret_cast<uintptr_t>(head.device);
+                const size_t pitch =
+                    rows == 1 ? head.bytes : reinterpret_cast<uintptr_t>(item.tiles[first + 1].device) - begin;
                 requireSync(pitch >= head.bytes, "invalid 3D device pitch");
                 for (size_t r = 0; r < rows; ++r) {
                     const auto& tile = item.tiles[first + r];
@@ -606,9 +606,9 @@ struct Options {
     bool        correctnessOnly   = false;
     bool        tileThreadProfile = false;
     bool        stagedMemcpyProfile{false};
-    bool        profileCapture    = false;
-    bool        exclude1dH2d      = false;
-    bool        seedProvided      = false;
+    bool        profileCapture = false;
+    bool        exclude1dH2d   = false;
+    bool        seedProvided   = false;
     std::string output;
 };
 uint32_t parseUnsigned(const std::string& text, const char* name) {
@@ -708,10 +708,9 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
     };
     os << "{\"type\":\"metadata\",\"implementation\":\""
        << (options.stagedMemcpyProfile ? "staged_memcpy_profile_v2" : "crc_copy_benchmark_v5")
-       << "\",\"seed\":" << options.seed
-       << ",\"source_commit\":\"" << provenance("CRC_BENCH_SOURCE_COMMIT")
-       << "\",\"base_commit\":\"" << provenance("CRC_BENCH_BASE_COMMIT")
-       << "\",\"binary_sha256\":\"" << provenance("CRC_BENCH_BINARY_SHA256") << "\""
+       << "\",\"seed\":" << options.seed << ",\"source_commit\":\"" << provenance("CRC_BENCH_SOURCE_COMMIT")
+       << "\",\"base_commit\":\"" << provenance("CRC_BENCH_BASE_COMMIT") << "\",\"binary_sha256\":\""
+       << provenance("CRC_BENCH_BINARY_SHA256") << "\""
        << ",\"shape_source\":\"CacheConfigCreator+DeviceBlockPoolConfigHelper\""
        << ",\"staged_no_crc_source\":\"production StagedSmDeviceHostCopyStrategy with shared CopyTileKernel and direct HOST-segment DMA\""
        << ",\"variants\":[\"integrated_crc\",\"copy1d_batch\",\"copy3d_batch\",\"staged_no_crc\",\"main_staged\"]"
@@ -738,7 +737,8 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"copy3d_submit_mutex\":\"benchmark-local mutex; production private mutex is not exported\""
        << ",\"host_input\":\"independent CPU whole-record oracle prepared outside timing\""
        << ",\"block_counts\":"
-       << (options.stagedMemcpyProfile ? "[1,8,32]" :
+       << (options.stagedMemcpyProfile ?
+               "[1,8,32]" :
                "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]")
        << ",\"seq_size_per_block\":128,\"cp_size\":4,\"tp_size\":4,\"cp_mode\":\"CP_RR\""
        << ",\"h2d_host_payload\":\"recently prepared on CPU once per shared round; host cache is not claimed cold\",\"fallback_allowed\":false}\n";
@@ -985,7 +985,7 @@ int run(int argc, char** argv) {
     knownVector();
     mixedCrcSelfTest<CrcBlockCopyBatch>();
     os << "{\"type\":\"mixed_crc_selftest\",\"variant\":\"integrated_crc\",\"success\":true}\n";
-    std::mt19937 source_rng(options.seed), order_rng(options.seed ^ 0x728193U);
+    std::mt19937     source_rng(options.seed), order_rng(options.seed ^ 0x728193U);
     std::vector<int> block_counts;
     for (int n = 1; n <= kMaxBackings; ++n)
         if (!options.stagedMemcpyProfile || n == 1 || n == 8 || n == 32)
@@ -1002,13 +1002,13 @@ int run(int argc, char** argv) {
             os << w.layout.sizes[t];
         }
         os << "],\"geometry\":" << w.layout.geometryJson()
-           << ",\"reserved_sentinel_blocks\":1,\"source_bytes\":" << w.sourceBytes << ",\"destination_bytes\":" << w.sourceBytes
-           << ",\"pool_blocks\":" << w.poolBlocks << ",\"evict_bytes\":" << w.evictBytes
-           << ",\"crc_payload_bytes_per_backing\":" << w.e << ",\"baseline_payload_bytes_per_backing\":" << w.p
+           << ",\"reserved_sentinel_blocks\":1,\"source_bytes\":" << w.sourceBytes
+           << ",\"destination_bytes\":" << w.sourceBytes << ",\"pool_blocks\":" << w.poolBlocks
+           << ",\"evict_bytes\":" << w.evictBytes << ",\"crc_payload_bytes_per_backing\":" << w.e
+           << ",\"baseline_payload_bytes_per_backing\":" << w.p
            << ",\"crc_result_bytes_per_backing\":12,\"host_pinned_verified\":true,\"source_device_verified\":true"
            << ",\"copy3d_operations_per_backing\":" << benchmark.groupRows.size()
-           << ",\"copy3d_expanded_rows_per_backing\":" << w.layout.sizes.size()
-           << ",\"copy3d_max_device_pitch\":"
+           << ",\"copy3d_expanded_rows_per_backing\":" << w.layout.sizes.size() << ",\"copy3d_max_device_pitch\":"
            << *std::max_element(w.layout.sizes.begin(), w.layout.sizes.end()) * size_t(w.poolBlocks)
            << ",\"copy3d_max_host_pitch\":" << *std::max_element(w.layout.sizes.begin(), w.layout.sizes.end())
            << ",\"guard_check\":\"entire device pool against CPU oracle plus unselected sentinel\"}\n";
@@ -1077,8 +1077,9 @@ int run(int argc, char** argv) {
                             requireSync(profile.calls == 0 && profile.bytes == 0 && profile.nanoseconds == 0,
                                         "optimized staged unexpectedly copied payload on CPU");
                         if (variant == 4)
-                            requireSync(profile.calls == size_t(n) && profile.bytes == size_t(n) * w.p,
-                                        "main staged payload memcpy count/bytes mismatch; profile interception is incomplete");
+                            requireSync(
+                                profile.calls == size_t(n) && profile.bytes == size_t(n) * w.p,
+                                "main staged payload memcpy count/bytes mismatch; profile interception is incomplete");
 #endif
                         requireSync(status == CrcCopyStatus::OK, "measured copy call failed");
                         // Check the actual measured addresses without including oracle work in the timing.
@@ -1094,10 +1095,9 @@ int run(int argc, char** argv) {
 #ifdef RTP_LLM_STAGED_MEMCPY_PROFILE
                         if (round >= 0 && (variant == 3 || variant == 4))
                             os << "{\"type\":\"staged_memcpy_profile\",\"direction\":\"" << (store ? "d2h" : "h2d")
-                               << "\",\"layout\":\"" << w.layout.name << "\",\"blocks\":" << n
-                               << ",\"variant\":\"" << syncNames[variant] << "\",\"repeat\":" << options.repeat
-                               << ",\"round\":" << round << ",\"position\":" << position
-                               << ",\"source_plan\":" << source << ",\"wall_us\":" << us
+                               << "\",\"layout\":\"" << w.layout.name << "\",\"blocks\":" << n << ",\"variant\":\""
+                               << syncNames[variant] << "\",\"repeat\":" << options.repeat << ",\"round\":" << round
+                               << ",\"position\":" << position << ",\"source_plan\":" << source << ",\"wall_us\":" << us
                                << ",\"payload_bytes\":" << w.p << ",\"memcpy_calls\":" << profile.calls
                                << ",\"memcpy_bytes\":" << profile.bytes
                                << ",\"memcpy_us\":" << double(profile.nanoseconds) / 1000.0 << "}\n";

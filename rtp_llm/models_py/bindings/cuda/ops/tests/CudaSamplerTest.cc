@@ -1017,6 +1017,61 @@ TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterMatchesLegacyRoundTrip) {
     }
 }
 
+// The legacy top-k=1 path used to transpose and copy the entire token matrix
+// when all_probs was absent. CUDA-resident histories need only the sampled
+// final column; earlier columns may be uninitialized in MTP verify.
+TEST_F(CudaSamplerTest, testTopK1WithoutAllProbsWritesOnlyLastColumn) {
+    const int64_t batch_size = 4, vocab_size = 64, step = 1023;
+    torch::manual_seed(20261029);
+    auto base_logits =
+        torch::randn({batch_size, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto sentinel = torch::full({batch_size, step + 1}, -12345, torch::kInt32);
+
+    auto run_case = [&](bool cuda_history) {
+        auto                       logits_t           = base_logits.clone();
+        auto                       token_ids_t        = cuda_history ? sentinel.to(torch::kCUDA) : sentinel.clone();
+        auto                       sequence_lengths_t = cudaIntTensor({step, step, step, step}, {batch_size});
+        auto                       input_lengths_t    = cudaIntTensor({-1, -1, -1, -1}, {batch_size});
+        auto                       top_k_t            = pinnedIntTensor({1, 1, 1, 1});
+        auto                       top_p_t            = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        auto                       temperature_t      = pinnedFloatTensor({1.0, 1.0, 1.0, 1.0});
+        std::vector<at::Generator> generator(batch_size);
+        GreedyParams               params({logits_t,
+                                           input_lengths_t,
+                                           sequence_lengths_t,
+                                           token_ids_t,
+                                           (size_t)step,
+                                           top_k_t,
+                                           top_p_t,
+                                           temperature_t,
+                                           nullopt,
+                                           nullopt,
+                                           nullopt,
+                                           nullopt,
+                                           false,
+                                           nullopt,
+                                           nullopt,
+                                           nullopt,
+                                           nullopt,
+                                           generator});
+        execSampleGreedy(params);
+        check_cuda_error();
+        cudaDeviceSynchronize();
+        return toHostInt(token_ids_t);
+    };
+
+    auto direct = run_case(true);
+    auto legacy = run_case(false);
+    ASSERT_EQ(direct, legacy);
+    auto expected = base_logits.argmax(-1).cpu();
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t s = 0; s < step; ++s) {
+            ASSERT_EQ(direct[b * (step + 1) + s], -12345);
+        }
+        ASSERT_EQ(direct[b * (step + 1) + step], expected[b].item<int64_t>());
+    }
+}
+
 // Inactive penalty tensors (repetition==1.0, presence/frequency==0.0) must not
 // disable the direct scatter path, and the stochastic top-k branch must still
 // produce bit-identical tokens and renormalized all_probs versus the legacy

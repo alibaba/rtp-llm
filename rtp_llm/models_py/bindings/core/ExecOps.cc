@@ -52,9 +52,8 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
 
 #if USING_CUDA
-#include <cuda_runtime.h>
-#include <cuda_profiler_api.h>
 #include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/core/CudaProfilerCompat.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #elif USING_ROCM
 #include <hip/hip_runtime.h>

@@ -337,11 +337,11 @@ py_test(
         "test_v41_mhc_prenorm",
         "test_v41_hc_jit_warmup",
         "test_v41_delayed_hc_cuda_graph",
-        "test_flash_mla_query_copy_cuda",
     ]
 ]
 
 _TESTS = [
+    "test_dspark_commit_wkv",
     "mega_moe_static_buf_test",
     "test_dspark_cuda_graph_contract",
     "test_engram_cpu",
@@ -449,6 +449,48 @@ py_test(
     env = {"GPU_COUNT": "1"},
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
     target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_dspark_commit_wkv_sm90",
+    srcs = ["test_dspark_commit_wkv.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_dspark_commit_wkv.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_dspark_prepare_triton_sm90",
+    srcs = ["test_dspark_prepare_triton.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_dspark_prepare_triton.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     legacy_create_init = 0,
 )
 

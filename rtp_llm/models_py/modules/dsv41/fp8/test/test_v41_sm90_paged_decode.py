@@ -276,7 +276,7 @@ class SM90PagedDecodeTest(unittest.TestCase):
                                     )
                                     torch.testing.assert_close(tensor_only, actual[0])
 
-    def test_h20_verification_preserves_single_step_arithmetic(self):
+    def test_h20_verification_preserves_single_query_reduction_order(self):
         from rtp_llm.device.device_type import is_h20
 
         if not is_h20():
@@ -292,8 +292,9 @@ class SM90PagedDecodeTest(unittest.TestCase):
                 args["global_slots"][..., :3] = selected
                 actual, actual_lse = self.decode(**args)
                 self._check(args, (actual, actual_lse))
-                # Each speculative position must use the same arithmetic as
-                # an independent decode step with identical Q and visible KV.
+                # The patched SM90 planner keeps the same split-K reduction
+                # plan for each speculative position while executing the
+                # whole query batch in one native FlashMLA call.
                 outputs, lses = [], []
                 for index in range(4):
                     single = dict(args)

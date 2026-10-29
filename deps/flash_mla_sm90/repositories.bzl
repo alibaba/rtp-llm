@@ -13,6 +13,22 @@ def _flash_mla_sm90_impl(ctx):
 from pathlib import Path
 import shutil
 src = Path('upstream/flash_mla')
+
+# The pinned Hopper wheel computes num_sm_parts as
+# num_sms / s_q / (h_q / 64).  Its SM90 kernel already maps s_q to grid.y, so
+# that first division only changes the split-K reduction order for speculative
+# multi-query decode.  Patch the three x86 instructions `cltd; idiv %ebp` to
+# NOPs, preserving the exact single-query split plan without rebuilding or
+# carrying a private binary wheel.  The surrounding bytes and wheel sha256
+# make this fail closed if upstream changes.
+cuda_so = next(src.glob('cuda*.so'))
+binary = cuda_so.read_bytes()
+needle = bytes.fromhex('8b808001000099f7fd85db0f49cb')
+replacement = bytes.fromhex('8b808001000090909085db0f49cb')
+if binary.count(needle) != 1:
+    raise RuntimeError('unexpected FlashMLA SM90 get_meta binary layout')
+cuda_so.write_bytes(binary.replace(needle, replacement, 1))
+
 dst = Path('site-packages/flash_mla_sm90')
 shutil.copytree(src, dst)
 for path in dst.rglob('*.py'):

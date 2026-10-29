@@ -9,6 +9,7 @@ cc_library(
         "cuda_host_utils.cc",
     ],
     hdrs = [
+        "NvmlCompat.h",
         "cuda_host_utils.h",
     ],
     deps = torch_deps() + [

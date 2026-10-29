@@ -716,6 +716,13 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsUnderA
     // Private clone: the mask lands on it, the model output stays untouched.
     EXPECT_NE(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
     EXPECT_TRUE(model_output.logits.eq(0).all().item<bool>());
+    // The speculative processor has already materialized its complete effect
+    // as the packed logits mask. It is not a sampler history reader, so the
+    // 4 x context token matrix stays device-only and no H2D stream is created.
+    EXPECT_TRUE(sampler_inputs.token_ids.is_cuda());
+#if USING_CUDA
+    EXPECT_FALSE(processor.sampler_input_copy_stream_.has_value());
+#endif
     const float neg_inf = -std::numeric_limits<float>::max();
     for (int i = 0; i < 3; ++i) {
         EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
@@ -724,9 +731,11 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsUnderA
 
 // Dead sampler-input elision: with production-equivalent defaults
 // (return_all_probs DEFAULT as the MTP executor sets it, identity penalties,
-// no ngram ban, single beam, no logits processor) no consumer reads the
-// history columns on device, so the gather skips the host snapshot fill,
-// full upload and proposal scatter. Only the matrix
+// no ngram ban, single beam, no inline sampler processor) no consumer reads
+// the history columns on device, so the gather skips the host snapshot fill,
+// full upload and proposal scatter. A speculative logits processor is also
+// eligible after it has materialized its complete effect as a vocab mask.
+// Only the matrix
 // geometry is defined; committed and proposal columns are don't-care (the
 // last column's only definer is the greedy sampler's direct scatter, which
 // runs after this gather) and are never asserted here.
@@ -750,6 +759,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsHistoryMateri
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
     for (auto& stream : {stream1, stream2}) {
         stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+        stream->setReturnAllProbs(ReturnAllProbsMode::NONE);
     }
 
     auto processor = MtpBatchStreamProcessor(
@@ -878,10 +888,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputDeadHistoryGateFli
         "no_repeat_ngram_size",
         [](const GenerateStreamPtr& s) { s->generateConfig()->no_repeat_ngram_size = 3; },
         /*expect_all_probs=*/true);
-    run_flip_case(
-        "return_all_probs_none",
-        [](const GenerateStreamPtr& s) { s->setReturnAllProbs(ReturnAllProbsMode::NONE); },
-        /*expect_all_probs=*/false);
 }
 
 // Re-enabling a history reader must upload the current host history in full,
@@ -2775,6 +2781,54 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLoca
         EXPECT_EQ(input.multimodal_features->at(1).size(0), 1);
         EXPECT_EQ(input.mm_extra_input->at(0).numel(), 8);
         EXPECT_EQ(input.mm_extra_input->at(1).numel(), 8);
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotFullBatchAndWidthFallbackPreserveEveryEntry) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 8;
+    model_config.num_layers  = 1;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto            first  = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    auto            second = createContextStream(model_config, runtime_config, resource_context, {2}, 2);
+    first->setIsContextStream(false);
+    second->setIsContextStream(false);
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 3;
+    TestableMtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    const auto cuda_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+
+    // Identical widths use direct device concatenation when enabled. Wider
+    // destinations and distinct snapshot widths must retain all host padding.
+    for (int mode : {0, 1, 2}) {
+        GptModelInputs input;
+        input.kv_cache_block_id                          = torch::full({2, 2, mode == 0 ? 3 : 5}, -7, pinned_i32);
+        input.kv_cache_kernel_block_id                   = torch::full({2, 2, mode == 0 ? 4 : 7}, -9, pinned_i32);
+        auto                           expected_physical = input.kv_cache_block_id.clone();
+        auto                           expected_kernel   = input.kv_cache_kernel_block_id.clone();
+        std::vector<GenerateStreamPtr> streams{first, second};
+        for (int row = 0; row < 2; ++row) {
+            int  physical_width = mode == 2 && row == 1 ? 4 : 3;
+            int  kernel_width   = mode == 2 && row == 1 ? 6 : 4;
+            auto physical =
+                (torch::arange(2 * physical_width, torch::kInt32) + 100 * (row + 1)).reshape({2, 1, physical_width});
+            auto kernel =
+                (torch::arange(2 * kernel_width, torch::kInt32) + 1000 * (row + 1)).reshape({2, 1, kernel_width});
+            expected_physical.narrow(1, row, 1).narrow(2, 0, physical_width).copy_(physical);
+            expected_kernel.narrow(1, row, 1).narrow(2, 0, kernel_width).copy_(kernel);
+            GenerateStream::MtpAsyncDeviceState state;
+            state.next_kv_cache_block_id_gpu        = physical.to(cuda_i32);
+            state.next_kv_cache_kernel_block_id_gpu = kernel.to(cuda_i32);
+            streams[row]->setMtpAsyncDeviceState(std::move(state));
+        }
+        TensorHolder holder;
+        processor.overlayMtpCacheSnapshots(StreamGroups({first, second}), input, holder);
+        EXPECT_TRUE(torch::equal(input.kv_cache_block_id.cpu(), expected_physical)) << "mode=" << mode;
+        EXPECT_TRUE(torch::equal(input.kv_cache_kernel_block_id.cpu(), expected_kernel)) << "mode=" << mode;
     }
 }
 

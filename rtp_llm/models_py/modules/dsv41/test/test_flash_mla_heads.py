@@ -39,7 +39,7 @@ class FlashMLAHeadTest(unittest.TestCase):
             self.assertEqual(maximum.shape, (3, heads))
             self.assertEqual(lse.shape, (3, heads))
 
-    def test_single_query_preserves_indices_lengths_and_planner_lifetime(self):
+    def test_multi_query_calls_native_once_with_full_indices(self):
         q = torch.randn(2, 4, 16, 512, dtype=torch.bfloat16)
         primary = torch.arange(2 * 4 * 8).view(2, 4, 8)
         extra = primary + 100
@@ -54,34 +54,34 @@ class FlashMLAHeadTest(unittest.TestCase):
             return plan, None
 
         def native(*, q, attn_sink, **kwargs):
-            index = len(calls) % 4
-            self.assertEqual(q.shape[1], 1)
-            torch.testing.assert_close(kwargs["indices"], primary[:, index : index + 1])
-            torch.testing.assert_close(
-                kwargs["extra_indices_in_kvcache"], extra[:, index : index + 1]
-            )
+            self.assertEqual(q.shape, (2, 4, 64, 512))
+            torch.testing.assert_close(q[:, :, :16], original_q)
+            torch.testing.assert_close(kwargs["indices"], primary)
+            torch.testing.assert_close(kwargs["extra_indices_in_kvcache"], extra)
             self.assertIs(kwargs["topk_length"], lengths)
             self.assertIs(kwargs["tile_scheduler_metadata"], created[0])
-            calls.append(index)
+            calls.append(q)
             return q, q.sum(-1).transpose(1, 2)
 
+        original_q = q
         kwargs = dict(
             tile_scheduler_metadata=owner,
             indices=primary,
             extra_indices_in_kvcache=extra,
             topk_length=lengths,
         )
-        with patch.dict(
-            sys.modules, {"flash_mla": SimpleNamespace(get_mla_metadata=metadata)}
-        ):
+        backend = SimpleNamespace(
+            get_mla_metadata=metadata, flash_mla_with_kvcache=native
+        )
+        with patch.object(FLASH, "_backend", return_value=(backend, True)):
             for _ in range(2):
-                output, lse = FLASH._single_query_decode(native, q, None, kwargs)
+                output, lse = FLASH.flash_mla_with_kvcache(q=q, **kwargs)
                 torch.testing.assert_close(output, q, rtol=0, atol=0)
                 torch.testing.assert_close(
                     lse, q.sum(-1).transpose(1, 2), rtol=0, atol=0
                 )
         self.assertEqual(len(created), 1)
-        self.assertEqual(len(calls), 8)
+        self.assertEqual(len(calls), 2)
 
     def test_backend_selection_preserves_sm100_default_wheel(self):
         q = torch.zeros(1, 1, 64, 512)

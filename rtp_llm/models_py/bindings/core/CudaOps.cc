@@ -14,8 +14,8 @@
 #include "ATen/ops/cat.h"
 #include "rtp_llm/models_py/bindings/common/kernels/batch_copy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/copy_utils.h"
+#include "rtp_llm/models_py/bindings/core/CudaProfilerCompat.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
-#include <cuda_profiler_api.h>
 #elif USING_ROCM
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"

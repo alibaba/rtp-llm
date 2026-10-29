@@ -10,8 +10,6 @@ import importlib
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.device.device_type import is_sm90
-
 
 def _backend(q):
     sm90 = (
@@ -60,79 +58,5 @@ def flash_mla_with_kvcache(*, q, attn_sink=None, **kwargs):
         kwargs["tile_scheduler_metadata"] = plan
 
     q, sink, heads = _pad_heads(q, attn_sink)
-    if (
-        q.is_cuda
-        and q.shape[1] > 1
-        and kwargs.get("indices") is not None
-        and is_sm90(q.device)
-    ):
-        output, lse = _single_query_decode(
-            native, q, sink, kwargs, backend.get_mla_metadata
-        )
-    else:
-        output, lse = native(q=q, attn_sink=sink, **kwargs)
+    output, lse = native(q=q, attn_sink=sink, **kwargs)
     return output[..., :heads, :], lse[:, :heads, :]
-
-
-def _single_query_decode(native, q, sink, kwargs, get_mla_metadata=None):
-    """Keep SM90 verification on the single-step sparse decode arithmetic.
-
-    Native multi-query planning changes split/merge boundaries with B*S.
-    Small BF16 differences can then amplify through downstream quantization.
-    Sparse indices already encode each query's causal visibility. Reuse the
-    existing kernel and per-forward planner ownership, including graph capture.
-    """
-    if get_mla_metadata is None:
-        from flash_mla import get_mla_metadata
-
-    owner = kwargs["tile_scheduler_metadata"]
-    # The SM90 FlashMLA scheduler depends on Q shape and the values of
-    # topk_length/extra_topk_length, not on the index payload.  This wrapper
-    # slices only Q and the index tensors; the length tensors stay identical
-    # for every single-query call.  Match the SM100 path's per-layer-type
-    # ownership and initialize one plan on the first query, then reuse it for
-    # the remaining queries and same-type layers.  Keeping one plan per query
-    # recorded Q redundant get_mla_metadata kernels in every graph replay.
-    plan = getattr(owner, "_dsv41_query_plan", None)
-    if plan is None:
-        plan = get_mla_metadata()[0]
-        owner._dsv41_query_plan = plan
-    # Keep one query's operands live, rather than retaining a query-major
-    # copy of the entire speculative batch in each CUDA graph pool.
-    scratch = None
-    join_outputs = None
-    primary = kwargs.get("indices")
-    extra = kwargs.get("extra_indices_in_kvcache")
-    if q.is_cuda and is_sm90(q.device):
-        from rtp_llm.models_py.modules.dsv41._flash_mla_query_copy_triton import (
-            allocate_query_scratch,
-            can_fuse_query_copy,
-            copy_query_into_scratch,
-            join_query_outputs,
-        )
-
-        join_outputs = join_query_outputs
-        if can_fuse_query_copy(q, primary, extra):
-            scratch = allocate_query_scratch(q, primary, extra)
-
-    outputs, lses = [], []
-    for index in range(q.shape[1]):
-        args = dict(kwargs, tile_scheduler_metadata=plan)
-        if scratch is not None:
-            copy_query_into_scratch(q, primary, extra, index, scratch)
-            query, args["indices"], extra_query = scratch
-            if extra is not None:
-                args["extra_indices_in_kvcache"] = extra_query
-        else:
-            query = q[:, index : index + 1].contiguous()
-            for name in ("indices", "extra_indices_in_kvcache"):
-                value = args.get(name)
-                if value is not None:
-                    args[name] = value[:, index : index + 1].contiguous()
-        output, lse = native(q=query, attn_sink=sink, **args)
-        outputs.append(output)
-        lses.append(lse)
-    joined = join_outputs(outputs, lses) if join_outputs is not None else None
-    if joined is not None:
-        return joined
-    return torch.cat(outputs, dim=1), torch.cat(lses, dim=2)

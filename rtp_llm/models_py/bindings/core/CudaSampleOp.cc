@@ -622,8 +622,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // (scatter_new_tokens); vLLM scatters prev_sampled_token_ids into input_ids
     // and gates every history-derived tensor on no_penalties; SGLang feeds its
     // penalizers only the latest [bs] token, gated on is_required.
-    const bool direct_token_scatter =
-        !topk1_fast_path && params.token_ids.is_cuda() && !repetitionPenaltyActive(params, batch_size);
+    const bool    direct_token_scatter = params.token_ids.is_cuda() && !repetitionPenaltyActive(params, batch_size);
     torch::Tensor transposed_tokens;
     if (!direct_token_scatter) {
         transposed_tokens = device_tokens.transpose(0, 1).contiguous();
@@ -644,14 +643,17 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     }
 
     if (topk1_fast_path) {
-        torch::Tensor samples_t =
-            transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
-        samples_t.copy_(selected_tokens, true);
-
-        auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
-        params.token_ids.copy_(output_tokens, true);
+        if (direct_token_scatter) {
+            params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(selected_tokens, true);
+        } else {
+            torch::Tensor samples_t =
+                transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
+            samples_t.copy_(selected_tokens, true);
+            auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
+            params.token_ids.copy_(output_tokens, true);
+        }
 
         return GreedyOutput{};
     }
