@@ -15,8 +15,8 @@ from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
 def _hc_prefill_inject_norm(
     X, S, G, GAMMA, RESIDUAL, NORM, AMAX, EPS: tl.constexpr, COLLECT: tl.constexpr
 ):
-    row = tl.program_id(0)
-    group = tl.program_id(1)
+    group = tl.program_id(0)
+    row = tl.program_id(1)
     column = tl.arange(0, 4096)
     mask = column < 2560
     offset = row * 10240 + group * 2560 + column
@@ -63,7 +63,8 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
         if collect
         else residual
     )
-    _hc_prefill_inject_norm[(rows, 4)](
+    # Adjacent groups share the sublayer row and traverse contiguous residuals.
+    _hc_prefill_inject_norm[(4, rows)](
         x,
         sublayer,
         gates,
