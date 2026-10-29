@@ -580,6 +580,8 @@ class IndexerFP8(PoolBackedModule):
         )
 
     def _quantize_q(self, q: torch.Tensor, weights: torch.Tensor):
+        # GLM53 projects head gates in FP32 to distinguish near-tie scores.
+        # Both quantizers accept FP32 gates; preserve them until scale folding.
         if self._fuse_glm_q_quant():
             from rtp_llm.models_py.modules.dsv4.fp8._indexer_hadamard_quant_triton import (
                 indexer_hadamard_quant_fold,
@@ -946,9 +948,7 @@ class IndexerFP8(PoolBackedModule):
             # The block table is the only capture-stable bound for all replays.
             T_max = max(32, T_cache)
 
-            q_fp8, w_fold = self._quantize_q(
-                _as_bf16_contig(q), _as_bf16_contig(weights)
-            )
+            q_fp8, w_fold = self._quantize_q(_as_bf16_contig(q), weights.contiguous())
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
@@ -1468,7 +1468,7 @@ class IndexerFP8(PoolBackedModule):
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
                 q_fp8, w_fold = self._quantize_q(
-                    _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
+                    _as_bf16_contig(q_for_quant), w_for_quant.contiguous()
                 )
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
@@ -1635,7 +1635,7 @@ class IndexerFP8(PoolBackedModule):
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q"):
                 q_fp8, w_fold = self._quantize_q(
-                    _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
+                    _as_bf16_contig(q_for_quant), w_for_quant.contiguous()
                 )
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
