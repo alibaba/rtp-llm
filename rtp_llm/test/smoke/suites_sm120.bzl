@@ -77,13 +77,13 @@ def sm120_suites():
                 name = "bf16_sm120",
                 task_info = "data/model/qwen25/q_r_s_bf16_sm120.json",
                 smoke_args = "--act_type BF16 --warm_up 0",
-                gpu_type = ["RTX_5000_PRO"],
+                gpu_type = ["RTX_5000_PRO_CU13", "RTX_5000_PRO"],
             ),
             smoke_test(
                 name = "bf16_cuda_graph_sm120",
                 task_info = "data/model/qwen25/q_r_s_bf16_sm120.json",
                 smoke_args = "--act_type BF16 --warm_up 0 --seq_size_per_block 64 --enable_cuda_graph 1 --decode_capture_config '1,2'",
-                gpu_type = ["RTX_5000_PRO"],
+                gpu_type = ["RTX_5000_PRO_CU13", "RTX_5000_PRO"],
             ),
             smoke_test(
                 name = "random_seed_sm120",

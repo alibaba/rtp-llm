@@ -82,6 +82,22 @@ class CudaFp4GEMMLinear(LinearBase):
             and get_sm(weight.device) == (12, 0)
             and (self.hidden_size, self.output_size) == (8704, 5120)
         )
+        self._decode_tiled_runner = None
+        if (
+            os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+            and self.backend == "cutlass"
+            and weight.is_cuda
+            and get_sm(weight.device) == (12, 0)
+            and (self.hidden_size, self.output_size) in ((5120, 17408), (5120, 124160))
+        ):
+            try:
+                from flashinfer.gemm.gemm_base import _b12x_gemm_fp4_runner
+
+                self._decode_tiled_runner = _b12x_gemm_fp4_runner(
+                    12, 0, True, torch.bfloat16, True
+                )
+            except ImportError:
+                pass
         self._decode_cudnn_backend = False
         if (
             os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
@@ -169,7 +185,32 @@ class CudaFp4GEMMLinear(LinearBase):
                 backend = "auto"
             elif self._decode_cudnn_backend and 5 <= input_m <= 32:
                 backend = "cudnn"
-        if self.backend == "sgl_cutlass":
+        if (
+            self._decode_tiled_runner is not None
+            and output_dtype == torch.bfloat16
+            and 0 < input_m <= 64
+        ):
+            # The 64x128 SM120 tile also wins with rotating, uncached weights.
+            # Keep the existing FP4/SF layout and device-resident alpha.
+            output = torch.empty(
+                output_shape, device=input_fp4.device, dtype=output_dtype
+            )
+            self._decode_tiled_runner.forward(
+                [
+                    input_fp4,
+                    self.weight.T,
+                    input_scale_interleaved,
+                    self.weight_scales.T,
+                    self.alpha,
+                    output_dtype,
+                    output,
+                    16,
+                    True,
+                    None,
+                ],
+                tactic=((64, 128), (1, 1), False, False, "sm120", None),
+            )
+        elif self.backend == "sgl_cutlass":
             output = cutlass_scaled_fp4_mm_wrapper(
                 input_fp4,
                 self.weight,

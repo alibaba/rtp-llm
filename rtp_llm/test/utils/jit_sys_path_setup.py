@@ -43,8 +43,14 @@ def get_package_info(package_name):
                         sys.path.insert(0, pip_path)
 
         module = importlib.import_module(package_name)
-        if hasattr(module, "__file__") and module.__file__:
-            package_path = Path(module.__file__).parent
+        package_file = getattr(module, "__file__", None)
+        package_paths = getattr(module, "__path__", ())
+        if package_file or package_paths:
+            package_path = (
+                Path(package_file).parent
+                if package_file
+                else Path(next(iter(package_paths)))
+            )
             # Get version from metadata
             try:
                 dist = importlib.metadata.distribution(meta_package_name)
@@ -114,7 +120,44 @@ def copy_package_with_lock(package_name, cache_dir):
 
         # Copy the package
         try:
-            if Path(source_path).is_dir():
+            if package_name == "nvidia_cutlass_dsl":
+                # Bazel's generated init stubs can shadow CuTe's extension modules.
+                def ignore_namespace_stubs(directory, names):
+                    if "__init__.py" not in names:
+                        return []
+                    content = (Path(directory) / "__init__.py").read_bytes()
+                    if not content.strip() or content.startswith(
+                        b"# __path__ manipulation added by bazelbuild/rules_python"
+                    ):
+                        return ["__init__.py"]
+                    return []
+
+                # Bazel separates the wheels and omits their RECORD files.
+                for suffix in (
+                    "",
+                    "-libs-base",
+                    "-libs-cu12",
+                    "-libs-cu13",
+                    "-libs-core",
+                ):
+                    try:
+                        dist = importlib.metadata.distribution(
+                            "nvidia-cutlass-dsl" + suffix
+                        )
+                    except importlib.metadata.PackageNotFoundError:
+                        continue
+                    portion = Path(dist.locate_file("nvidia_cutlass_dsl"))
+                    if dist.version == version and portion.is_dir():
+                        shutil.copytree(
+                            portion,
+                            target_package_path,
+                            dirs_exist_ok=True,
+                            ignore=ignore_namespace_stubs,
+                        )
+                namespace_init = Path(source_path) / "__init__.py"
+                if namespace_init.is_file():
+                    shutil.copy2(namespace_init, target_package_path / "__init__.py")
+            elif Path(source_path).is_dir():
                 shutil.copytree(source_path, target_package_path, symlinks=True)
             else:
                 shutil.copy2(source_path, target_package_path)
@@ -254,7 +297,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
     )
 
     if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+        packages = ["nvidia_cutlass_dsl", "flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []

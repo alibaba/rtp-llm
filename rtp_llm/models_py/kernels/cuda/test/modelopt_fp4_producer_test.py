@@ -160,12 +160,82 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
             )
         if not layer._decode_cudnn_backend:
             self.skipTest("requires cuDNN 9.15 or newer")
-        for m in (5, 10, 17, 20, 32):
+        runner = layer._decode_tiled_runner
+        self.assertIsNotNone(runner)
+        for m in (1, 3, 5, 10, 17, 20, 32, 40, 64, 65, 71):
             x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
             layer._decode_cudnn_backend = False
+            layer._decode_tiled_runner = None
             reference = layer(x)
             layer._decode_cudnn_backend = True
-            torch.testing.assert_close(layer(x), reference, rtol=0, atol=0)
+            layer._decode_tiled_runner = runner
+            with patch.object(runner, "forward", wraps=runner.forward) as tiled:
+                actual = layer(x)
+                self.assertEqual(tiled.call_count, int(m <= 64))
+            self.assertTrue(
+                torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+            )
+
+    def test_lm_head_tiled_projection_and_fallback(self):
+        k, n = 5120, 124160
+        scale = torch.tensor([31.7], device="cuda")
+        weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.1
+        wq, ws = fp4_quantize(weight, scale)
+        del weight
+        with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "1"}):
+            layer = CudaFp4GEMMLinear(
+                wq,
+                ws,
+                torch.tensor([0.01713], device="cuda"),
+                bias=torch.randn(n, device="cuda", dtype=torch.bfloat16),
+                weight_scale_2=1 / scale,
+            )
+        runner = layer._decode_tiled_runner
+        self.assertIsNotNone(runner)
+        for m in (1, 5, 8, 17, 40, 64, 65, 71):
+            x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+            layer._decode_tiled_runner = None
+            expected = layer(x)
+            layer._decode_tiled_runner = runner
+            with patch.object(runner, "forward", wraps=runner.forward) as tiled:
+                actual = layer(x)
+                self.assertEqual(tiled.call_count, int(m <= 64))
+            self.assertTrue(
+                torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+            )
+        with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "0"}):
+            disabled = CudaFp4GEMMLinear(
+                wq, ws, layer.input_scale, weight_scale_2=1 / scale
+            )
+        self.assertIsNone(disabled._decode_tiled_runner)
+
+    def test_tiled_graph_reads_current_inputs_weights_and_alpha(self):
+        k, n, m = 5120, 17408, 17
+        scale = torch.tensor([31.7], device="cuda")
+        weight = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.1
+        wq, ws = fp4_quantize(weight, scale)
+        with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "1"}):
+            layer = CudaFp4GEMMLinear(
+                wq, ws, torch.tensor([0.01713], device="cuda"), weight_scale_2=1 / scale
+            )
+        self.assertIsNotNone(layer._decode_tiled_runner)
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        layer(x)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = layer(x)
+        x.normal_()
+        wq.fill_(42)
+        with torch.inference_mode():
+            layer.alpha.mul_(0.7)
+        graph.replay()
+        layer._decode_tiled_runner = None
+        layer._decode_cudnn_backend = False
+        expected = layer(x)
+        self.assertTrue(
+            torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+        )
+        graph.reset()
 
 
 if __name__ == "__main__":
