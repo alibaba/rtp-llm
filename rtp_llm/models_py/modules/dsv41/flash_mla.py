@@ -92,16 +92,42 @@ def _single_query_decode(native, q, sink, kwargs, get_mla_metadata=None):
         owner._dsv41_query_plans = plans
     if len(plans) != q.shape[1]:
         raise ValueError("FlashMLA query count changed on an existing planner")
+    # Keep one query's operands live, rather than retaining a query-major
+    # copy of the entire speculative batch in each CUDA graph pool.
+    scratch = None
+    join_outputs = None
+    primary = kwargs.get("indices")
+    extra = kwargs.get("extra_indices_in_kvcache")
+    if q.is_cuda and is_sm90(q.device):
+        from rtp_llm.models_py.modules.dsv41._flash_mla_query_copy_triton import (
+            allocate_query_scratch,
+            can_fuse_query_copy,
+            copy_query_into_scratch,
+            join_query_outputs,
+        )
+
+        join_outputs = join_query_outputs
+        if can_fuse_query_copy(q, primary, extra):
+            scratch = allocate_query_scratch(q, primary, extra)
+
     outputs, lses = [], []
     for index, plan in enumerate(plans):
         args = dict(kwargs, tile_scheduler_metadata=plan)
-        for name in ("indices", "extra_indices_in_kvcache"):
-            value = args.get(name)
-            if value is not None:
-                args[name] = value[:, index : index + 1].contiguous()
-        output, lse = native(
-            q=q[:, index : index + 1].contiguous(), attn_sink=sink, **args
-        )
+        if scratch is not None:
+            copy_query_into_scratch(q, primary, extra, index, scratch)
+            query, args["indices"], extra_query = scratch
+            if extra is not None:
+                args["extra_indices_in_kvcache"] = extra_query
+        else:
+            query = q[:, index : index + 1].contiguous()
+            for name in ("indices", "extra_indices_in_kvcache"):
+                value = args.get(name)
+                if value is not None:
+                    args[name] = value[:, index : index + 1].contiguous()
+        output, lse = native(q=query, attn_sink=sink, **args)
         outputs.append(output)
         lses.append(lse)
+    joined = join_outputs(outputs, lses) if join_outputs is not None else None
+    if joined is not None:
+        return joined
     return torch.cat(outputs, dim=1), torch.cat(lses, dim=2)

@@ -333,7 +333,12 @@ py_test(
         }),
         legacy_create_init = 0,
     )
-    for name in ["test_v41_mhc_prenorm", "test_v41_hc_jit_warmup", "test_v41_delayed_hc_cuda_graph"]
+    for name in [
+        "test_v41_mhc_prenorm",
+        "test_v41_hc_jit_warmup",
+        "test_v41_delayed_hc_cuda_graph",
+        "test_flash_mla_query_copy_cuda",
+    ]
 ]
 
 _TESTS = [
