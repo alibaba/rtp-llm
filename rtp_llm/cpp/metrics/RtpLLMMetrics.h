@@ -1639,3 +1639,38 @@ void stopKmonitorFactory();
 void setHippoTags(kmonitor::MetricsConfig& config);
 
 }  // namespace rtp_llm
+
+namespace rtp_llm {
+
+class RtpLLMRemoteCacheControlMetricsCollector final {
+public:
+    bool enabled{true};
+};
+
+class RtpLLMRemoteCacheControlMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheControlMetricsCollector* collector);
+    kmonitor::MutableMetric* enabled_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheOutcomeMetricsCollector final {
+public:
+    const char* stage{"lookup"};
+    const char* outcome{"failed"};
+};
+
+class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCacheOutcomeMetricsCollector*);
+    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+}  // namespace rtp_llm

@@ -91,7 +91,8 @@ public:
         TIMEOUT
     };
 
-    Impl(const CacheConfig&                         cache_config,
+    Impl(const StorageBackend& backend,
+         const CacheConfig&                         cache_config,
          const KVCacheConfig&                       kv_cache_config,
          const RuntimeConfig&                       runtime_config,
          const ParallelismConfig&                   parallelism_config,
@@ -100,6 +101,7 @@ public:
          std::shared_ptr<kvcm::ClientWrapper>       client_wrapper,
          std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
          bool gdr_enabled):
+        backend_(backend),
         cache_config_(cache_config),
         kv_cache_config_(kv_cache_config),
         runtime_config_(runtime_config),
@@ -301,6 +303,17 @@ public:
         return true;
     }
 
+    void reportRemoteCacheSkipped(const char* stage) noexcept {
+        try {
+            RtpLLMRemoteCacheOutcomeMetricsCollector collector;
+            collector.stage = stage;
+            collector.outcome = "disabled";
+            reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(collector);
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to report disabled remote cache operation");
+        }
+    }
+
     StorageMatchResult match(const StorageRequest& request) {
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata match must run on tp rank 0, got %ld",
@@ -429,6 +442,12 @@ public:
                 remote->add_uris(std::string(location_spec.uri));
             }
         }
+        if (!backend_.remoteCacheEnabled()) {
+            reportRemoteCacheSkipped("read");
+            collector.remote_read_qps = false;
+            collector.remote_read_fail_qps = false;
+            throw std::runtime_error("remote cache disabled by KVCM before read submission");
+        }
         (void)dispatchRequests(std::move(requests), request);
         // A canonical CP key already covers every shard. Do not multiply this
         // logical token count by the number of TP ranks or payload groups.
@@ -438,6 +457,10 @@ public:
     }
 
     void write(const StorageRequest& request) {
+        if (!backend_.remoteCacheEnabled()) {
+            reportRemoteCacheSkipped("write");
+            return;
+        }
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata write must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -530,6 +553,10 @@ public:
                 const auto                             stage_start = Clock::now();
                 block_tree_cache_detail::ScopeRollback timer(
                     [&] { collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start); });
+                if (!backend_.remoteCacheEnabled()) {
+                    reportRemoteCacheSkipped("write");
+                    throw std::runtime_error("remote cache disabled by KVCM before write submission");
+                }
                 return dispatchRequests(std::move(requests), request);
             }();
             bool has_actual_uri = false;
@@ -1363,6 +1390,7 @@ private:
     }
 
 private:
+    const StorageBackend& backend_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;
@@ -1406,7 +1434,8 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                    std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter),
                    parallelism_config.world_rank,
                    std::chrono::milliseconds(kv_cache_config.kvcm_task_timeout_ms)),
-    impl_(std::make_unique<Impl>(cache_config,
+    impl_(std::make_unique<Impl>(*this,
+                                 cache_config,
                                  kv_cache_config,
                                  runtime_config,
                                  parallelism_config,
@@ -1453,6 +1482,10 @@ void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
 
 void KVCMStorageBackend::shutdownImpl() noexcept {
     impl_->shutdown();
+}
+
+void KVCMStorageBackend::onRemoteCacheSkipped(const char* stage) noexcept {
+    impl_->reportRemoteCacheSkipped(stage);
 }
 
 void KVCMStorageBackend::onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept {

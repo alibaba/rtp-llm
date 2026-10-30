@@ -38,6 +38,8 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheControlMetrics);
 
 bool RtpLLMGrpcConnectFailureMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(connect_failed_qps_metric, "rtp_llm_rank_broadcast_grpc_connect_failed_qps");
@@ -1308,6 +1310,33 @@ void setHippoTags(kmonitor::MetricsConfig& config) {
         config.AddGlobalTag("hippo_app", autil::EnvUtil::getEnv("HIPPO_APP", ""));
         config.AddGlobalTag("hippo_group", autil::EnvUtil::getEnv("HIPPO_SERVICE_NAME", ""));
     }
+}
+
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+
+bool RtpLLMRemoteCacheControlMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(enabled_metric, "rtp_llm_remote_cache_enabled");
+    return true;
+}
+
+void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags* tags,
+                                             RtpLLMRemoteCacheControlMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(enabled_metric, collector->enabled ? 1 : 0);
+}
+
+bool RtpLLMRemoteCacheOutcomeMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(outcome_qps_metric, "rtp_llm_remote_cache_outcome_qps");
+    return true;
+}
+
+void RtpLLMRemoteCacheOutcomeMetrics::report(const kmonitor::MetricsTags*              tags,
+                                             RtpLLMRemoteCacheOutcomeMetricsCollector* collector) {
+    kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
+    event_tags.AddTag("stage", collector->stage);
+    event_tags.AddTag("outcome", collector->outcome);
+    outcome_qps_metric->Report(&event_tags, 1);
 }
 
 }  // namespace rtp_llm
