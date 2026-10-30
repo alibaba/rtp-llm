@@ -420,7 +420,7 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task,
                                             ErrorInfo                                   error) noexcept {
     if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
-        auto observation = CompletionStageContext::forTask(*metrics_reporter_, task->transfer_task, "evict", false);
+        auto observation = CompletionStageContext::forTransfer(*metrics_reporter_, task->transfer_task, "evict", false);
         CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
         // Ordinary source/target references are still held here. Freeze every
         // saved endpoint before rollback can return any of them to a pool.
@@ -449,14 +449,13 @@ void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransf
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
                                                   bool                                        success) noexcept {
-    auto observation = CompletionStageContext::forTask(*metrics_reporter_, task->transfer_task, "evict", success);
-    auto total       = observation.start("completion_total", "business_completion");
-    auto queue       = observation.start("completion_queue_wait", "business_completion");
+    auto observation = CompletionStageContext::forTransfer(*metrics_reporter_, task->transfer_task, "evict", success);
+    auto timers      = CompletionStageTimers::create(observation);
     const int64_t queue_begin = currentTimeUs();
     auto          settle =
-        [this, task = std::move(task), success, observation, queue, total, queue_begin](bool queued) noexcept {
-            queue.finish(success);
-            block_tree_cache_detail::ScopeRollback finish([&] { total.finish(success); });
+        [this, task = std::move(task), success, observation, timers, queue_begin](bool queued) noexcept {
+            timers.finishQueue(success);
+            block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
             CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
             if (queued) {
                 metrics_reporter_->reportQueueWaitMetric(
@@ -762,8 +761,7 @@ void BlockTreeEvictor::updatePendingRelease(const std::vector<TransferDescriptor
 void BlockTreeEvictor::collectFullPrune(const TransferDescriptor&                  eviction_desc,
                                         EvictionDropTask&                          task,
                                         std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const {
-    if (task.hasFullPrune()
-        || tree_->groupSets()[eviction_desc.group_set_id]->groupType() != CacheGroupType::FULL) {
+    if (task.hasFullPrune() || tree_->groupSets()[eviction_desc.group_set_id]->groupType() != CacheGroupType::FULL) {
         return;
     }
 
@@ -1093,8 +1091,8 @@ bool BlockTreeEvictor::canReclaimDeviceDrop(const TransferDescriptor& desc) cons
               });
 }
 
-EvictionDropTask BlockTreeEvictor::planDropTask(
-    TransferDescriptor eviction_desc, std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const {
+EvictionDropTask BlockTreeEvictor::planDropTask(TransferDescriptor                         eviction_desc,
+                                                std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const {
     EvictionDropTask task;
     task.primary_timing =
         EvictionTimingSnapshot(eviction_desc.node->group_set_resources[eviction_desc.group_set_id].candidate_meta);

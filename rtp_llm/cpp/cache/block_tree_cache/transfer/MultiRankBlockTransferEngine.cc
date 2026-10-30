@@ -115,17 +115,16 @@ private:
                                      "coordinator_completion",
                                      self->transfer_id_,
                                      self->completion_identity_);
-            self->evaluate();
-            total.finish(self->success());
+            total.finish(self->evaluate());
         });
     }
 
-    void evaluate(ErrorInfo forced_error = ErrorInfo::OkStatus()) {
+    bool evaluate(ErrorInfo forced_error = ErrorInfo::OkStatus()) {
         TransferResult result =
             forced_error.ok() ? TransferResult{} : TransferResult(std::move(forced_error), CacheCopyError::RPC_FAILED);
         if (result.ok()) {
             if (!broadcast_result_->done()) {
-                return;
+                return false;
             }
             if (!broadcast_result_->success()) {
                 result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
@@ -181,10 +180,15 @@ private:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (evaluated_ || finishing_) {
-                return;
+                // An unpublished result owned by another evaluator is not a
+                // failure of this completed response evaluation.
+                return result.ok();
             }
             finishing_ = true;
         }
+        if (auto probe =
+                block_tree_cache_detail::after_transfer_completion_claim_for_test.load(std::memory_order_acquire))
+            probe();
         if (wait_timer_) {
             wait_timer_.finish(result.ok());
             try {
@@ -239,6 +243,7 @@ private:
             callback(result);
         }
         dispatch.finish(result.ok());
+        return result.ok();
     }
 
     std::shared_ptr<TransferBroadcastResult>       broadcast_result_;
