@@ -239,8 +239,8 @@ public:
     }
 
     void clearLoadInitiated() {
-        flags_ =
-            static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::LoadInitiated));
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
+                                        & ~static_cast<uint32_t>(EventType::LoadInitiated | EventType::CachePrepared));
     }
 
 private:
