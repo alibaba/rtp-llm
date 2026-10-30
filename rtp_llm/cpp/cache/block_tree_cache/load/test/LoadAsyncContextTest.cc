@@ -208,19 +208,23 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
 
 void initBackend(ManualBackend& backend, const DeviceBlockPoolPtr& pool) {
     RTP_LLM_CHECK(backend.init(
-        makeTopology(), {{"group_0", pool}}, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+        makeTopology(), {{"group_0", pool}}, [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }, 1));
 }
 
 void initBackend(ManualBackend&                         backend,
                  std::shared_ptr<const CacheTopology>   topology,
-                 const std::vector<DeviceBlockPoolPtr>& pools) {
+                 const std::vector<DeviceBlockPoolPtr>& pools,
+                 size_t                                 canonical_size_per_block) {
     StorageBackend::PoolsByTag pools_by_tag;
     RTP_LLM_CHECK(topology->groupTags().size() == pools.size());
     for (size_t i = 0; i < pools.size(); ++i) {
         RTP_LLM_CHECK(pools_by_tag.emplace(topology->groupTags()[i], pools[i]).second);
     }
     RTP_LLM_CHECK(backend.init(
-        topology, std::move(pools_by_tag), [](int, const std::string&, int) { return std::vector<BlockInfo>{}; }));
+        topology,
+        std::move(pools_by_tag),
+        [](int, const std::string&, int) { return std::vector<BlockInfo>{}; },
+        canonical_size_per_block));
 }
 
 StorageRequest makeRequest(size_t key_count) {
@@ -714,7 +718,7 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
         blocks.push_back(block);
     }
     initBackend(
-        *backend, makeTopology({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}), bound_pools);
+        *backend, makeTopology({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}), bound_pools, 1);
 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2, 3, 4}),
                            std::vector<std::vector<StorageBlockHandle>>(4)};
@@ -757,6 +761,83 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
     EXPECT_EQ(aborts, 0u);
     for (size_t group_id = 0; group_id < pools.size(); ++group_id) {
         pools[group_id]->decRef(blocks[group_id]);
+    }
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, CanonicalSpanControlsSwaReadHandlesAndReleasesPins) {
+    size_t                                      commits     = 0;
+    size_t                                      aborts      = 0;
+    auto                                        coordinator = makeCoordinator(commits, aborts);
+    auto                                        backend     = std::make_shared<ManualBackend>();
+    std::vector<std::shared_ptr<TestBlockPool>> pools;
+    std::vector<DeviceBlockPoolPtr>             bound_pools;
+    std::vector<BlockIdxType>                   blocks;
+    for (size_t group_id = 0; group_id < 3; ++group_id) {
+        auto pool  = std::make_shared<TestBlockPool>();
+        auto block = pool->malloc().value();
+        pool->incRef(block);
+        pools.push_back(pool);
+        bound_pools.push_back(pool);
+        blocks.push_back(block);
+    }
+    auto original_topology       = makeTopology({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA});
+    auto groups                  = original_topology->groups();
+    auto swa_spec                = groups[2].spec->clone();
+    swa_spec->seq_size_per_block = 64;
+    swa_spec->kernel_seq_size_per_block  = 64;
+    groups[2].spec                       = std::move(swa_spec);
+    groups[2].policy.sliding_window_size = 65;
+    auto topology                        = CacheTopology::create(std::move(groups), original_topology->layers());
+    initBackend(*backend, topology, bound_pools, 32);
+
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2, 3, 4, 5}),
+                           std::vector<std::vector<StorageBlockHandle>>(5)};
+    for (auto& handles : request.handles) {
+        handles = {{"group_0", NULL_BLOCK_IDX}, {"group_1", NULL_BLOCK_IDX}, {"group_2", NULL_BLOCK_IDX}};
+    }
+    auto context = coordinator->create({}, {}, 0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 5u);
+        const auto& handles = current.backendHandles();
+        EXPECT_EQ(handles.size(), 5u);
+        EXPECT_EQ(handles[0].size(), 1u);
+        EXPECT_EQ(handles[1].size(), 1u);
+        EXPECT_EQ(handles[2].size(), 2u);
+        EXPECT_EQ(handles[3].size(), 2u);
+        EXPECT_EQ(handles[4].size(), 3u);
+        for (size_t key_index = 0; key_index < handles.size(); ++key_index) {
+            for (size_t handle_index = 0; handle_index < handles[key_index].size(); ++handle_index) {
+                const auto group_id = static_cast<size_t>(handles[key_index][handle_index].tag.back() - '0');
+                current.setBackendTargetBlock(key_index, handle_index, blocks[group_id]);
+            }
+        }
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    auto match_meta            = std::make_shared<TestMatchMeta>();
+    match_meta->remote_version = 17;
+    backend->completeMatch(5, match_meta);
+    ASSERT_TRUE(backend->readPending());
+    backend->completeRead();
+    ASSERT_EQ(backend->readMatchMeta(), match_meta);
+    EXPECT_EQ(backend->readMatchMeta()->remote_version, 17u);
+    EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{1, 1, 2, 2, 3}));
+    EXPECT_EQ(backend->readGroupTags(),
+              (std::vector<std::vector<std::string>>{{"group_0"},
+                                                     {"group_0"},
+                                                     {"group_0", "group_2"},
+                                                     {"group_0", "group_2"},
+                                                     {"group_0", "group_1", "group_2"}}));
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    for (size_t group_id = 0; group_id < pools.size(); ++group_id) {
+        EXPECT_EQ(pools[group_id]->refCount(blocks[group_id]), 1u);
+        pools[group_id]->decRef(blocks[group_id]);
+        EXPECT_EQ(pools[group_id]->freeBlocksNum(), 3u);
     }
     coordinator->shutdown();
 }

@@ -28,7 +28,9 @@ void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
         callback();
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("StorageBackend completion failed: %s", error.what());
-    } catch (...) { RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception"); }
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("StorageBackend completion failed with an unknown exception");
+    }
 }
 
 struct StorageTaskState {
@@ -88,11 +90,13 @@ StorageBackend::~StorageBackend() {
 
 bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
                           PoolsByTag                           pools_by_tag,
-                          BufferResolver                       buffer_resolver) {
+                          BufferResolver                       buffer_resolver,
+                          size_t                               canonical_size_per_block) {
     if (init_attempted_) {
         RTP_LLM_LOG_ERROR("StorageBackend initialization has already been attempted");
         return false;
     }
+    RTP_LLM_CHECK_WITH_INFO(canonical_size_per_block > 0, "canonical size per block must be positive");
     RTP_LLM_CHECK(topology && buffer_resolver);
     RTP_LLM_CHECK(pools_by_tag.size() == topology->groups().size());
     std::unordered_set<const DeviceBlockPool*> seen_pools;
@@ -110,10 +114,11 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
         RTP_LLM_LOG_ERROR("StorageBackend executor cannot be shared between backends");
         return false;
     }
-    topology_            = std::move(topology);
-    pools_by_tag_        = std::move(pools_by_tag);
-    buffer_resolver_     = std::move(buffer_resolver);
-    const auto fail_init = [this] {
+    topology_                 = std::move(topology);
+    pools_by_tag_             = std::move(pools_by_tag);
+    buffer_resolver_          = std::move(buffer_resolver);
+    canonical_size_per_block_ = canonical_size_per_block;
+    const auto fail_init      = [this] {
         shutdownImpl();
         buffer_resolver_ = {};
         pools_by_tag_.clear();
@@ -326,7 +331,7 @@ std::vector<BlockInfo> StorageBackend::convertIndexToBuffer(int layer_id, const 
 
 bool StorageBackend::isHandleRequired(size_t key_index, size_t matched_key_count, std::string_view tag) const {
     RTP_LLM_CHECK(key_index < matched_key_count);
-    const size_t reuse_count = topology().group(tag).reuseBlockCount(matched_key_count);
+    const size_t reuse_count = topology().group(tag).reuseBlockCount(matched_key_count, canonical_size_per_block_);
     return matched_key_count - key_index <= reuse_count;
 }
 
@@ -339,7 +344,9 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
         if (success) {
             try {
                 result = matchImpl(request);
-            } catch (...) { success = false; }
+            } catch (...) {
+                success = false;
+            }
         }
         if (done) {
             done(success ? result.matched_blocks_num : 0, success ? std::move(result.match_meta) : nullptr, success);
