@@ -7,6 +7,43 @@
 
 namespace rtp_llm {
 
+TEST(AsyncProfilingScopeTest, CompletionSpansRetainScopeOperationAndDirectionAcrossThreads) {
+    auto session = AsyncProfileSession::start();
+    auto begin   = AsyncProfileSession::steadyNowUs();
+    auto span    = AsyncProfileSpan::fromSteady(
+        "completion_execute", 42, 0, 8, begin, -1, 77, "host_to_device", "business_completion", "load");
+    std::thread worker([span, begin] { span.finishAtSteady(begin + 25); });
+    worker.join();
+    auto events = session->finish(AsyncProfileSession::nowUs() + 1000);
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_NE(events[0].name.find("cache.transfer.host_to_device.completion_execute"), std::string::npos);
+    EXPECT_NE(events[0].name.find("scope=business_completion,operation=load"), std::string::npos);
+    EXPECT_NE(events[0].name.find("request_id=42"), std::string::npos);
+    EXPECT_NE(events[0].name.find("transfer_id=77"), std::string::npos);
+    EXPECT_EQ(events[0].end_us - events[0].start_us, 25);
+}
+
+TEST(AsyncProfilingScopeTest, CompletionMetadataDoesNotLeakIntoNextSession) {
+    auto first  = AsyncProfileSession::start();
+    auto span   = AsyncProfileSpan::fromSteady("completion_total",
+                                             42,
+                                             0,
+                                             8,
+                                             AsyncProfileSession::steadyNowUs(),
+                                             -1,
+                                             77,
+                                             "device_to_host",
+                                             "coordinator_completion",
+                                             "evict");
+    auto events = first->finish();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_NE(events[0].name.find("operation=evict"), std::string::npos);
+    EXPECT_NE(events[0].name.find("incomplete=1"), std::string::npos);
+    auto second = AsyncProfileSession::start();
+    span.finish();
+    EXPECT_TRUE(second->finish().empty());
+}
+
 TEST(AsyncProfilingScopeTest, BackgroundCompletionHasIdentityAndOriginalTimestamps) {
     auto             session = AsyncProfileSession::start();
     const auto       begin   = AsyncProfileSession::nowUs();

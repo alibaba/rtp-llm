@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 
 namespace rtp_llm {
 
@@ -60,29 +61,47 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
             task->host_to_device_task,
             [this, task, &transfer_dispatcher, &metrics_reporter, transfer_begin, callback = std::move(callback)](
                 TransferResult result) mutable {
-                task->host_result = result;
+                auto observation =
+                    CompletionStageContext::forTask(metrics_reporter, task->host_to_device_task, "load", result.ok());
+                CompletionStageScope total(observation, "callback_total", "workflow_callback");
+                {
+                    CompletionStageScope save(observation, "save_result", "workflow_callback");
+                    task->host_result = result;
+                }
                 try {
-                    reportStageFinished(*task,
-                                        metrics_reporter,
-                                        Tier::HOST,
-                                        task->host_to_device_task.descriptors(),
-                                        transfer_begin,
-                                        result.ok());
-                    metrics_reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
+                    {
+                        CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");
+                        reportStageFinished(*task,
+                                            metrics_reporter,
+                                            Tier::HOST,
+                                            task->host_to_device_task.descriptors(),
+                                            transfer_begin,
+                                            result.ok());
+                        metrics_reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
+                    }
                     if (!result.ok()) {
                         task->phase = Task::Phase::FINISHED;
                         callback(std::move(result.status));
                         return;
                     }
-                    startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
+                    if (task->disk_to_device_task.descriptors().empty()) {
+                        CompletionStageScope notify(observation, "context_complete", "workflow_callback");
+                        startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
+                    } else {
+                        CompletionStageScope next(observation, "next_stage_submit", "workflow_callback");
+                        startDiskTransfer(task, transfer_dispatcher, metrics_reporter, callback);
+                    }
                 } catch (const std::exception& exception) {
+                    total.setSuccess(false);
                     task->phase = Task::Phase::FINISHED;
                     callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
                 } catch (...) {
+                    total.setSuccess(false);
                     task->phase = Task::Phase::FINISHED;
                     callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown host load completion exception"));
                 }
-            });
+            },
+            "load");
     } catch (const std::exception& error) {
         task->phase = Task::Phase::FINISHED;
         callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
@@ -108,25 +127,38 @@ void LoadTaskRunner::startDiskTransfer(TaskPtr                        task,
     transfer_dispatcher.runTransfer(
         task->disk_to_device_task,
         [this, task, &metrics_reporter, transfer_begin, callback = std::move(callback)](TransferResult result) mutable {
-            task->disk_result = result;
+            auto observation =
+                CompletionStageContext::forTask(metrics_reporter, task->disk_to_device_task, "load", result.ok());
+            CompletionStageScope total(observation, "callback_total", "workflow_callback");
+            {
+                CompletionStageScope save(observation, "save_result", "workflow_callback");
+                task->disk_result = result;
+            }
             try {
-                reportStageFinished(*task,
-                                    metrics_reporter,
-                                    Tier::DISK,
-                                    task->disk_to_device_task.descriptors(),
-                                    transfer_begin,
-                                    result.ok());
-                metrics_reporter.maybeReportCopyError(Tier::DISK, Tier::DEVICE, result);
+                {
+                    CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");
+                    reportStageFinished(*task,
+                                        metrics_reporter,
+                                        Tier::DISK,
+                                        task->disk_to_device_task.descriptors(),
+                                        transfer_begin,
+                                        result.ok());
+                    metrics_reporter.maybeReportCopyError(Tier::DISK, Tier::DEVICE, result);
+                }
                 task->phase = Task::Phase::FINISHED;
+                CompletionStageScope notify(observation, "context_complete", "workflow_callback");
                 callback(std::move(result.status));
             } catch (const std::exception& exception) {
+                total.setSuccess(false);
                 task->phase = Task::Phase::FINISHED;
                 callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
             } catch (...) {
+                total.setSuccess(false);
                 task->phase = Task::Phase::FINISHED;
                 callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk load completion exception"));
             }
-        });
+        },
+        "load");
 }
 
 void LoadTaskRunner::reportStageFinished(const Task&                            task,

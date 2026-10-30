@@ -23,6 +23,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -1089,6 +1091,83 @@ TEST(BlockTreeCacheMetricsTest, UnifiedStageLabelsDistinguishHostDiskAndStorageO
     for (const auto& event : events) {
         EXPECT_EQ(event.name.find("disk_to_device"), std::string::npos);
         EXPECT_NE(event.name.find("request_id=12345"), std::string::npos);
+    }
+}
+
+TEST(BlockTreeCacheMetricsTest, CompletionTagsPreserveWorkflowDirectionWithoutRequestCardinality) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    for (int request = 0; request < 2; ++request) {
+        TransferTask         task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(1), request);
+        auto                 observation = CompletionStageContext::forTask(reporter, task, "load");
+        CompletionStageScope scope(observation, "completion_execute", "business_completion");
+    }
+    reporter.flushStageMetrics();
+    auto* metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "HOST");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("scope", "business_completion");
+    tags.AddTag("stage", "completion_execute");
+    tags.AddTag("success", "true");
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 2);
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_qps_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, CompletionScopeReportsUnwindingAsFailureAndMixedSourcesExplicitly) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::diskToDevice(0, 3, {4})},
+                      std::chrono::seconds(1),
+                      123);
+    auto         observation = CompletionStageContext::forTask(reporter, task, "load");
+    EXPECT_STREQ(observation.identity.source, "MIXED");
+    EXPECT_STREQ(observation.identity.target, "DEVICE");
+    EXPECT_STREQ(observation.identity.path, "mixed_to_device");
+    LoadTaskRunner::Task workflow(task.descriptors(),
+                                  TransferTask({task.descriptors()[0]}, std::chrono::seconds(1), 123),
+                                  TransferTask({task.descriptors()[1]}, std::chrono::seconds(1), 123));
+    EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.host_to_device_task.traceId());
+    workflow.disk_result = TransferResult(1);
+    EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.disk_to_device_task.traceId());
+    try {
+        CompletionStageScope scope(observation, "completion_settle", "business_completion");
+        throw std::runtime_error("settlement failure");
+    } catch (const std::runtime_error&) {}
+    reporter.flushStageMetrics();
+    auto* metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    kmonitor::MetricsTags tags("operation", "load");
+    tags.AddTag("source_tier", "MIXED");
+    tags.AddTag("target_tier", "DEVICE");
+    tags.AddTag("scope", "business_completion");
+    tags.AddTag("stage", "completion_settle");
+    tags.AddTag("success", "false");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+}
+
+TEST(BlockTreeCacheMetricsTest, BorrowedCompletionTimersSupportTimelineWithoutKmonitor) {
+    BlockTreeCacheMetricsReporter reporter(nullptr);
+    TransferTask                  task({TransferDescriptor::hostToDisk(0, 1, 2)}, std::chrono::seconds(1), 123);
+    auto                          observation = CompletionStageContext::forTask(reporter, task, "evict");
+    EXPECT_FALSE(observation.start("completion_total", "business_completion"));
+    auto session = AsyncProfileSession::start();
+    auto total   = observation.start("completion_total", "business_completion");
+    ASSERT_TRUE(total);
+    std::thread worker([observation, total] {
+        { CompletionStageScope scope(observation, "completion_execute", "business_completion"); }
+        total.finish(true);
+        total.finish(false);
+    });
+    worker.join();
+    auto events = session->finish();
+    ASSERT_EQ(events.size(), 2u);
+    for (const auto& event : events) {
+        EXPECT_NE(event.name.find("host_to_disk"), std::string::npos);
+        EXPECT_NE(event.name.find("scope=business_completion,operation=evict"), std::string::npos);
+        EXPECT_NE(event.name.find("request_id=123"), std::string::npos);
     }
 }
 
