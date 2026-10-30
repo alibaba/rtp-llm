@@ -179,6 +179,25 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     EXPECT_EQ(mapper->virtualBlockSize(), seq_size_per_block * 2);
 }
 
+TEST_F(KVCacheManagerCPSlotMapperTest, PrefillCPShardingEnabled_ReturnsValidMapper) {
+    auto config = makeTestConfig(/*block_num=*/20, /*seq_size_per_block=*/4);
+
+    ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    par.prefill_cp_config.prefill_cp_size  = 2;
+    par.tp_rank                            = 1;
+    par.tp_size                            = 2;
+
+    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+    const auto mapper = mgr->cpSlotMapper();
+    ASSERT_NE(mapper, nullptr);
+    EXPECT_EQ(mapper->cpRank(), 1);
+    EXPECT_EQ(mapper->cpSize(), 2);
+}
+
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
