@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <optional>
 
 namespace rtp_llm::detail {
 
@@ -9,6 +10,7 @@ struct KVCMReportFeedback {
     bool ok = false;
     bool snapshot_required = false;
     bool registration_required = false;
+    std::optional<bool> remote_cache_enabled;
 };
 
 std::string normalizeKVCacheEventEndpoint(std::string endpoint);

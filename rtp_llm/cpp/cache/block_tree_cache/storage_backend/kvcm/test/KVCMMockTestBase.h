@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <numeric>
