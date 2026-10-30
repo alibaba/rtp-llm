@@ -2,6 +2,19 @@ workspace(name = "rtp_llm")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
+# ATOM's RTP plugin is packaged only for ROCm image builds.  Pin source and
+# checksum so the image cannot silently pick up an incompatible ATOM main.
+http_archive(
+    name = "atom_source",
+    sha256 = "b00d4b49c4d4b7ca1b40b26aaca7af20819bd950ade5381711cb2e473264d502",
+    strip_prefix = "ATOM-bdec681249254846f73b833d1a5112f86730ca34",
+    type = "tar.gz",
+    build_file = "//:BUILD.atom",
+    patches = ["//patches/atom:qwen4_exp_block_fp8_ple_bf16.patch"],
+    patch_args = ["-p1"],
+    urls = ["https://codeload.github.com/ROCm/ATOM/tar.gz/bdec681249254846f73b833d1a5112f86730ca34"],
+)
+
 http_archive(
     name = "io_opentelemetry_cpp",
     # v1.21.0 tag commit: b9cf499ff5715433848b316059714b5c59af1f2c

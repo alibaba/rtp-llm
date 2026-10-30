@@ -1,0 +1,45 @@
+load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
+
+# Package a pinned ATOM source snapshot with Bazel for the ROCm image.  Keep
+# RTP's tested transformers pin; upstream ATOM currently requires 5.16.1.
+py_library(
+    name = "atom_lib",
+    srcs = glob(["atom/**/*.py"]),
+    data = glob(["atom/**/*.json"]),
+    imports = ["."],
+    visibility = ["//visibility:public"],
+)
+
+py_package(
+    name = "atom_package",
+    deps = [":atom_lib"],
+    packages = ["atom"],
+)
+
+py_wheel(
+    name = "atom_whl",
+    distribution = "atom",
+    version = "0.1.8+gbdec681249",
+    python_tag = "py3",
+    visibility = ["//visibility:public"],
+    deps = [":atom_package"],
+    requires = [
+        "aiohttp",
+        "datasets",
+        "fastapi>=0.115,<0.137",
+        "msgspec",
+        "openpyxl",
+        "prometheus_client>=0.25,<0.26",
+        "protobuf",
+        "psutil",
+        "pybind11",
+        "pyzmq",
+        "setproctitle",
+        "tqdm",
+        "transformers==5.2.0",
+        "uvicorn",
+        "uvloop",
+        "xxhash",
+    ],
+)
