@@ -41,6 +41,12 @@ P2PConnectorPrefill::P2PConnectorPrefill(P2PConnectorConfig                     
 
 P2PConnectorPrefill::~P2PConnectorPrefill() = default;
 
+void P2PConnectorPrefill::stop() {
+    if (worker_) {
+        worker_->stop();
+    }
+}
+
 bool P2PConnectorPrefill::init() {
     if (config_.tp_rank == 0) {
         tp_broadcast_client_ = std::make_shared<P2PBroadcastClient>(

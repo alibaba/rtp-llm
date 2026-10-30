@@ -76,6 +76,22 @@ REQUEST_GET = None
 CONNECT_TIMEOUT_RETRIES = 2
 
 
+def configure_oss_internal_endpoint_rewrite(enabled: bool) -> None:
+    """Apply the download policy before starting work in this process."""
+    try:
+        from internal_source.rtp_llm.utils import ssrf_check
+    except ImportError:
+        return
+
+    configure = getattr(ssrf_check, "configure_oss_internal_endpoint_rewrite", None)
+    if configure is not None:
+        configure(enabled)
+    elif not enabled:
+        raise RuntimeError(
+            "Disabling OSS endpoint rewrite requires the matching internal download implementation"
+        )
+
+
 def _default_request_get(url, headers, timeout=10):
     import requests
 

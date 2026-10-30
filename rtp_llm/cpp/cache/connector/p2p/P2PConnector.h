@@ -38,6 +38,7 @@ public:
 
 public:
     bool init();
+    void stop();
 
     // Expose the Prefill resource store for integration and testing.
     std::shared_ptr<P2PConnectorResourceStore> streamStore() const;

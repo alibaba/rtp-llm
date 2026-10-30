@@ -1624,6 +1624,9 @@ class BackendTest(JitCacheTestBase):
                 events.append("backend")
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
+                self.engine = types.SimpleNamespace(
+                    config=types.SimpleNamespace(max_seq_len=4096)
+                )
                 FakeBackendManager.instance = self
 
             def start(self):
@@ -1672,6 +1675,7 @@ class BackendTest(JitCacheTestBase):
             backend.local_rank_start(None, configs, pipe_writer=object())
         self.assertEqual(status.call_args[0][1], "success")
         self.assertEqual(events, ["device", "tuning", "backend"])
+        self.assertEqual(status.call_args.kwargs["max_seq_len"], 4096)
         handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
         FakeBackendManager.instance.request_shutdown.assert_called_once_with()
         FakeBackendManager.instance.serve_forever.assert_called_once_with()

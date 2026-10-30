@@ -33,6 +33,8 @@ public:
     ~P2PWorkerPrefillRead();
 
 public:
+    void stop();
+
     bool init();
 
     bool writeByLayerTag(int                                  layer_id,
