@@ -149,10 +149,11 @@ def _sparse_paged_online_split_kernel(
     NUM_SPLITS: tl.constexpr,
     BLOCKS_PER_SPLIT: tl.constexpr,
 ):
-    batch = tl.program_id(0)
+    partition = tl.program_id(0)
+    batch = partition // (QUERY_LEN * NUM_SPLITS)
     head = tl.program_id(1)
-    query = tl.program_id(2) // NUM_SPLITS
-    split = tl.program_id(2) % NUM_SPLITS
+    query = (partition // NUM_SPLITS) % QUERY_LEN
+    split = partition % NUM_SPLITS
     kv_head = head // (H_Q // H_KV)
     rd = tl.arange(0, D)
     q = tl.load(
@@ -491,7 +492,8 @@ def sparse_paged_gqa_attn(
             fp16_pv=fp16_pv,
         )
     if not grouped:
-        _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
+        # CUDA grid Y/Z are limited to 65535. Keep all query partitions on X.
+        _sparse_paged_online_split_kernel[(batch * query_len * splits, q_heads)](
             q,
             kv_cache,
             scale_pointer,

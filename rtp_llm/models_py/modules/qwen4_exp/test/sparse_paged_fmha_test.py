@@ -402,6 +402,79 @@ class SparsePagedOnlineSplitTest(unittest.TestCase):
         torch.testing.assert_close(actual, torch.zeros_like(actual))
 
 
+class SparsePagedLongQueryGridTest(unittest.TestCase):
+    @staticmethod
+    def inputs(query_len, *, tp2_geometry=False):
+        torch.manual_seed(8100 + query_len)
+        batch, q_heads, kv_heads, head_dim = (
+            (1, 12, 1, 256) if tp2_geometry else (2, 4, 2, 64)
+        )
+        page_size = 64
+        q = torch.randn(
+            batch, q_heads, query_len, head_dim, device=_DEVICE, dtype=torch.bfloat16
+        )
+        cache = torch.randn(
+            7, 2, kv_heads, page_size, head_dim, device=_DEVICE, dtype=torch.bfloat16
+        )
+        table = torch.tensor(
+            [[6, 2, 4], [3, 5, 1]][:batch], device=_DEVICE, dtype=torch.int32
+        )
+        lengths = torch.full(
+            (batch, query_len), 3 * page_size, device=_DEVICE, dtype=torch.int32
+        )
+        rows = torch.arange(query_len, device=_DEVICE)
+        tokens = (
+            rows[None, :] * 17 + torch.arange(batch, device=_DEVICE)[:, None] * 31
+        ) % (3 * page_size)
+        has_count = not tp2_geometry
+        selected = torch.full(
+            (batch, query_len, 2051 + int(has_count)),
+            -1,
+            device=_DEVICE,
+            dtype=torch.int32,
+        )
+        selected[..., 0] = tokens
+        if has_count:
+            selected[..., -1] = 1
+        # A single selected token makes the exact result its stored BF16 V.
+        # Check every row without a quadratic dense-attention reference.
+        physical = table.gather(1, tokens // page_size)
+        expected = cache[
+            physical[:, :, None],
+            1,
+            torch.arange(kv_heads, device=_DEVICE)[None, None, :],
+            (tokens % page_size)[:, :, None],
+        ].permute(0, 2, 1, 3)
+        expected = expected.repeat_interleave(q_heads // kv_heads, dim=1)
+        return (q, cache, table, lengths, selected), expected, has_count
+
+    def _check(self, query_len, *, tp2_geometry=False):
+        import rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha as module
+
+        inputs, expected, has_count = self.inputs(query_len, tp2_geometry=tp2_geometry)
+        kernel = module._sparse_paged_online_split_kernel
+        with patch.object(kernel, "run", wraps=kernel.run) as invoked:
+            actual = sparse_paged_gqa_attn(
+                *inputs, page_size=64, selected_has_count=has_count
+            )
+            torch.cuda.synchronize()
+        self.assertEqual(invoked.call_count, 1)
+        self.assertEqual(
+            tuple(invoked.call_args.kwargs["grid"]),
+            (inputs[0].shape[0] * query_len * 8, inputs[0].shape[1]),
+        )
+        self.assertEqual(invoked.call_args.kwargs["NUM_SPLITS"], 8)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    def test_long_query_split_grid_boundaries(self):
+        for query_len in (8191, 8192, 32768):
+            with self.subTest(query_len=query_len):
+                self._check(query_len)
+
+    def test_tp2_geometry_above_grid_z_limit(self):
+        self._check(8192, tp2_geometry=True)
+
+
 class GroupedSparsePagedAttentionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
