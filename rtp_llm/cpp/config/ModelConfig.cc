@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include <limits>
 #include <sstream>
 #include <string>
 
@@ -159,6 +160,18 @@ void ModelConfig::set_mla_ops_type(std::string mla_ops_type_str) {
 
 bool ModelConfig::isGatedActivation() const {
     return rtp_llm::isGatedActivation(activation_type);
+}
+
+int64_t ModelConfig::getMtpInputHiddenSize() const {
+    if (hidden_size <= 0 || hc_mult <= 0) {
+        throw std::runtime_error("cannot resolve mtp_input_hidden_size from hidden_size="
+                                 + std::to_string(hidden_size) + " and hc_mult=" + std::to_string(hc_mult));
+    }
+    if (hidden_size > std::numeric_limits<int64_t>::max() / hc_mult) {
+        throw std::runtime_error("mtp_input_hidden_size overflows int64_t for hidden_size="
+                                 + std::to_string(hidden_size) + " and hc_mult=" + std::to_string(hc_mult));
+    }
+    return hidden_size * hc_mult;
 }
 
 bool ModelConfig::isKvCacheQuant() const {

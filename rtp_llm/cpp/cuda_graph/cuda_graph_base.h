@@ -50,13 +50,14 @@ struct GraphParams {
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
-    int64_t          hc_mult                                    = 1;
     int              generation_prefill_cuda_graph_max_requests = 0;
     int              generation_prefill_cuda_graph_pad_token_id = 0;
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
     std::vector<std::string> kv_cache_group_tags;
+    // Only groups whose graph kernels address allocator pages need this second map.
+    std::vector<std::string> physical_block_table_tags;
     // Final kernel block-table width, in kernel block IDs per row. Callers
     // compute it from model topology and actual reserve/fake bounds before
     // constructing the graph; this struct never re-derives page geometry.

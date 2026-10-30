@@ -119,11 +119,11 @@ protected:
                                 v_block_stride_bytes,
                                 type_sz);
 
-        auto spec                = std::make_shared<TestKVCacheSpec>();
-        spec->tag                = "default";
-        spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
-                                                                                  KVCacheSpecType::MultiHeadLatentAttention;
-        spec->seq_size_per_block = seq_size_per_block;
+        auto spec  = std::make_shared<TestKVCacheSpec>();
+        spec->tag  = "default";
+        spec->type = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
+                                                                    KVCacheSpecType::MultiHeadLatentAttention;
+        spec->seq_size_per_block        = seq_size_per_block;
         spec->kernel_seq_size_per_block = seq_size_per_block;
         spec->dtype                     = dtype;
         spec->k_block_bytes             = k_block_stride_bytes;
@@ -234,11 +234,11 @@ TEST_F(MemoryLayoutStrategyTest, Initialization) {
 TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     // Create an int8 config with kv-scale enabled (matches current production behavior).
     auto spec                = createTestKvCacheSpec(/*layer_num=*/4,
-                                      /*dtype=*/rtp_llm::DataType::TYPE_INT8,
-                                      /*local_head_num_kv=*/2,
-                                      /*seq_size_per_block=*/4,
-                                      /*k_block_stride_bytes=*/512,
-                                      /*v_block_stride_bytes=*/512);
+                                                     /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+                                                     /*local_head_num_kv=*/2,
+                                                     /*seq_size_per_block=*/4,
+                                                     /*k_block_stride_bytes=*/512,
+                                                     /*v_block_stride_bytes=*/512);
     auto test_spec           = std::dynamic_pointer_cast<TestKVCacheSpec>(spec);
     test_spec->k_scale_bytes = 2 * 4 * sizeof(float);
     test_spec->v_scale_bytes = 2 * 4 * sizeof(float);
@@ -268,6 +268,68 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     EXPECT_NE(buf_info[0].addr, nullptr);
     EXPECT_NE(buf_info[1].addr, nullptr);
     EXPECT_EQ(buf_info[1].size_bytes, config.kv_scale_stride_bytes);
+}
+
+TEST_F(MemoryLayoutStrategyTest, SparseMhaFp8UsesFp32UnitScaleLayout) {
+    for (const bool sparse : {false, true}) {
+        const size_t heads   = 2;
+        const size_t tokens  = 128;
+        const size_t k_bytes = heads * tokens * 256;
+        auto         spec    = std::dynamic_pointer_cast<TestKVCacheSpec>(
+            createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, heads, tokens, k_bytes, k_bytes));
+        spec->k_scale_bytes = heads * tokens * sizeof(float);
+        spec->v_scale_bytes = spec->k_scale_bytes;
+        rtp_llm::CacheConfig cache_config;
+        cache_config.layer_num          = 1;
+        cache_config.dtype              = DataType::TYPE_FP8_E4M3;
+        cache_config.seq_size_per_block = tokens;
+        cache_config.is_sparse          = sparse;
+        initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3);
+        auto pool_cfg =
+            DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+        auto cfg     = pool_cfg.memory_layouts[0];
+        EXPECT_FALSE(cfg.is_mla);
+        EXPECT_TRUE(cfg.hasScale());
+        auto                 kv    = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
+        auto                 scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
+        MemoryLayoutStrategy strategy;
+        ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+        auto views = strategy.getLayerScaleCacheTensors();
+        ASSERT_EQ(views.size(), 1);
+        EXPECT_EQ(views[0].scalar_type(), torch::kFloat32);
+        EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, static_cast<int64_t>(2 * heads * tokens)}));
+        EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
+        EXPECT_TRUE(torch::equal(views[0], torch::ones_like(views[0])));
+    }
+}
+
+TEST_F(MemoryLayoutStrategyTest, SparseMlaAndIndexerKeepByteScaleLayout) {
+    for (const auto type : {KVCacheSpecType::MultiHeadLatentAttention, KVCacheSpecType::OpaqueKV}) {
+        auto spec = std::dynamic_pointer_cast<TestKVCacheSpec>(
+            createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, 1, 128, 32768, 32768));
+        spec->type          = type;
+        spec->k_scale_bytes = 1024;
+        spec->v_scale_bytes = 0;
+        rtp_llm::CacheConfig cache_config;
+        cache_config.layer_num          = 1;
+        cache_config.dtype              = DataType::TYPE_FP8_E4M3;
+        cache_config.seq_size_per_block = 128;
+        cache_config.is_sparse          = true;
+        initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3);
+        auto pool_cfg =
+            DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+        auto cfg     = pool_cfg.memory_layouts[0];
+        EXPECT_TRUE(cfg.is_mla);
+        auto                 kv    = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
+        auto                 scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
+        MemoryLayoutStrategy strategy;
+        ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+        auto views = strategy.getLayerScaleCacheTensors();
+        ASSERT_EQ(views.size(), 1);
+        EXPECT_EQ(views[0].scalar_type(), torch::kUInt8);
+        EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, 128, 8}));
+        EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
+    }
 }
 
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
@@ -399,11 +461,11 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
     // Regression test: splitKVPartition uses byte offsets; when dtype element size > 1 (e.g. FP16),
     // partitioned slicing must use byte-view tensors.
     auto                 spec = createTestKvCacheSpec(/*layer_num=*/4,
-                                      /*dtype=*/rtp_llm::DataType::TYPE_FP16,
-                                      /*local_head_num_kv=*/8,
-                                      /*seq_size_per_block=*/64,
-                                      /*k_block_stride_bytes=*/1024,
-                                      /*v_block_stride_bytes=*/1024);
+                                                      /*dtype=*/rtp_llm::DataType::TYPE_FP16,
+                                                      /*local_head_num_kv=*/8,
+                                                      /*seq_size_per_block=*/64,
+                                                      /*k_block_stride_bytes=*/1024,
+                                                      /*v_block_stride_bytes=*/1024);
     rtp_llm::CacheConfig cache_config;
     cache_config.layer_num          = 4;
     cache_config.dtype              = rtp_llm::DataType::TYPE_FP16;
@@ -468,11 +530,11 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale) {
     // Create an int8 config with kv-scale enabled, and verify both kv-cache and kv-scale are partitioned.
     auto spec                = createTestKvCacheSpec(/*layer_num=*/4,
-                                      /*dtype=*/rtp_llm::DataType::TYPE_INT8,
-                                      /*local_head_num_kv=*/8,
-                                      /*seq_size_per_block=*/64,
-                                      /*k_block_stride_bytes=*/512,
-                                      /*v_block_stride_bytes=*/512);
+                                                     /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+                                                     /*local_head_num_kv=*/8,
+                                                     /*seq_size_per_block=*/64,
+                                                     /*k_block_stride_bytes=*/512,
+                                                     /*v_block_stride_bytes=*/512);
     auto test_spec           = std::dynamic_pointer_cast<TestKVCacheSpec>(spec);
     test_spec->k_scale_bytes = 8 * 64 * sizeof(float);
     test_spec->v_scale_bytes = 8 * 64 * sizeof(float);

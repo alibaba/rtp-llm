@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <exception>
@@ -7,6 +8,7 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <pybind11/embed.h>
 #include <pybind11/pybind11.h>
@@ -62,7 +64,6 @@ public:
         max_seq_len_(graph_params.max_seq_len),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
-        hc_mult_(static_cast<int>(graph_params.hc_mult)),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         position_encoding_(graph_params.position_encoding),
@@ -70,6 +71,8 @@ public:
         input_embedding_scalar_(graph_params.input_embedding_scalar),
         model_data_type_(graph_params.model_data_type),
         kv_cache_group_tags_(graph_params.kv_cache_group_tags),
+        physical_block_table_tags_(graph_params.physical_block_table_tags.begin(),
+                                   graph_params.physical_block_table_tags.end()),
         position_id_len_factor_(graph_params.position_id_len_factor),
         metrics_reporter_(std::move(metrics_reporter)),
         generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
@@ -83,6 +86,12 @@ public:
         RTP_LLM_CHECK_WITH_INFO(max_kernel_block_table_width_ > 0,
                                 "CUDA graph requires a positive kernel block table width");
         max_bs_ = graph_params.max_context_batch_size;
+        for (const auto& tag : physical_block_table_tags_) {
+            RTP_LLM_CHECK_WITH_INFO(std::find(kv_cache_group_tags_.begin(), kv_cache_group_tags_.end(), tag)
+                                        != kv_cache_group_tags_.end(),
+                                    "physical CUDA graph block table has no cache group: %s",
+                                    tag.c_str());
+        }
         if (py::hasattr(py_instance_, "cuda_graph_engram_window_size")) {
             engram_window_size_ = py_instance_.attr("cuda_graph_engram_window_size")().cast<int>();
         }
@@ -97,6 +106,10 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        RTP_LLM_CHECK_WITH_INFO(num_tokens_per_bs_ > 0, "CUDA graph tokens per request must be positive");
+        draft_prefill_uses_request_lanes_ =
+            isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
+            && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(generation_prefill_cuda_graph_max_requests_ > 0
                                         && generation_prefill_cuda_graph_max_requests_
@@ -116,8 +129,13 @@ public:
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        // Optional model bookkeeping after eager warmup, capture and replay.
+        // These callbacks run outside capture and do not prepare device inputs.
+        py_after_warmup_method_  = py::getattr(py_instance_, "on_cuda_graph_warmup", py::none());
+        py_after_capture_method_ = py::getattr(py_instance_, "on_cuda_graph_capture", py::none());
+        py_after_replay_method_  = py::getattr(py_instance_, "on_cuda_graph_replay", py::none());
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
@@ -199,12 +217,8 @@ private:
         return role_ == CudaGraphRole::GENERATION_PREFILL;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        // DSpARK propose/commit now run as construction-time-role decode graphs
-        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
-        // prefill keeps the fixed-capacity Python path: slicing its output buffer
-        // would mismatch the forward_decode [B * q_len, dim] result in
-        // captureOneGraphInstance.
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        // Request lanes describe token layout, independently of hidden-state width.
+        return draft_prefill_uses_request_lanes_;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -235,9 +249,13 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    py::object              py_after_warmup_method_;
+    py::object              py_after_capture_method_;
+    py::object              py_after_replay_method_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    draft_prefill_uses_request_lanes_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
@@ -248,7 +266,6 @@ private:
     int                     max_seq_len_{0};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
-    int                     hc_mult_{1};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
@@ -266,6 +283,7 @@ private:
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
     std::vector<std::string>                   kv_cache_group_tags_;
+    std::unordered_set<std::string>            physical_block_table_tags_;
     int                                        position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
     int                                        engram_window_size_{0};

@@ -1,0 +1,70 @@
+{
+  "source": "Installed FlashInfer0.7.0 snapshot from the matched vLLM runtime",
+  "license": "Apache-2.0",
+  "scope": "SM120 CP prefill with every page checkpoint; only Qwen4 Prefill adapter, Decode unchanged",
+  "adaptations": [
+    "Redirect utility import to current FlashInfer0.6.9 shared cache/SM helpers",
+    "Namespace isolated under Qwen4; no global dependency replacement",
+    "Use cached host architecture queries and original FlashInfer scratch allocator for the CP kernel; bypass only the stale high-level checkpoint rejection, retaining kernel checkpoint arguments",
+    "Remove the unused non-CP kernel; retain its geometry predicate in geometry.py for CP validation",
+    "Remove unused SM90 helpers and non-CP dispatch/work-descriptor helpers",
+    "Use the CUTLASS DSL 4.4.2 CopyUniversalOp for the existing 64-bit synchronous register-to-global stores"
+  ],
+  "files": [
+    {
+      "name": "geometry.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_sm120.py",
+      "source_sha256": "94fad8696bed061c577603f82670f038f55497231a6775717f8bef65facddb51",
+      "adapted_sha256": "f719e8ea49c50b371751bf954ec6b1eb3aa99808f752bd9c230cec85123e7af2",
+      "adaptation": "Extract only _FullyFusedDeltaRuleSm120.can_implement; non-CP compute code is omitted"
+    },
+    {
+      "name": "helpers.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/helpers.py",
+      "source_sha256": "ac00e2c267a196087a8adec1cbe74b2b2e1c08eb6d5668c433b4011cdf6948e3",
+      "adapted_sha256": "11974042414b1c6a8f45aec1a81d479f803d9ac416c538c125fba480d1d6feb4"
+    },
+    {
+      "name": "custom_compile_cache.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/custom_compile_cache.py",
+      "source_sha256": "218c53d6b7afd00dda369ac1fd90d5a7cb65ea4fb9bdc7f8bafc06535d86bca8",
+      "adapted_sha256": "e8ff27a73a22bed5b0ccd1ec7292b22fdd8fb37e6c032ff31199f8c370cd03b8"
+    },
+    {
+      "name": "alpha.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/alpha.py",
+      "source_sha256": "7f40522b7c7b49f4ffed29d3998bccea56f2acc22224ecd0b4429e3f0ce0befb",
+      "adapted_sha256": "a70ed206cf9d4c78bc1953767c317d5fc8bc5b1499310d5a9d1c603787b434d0"
+    },
+    {
+      "name": "schedule.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/schedule.py",
+      "source_sha256": "5919360e8fb487d51a63c06c73577328855def84acee09e4cfa6046ebca35f45",
+      "adapted_sha256": "b7c1599cf1ad8be83d07d8c577a3d2f0e0ee5fb8aa8fa5fefacb2d0dbe7da910"
+    },
+    {
+      "name": "collective_store_tma.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/collective_store_tma.py",
+      "source_sha256": "92305a4f3b6aa168590a3cf67c0f1dd60c4e720bba9265e1c6709f2d117f10cd",
+      "adapted_sha256": "630d79bf50780df416871a568945159b7eb1a0cc0077eb76015a2db3742e4533"
+    },
+    {
+      "name": "collective_inverse_hmma.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/collective_inverse_hmma.py",
+      "source_sha256": "fa91470f65679a189ef1525b4980451ec75724e1c98b4ff23085a2f5456df790",
+      "adapted_sha256": "d0aef127e63c2d7e807a597db990f244d355f49d3e973f630f236291ead17d39"
+    },
+    {
+      "name": "varlen_helper.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/varlen_helper.py",
+      "source_sha256": "ced3aeeee187f9d96d4d3ed5d28b0e088dc23d75b214d8a6b129c877160f3be1",
+      "adapted_sha256": "d5d802d7026b66594ad6389ff4320ef584610dc9e6308d4bdd865bea66572c1e"
+    },
+    {
+      "name": "delta_rule_cp_sm120.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_cp_sm120.py",
+      "source_sha256": "b02c8ef1ba98177d3695a2cbece5dfd8c208d8339265ab3dbda6e7e23fec5ba1",
+      "adapted_sha256": "0671cc2f65fa0851ec43fcc07ba9fa098da5c178e1ee4c0145cf5fdf085c9e8e"
+    }
+  ]
+}

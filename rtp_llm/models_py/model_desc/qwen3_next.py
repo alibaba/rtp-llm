@@ -1,5 +1,4 @@
 import logging
-import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
@@ -26,7 +25,6 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     MultimodalEmbeddingInjector,
-    RMSNorm,
     RMSResNorm,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
@@ -65,10 +63,10 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
-from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
+    HWKernelConfig,
     HybridAttentionType,
     LinearAttentionConfig,
     ParallelismConfig,
@@ -946,7 +944,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             attn_meta,
         )
-
         return attn_out
 
     def _get_bs_from_attenion_input(
@@ -980,6 +977,7 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        linear_factory=None,
     ):
         super().__init__(
             attn_config,
@@ -988,9 +986,10 @@ class Qwen3NextAttention(CausalAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            linear_factory=linear_factory,
         )
         # maybe fuse gate in qkv_proj later
-        self.gate = LinearFactory.create_linear_from_weights(
+        self.gate = self.linear_factory.create_linear_from_weights(
             weights,
             W.attn_gate_w,
             W.attn_gate_s,
@@ -1021,8 +1020,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        norm_activation: Optional[str] = None,
+        linear_factory=None,
     ):
         super().__init__()
+        self.linear_factory = linear_factory or LinearFactory
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -1077,13 +1079,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             weights[W.linear_attn_qkvz_w] = fused_w[:, : self._qkvz_size]
             weights[W.linear_attn_ba_w] = fused_w[:, self._qkvz_size :]
             del qkvz_w, ba_w
-            self.in_proj_fused = LinearFactory.create_linear(
+            self.in_proj_fused = self.linear_factory.create_linear(
                 fused_w, None, None, quant_config, hw_kernel_config=hw_kernel_config
             )
             self.in_proj_qkvz = None
             self.in_proj_ba = None
         else:
-            self.in_proj_qkvz = LinearFactory.create_linear_from_weights(
+            self.in_proj_qkvz = self.linear_factory.create_linear_from_weights(
                 weights,
                 W.linear_attn_qkvz_w,
                 W.linear_attn_qkvz_s,
@@ -1097,7 +1099,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             ba_hw_kernel_config = hw_kernel_config
             if rocm_swizzle_enabled and not should_swizzle_linear_attn_ba(ba_w):
                 ba_hw_kernel_config = None
-            self.in_proj_ba = LinearFactory.create_linear_from_weights(
+            self.in_proj_ba = self.linear_factory.create_linear_from_weights(
                 weights,
                 W.linear_attn_ba_w,
                 None,
@@ -1117,8 +1119,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             weights[W.linear_attn_norm_w],
             eps=layernorm_eps,
             group_size=linear_attn_config.linear_value_head_dim,
+            activation=norm_activation or "silu",
         )
-        self.out_proj = LinearFactory.create_linear_from_weights(
+        self.out_proj = self.linear_factory.create_linear_from_weights(
             weights,
             W.linear_attn_out_w,
             W.linear_attn_out_s,
@@ -1341,11 +1344,14 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         valid_mask = attn_meta.cp_local_valid_mask
         local_attn_out[valid_mask] = full_attn_out[attn_meta.cp_local_extract_indices]
 
-        local_attn_out = self.norm(
-            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
-        )
-        local_attn_out = self.out_proj(local_attn_out)
-        return local_attn_out
+        return self._output_project(local_attn_out, z)
+
+    def _output_project(self, attn_output, gate):
+        value = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
+        project = getattr(self.norm, "forward_project", None)
+        if callable(project):
+            return project(value, gate, self.out_proj)
+        return self.out_proj(self.norm(value, gate))
 
     def forward(
         self,
@@ -1376,18 +1382,24 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
         else:
             attn_output = self.decode_gdn(
-                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
             )
-        attn_output = self.norm(
-            attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
-        )
-        attn_output = self.out_proj(attn_output)
+        attn_output = self._output_project(attn_output, z)
         if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
+            reduce_output = getattr(self, "tp_all_reduce", all_reduce)
+            attn_output = reduce_output(attn_output, group=Group.TP)
         return attn_output
 
 
 class Qwen3NextDecoderLayer(nn.Module):
+    _linear_factory = LinearFactory
+    _moe_layer_cls = GenericMoeLayer
+
     def __init__(
         self,
         config: ModelConfig,
@@ -1404,14 +1416,19 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
         ]
+        attention_quant_config = self._attention_quant_config(config, weights)
         if self.layer_type == HybridAttentionType.LINEAR:
             self.self_attn = Qwen3NextGatedDeltaNet(
                 config.linear_attention_config,
                 parallelism_config,
                 weights,
                 config.layernorm_eps,
-                config.quant_config,
+                attention_quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
+                # Qwen4-Exp gates this norm with `output_gate_type` (sigmoid);
+                # Qwen3-Next checkpoints leave it unset and keep silu.
+                norm_activation=getattr(config, "linear_attn_norm_activation", None),
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -1422,12 +1439,13 @@ class Qwen3NextDecoderLayer(nn.Module):
                 parallelism_config,
                 weights,
                 config.layernorm_eps,
-                config.quant_config,
+                attention_quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
             )
 
         if config.moe_style in (1, 2):
-            self.mlp = GenericMoeLayer(
+            self.mlp = self._moe_layer_cls(
                 config,
                 parallelism_config,
                 weights,
@@ -1435,6 +1453,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 max_generate_batch_size,
                 enable_cuda_graph,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
             )
         elif config.moe_style == 0:
             self.mlp = DenseMLP(
@@ -1443,8 +1462,17 @@ class Qwen3NextDecoderLayer(nn.Module):
                 weights,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                linear_factory=self._linear_factory,
             )
 
+        self._build_residual_modules(config, weights)
+
+    def _attention_quant_config(self, config, weights):
+        return config.quant_config
+
+    def _build_residual_modules(
+        self, config: ModelConfig, weights: Dict[str, torch.Tensor]
+    ) -> None:
         self.input_layernorm = RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -1479,6 +1507,8 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 
 class Qwen3NextModel(GptModelBase):
+    _decoder_layer_cls = Qwen3NextDecoderLayer
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -1510,7 +1540,7 @@ class Qwen3NextModel(GptModelBase):
         )
         self.layers = nn.ModuleList(
             [
-                Qwen3NextDecoderLayer(
+                self._decoder_layer_cls(
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
@@ -1523,6 +1553,11 @@ class Qwen3NextModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
+        self._build_output_head(model_config, weights)
+
+    def _build_output_head(
+        self, model_config: ModelConfig, weights: ModelWeights
+    ) -> None:
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
@@ -1657,15 +1692,12 @@ class Qwen3NextModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         return self.embed_tokens(input_ids)
 
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        if torch.version.hip is not None and isinstance(
-            fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
-        ):
-            fmha_impl.bind_graph_inputs(inputs)
-        hidden_states = self.word_embedding(inputs)
-        capture = self.capture_context(inputs.capture_hidden_states)
-
-        is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
+    def _build_attn_meta(
+        self,
+        inputs: PyModelInputs,
+        device: torch.device,
+        is_cuda_graph: bool = False,
+    ) -> Qwen3NextMetadata:
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         linear_layer_idx = next(
             (
@@ -1703,7 +1735,13 @@ class Qwen3NextModel(GptModelBase):
         cp_local_extract_indices = None
         cp_local_valid_mask = None
         aiter_gdn_prefill_metadata: dict[int, tuple[torch.Tensor, object]] = {}
-        if attention_inputs.is_prefill and not is_target_verify:
+        # Full-attention-only models (including the MTP draft) have no
+        # convolution consumer. Avoid its device-to-host launch metadata copy.
+        if (
+            linear_layer_idx is not None
+            and attention_inputs.is_prefill
+            and not is_target_verify
+        ):
             if is_cp:
                 (
                     full_prefill_conv1d_meta,
@@ -1711,14 +1749,31 @@ class Qwen3NextModel(GptModelBase):
                     cp_restore_indices,
                     cp_local_extract_indices,
                     cp_local_valid_mask,
-                ) = self._build_cp_linear_attn_metadata(
-                    attention_inputs, hidden_states.device
-                )
+                ) = self._build_cp_linear_attn_metadata(attention_inputs, device)
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
+                host_cu = attention_inputs.cu_seqlens
+                if (
+                    torch.version.hip is None
+                    and torch.device(device).type == "cuda"
+                    and not is_cuda_graph
+                    and not attention_inputs.is_cuda_graph
+                    and attention_inputs.input_lengths.device.type == "cpu"
+                    and isinstance(host_cu, torch.Tensor)
+                    and host_cu.device.type == "cpu"
+                    and host_cu.ndim == 1
+                    and host_cu.numel() > 0
+                    and host_cu.shape == cu_seqlen_without_padding.shape
+                    and host_cu.dtype == cu_seqlen_without_padding.dtype
+                ):
+                    # PyWrappedModel builds this host prefix sum from the live
+                    # host input lengths and uploads its device mirror before
+                    # forward. Reuse it for host launch metadata. Graph inputs
+                    # and device-only batches retain the live device fallback.
+                    cu_seqlen_without_padding = host_cu
                 prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                     query_start_loc=cu_seqlen_without_padding,
-                    device=hidden_states.device,
+                    device=device,
                 )
 
         if (
@@ -1755,7 +1810,7 @@ class Qwen3NextModel(GptModelBase):
                         metadata,
                     )
 
-        attn_meta = Qwen3NextMetadata(
+        return Qwen3NextMetadata(
             prefill_conv1d_meta=prefill_conv1d_meta,
             is_target_verify=is_target_verify,
             full_prefill_conv1d_meta=full_prefill_conv1d_meta,
@@ -1767,27 +1822,38 @@ class Qwen3NextModel(GptModelBase):
             aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
         )
 
+    def _layer_fmha_impl(self, decoder_layer, fmha_impl, layer_idx: int):
+        if decoder_layer.layer_type == HybridAttentionType.LINEAR:
+            return None
+        return select_fmha_impl_for_layer(fmha_impl, self.kv_cache, layer_idx)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if torch.version.hip is not None and isinstance(
+            fmha_impl, (_QwenGraphAttentionImpls, _QwenGdnGraphDelegate)
+        ):
+            fmha_impl.bind_graph_inputs(inputs)
+        hidden_states = self.word_embedding(inputs)
+
+        is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
+        attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
+        capture = self.capture_context(inputs.capture_hidden_states)
+
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
         capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
         if capture_aux_hidden:
-            self.begin_aux_hidden_capture(hidden_states, is_target_verify)
+            self.begin_aux_hidden_capture(hidden_states, attn_meta.is_target_verify)
 
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, i
             )
-            layer_fmha_impl = (
-                None
-                if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
-            )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
-                layer_fmha_impl,
+                self._layer_fmha_impl(decoder_layer, fmha_impl, i),
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,

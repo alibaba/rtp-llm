@@ -11,13 +11,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
     MlaImplBase,
 )
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    KvCacheDataType,
-    ParallelismConfig,
-    RopeStyle,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.ops.fused_rope_kvcache_op import DecodeRopeContractError
 from rtp_llm.utils.model_weight import W
@@ -317,6 +311,27 @@ def get_fmha_impl(
     raise Exception("can not find mha type")
 
 
+def _select_attention_impl_key(
+    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+) -> str:
+    """Route to the attention implementation family.
+
+    * ``mla`` -- MLA models (DSv4, GLM5.3, ...).
+    * ``sparse_gqa`` -- model-registered sparse GQA backend.
+      Opt-in via ``attn_configs.use_sparse_gqa_fmha``: the sparse impl needs
+      the indexer's ``selected_indices``, which the production attention ABI
+      does not carry yet. The same implementation owns prefill and paged
+      decode; either path still requires a model-side selection and must never
+      fall through to dense MHA.
+    * ``mha`` -- everything else (dense prefill/decode).
+    """
+    if attn_configs.use_mla:
+        return "mla"
+    if attn_configs.is_sparse and attn_configs.use_sparse_gqa_fmha:
+        return "sparse_gqa"
+    return "mha"
+
+
 class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 
@@ -342,8 +357,8 @@ class AttnImplFactory(object):
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
-        key_str = "mla" if attn_configs.use_mla else "mha"
-        fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
+        key_str = _select_attention_impl_key(attn_configs, attn_inputs)
+        fmha_impl_method = cls.get_fmha_impl_method(key_str)
         instance = fmha_impl_method(
             attn_configs,
             weight,
@@ -357,6 +372,17 @@ class AttnImplFactory(object):
         )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance
+
+    @classmethod
+    def register_fmha_impl(
+        cls, attention_type: str, factory: AttentionImplFactory
+    ) -> None:
+        existing = cls.FMHA_IMPL_REGISTRY.get(attention_type)
+        if existing is not None and existing is not factory:
+            raise ValueError(
+                f"Attention backend {attention_type!r} is already registered"
+            )
+        cls.FMHA_IMPL_REGISTRY[attention_type] = factory
 
     @classmethod
     def get_fmha_impl_method(cls, attention_type: str) -> AttentionImplFactory:

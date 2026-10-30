@@ -1,6 +1,9 @@
+import importlib.util
 import logging
 from dataclasses import dataclass
 from functools import cache
+from pathlib import Path
+from types import ModuleType
 from typing import Optional
 
 import torch
@@ -9,6 +12,7 @@ from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
 from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 from libth_transformer_config import (
     AttentionConfigs,
+    RopeStyle,
     check_rope_cache,
     get_rope_cache_once,
 )
@@ -18,10 +22,48 @@ class DecodeRopeContractError(RuntimeError):
     """Decode RoPE input/state invariant violation that must not fall back."""
 
 
+def _load_fused_rope_kvcache_without_package_init() -> ModuleType:
+    """Load the independent fused RoPE wrapper when optional siblings fail.
+
+    Some rtp-kernel builds import every optional backend from package
+    ``__init__``.  A missing FlashAttention runtime must not make the
+    standalone fused RoPE/KV-cache extension unavailable.
+    """
+    package_spec = importlib.util.find_spec("rtp_kernel")
+    if package_spec is None or package_spec.submodule_search_locations is None:
+        raise ImportError("rtp_kernel package is unavailable")
+
+    package_dir = next(iter(package_spec.submodule_search_locations), None)
+    if package_dir is None:
+        raise ImportError("rtp_kernel package directory is unavailable")
+
+    module_path = Path(package_dir) / "fused_rope_kvcache.py"
+    module_spec = importlib.util.spec_from_file_location(
+        "_rtp_kernel_fused_rope_kvcache", module_path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise ImportError(f"failed to load fused RoPE wrapper from {module_path}")
+
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
 @cache
-def _get_fused_rope_kvcache():
+def _get_fused_rope_kvcache() -> ModuleType:
     # Lazy: keeps import free of JIT builds; warm-up still hits this pre-readiness.
-    from rtp_kernel import fused_rope_kvcache
+    try:
+        from rtp_kernel import fused_rope_kvcache
+    except ImportError as package_error:
+        try:
+            fused_rope_kvcache = _load_fused_rope_kvcache_without_package_init()
+        except (ImportError, OSError):
+            raise package_error
+        logging.warning(
+            "loaded rtp_kernel.fused_rope_kvcache without package initialization "
+            "because an optional rtp_kernel backend failed to import: %s",
+            package_error,
+        )
 
     return fused_rope_kvcache
 
@@ -326,6 +368,16 @@ class FusedRopeKVCacheDecodeOp:
             )
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
+        use_rope_cache = check_rope_cache(rope_config, rope_cache)
+        # The cached decode kernel receives sequence_lengths as its position
+        # pointer, even when explicit multi-axis position_ids are supplied.
+        # That op-owned buffer contains one value per request. Applying the
+        # position-ID stride here reads past it (e.g. Qwen4 MTP inherits 3).
+        cached_decode = use_rope_cache and rope_config.style in (
+            RopeStyle.Base,
+            RopeStyle.Yarn,
+        )
+        decode_index_factor = 1 if cached_decode else rope_config.index_factor
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
@@ -340,9 +392,7 @@ class FusedRopeKVCacheDecodeOp:
             store_kv=False,
             kv_cache_scale=self._get_kv_scale(kv_cache),
             kv_cache_offset_h=params.kv_cache_offset_h,
-            rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
-            ),
+            rope_cache=rope_cache.data if use_rope_cache else None,
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,
             rope_dim=rope_config.dim,
@@ -354,7 +404,7 @@ class FusedRopeKVCacheDecodeOp:
             rope_extrapolation_factor=rope_config.extrapolation_factor,
             rope_mscale=rope_config.mscale,
             rope_offset=rope_config.offset,
-            rope_index_factor=rope_config.index_factor,
+            rope_index_factor=decode_index_factor,
             rope_mrope_dim1=rope_config.mrope_dim1,
             rope_mrope_dim2=rope_config.mrope_dim2,
             rope_mrope_dim3=rope_config.mrope_dim3,

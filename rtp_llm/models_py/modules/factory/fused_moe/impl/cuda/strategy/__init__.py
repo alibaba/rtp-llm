@@ -1,6 +1,7 @@
 """CUDA MOE strategies"""
 
 from .fp4 import (
+    CudaNvfp4CutlassStrategy,
     CudaFp4EpLowLatencyStrategy,
     CudaFp4EpNormalStrategy,
     CudaFp4NoDPStrategy,
@@ -36,6 +37,7 @@ from .w4a8_int4_per_channel import (
 )
 
 __all__ = [
+    "CudaNvfp4CutlassStrategy",
     # No quantization
     "CudaNoQuantEpLowLatencyStrategy",
     "CudaNoQuantCppStrategy",

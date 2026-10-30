@@ -361,6 +361,12 @@ class TemplateTest(TestCase):
     def test_qwen35_dense_mtp_uses_qwen35_renderer(self):
         assert _renderer_factory["qwen35_dense_mtp"] is Qwen35Renderer
 
+    def test_qwen4_exp_uses_qwen35_renderer(self):
+        assert _renderer_factory["qwen4_exp"] is Qwen35Renderer
+
+    def test_qwen4_exp_mtp_uses_qwen35_renderer(self):
+        assert _renderer_factory["qwen4_exp_mtp"] is Qwen35Renderer
+
     def test_qwen35_passes_chat_template_kwargs_to_template(self):
         tokenizer = _Qwen35DefaultTemplateTokenizer()
         renderer = Qwen35Renderer(
@@ -385,6 +391,42 @@ class TemplateTest(TestCase):
             "<|im_start|>user\nhello<|im_end|>\n"
             "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         )
+
+    def test_qwen35_passes_top_level_enable_thinking_to_template(self):
+        renderer = Qwen35Renderer(
+            _Qwen35DefaultTemplateTokenizer(),
+            RendererParams(
+                model_type="qwen4_exp",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            GenerateEnvConfig(),
+            RenderConfig(),
+        )
+        messages = [ChatMessage(role=RoleEnum.user, content="hello")]
+
+        disabled_prompt = renderer.render_chat(
+            ChatCompletionRequest(
+                messages=messages,
+                enable_thinking=False,
+                chat_template_kwargs={"enable_thinking": True},
+            )
+        ).rendered_prompt
+        disabled_kwargs_prompt = renderer.render_chat(
+            ChatCompletionRequest(
+                messages=messages,
+                enable_thinking=True,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+        ).rendered_prompt
+        enabled_prompt = renderer.render_chat(
+            ChatCompletionRequest(messages=messages, enable_thinking=True)
+        ).rendered_prompt
+
+        self.assertTrue(disabled_prompt.endswith("<think>\n\n</think>\n\n"))
+        self.assertTrue(disabled_kwargs_prompt.endswith("<think>\n\n</think>\n\n"))
+        self.assertTrue(enabled_prompt.endswith("<think>\n"))
 
     def test_basic_renderer_preserves_template_thinking_default(self):
         generate_env_config = GenerateEnvConfig()

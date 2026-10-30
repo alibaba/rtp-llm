@@ -232,6 +232,18 @@ py_test(
 )
 
 py_test(
+    name = "lazy_registry_test",
+    srcs = [
+        "lazy_registry_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+)
+
+py_test(
     name = "pipeline_test",
     srcs = [
         "pipeline_test.py",

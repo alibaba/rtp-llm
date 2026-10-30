@@ -359,6 +359,30 @@ class OpenaiComparer(BaseComparer):
     ) -> None:
         if self.qr_info.get("grammar_constraint_only"):
             self._validate_grammar_constraint(actual_result)
+            minimum_aux_info = self.qr_info.get("compare_config", {}).get(
+                "minimum_aux_info", {}
+            )
+            if minimum_aux_info:
+                if actual_result.aux_info is None:
+                    raise SmokeException(
+                        QueryStatus.COMPARE_FAILED,
+                        "[grammar_constraint_only] minimum aux_info missing: "
+                        f"{minimum_aux_info}",
+                    )
+                for field, minimum in minimum_aux_info.items():
+                    actual = getattr(actual_result.aux_info, field, None)
+                    if (
+                        isinstance(minimum, bool)
+                        or not isinstance(minimum, (int, float))
+                        or isinstance(actual, bool)
+                        or not isinstance(actual, (int, float))
+                        or actual < minimum
+                    ):
+                        raise SmokeException(
+                            QueryStatus.COMPARE_FAILED,
+                            "[grammar_constraint_only] minimum "
+                            f"aux_info.{field}: expected >= {minimum!r}, got {actual!r}",
+                        )
             return
 
         diffs: List[str] = []
@@ -414,6 +438,34 @@ class OpenaiComparer(BaseComparer):
                             actual_required_aux,
                         )
                     )
+
+        minimum_aux_info = compare_config.get("minimum_aux_info", {})
+        if minimum_aux_info:
+            if actual_result.aux_info is None:
+                diffs.append(
+                    self._format_expect_actual(
+                        "minimum aux_info missing",
+                        minimum_aux_info,
+                        None,
+                    )
+                )
+            else:
+                for field, minimum in minimum_aux_info.items():
+                    actual = getattr(actual_result.aux_info, field, None)
+                    if (
+                        isinstance(minimum, bool)
+                        or not isinstance(minimum, (int, float))
+                        or isinstance(actual, bool)
+                        or not isinstance(actual, (int, float))
+                        or actual < minimum
+                    ):
+                        diffs.append(
+                            self._format_expect_actual(
+                                f"minimum aux_info.{field}",
+                                f">= {minimum!r}",
+                                actual,
+                            )
+                        )
 
         expect_extra_outputs = copy.copy(expect_result.extra_outputs)
         actual_extra_outputs = copy.copy(actual_result.extra_outputs)

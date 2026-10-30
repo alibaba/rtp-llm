@@ -61,9 +61,7 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -96,6 +94,15 @@ class GptModelBase(nn.Module):
 
     def capture_context(self, requested: bool) -> CaptureContext:
         return self._capture_context.for_forward(requested)
+
+    def compute_logits(self, hidden: torch.Tensor) -> Optional[torch.Tensor]:
+        """Optionally own the output head after normalization and row selection.
+
+        Return contiguous FP32 [rows, padded_vocab] on the hidden device,
+        including TP gathering. None delegates computation and TP gathering to
+        the native head. The caller retains vocabulary trimming and sampling.
+        """
+        return None
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
@@ -243,9 +250,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None

@@ -168,6 +168,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("KERNEL_BLOCK_COMPRESSED", OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED)
         .value("STATE_RING", OpaqueBlockEntryCountMode::STATE_RING);
 
+    py::enum_<TpCacheTransferMode>(m, "TpCacheTransferMode")
+        .value("LEGACY", TpCacheTransferMode::LEGACY)
+        .value("REPLICATED", TpCacheTransferMode::REPLICATED)
+        .value("MHA_HEADS", TpCacheTransferMode::MHA_HEADS)
+        .value("LINEAR_QKV", TpCacheTransferMode::LINEAR_QKV);
+
     py::enum_<CpPrefillSliceLayout>(m, "CpPrefillSliceLayout")
         .value("NONE", CpPrefillSliceLayout::NONE)
         .value("PAYLOAD", CpPrefillSliceLayout::PAYLOAD)
@@ -1029,8 +1035,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_all_gather             = t[9].cast<bool>();
                     c.ll_num_max_token           = t[10].cast<int>();
                     c.moe_strategy               = t[11].cast<std::string>();
-                    if (t.size() == 13)
+                    if (t.size() == 13) {
                         c.fp4_moe_op = t[12].cast<std::string>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
@@ -1838,6 +1845,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
+        .def_readwrite("use_sparse_gqa_fmha", &AttentionConfigs::use_sparse_gqa_fmha)
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
@@ -2011,6 +2019,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
+        .def_readwrite("tp_transfer_mode", &KVCacheSpecDesc::tp_transfer_mode)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
@@ -2048,11 +2057,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.tp_transfer_mode);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2074,6 +2084,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() == 21) {
+                    c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
+                }
                 return c;
             }));
 
@@ -2190,6 +2203,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)
         .def("getAttentionConfigs", &ModelConfig::getAttentionConfigs)
+        .def("getMtpInputHiddenSize", &ModelConfig::getMtpInputHiddenSize)
         .def("isGatedActivation", &ModelConfig::isGatedActivation)
         .def("isKvCacheQuant", &ModelConfig::isKvCacheQuant)
         .def("to_string", &ModelConfig::to_string);

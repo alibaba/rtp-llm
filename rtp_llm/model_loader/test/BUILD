@@ -79,3 +79,15 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_online_modelopt_fp4",
+    srcs = ["test_online_modelopt_fp4.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "nvfp4_cache_test",
+    srcs = ["nvfp4_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

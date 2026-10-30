@@ -58,6 +58,21 @@ class _GenerationOnlyAttentionImpl(_SafeAttentionImpl):
 
 
 class AttentionFactoryGenerationPrefillCudaGraphTest(unittest.TestCase):
+    def test_model_backend_registration_is_explicit_and_cannot_replace_an_owner(self):
+        factory = attn_factory.AttnImplFactory
+        with patch.object(
+            factory, "FMHA_IMPL_REGISTRY", dict(factory.FMHA_IMPL_REGISTRY)
+        ):
+            backend = lambda *args, **kwargs: None
+            factory.register_fmha_impl("test_model_backend", backend)
+            factory.register_fmha_impl("test_model_backend", backend)
+            self.assertIs(factory.get_fmha_impl_method("test_model_backend"), backend)
+            with self.assertRaisesRegex(ValueError, "already registered"):
+                factory.register_fmha_impl("test_model_backend", lambda: None)
+            factory.FMHA_IMPL_REGISTRY.pop("sparse_gqa", None)
+            with self.assertRaisesRegex(ValueError, "Unsupported attention type"):
+                factory.get_fmha_impl_method("sparse_gqa")
+
     def setUp(self):
         self.attn_configs = types.SimpleNamespace(
             rope_config=types.SimpleNamespace(style=None),
@@ -199,6 +214,32 @@ class AttentionFactoryGenerationPrefillMlaCudaGraphTest(
         )
         with self.assertRaises(ValueError):
             self._select([_SafeAttentionImpl], mode="invalid_graph_mode")
+
+
+class AttnFactoryRegistryDispatchTest(unittest.TestCase):
+    """Every registry entry must accept the dispatcher's positional call.
+
+    ``AttnImplFactory.get_fmha_impl`` invokes the selected registry function
+    with nine positional arguments: (attn_configs, weight, attn_inputs,
+    fmha_config, quant_config, is_cuda_graph, max_seq_len, parallelism_config,
+    cuda_graph_selection_mode). A family that lags behind that signature only
+    fails when it is actually routed to -- the qwen4 sparse-GQA path hit
+    "takes from 3 to 8 positional arguments but 9 were given" in the MTP smoke.
+    """
+
+    def test_registry_functions_accept_the_dispatcher_call(self):
+        import inspect
+
+        dispatcher_args = (None,) * 9
+        self.assertTrue(attn_factory.AttnImplFactory.FMHA_IMPL_REGISTRY)
+        for name, fn in attn_factory.AttnImplFactory.FMHA_IMPL_REGISTRY.items():
+            try:
+                inspect.signature(fn).bind(*dispatcher_args)
+            except TypeError as error:
+                self.fail(
+                    f"registry entry {name!r} ({fn.__name__}) cannot bind the "
+                    f"dispatcher's 9 positional arguments: {error}"
+                )
 
 
 if __name__ == "__main__":

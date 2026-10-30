@@ -47,6 +47,11 @@ struct PyWrappedModelTestPeer {
         model.context_parallel_processor_ = std::move(processor);
     }
 
+    static GptModelOutputs
+    forwardPostLayersLastHidden(PyWrappedModel& model, const torch::Tensor& hidden, const GptModelInputs& inputs) {
+        return model.forwardPostLayersLastHidden(hidden, inputs);
+    }
+
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
     }
@@ -136,6 +141,14 @@ private:
 private:
     kmonitor::MetricsReporterPtr reporter_;
 };
+void ensureRuntimeInitialized() {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() {
+        if (!isRuntimeInitialized()) {
+            initRuntime(0, false, false, MlaOpsType::AUTO);
+        }
+    });
+}
 
 struct TestCacheSpec: public KVCacheSpec {
     TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes):
@@ -681,6 +694,28 @@ Scenario makeScenario(const std::string& name) {
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
+    if (name == "cuda_lengths_host_prefix" || name == "cuda_lengths_host_prefix_micro") {
+        auto config           = makeCacheConfig({{"full", 128, 256}});
+        auto layout           = makeLayout(config);
+        auto inputs           = makeInputs({1, 3, 4},
+                                           {501, 502, 503},
+                                           std::vector<int64_t>(24, 0),
+                                           8,
+                                           std::vector<int32_t>(24, 1),
+                                           {"full"},
+                                           8,
+                                           128,
+                                           256);
+        inputs.input_lengths  = inputs.input_lengths.cuda();
+        inputs.prefix_lengths = pinnedTensor({128, 256, 512}, {3});
+        inputs.pd_separation  = false;
+        Scenario scenario{
+            std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+        if (name == "cuda_lengths_host_prefix_micro") {
+            scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
+        }
+        return scenario;
+    }
     if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
         || name == "single_model_extra_payload") {
         const bool single_group = name == "single_model_extra_payload";
@@ -1095,14 +1130,9 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                                              size_t             forward_count,
                                              bool               ignore_deferred_errors,
                                              bool               capture_only_first_forward,
-                                             bool               skip_first_deferred_error_take) {
-    static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
-    });
+                                             bool               skip_first_deferred_error_take,
+                                             bool               owns_py_model) {
+    ensureRuntimeInitialized();
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
@@ -1169,7 +1199,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               SpeculativeExecutionConfig{},
                               scenario.device_resources,
                               MlaOpsType::AUTO,
-                              /*max_seq_len=*/64,
+                              /*max_seq_len=*/scenario_name.find("cuda_lengths_host_prefix") == 0 ? 1024 : 64,
                               scenario.hidden_size,
                               manager,
                               scenario.mtp_cache_config_index,
@@ -1178,6 +1208,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               /*kernel_block_table_width=*/0,
                               scenario.capture_layer_ids,
                               scenario.capture_dtype};
+    params.owns_py_model = owns_py_model;
     if (cacheless_warmup) {
         params.cache_manager                     = nullptr;
         scenario.inputs.warmup                   = true;
@@ -1254,6 +1285,12 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
             } else {
                 forward_hidden_states.emplace_back();
             }
+        }
+        if (scenario_name.find("cuda_lengths_host_prefix") == 0) {
+            scenario.inputs.prefix_lengths = pinnedTensor({256, 128, 384}, {3});
+            (void)model.forward(scenario.inputs);
+            scenario.inputs.prefix_lengths = pinnedTensor({0, 0, 0}, {3});
+            (void)model.forward(scenario.inputs);
         }
         capture_stats = model.hiddenStateCaptureStats();
         if (test_cp_processor != nullptr) {
@@ -1491,7 +1528,8 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
 
 // Exercise input preparation, Python forward, graphs and custom output together.
 // Only decoder math is replaced; all routing and post-layers code is production.
-py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm) {
+py::dict
+runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm, bool compact_output) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
     constexpr int     width             = 4;
@@ -1547,7 +1585,9 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
         model.prepareAttentionInputs(inputs);
         model.updateKVCacheKernelBlockId(inputs);
     }
-    const auto outputs      = model.forward(inputs);
+    const auto outputs            = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
+                                              model, torch::ones({2, width}, lm_head->kernel.options()), inputs) :
+                                                     model.forward(inputs);
     result["graph_status"]  = generationPrefillCudaGraphStatusString(outputs.generation_prefill_cuda_graph_status);
     result["custom_output"] = outputs.custom_output;
     result["custom_output_error"] = outputs.custom_output_error;
@@ -1573,13 +1613,75 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     return result;
 }
 
+py::object
+runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string& action, bool is_speculative_target) {
+    ensureRuntimeInitialized();
+
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_FP16;
+    description.norm_type                    = NormType::rmsnorm;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = 1;
+
+    GptModelInitParams params{weights,
+                              description,
+                              std::nullopt,
+                              /*model_id=*/0,
+                              ParallelismConfig{},
+                              HWKernelConfig{},
+                              ProfilingDebugLoggingConfig{},
+                              RuntimeConfig{},
+                              ConcurrencyConfig{},
+                              SpeculativeExecutionConfig{},
+                              DeviceResourceConfig{},
+                              MlaOpsType::AUTO,
+                              /*max_seq_len=*/64,
+                              /*hidden_size=*/1,
+                              /*cache_manager=*/nullptr,
+                              /*mtp_cache_config_index=*/std::nullopt};
+    PyWrappedModel     model(params,
+                             std::move(py_model),
+                             /*is_prefill_cuda_graph_mode=*/false,
+                             /*use_spec_decoding=*/is_speculative_target);
+
+    if (action == "reduce_true" || action == "reduce_false") {
+        const auto result = model.reduceSpeculativeTargetPrepareStatus(action == "reduce_true");
+        return result.has_value() ? py::object(py::bool_(*result)) : py::object(py::none());
+    }
+    if (action == "has_hooks") {
+        return py::bool_(model.hasSpeculativeTargetCommitHooks());
+    }
+    if (action == "prepare") {
+        auto accept_len =
+            torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
+        return py::str(model.prepareSpeculativeTargetCommit(accept_len));
+    }
+    if (action == "abort") {
+        (void)model.finishSpeculativeTargetCommit(false);
+        return py::none();
+    }
+    if (action == "commit") {
+        return py::str(model.finishSpeculativeTargetCommit(true));
+    }
+    throw std::invalid_argument("unknown PyWrappedModel speculative commit bridge action: " + action);
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
-    m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_post_layers",
+          &rtp_llm::test::runCustomOutput,
+          py::arg("py_model"),
+          py::arg("handler"),
+          py::arg("indexes"),
+          py::arg("python_norm"),
+          py::arg("compact_output") = false);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
     m.def("initialize_capture_publisher_with_core_dump", &rtp_llm::test::initializeCapturePublisherWithCoreDump);
@@ -1598,7 +1700,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("forward_count")                  = 1,
           py::arg("ignore_deferred_errors")         = false,
           py::arg("capture_only_first_forward")     = false,
-          py::arg("skip_first_deferred_error_take") = false);
+          py::arg("skip_first_deferred_error_take") = false,
+          py::arg("owns_py_model")                  = true);
     m.def("run_dirty_generation_prefill_capture_scenario",
           &rtp_llm::test::runDirtyGenerationPrefillCaptureScenario,
           py::arg("py_model"));
@@ -1607,4 +1710,9 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("py_model"),
           py::arg("expected_error_substring") = "",
           py::arg("forward_flags")            = std::vector<std::pair<bool, bool>>{});
+    m.def("run_speculative_commit_bridge",
+          &rtp_llm::test::runPyWrappedModelSpeculativeCommitBridge,
+          py::arg("py_model"),
+          py::arg("action"),
+          py::arg("is_speculative_target") = true);
 }

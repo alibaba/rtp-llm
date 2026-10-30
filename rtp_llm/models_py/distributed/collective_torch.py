@@ -37,6 +37,7 @@ _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
 _flashinfer_allreduce = None
+_canonical_p2p = None
 
 
 def _get_rocm_rccl():
@@ -76,6 +77,7 @@ def _init_flashinfer_allreduce(
     parallelism_config: ParallelismConfig,
     disable_custom_all_reduce: Optional[bool] = None,
 ) -> None:
+    global _canonical_p2p
     if parallelism_config.tp_size <= 1:
         return
     _get_flashinfer_allreduce().init_flashinfer_allreduce(
@@ -84,6 +86,19 @@ def _init_flashinfer_allreduce(
         single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
         disable_custom_all_reduce=disable_custom_all_reduce,
     )
+
+    if (
+        parallelism_config.tp_size == 8
+        and parallelism_config.world_size == 8
+        and parallelism_config.local_world_size == 8
+    ):
+        from rtp_llm.models_py.distributed.canonical_p2p import init_canonical_p2p
+
+        _canonical_p2p = init_canonical_p2p(
+            _get_group(Group.TP),
+            torch.device("cuda", parallelism_config.local_rank),
+            disable_custom_all_reduce=disable_custom_all_reduce,
+        )
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -493,13 +508,55 @@ def _register_process_groups_to_cpp():
             dest.copy_(tensor)
             return dest
         target = dest if dest is not None else tensor
+        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
+        if (
+            op == 0
+            and mode == _CPP_PARALLEL_MODE_TP
+            and tensor.is_cuda
+            and target.is_cuda
+            and tensor.shape == target.shape
+            and tensor.dtype == target.dtype
+            and tensor.device == target.device
+            and target.is_contiguous()
+            and flashinfer_ar is not None
+            and pg is flashinfer_ar.group
+            and not (
+                _canonical_p2p is not None
+                and pg is _canonical_p2p.group
+                and _canonical_p2p.should_use(tensor)
+            )
+            and flashinfer_ar.should_use_cpp_small(tensor)
+        ):
+            return flashinfer_ar.all_reduce_into(tensor, target)
         if dest is not None:
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
-        torch.distributed.all_reduce(
-            gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
-        )
+        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
+        if (
+            op == 0
+            and mode == _CPP_PARALLEL_MODE_TP
+            and not was_cpu
+            and _canonical_p2p is not None
+            and pg is _canonical_p2p.group
+            and _canonical_p2p.should_use(gpu_t)
+        ):
+            _canonical_p2p.all_reduce(gpu_t)
+        elif (
+            op == 0
+            and mode == _CPP_PARALLEL_MODE_TP
+            and not was_cpu
+            and flashinfer_ar is not None
+            and pg is flashinfer_ar.group
+            and flashinfer_ar.should_use_cpp_small(gpu_t)
+        ):
+            result = flashinfer_ar.all_reduce(gpu_t)
+            # The C++ callback returns the original destination storage.
+            gpu_t.copy_(result)
+        else:
+            torch.distributed.all_reduce(
+                gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
+            )
         if was_cpu:
             target.copy_(gpu_t)
         return target
@@ -636,6 +693,7 @@ def destroy_distributed_environment():
     to reinitialize the distributed environment.
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _canonical_p2p
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -667,6 +725,9 @@ def destroy_distributed_environment():
     if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
 
+    if _canonical_p2p is not None:
+        _canonical_p2p.close()
+    _canonical_p2p = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
@@ -797,13 +858,17 @@ def all_reduce(
             return rocm_rccl.capture_all_reduce(target, _get_group(group))
 
     if group == Group.TP:
+        if _canonical_p2p is not None and _canonical_p2p.should_use(tensor):
+            return _canonical_p2p.all_reduce(tensor, inplace=inplace)
+
         flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
         if flashinfer_ar is not None and flashinfer_ar.should_use(tensor):
-            result = flashinfer_ar.all_reduce(tensor)
             if inplace:
-                tensor.copy_(result)
-                return tensor
-            return result
+                # IPC first stages the input, so the registered reduction may
+                # write directly back into its original destination. Avoid a
+                # second device copy at every model-layer collective.
+                return flashinfer_ar.all_reduce_into(tensor, tensor)
+            return flashinfer_ar.all_reduce(tensor)
 
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
@@ -852,7 +917,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    # The blocking collective submits a complete write of every output element
+    # and orders its completion before consumers on this CUDA stream.
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,

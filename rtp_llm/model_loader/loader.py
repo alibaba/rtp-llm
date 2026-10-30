@@ -96,7 +96,17 @@ class ModelLoader:
         global_weight_aliases: Optional[Mapping[str, torch.Tensor]] = None,
     ):
         self._global_weight_aliases = dict(global_weight_aliases or {})
-        descriptor_names = {weight.name for weight in self._model_weights_info.weights}
+        descriptors = {
+            weight.name: weight for weight in self._model_weights_info.weights
+        }
+        descriptors.update(
+            {
+                name: weight
+                for weight in self._model_weights_info.weights
+                for name in getattr(weight, "additional_output_names", ())
+            }
+        )
+        descriptor_names = set(descriptors)
         unknown_aliases = set(self._global_weight_aliases) - descriptor_names
         if unknown_aliases:
             raise KeyError(
@@ -105,9 +115,15 @@ class ModelLoader:
         for name, tensor in self._global_weight_aliases.items():
             if not isinstance(tensor, torch.Tensor):
                 raise TypeError(f"global weight alias {name!r} is not a torch.Tensor")
-            if tensor.device != torch.device(device):
+            descriptor = descriptors[name]
+            expected_device = torch.device(
+                getattr(descriptor, "resident_output_devices", {}).get(
+                    name, descriptor.resident_device or device
+                )
+            )
+            if tensor.device != expected_device:
                 raise ValueError(
-                    f"global weight alias {name!r} is on {tensor.device}, expected {torch.device(device)}"
+                    f"global weight alias {name!r} is on {tensor.device}, expected {expected_device}"
                 )
         if self._load_config.is_ft_style_weight:
             weights = self._load_from_ft_style(device)
@@ -229,9 +245,13 @@ class ModelLoader:
         # 清空现有的权重
         weights = [{} for _ in range(num_layers)]
         global_weights = dict(self._global_weight_aliases)
+        resident_devices = self._resident_weight_devices()
+        source_device = "cpu" if resident_devices else device
         # 重新构建权重
         all_tensors = self._load_config.database.load_tensors_by_prefix(
-            (layer_weight_prefix, global_weight_prefix), device, direct_io=direct_io
+            (layer_weight_prefix, global_weight_prefix),
+            source_device,
+            direct_io=direct_io and source_device == device,
         )
         for key, tensor in all_tensors.items():
             if key.startswith(layer_weight_prefix):
@@ -241,19 +261,27 @@ class ModelLoader:
                 name = ".".join(parts[1:])
                 # 将张量移动到设备，并设置到对应的层
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
-                weights[layer_id][name] = tensor[0].to(device)
+                weights[layer_id][name] = tensor[0].to(
+                    self._resident_weight_device(
+                        resident_devices, layer_id, name, device
+                    )
+                )
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
                 if name in self._global_weight_aliases:
                     continue
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
-                global_weights[name] = tensor[0].to(device)
+                value = tensor[0].to(
+                    self._resident_weight_device(resident_devices, None, name, device)
+                )
+                global_weights[name] = value
         model_weights.weights = weights
         model_weights.global_weights = global_weights
         return model_weights
 
     def _load_weight(self, device: str):
         load_method = self._load_method
+        supports_fast_iteration = self._supports_fastsafetensors_iteration()
         if load_method == LoadMethod.AUTO:
             is_safetensor = self._load_config.database.is_safetensor
             convert_device = self._choose_weight_convert_device(device)
@@ -265,6 +293,7 @@ class ModelLoader:
                 and not_same_name_tensors
                 and self._is_memory_enough_for_fastsafetensor()
                 and has_module("fastsafetensors")
+                and supports_fast_iteration
             ):
                 load_method = LoadMethod.FASTSAFETENSORS
             else:
@@ -275,25 +304,40 @@ class ModelLoader:
         )
 
         if load_method.lower() == LoadMethod.FASTSAFETENSORS:
+            if not supports_fast_iteration:
+                raise ValueError(
+                    "fastsafetensors loading is unsafe for a weight descriptor "
+                    "that requires checkpoint-key selection before tensor I/O; "
+                    "use load_method=scratch"
+                )
             return self._load_from_fastsafetensor(device)
         elif load_method.lower() == LoadMethod.SCRATCH:
             return self._load_from_scratch(device)
         else:
             raise ValueError(f"Unknown load method: {load_method}")
 
+    def _supports_fastsafetensors_iteration(self) -> bool:
+        """Whether every active descriptor permits unfiltered tensor iteration."""
+        descriptors = list(self._model_weights_info.weights)
+        for layer in self._model_weights_info.layer_weights:
+            descriptors.extend(layer if isinstance(layer, list) else [layer])
+        descriptors.extend(self._misc_weights_info)
+        return all(
+            getattr(component, "supports_fastsafetensors_iteration", True)
+            for descriptor in descriptors
+            for component in descriptor.get_components()
+        )
+
     def _is_memory_enough_for_fastsafetensor(self):
-        model_size = self._weights_info.model_config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         max_file_size = self._load_config.database.get_max_file_size()
         if device_mem_info is None:
             return False
         else:
             free_mem = device_mem_info.free / (1024.0**2)
-        model_mem = (
-            model_size
-            / max(self._load_config.ep_size, self._load_config.tp_size)
-            / (1024.0**2)
-        )
+        model_mem = self._weights_info.model_config.eval_model_weight_size_per_rank(
+            self._load_config.tp_size, self._load_config.ep_size
+        ) / (1024.0**2)
         if self._is_online_ptpc():
             # Online PTPC with inline FP8: MoE expert weights are quantized
             # per-expert during loading (no BF16 peak for MoE), but dense
@@ -666,22 +710,52 @@ class ModelLoader:
         if self._load_config.force_cpu_load_weights:
             logging.warning("force_cpu_load_weights is enabled, load weights to cpu")
             return "cpu"
-        model_size = self._weights_info.model_config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
         if device_mem_info is None:
             logging.warning("device_mem_info is None, load weights to cpu")
             return "cpu"
         else:
             free_mem = device_mem_info.free / (1024.0**3)
-        model_mem = (
-            model_size
-            / max(self._load_config.ep_size, self._load_config.tp_size)
-            / (1024.0**3)
-        )
+        model_mem = self._weights_info.model_config.eval_model_weight_size_per_rank(
+            self._load_config.tp_size, self._load_config.ep_size
+        ) / (1024.0**3)
         device = current_device if free_mem * 0.9 > model_mem else "cpu"
         logging.info(
             f"free_mem: {free_mem:.2f}GB, estimated model_mem: {model_mem:.2f}GB, use device: {device}"
         )
+        return device
+
+    def _resident_weight_devices(self) -> Dict[Tuple[Optional[int], str], str]:
+        """Collect descriptor storage overrides, including named shard outputs."""
+        result = {}
+        groups = [(None, self._model_weights_info.weights + self._misc_weights_info)]
+        groups.extend(enumerate(self._model_weights_info.layer_weights))
+        for layer_id, modules in groups:
+            if isinstance(modules, WeightModule):
+                modules = [modules]
+            for module in modules:
+                for component in module.get_components():
+                    if component.resident_device is not None:
+                        result[(layer_id, component.name)] = component.resident_device
+                    for (
+                        name,
+                        resident_device,
+                    ) in component.resident_output_devices.items():
+                        result[(layer_id, name)] = resident_device
+        return result
+
+    @staticmethod
+    def _resident_weight_device(
+        resident_devices: Dict[Tuple[Optional[int], str], str],
+        layer_id: Optional[int],
+        name: str,
+        device: str,
+    ) -> str:
+        for (weight_layer, prefix), resident_device in resident_devices.items():
+            if weight_layer == layer_id and (
+                name == prefix or name.startswith(prefix + ".")
+            ):
+                return resident_device
         return device
 
     def _load_from_scratch(self, device: str):
@@ -690,10 +764,15 @@ class ModelLoader:
             device
         )  # choose convert device to avoid out of mem
         logging.info(f"load weight by device: {convert_device}")
+        resident_devices = self._resident_weight_devices()
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
             if convert_device != device:
-                tensor = tensor.to(device)
+                tensor = tensor.to(
+                    self._resident_weight_device(
+                        resident_devices, layer_id, name, device
+                    )
+                )
             if layer_id is not None:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:

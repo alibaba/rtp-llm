@@ -101,15 +101,15 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
     # marked ``is_prefill=True`` even though it's functionally a
     # multi-token decode — the parent's default would reject it.
     # Both captures route through ``forward_decode`` + MTP's
-    # ``_prepare_decode_hidden`` (``T = B*q_len``).  This requires
-    # ``prepareCaptureInputs`` to size ``input_ids`` / ``input_hiddens``
-    # and the output buffer to ``max_bs * num_tokens_per_bs`` (full
-    # capacity), NOT the per-capture ``seq_len`` — handled in
-    # ``cuda_graph_runner.cc`` / ``cuda_graph_prefill.cc`` for draft
-    # prefill mode (num_tokens_per_bs != max_seq_len).
+    # ``_prepare_decode_hidden`` (``T = B*q_len``). Draft prefill therefore
+    # reserves fixed token lanes per captured request, with matching input,
+    # metadata and output capacities for each graph key.
     # ------------------------------------------------------------------
 
     def _should_capture_cuda_graph(self, attn, is_target_verify: bool) -> bool:
+        return True
+
+    def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
         return True
 
     # ------------------------------------------------------------------

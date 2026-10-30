@@ -19,6 +19,14 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity,
 class WeightModule(ABC):
     _registry = weakref.WeakValueDictionary()
     _cache = weakref.WeakKeyDictionary()
+    # The fastsafetensors iterator reads every tensor before Python-side key
+    # filtering. Descriptors that must select checkpoint keys *before* I/O (for
+    # example a rank-local table) opt out and make ModelLoader use scratch load.
+    supports_fastsafetensors_iteration = True
+    # Descriptors may keep their output on a fixed device independently of the
+    # loader's temporary conversion device and the model's execution device.
+    resident_device: Optional[str] = None
+    resident_output_devices: Dict[str, str] = {}
     lora_base_name = "base_model.model.{}.{}.weight"
     lora_A_suffix = "lora_A"
     lora_B_suffix = "lora_B"
@@ -169,6 +177,9 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
+        # Resolve placement before materializing tensors and use it through the
+        # final flattening step, so offloaded tables never stage on the GPU.
+        device = self.resident_device or device
         raw_tensors = self._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
@@ -190,7 +201,8 @@ class WeightModule(ABC):
                 if isinstance(v, dict):
                     __extract_tensor(v)
                 else:
-                    flat_res.update({k: v.to(device)})
+                    tensor = v.to(self.resident_output_devices.get(k, device))
+                    flat_res.update({k: tensor})
 
         __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
@@ -200,6 +212,7 @@ class WeightModule(ABC):
     def update(
         self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
     ):
+        device = self.resident_device or device
         split_tensors = self._split(tensor, load_config)
         processed_tensors = self._postprocess(split_tensors, device, load_config)
         flat_res = {}
@@ -209,7 +222,9 @@ class WeightModule(ABC):
                 if isinstance(v, dict):
                     __extract_tensor(v)
                 else:
-                    flat_res.update({k: v.to(device)})
+                    flat_res.update(
+                        {k: v.to(self.resident_output_devices.get(k, device))}
+                    )
 
         __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}

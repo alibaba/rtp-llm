@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/TpCacheTransferPlan.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -101,6 +102,7 @@ struct KVCacheSpec {
     size_t cache_key_token_stride = 0;
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
+    TpCacheTransferLayout tp_transfer;
 
     KVCacheSpec(std::string tag,
                 uint32_t    seq_size_per_block,
@@ -172,7 +174,11 @@ struct KVCacheSpec {
            << ";block_payload_bytes=" << block_payload_bytes() << ";k_block_payload_bytes=" << k_block_payload_bytes()
            << ";v_block_payload_bytes=" << v_block_payload_bytes() << ";scale_block_bytes=" << scale_block_size_bytes()
            << ";k_scale_block_bytes=" << k_scale_block_size_bytes()
-           << ";v_scale_block_bytes=" << v_scale_block_size_bytes();
+           << ";v_scale_block_bytes=" << v_scale_block_size_bytes()
+           << ";tp_transfer=" << static_cast<int>(tp_transfer.mode) << ";tp_q_bytes=" << tp_transfer.q_row_bytes
+           << ";tp_k_bytes=" << tp_transfer.k_row_bytes << ";tp_v_bytes=" << tp_transfer.v_row_bytes
+           << ";tp_history=" << tp_transfer.history_rows << ";tp_key_heads=" << tp_transfer.key_heads
+           << ";tp_value_heads=" << tp_transfer.value_heads;
         return os.str();
     }
 

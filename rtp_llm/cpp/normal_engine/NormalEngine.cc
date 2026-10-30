@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -297,8 +298,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(
-            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
+        auto mtp_executor = std::make_unique<MtpExecutor>(
+            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_);
+        mtp_executor->setModelForwardCallbacks([this]() { step_profiler_.startStep(); },
+                                               [this]() { step_profiler_.finishStep(); });
+        executor_ = std::move(mtp_executor);
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -844,6 +848,10 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
+    // A non-root idle MTP loop may be waiting for the next CPU input frame.
+    // Wake it before join; otherwise rank 0's model teardown collective waits
+    // for a peer that cannot reach its own model destructor.
+    CpuTpBroadcaster::instance().interruptReceive();
     loop_thread_->join();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
@@ -857,10 +865,22 @@ void NormalEngine::loop() {
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
     while (running_) {
-        auto status = step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+        try {
+            auto status = step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+        } catch (const std::exception& e) {
+            // A peer may close its TP broadcast socket after stop() clears
+            // running_ but before this rank returns from its current step.
+            // Treat that exception as part of shutdown; an exception during
+            // normal service must still fail the process.
+            if (running_) {
+                throw;
+            }
+            RTP_LLM_LOG_WARNING("normal engine loop stopped during shutdown: %s", e.what());
+            break;
         }
     }
 }
@@ -1037,17 +1057,10 @@ absl::Status NormalEngine::step() try {
     }
 
     {
-        // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
-        // has no callbacks yet, so bracket the propose path here on the engine
-        // loop thread (Kineto requires enable/disable on the same thread).
-        if (propose_params_) {
-            step_profiler_.startStep();
-        }
+        // Both executors drive profiling from actual model-work callbacks,
+        // after TP input synchronization has rejected idle steps.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(streams, tps_schedule_time_us);
-        if (propose_params_) {
-            step_profiler_.finishStep();
-        }
     }
 
     // report step metrics
