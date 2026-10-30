@@ -13,8 +13,6 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -47,11 +45,7 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     public void init() {
         log.info("start init LBStatusConsistencyService.");
-        try {
-            localHostIp = InetAddress.getLocalHost().getHostAddress();
-        } catch (UnknownHostException e) {
-            throw new RuntimeException(e);
-        }
+        localHostIp = MasterHost.resolve(environment);
         // Read from Spring Environment to respect --server.port= CLI args;
         // fall back to JVM system property.
         serverPort = environment.getProperty("server.port");

@@ -1,0 +1,5 @@
+seq_size_per_block: 16
+test_block_num: 4096
+reserve_block_ratio: 0
+max_seq_len: 4096
+compute.forward.expression: 1 + batchSize

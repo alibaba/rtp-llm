@@ -1,0 +1,37 @@
+id: example
+name: Public Python interfaces
+describe: Compile without Java artifacts
+environment:
+  master:
+    config:
+      FLEXLB_CONFIG: '{"schemaVersion":1}'
+  prefill:
+    engine: rtp
+    config:
+      a_b_c: 128
+      cache.sync.delay_ms: 10
+phases:
+  - id: observe
+    describe: Read and reuse results
+    timeout: 10s
+    steps:
+      - id: leader
+        describe: Observe leadership
+        interface: master/leadership/get
+        expect: {count: 1}
+      - id: again
+        describe: Query the selected Master
+        interface: master/leadership/get
+        args:
+          targets: {ref: steps.leader}
+      - id: tps
+        describe: Observe actual compute throughput
+        interface: engine/prefill/tps
+        args: {range: [-30s, 0s]}
+        expect: {gte: 0}
+      - id: cached
+        describe: Compare throughput including cache
+        interface: engine/prefill/tps_with_cache
+        expect:
+          gte: {ref: steps.tps}
+view: views/default/dashboard.json

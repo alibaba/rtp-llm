@@ -1,0 +1,31 @@
+max_seq_len: 1048576
+cp_size: 1
+cp_enabled: false
+tp_size: 1
+dp_size: 1
+seq_size_per_block: 128
+reuse_cache: false
+enable_device_cache: true
+enable_memory_cache: false
+enable_disk_cache: false
+reserve_block_ratio: 8
+enable_remote_cache: false
+device_eviction_policy: lru
+# 待实现的背压/驱逐参数仅进入 pending_config，不作为当前生效能力。
+block_tree_business_queue_max_size: 10000
+block_tree_transfer_queue_max_size: 10000
+block_tree_device_evict_low_watermark_ratio: 0.82
+block_tree_device_evict_high_watermark_ratio: 0.9
+max_generate_batch_size: 128
+max_batch_tokens_size: 1048576
+load_cache_timeout_ms: 5000
+max_rpc_timeout_ms: 7200000
+test_block_num: 221485
+compute:
+  forward:
+    expression: 19.5 + 0.175 * batchSize
+  decode:
+    tokens_per_step: 2.6
+  eos:
+    probability: 0.0025
+    seed: 20260922

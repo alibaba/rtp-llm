@@ -1,0 +1,170 @@
+id: master_ha_failover
+name: Master 滚动重启
+describe: DeepSeek 原始前缀流量按 0.1 倍速回放，贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 48
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 192
+    config: configs/decode.yaml
+  client:
+    config: {}
+    deployment:
+      replicas: 2
+phases:
+- id: startup
+  describe: 启动两个独立 Master JVM，按实际选举结果记录主节点 A 和备用节点 B。
+  timeout: 120s
+  steps:
+  - id: get_master_a
+    describe: 记录当前唯一主 Master 的实际地址列表作为 A。
+    interface: master/leadership/get
+    expect:
+      count: 1
+  - id: get_master_b
+    describe: 记录声明自己非主的唯一 Master 作为 B。
+    interface: master/leadership/get
+    args: {is_leader: false}
+    expect:
+      count: 1
+  - id: check_initial_master_leader
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.get_master_a
+- id: failover
+  describe: 持续流量中先杀 A、恢复 A，再杀 B、恢复 B；不重启 Client。
+  timeout: 600s
+  steps:
+  - id: start_client
+    describe: 按 0.1 倍速回放完整 DeepSeek trace，先等待 30 秒建立基线。
+    interface: client/start
+    args:
+      requests_file: deepseek.binpb.zst
+      concurrency: 4096
+      queue_capacity: 4096
+      request_timeout: 120s
+      drain_timeout: 150s
+      replay_speed: 0.1
+    wait_after: 30s
+    within: 300s
+  - id: check_baseline_client_success_rate
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: kill_master_a
+    describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
+    interface: master/stop
+    args:
+      targets:
+        ref: steps.get_master_a
+      mode: kill
+    expect:
+      eq:
+        ref: steps.get_master_a
+    within: 45s
+    wait_after: 30s
+  - id: check_master_leader_after_kill_a
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.get_master_b
+  - id: check_client_success_rate_after_kill_a
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: restart_master_a
+    describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
+    interface: master/restart
+    args:
+      targets:
+        ref: steps.get_master_a
+    expect:
+      eq:
+        ref: steps.get_master_a
+    within: 120s
+    wait_after: 30s
+  - id: check_master_leader_after_restart_a
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.get_master_b
+  - id: kill_master_b
+    describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
+    interface: master/stop
+    args:
+      targets:
+        ref: steps.get_master_b
+      mode: kill
+    expect:
+      eq:
+        ref: steps.get_master_b
+    within: 45s
+    wait_after: 30s
+  - id: check_master_leader_after_kill_b
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.get_master_a
+  - id: check_client_success_rate_after_kill_b
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: restart_master_b
+    describe: 在原服务地址恢复指定 Master，使用新进程和独立产物，等待 30 秒。
+    interface: master/restart
+    args:
+      targets:
+        ref: steps.get_master_b
+    expect:
+      eq:
+        ref: steps.get_master_b
+    within: 120s
+    wait_after: 30s
+  - id: check_master_leader_after_restart_b
+    describe: 检查所有存活 Master 中唯一的主节点。
+    interface: master/leadership/get
+    expect:
+      eq:
+        ref: steps.get_master_a
+  - id: check_client_success_rate_after_restart_b
+    describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
+    interface: client/success_rate
+    args:
+      range:
+      - -20s
+      - 0s
+    expect:
+      gte: 0.95
+  - id: stop_client
+    describe: 提前停止 trace 回放并收齐所有 Client 已发请求的终态。
+    interface: client/stop
+    within: 180s

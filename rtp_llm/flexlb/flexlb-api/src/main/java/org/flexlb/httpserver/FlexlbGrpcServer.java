@@ -2,7 +2,6 @@ package org.flexlb.httpserver;
 
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
-import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -118,7 +117,7 @@ public class FlexlbGrpcServer {
         reportExecutorMetrics();
 
         server =
-                NettyServerBuilder.forPort(port)
+                GrpcServerBinding.builder(environment, port)
                         .channelType(NioServerSocketChannel.class)
                         .bossEventLoopGroup(bossGroup)
                         .workerEventLoopGroup(grpcServerEventLoopGroup)
