@@ -43,8 +43,9 @@ final class PrefillGeneration implements AutoCloseable {
     }
     private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis, boolean grouped) {
         transfer.validate(input);
-        if (input.getGenerateConfig().getMaxNewTokens() <= 1 || !input.getGenerateConfig().getCanUsePdSeparation())
-            throw Status.UNIMPLEMENTED.withDescription("Batch and multi-token requests require P/D separation").asRuntimeException();
+        // Batch admission already selects the PD protocol, even for a single output token.
+        if (!grouped && !input.getGenerateConfig().getCanUsePdSeparation())
+            throw Status.UNIMPLEMENTED.withDescription("Non-separated multi-token generation is not supported").asRuntimeException();
         var targets = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.DECODE).toList();
         if (targets.size() != 1 || targets.getFirst().getIp().isBlank() || targets.getFirst().getGrpcPort() <= 0 || targets.getFirst().getGrpcPort() > 65535)
             throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription("Exactly one valid Decode role address is required"), 605);

@@ -124,8 +124,6 @@ final class DecodeAdmission implements AutoCloseable {
         RtpRequestValidation.supported(input);
         if (org.flexlb.mock.multimodal.MediaInput.present(input))
             throw Status.FAILED_PRECONDITION.withDescription("Decode ALLOCATE requires the prepared P input").asRuntimeException();
-        if (generation.getPrefillOnly())
-            throw Status.UNIMPLEMENTED.withDescription("Decode does not support prefill_only").asRuntimeException();
         if (input.getTokenIdsCount() < 1
                 || generation.getTimeoutMs() < 0 || generation.getMaxNewTokens() < 1 || generation.getMinNewTokens() < 0
                 || generation.getMinNewTokens() > generation.getMaxNewTokens() || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
