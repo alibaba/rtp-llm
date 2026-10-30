@@ -8,7 +8,7 @@ import secrets
 import socket
 import uuid
 from urllib.parse import urlsplit
-from ..config.values import duration
+from ..config.validation import duration
 
 from .records import write_json
 from .transport import ExecutionError

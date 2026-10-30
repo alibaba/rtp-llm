@@ -7,9 +7,8 @@ from .environment import compile_environment
 from .errors import ConfigError
 from .model import Step, CompiledCase, Expect, Phase, Reference
 from .parser import load_yaml
-from .registry import Registry, construct
-from .validation import validate
-from .values import duration, fields, text
+from .registry import Registry
+from .validation import compatible, duration, fields, text, validate
 
 _ID = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 _GLOBALS = {'type': 'object', 'properties': {
@@ -17,30 +16,7 @@ _GLOBALS = {'type': 'object', 'properties': {
     for role in ('masters', 'prefill', 'decode', 'vit')}, 'required': []}
 
 
-def compatible(source, expected):
-    if source['type'] == 'union':
-        return all(compatible(v, expected) for v in source['variants'])
-    if expected['type'] == 'union':
-        return any(compatible(source, v) for v in expected['variants'])
-    if source['type'] != expected['type']:
-        return source['type'] == 'integer' and expected['type'] == 'number'
-    if source['type'] == 'array':
-        return compatible(source['items'], expected['items'])
-    if source['type'] == 'object':
-        if 'values' in expected:
-            return 'values' in source and compatible(source['values'], expected['values'])
-        if not set(expected.get('required', ())) <= set(source.get('required', ())):
-            return False
-        for name, definition in source.get('properties', {}).items():
-            if name not in expected['properties']:
-                return False
-            if not compatible(definition, expected['properties'][name]):
-                return False
-        return True
-    return True
-
-
-def reference(value, expected, where, *, previous):
+def _reference(value, expected, where, *, previous):
     fields(value, {'ref'}, {'ref'}, where=where)
     parts = text(value['ref'], where + '.ref').split('.')
     if any(not _ID.fullmatch(part) for part in parts):
@@ -60,21 +36,21 @@ def reference(value, expected, where, *, previous):
     return Reference(source, tuple(path))
 
 
-def argument(value, spec, previous, where):
-    return validate(value, spec, where, reference=partial(reference, previous=previous))
+def _argument(value, spec, previous, where):
+    return validate(value, spec, where, reference=partial(_reference, previous=previous))
 
 
-def has_reference(value):
+def _has_reference(value):
     if isinstance(value, Reference):
         return True
     if isinstance(value, dict):
-        return any(has_reference(v) for v in value.values())
+        return any(_has_reference(v) for v in value.values())
     if isinstance(value, list):
-        return any(has_reference(v) for v in value)
+        return any(_has_reference(v) for v in value)
     return False
 
 
-def expectation(raw, interface, previous):
+def _expectation(raw, interface, previous):
     fields(raw, {'eq', 'count', 'gte', 'lte'}, where='expect')
     if set(raw) not in ({'eq'}, {'count'}, {'gte'}, {'lte'}, {'gte', 'lte'}):
         raise ConfigError('expect needs eq, count, or gte/lte')
@@ -91,13 +67,13 @@ def expectation(raw, interface, previous):
                 raise ConfigError(f'{op} requires numeric output')
         if isinstance(value, str) and interface.unit == 's' and op != 'count':
             value = float(duration(value))
-        result[op] = argument(value, expected, previous, 'expect.' + op)
-    if {'gte', 'lte'} <= result.keys() and not has_reference(result) and result['gte'] > result['lte']:
+        result[op] = _argument(value, expected, previous, 'expect.' + op)
+    if {'gte', 'lte'} <= result.keys() and not _has_reference(result) and result['gte'] > result['lte']:
         raise ConfigError('expect lower bound exceeds upper bound')
     return Expect(result)
 
 
-def identity(value, ids):
+def _identity(value, ids):
     text(value, 'id')
     if not _ID.fullmatch(value) or value in ids:
         raise ConfigError(f'Invalid or duplicate id: {value}')
@@ -105,7 +81,7 @@ def identity(value, ids):
     return value
 
 
-def asset(value, directory, shared_root):
+def _view_path(value, directory, shared_root):
     value = text(value, 'view')
     if '://' in value:
         raise ConfigError('Only local/shared paths are supported')
@@ -118,36 +94,36 @@ def asset(value, directory, shared_root):
     return (base / candidate).resolve()
 
 
-def compile_step(raw, registry, ids, previous):
+def _compile_step(raw, registry, ids, previous):
     fields(raw, {'id', 'describe', 'interface', 'args', 'expect', 'within', 'wait_after'},
            {'id', 'describe', 'interface'}, where='step')
-    step_id = identity(raw['id'], ids)
+    step_id = _identity(raw['id'], ids)
     description = text(raw['describe'], 'step.describe')
     interface = registry.get(raw['interface'])
-    args = argument(raw.get('args', {}), interface.args, previous, step_id + '.args')
-    if not has_reference(args):
-        construct(interface.argument_type, args, interface.name + '.args')
+    args = _argument(raw.get('args', {}), interface.args, previous, step_id + '.args')
+    if not _has_reference(args):
+        interface.arguments(args)
     within = raw.get('within')
     if within is not None:
         duration(within, positive=True)
     wait_after = raw.get('wait_after', '0s')
     duration(wait_after)
-    expect = expectation(raw['expect'], interface, previous) if 'expect' in raw else None
+    expect = _expectation(raw['expect'], interface, previous) if 'expect' in raw else None
     previous[step_id] = interface.returns
     return Step(step_id, description, interface.name, args, expect, within, wait_after)
 
 
-def compile_phase(raw, registry, ids, previous):
+def _compile_phase(raw, registry, ids, previous):
     fields(raw, {'id', 'describe', 'timeout', 'steps'},
            {'id', 'describe', 'timeout', 'steps'}, where='phase')
-    phase_id = identity(raw['id'], ids)
+    phase_id = _identity(raw['id'], ids)
     description = text(raw['describe'], 'phase.describe')
     duration(raw['timeout'], positive=True)
     if not isinstance(raw['steps'], list) or not raw['steps']:
         raise ConfigError('steps must be a nonempty list')
     steps = []
     for step in raw['steps']:
-        steps.append(compile_step(step, registry, ids, previous))
+        steps.append(_compile_step(step, registry, ids, previous))
     return Phase(phase_id, description, raw['timeout'], tuple(steps))
 
 
@@ -159,7 +135,7 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
     registry = registry or Registry.standard()
     ids = {'globals', 'steps'}
     previous = {}
-    case_id = identity(raw['id'], ids)
+    case_id = _identity(raw['id'], ids)
     description = text(raw['describe'], 'describe')
     name = text(raw['name'], 'name') if 'name' in raw else None
     environment = compile_environment(raw['environment'], directory=path.parent)
@@ -167,9 +143,9 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
         raise ConfigError('phases must be a nonempty list')
     phases = []
     for phase in raw['phases']:
-        phases.append(compile_phase(phase, registry, ids, previous))
+        phases.append(_compile_phase(phase, registry, ids, previous))
     view = Path(__file__).resolve().parents[3] / 'views/default.json'
     if 'view' in raw:
-        view = asset(raw['view'], path.parent, shared_root)
+        view = _view_path(raw['view'], path.parent, shared_root)
     return CompiledCase(id=case_id, describe=description, name=name, directory=path.parent,
                         environment=environment, phases=tuple(phases), view=view, source=path)

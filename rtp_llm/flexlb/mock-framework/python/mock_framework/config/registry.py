@@ -59,18 +59,18 @@ def schema(kind):
     raise ConfigError(f'Unsupported interface type: {kind!r}')
 
 
-def construct(kind, value, where='argument'):
+def _construct(kind, value, where='argument'):
     """Build typed arguments after schema validation, retaining constructor error paths."""
     origin = get_origin(kind)
     arguments = get_args(kind)
     if origin is Annotated:
-        return construct(arguments[0], value, where)
+        return _construct(arguments[0], value, where)
     if origin in (Union, UnionType):
         errors = []
         for variant in arguments:
             try:
                 validate(value, schema(variant), where)
-                return construct(variant, value, where)
+                return _construct(variant, value, where)
             except ConfigError as error:
                 errors.append(str(error))
         detail = '; '.join(dict.fromkeys(errors))
@@ -79,26 +79,26 @@ def construct(kind, value, where='argument'):
         hints = get_type_hints(kind, include_extras=True)
         values = {}
         for key, item in value.items():
-            values[key] = construct(hints[key], item, f'{where}.{key}')
+            values[key] = _construct(hints[key], item, f'{where}.{key}')
         try:
             return kind(**values)
         except (ValueError, TypeError) as error:
             raise ConfigError(f'{where}: {error}') from error
     if origin is list:
-        return [construct(arguments[0], item, f'{where}[{index}]')
+        return [_construct(arguments[0], item, f'{where}[{index}]')
                 for index, item in enumerate(value)]
     if origin is dict:
-        return {key: construct(arguments[1], item, f'{where}.{key}') for key, item in value.items()}
+        return {key: _construct(arguments[1], item, f'{where}.{key}') for key, item in value.items()}
     return value
 
 
-def result_value(value):
+def _result_value(value):
     if is_dataclass(value):
         return asdict(value)
     if isinstance(value, list):
-        return [result_value(item) for item in value]
+        return [_result_value(item) for item in value]
     if isinstance(value, dict):
-        return {key: result_value(item) for key, item in value.items()}
+        return {key: _result_value(item) for key, item in value.items()}
     return value
 
 
@@ -119,12 +119,12 @@ class Interface:
     def arguments(self, value):
         where = self.name + '.args'
         validate(value, self.args, where)
-        return construct(self.argument_type, value, where)
+        return _construct(self.argument_type, value, where)
 
     async def call(self, context, arguments):
         """Execute arguments already prepared by the Runner; validate the returned value."""
         result = await self.function(context, arguments)
-        result = result_value(result)
+        result = _result_value(result)
         validate(result, self.returns, self.name + '.result')
         return result
 

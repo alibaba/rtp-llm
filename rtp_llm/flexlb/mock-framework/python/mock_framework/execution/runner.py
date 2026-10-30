@@ -4,8 +4,7 @@ import time
 from pathlib import Path
 
 from ..config.model import Reference
-from ..config.validation import validate
-from ..config.values import duration
+from ..config.validation import duration, validate
 from .assertions import compare
 from .environment import RunEnvironment
 from .records import Records, timestamp, write_json

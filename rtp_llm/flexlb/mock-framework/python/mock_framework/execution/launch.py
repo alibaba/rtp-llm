@@ -1,6 +1,6 @@
 """Validate local launch recipes independently of process ownership."""
 from pathlib import Path
-from ..config.values import duration, fields, text
+from ..config.validation import duration, fields, text
 from .transport import ExecutionError
 from .monitoring import prepare_prometheus
 from .engines import ROLES

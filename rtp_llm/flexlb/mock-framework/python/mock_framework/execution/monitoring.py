@@ -9,7 +9,7 @@ import urllib.request
 
 import yaml
 
-from ..config.values import duration, fields, text
+from ..config.validation import duration, fields, text
 from .records import timestamp, write_json
 from .transport import ExecutionError
 
