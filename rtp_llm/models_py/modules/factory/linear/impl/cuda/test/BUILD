@@ -3,6 +3,14 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "bf16_collective_projection_test",
+    srcs = ["bf16_collective_projection_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "2"},
+)
+
+py_test(
     name = "fp8_deepgemm_linear_out_test",
     srcs = ["fp8_deepgemm_linear_out_test.py"],
     deps = [
