@@ -118,7 +118,7 @@ class PaddedPackTest(unittest.TestCase):
             ([128, 0, 64], [128, 0, 64]),
             ([0, 0], [0, 0]),
         ]
-        for page in (64, 512):
+        for page in (1, 64, 512):
             for actual, padded in cases:
                 with self.subTest(page=page, actual=actual, padded=padded):
                     self.check_case(actual, padded, page, strided=True)

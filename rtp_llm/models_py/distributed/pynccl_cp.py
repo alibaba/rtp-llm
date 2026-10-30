@@ -206,6 +206,9 @@ _COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple["_NCCLLib", Any]] = {}
 _OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
 _OVERLAP_SYMM_COMMS: Dict[Tuple[Any, int], Any] = {}
+_INDEXER_OVERLAP_COMMS: Dict[Tuple[Any, int], Tuple[Any, Any]] = {}
+_INDEXER_OVERLAP_STREAMS: Dict[Tuple[Any, int], torch.cuda.Stream] = {}
+_INDEXER_OVERLAP_SYMM_COMMS: Dict[Tuple[Any, int], Any] = {}
 _WORLD_SIZES: Dict[Any, int] = {}
 _OVERLAP_BUFFERS: Dict[Tuple[Any, ...], Any] = {}
 _INDEXER_BUFFERS: Dict[Tuple[Any, ...], Tuple[Any, Any]] = {}
@@ -267,12 +270,16 @@ def _torch_all_gather(input: torch.Tensor, group: Any) -> torch.Tensor:
     return all_gather(input, group=group)
 
 
-def _get_comm(process_group, device: torch.device, *, independent: bool = False):
+def _get_comm(process_group, device: torch.device, *, independent: bool | str = False):
     """Collectively create and cache the direct NCCL communicator at startup."""
     global _LIB
 
     key = _comm_key(process_group, device)
-    cache = _OVERLAP_COMMS if independent else _COMMS
+    cache = (
+        _INDEXER_OVERLAP_COMMS
+        if independent == "indexer"
+        else _OVERLAP_COMMS if independent else _COMMS
+    )
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -332,7 +339,75 @@ def warmup_kv_overlap(group: Any) -> torch.cuda.Stream:
             else:
                 side._owner_stream = _OVERLAP_STREAMS[key].cuda_stream
         _OVERLAP_SYMM_COMMS[key] = side
+    if enabled() and os.environ.get("RTP_LLM_CP_INDEXER_OVERLAP", "1") == "1":
+        _warmup_indexer_overlap(process_group, device)
     return _OVERLAP_STREAMS[key]
+
+
+def _warmup_indexer_overlap(process_group, device):
+    # Called only from rank-uniform prepare, never lazily inside forward.
+    key = _comm_key(process_group, device)
+    if key in _INDEXER_OVERLAP_STREAMS:
+        return
+    _get_comm(process_group, device, independent="indexer")
+    stream = torch.cuda.Stream(device=device, priority=-1)
+    side = None
+    if _TORCH_SYMM_GATHER:
+        from rtp_llm.models_py.distributed.symm_mem import (
+            TorchSymmMemCommunicator,
+            get_symm_mem_communicator,
+        )
+
+        main = get_symm_mem_communicator()
+        if main is not None and main.group is process_group and not main.disabled:
+            side = TorchSymmMemCommunicator(process_group, device)
+            if side.disabled:
+                side = None
+            else:
+                side._owner_stream = stream.cuda_stream
+    _INDEXER_OVERLAP_STREAMS[key] = stream
+    _INDEXER_OVERLAP_SYMM_COMMS[key] = side
+
+
+def indexer_overlap_stream(group, device):
+    if not enabled() or torch.cuda.is_current_stream_capturing():
+        return None
+    return _INDEXER_OVERLAP_STREAMS.get(
+        _comm_key(_resolve_process_group(group), device)
+    )
+
+
+def _on_indexer_overlap_stream(process_group, device):
+    stream = _INDEXER_OVERLAP_STREAMS.get(_comm_key(process_group, device))
+    return (
+        stream is not None
+        and stream.cuda_stream == torch.cuda.current_stream(device).cuda_stream
+    )
+
+
+def _indexer_overlap_all_gather(input, process_group):
+    key = _comm_key(process_group, input.device)
+    side = _INDEXER_OVERLAP_SYMM_COMMS.get(key)
+    if side is not None:
+        output = _try_torch_symm_all_gather(input, process_group, communicator=side)
+        if output is not None:
+            return output
+    output = torch.empty(
+        (_world_size(process_group) * input.size(0), *input.shape[1:]),
+        dtype=input.dtype,
+        device=input.device,
+    )
+    _validate_all_gather(output, input, process_group)
+    lib, comm = _INDEXER_OVERLAP_COMMS[key]
+    lib.all_gather(
+        input.data_ptr(),
+        output.data_ptr(),
+        input.numel(),
+        input.dtype,
+        comm,
+        torch.cuda.current_stream(input.device).cuda_stream,
+    )
+    return output
 
 
 class _RegisteredKvBuffers:
@@ -428,7 +503,8 @@ def _registered_indexer_all_gather(input, group, role):
         return None
     process_group = _resolve_process_group(group)
     comm_key = _comm_key(process_group, input.device)
-    entry = _COMMS.get(comm_key)
+    on_side = _on_indexer_overlap_stream(process_group, input.device)
+    entry = (_INDEXER_OVERLAP_COMMS if on_side else _COMMS).get(comm_key)
     if entry is None:
         return None
     lib, comm = entry
@@ -437,7 +513,12 @@ def _registered_indexer_all_gather(input, group, role):
     if input.dim() != 2 or not input.is_contiguous() or input.element_size() != 1:
         return None
     stream = torch.cuda.current_stream(input.device)
-    key = (*comm_key, role, input.size(1), input.dtype)
+    key = (
+        *comm_key,
+        role + "@overlap" if on_side else role,
+        input.size(1),
+        input.dtype,
+    )
     cached = _INDEXER_BUFFERS.get(key)
     buffers = None
     if cached is not None:
@@ -523,6 +604,9 @@ def destroy() -> None:
     """Release symmetric windows and direct communicators before PG teardown."""
     global _LIB
 
+    for stream in _INDEXER_OVERLAP_STREAMS.values():
+        stream.synchronize()
+    _INDEXER_OVERLAP_SYMM_COMMS.clear()
     for key, side in _OVERLAP_SYMM_COMMS.items():
         if side is not None:
             _OVERLAP_STREAMS[key].synchronize()
@@ -548,7 +632,11 @@ def destroy() -> None:
                 "Failed to deregister GLM5 pynccl symmetric window: %s", error
             )
 
-    for lib, comm in [*_COMMS.values(), *_OVERLAP_COMMS.values()]:
+    for lib, comm in [
+        *_COMMS.values(),
+        *_OVERLAP_COMMS.values(),
+        *_INDEXER_OVERLAP_COMMS.values(),
+    ]:
         try:
             lib.destroy_comm(comm)
         except RuntimeError as error:
@@ -567,6 +655,8 @@ def destroy() -> None:
     _COMMS.clear()
     _OVERLAP_COMMS.clear()
     _OVERLAP_STREAMS.clear()
+    _INDEXER_OVERLAP_COMMS.clear()
+    _INDEXER_OVERLAP_STREAMS.clear()
     _OVERLAP_BUFFERS.clear()
     _INDEXER_BUFFERS.clear()
     _WORLD_SIZES.clear()
@@ -895,6 +985,12 @@ def all_gather(
         )
 
     process_group = _resolve_process_group(group)
+    if (
+        role is not None
+        and role.startswith("indexer_")
+        and _on_indexer_overlap_stream(process_group, input.device)
+    ):
+        return _indexer_overlap_all_gather(input, process_group)
     gathered = _try_torch_symm_all_gather(input, process_group)
     if gathered is not None:
         return gathered

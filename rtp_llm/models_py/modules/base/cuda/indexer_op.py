@@ -652,6 +652,20 @@ class IndexerOp(nn.Module):
             is_neox_style=self.is_neox_style,
         )
 
+    def fused_rope_hadamard_k(self, k, positions):
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
+            fused_k_rope_hadamard,
+        )
+
+        return fused_k_rope_hadamard(
+            k,
+            positions,
+            self.cos_sin_cache,
+            self.index_head_dim,
+            self.index_head_dim - self.rope_head_dim,
+            self.is_neox_style,
+        )
+
     def fused_rope_quant_qk(
         self,
         q: torch.Tensor,
@@ -694,6 +708,7 @@ class IndexerOp(nn.Module):
         kv_cache: KVCache,
         slot_mapping: torch.Tensor,
         kv_restore_unpad_indices: torch.Tensor,
+        cache_key=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Context-parallel variant: all-gather only K from all CP ranks, restore to logical
@@ -713,19 +728,8 @@ class IndexerOp(nn.Module):
         Returns:
             Tuple of (q_fp8, q_scale) for local context only, shapes [local_tokens, ...].
         """
-        assert kv_cache is not None, "kv_cache is required"
-        gathered_key = all_gather(
-            key.contiguous(), group=Group.TP, role="indexer_k_bf16"
-        )
-        gathered_key = gathered_key.reshape(-1, key.size(-1))
-        restored_key = gathered_key[kv_restore_unpad_indices]  # element wise
-
-        rtp_llm_ops.indexer_k_quant_and_cache(
-            restored_key,
-            self._kv_cache_blocks(kv_cache),
-            slot_mapping,
-            self.block_size,
-            self.scale_fmt,
+        (cache_key or self.quant_k_cp_only)(
+            key, kv_cache, slot_mapping, kv_restore_unpad_indices
         )
         query_flat = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
@@ -965,82 +969,24 @@ class IndexerOp(nn.Module):
 
         return topk_result
 
-    def _get_topk_ragged_cp(
+    def prepare_cp_k(
         self,
-        q_fp8: torch.Tensor,
-        weights: torch.Tensor,
-        kv_cache: KVCache,
-        fmha_params: Any,
-        attention_inputs: Any,
-        total_local_ids: torch.Tensor,
-        cu_kv_seqlens_global: torch.Tensor,
-        num_kv_tokens: int,
-        precomputed_ks: torch.Tensor,
-        precomputed_ke: torch.Tensor,
-        precomputed_lengths: torch.Tensor,
-        precomputed_topk_off: torch.Tensor,
-        kv_cache_sharded: bool = False,
-        cp_size: int = 1,
-        cp_rank: int = 0,
-        kv_owner_tokens_per_block: int = 0,
-        indexer_cp_plan: Optional[Any] = None,
-        indexer_cp_local_cu: Optional[torch.Tensor] = None,
-        indexer_copy_dst_idx: Optional[torch.Tensor] = None,
-        indexer_src_for_padded: Optional[torch.Tensor] = None,
-        total_local_ids_is_identity: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute TopK indices for ragged attention (prefill phase) with context parallel
-        chunking. Splits q by CP chunk indices, runs fp8_mqa_logits + topk per chunk,
-        and returns (topk0, topk1) for the two CP chunks so the caller can use them directly.
-
-        Full KV for logits: deep_gemm.fp8_mqa_logits requires full kv_fp8 for mathematical
-        correctness. Each row i uses K[ks[i]:ke[i]] (ragged); we only chunk the q dimension,
-        so we still pass the full gathered kv_fp8 and per-chunk ks/ke for each chunk.
-
-        Args:
-            q_fp8: Local quantized query for this CP rank [local_tokens, ...].
-            weights: Weights tensor for this rank, shape [local_tokens, ...].
-            kv_cache: KV cache object
-            fmha_params: FMHA parameters (ks/ke/etc. on the full tensor; not used for indexing).
-            attention_inputs: Attention inputs with kv_cache_kernel_block_id_device.
-            total_local_ids: Rows of ``q_fp8`` / ``weights`` to participate in logits.
-            cu_kv_seqlens_global: Cumulative KV lengths for the full (gathered) sequence.
-            num_kv_tokens: Full KV token count (length of logical KV after restore).
-            precomputed_ks: ``fmha_params.ks[total_global_ids]``, precomputed in plan().
-            precomputed_ke: ``fmha_params.ke[total_global_ids]``, precomputed in plan().
-            precomputed_lengths: ``fmha_params.expanded_seq_lens[total_global_ids]``, precomputed in plan().
-            precomputed_topk_off: ``fmha_params.topk_indices_offset[total_global_ids]``, precomputed in plan().
-
-        Returns:
-            TopK indices for this CP rank, shape [len(total_local_ids), index_topk].
-            Ranks with no local query tokens return an empty tensor instead of
-            ``None`` so shared DSA layers can keep propagating the last full
-            layer's top-k object.
-        """
-        device = q_fp8.device
-        has_local_ids = total_local_ids is not None and int(total_local_ids.numel()) > 0
-        sharded_cp_kv = kv_cache_sharded and int(cp_size) > 1
-        if not has_local_ids and not sharded_cp_kv:
-            return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
-
+        kv_cache,
+        attention_inputs,
+        num_kv_tokens,
+        cu_kv_seqlens_global,
+        kv_cache_sharded=False,
+        cp_size=1,
+        indexer_cp_plan=None,
+        indexer_cp_local_cu=None,
+        indexer_copy_dst_idx=None,
+        indexer_src_for_padded=None,
+    ):
+        """Assemble the exact full K/scale used by CP logits on the caller's stream."""
+        device = self._kv_cache_blocks(kv_cache).device
         total_kv_tokens = num_kv_tokens
+        sharded_cp_kv = kv_cache_sharded and int(cp_size) > 1
         assert total_kv_tokens > 0, "num_kv_tokens must be positive"
-
-        weights_sq = weights.squeeze(-1)
-
-        if has_local_ids:
-            if total_local_ids_is_identity:
-                n_local = int(total_local_ids.numel())
-                q0 = q_fp8[:n_local]
-                weights_sq0 = weights_sq[:n_local]
-            else:
-                q0 = q_fp8[total_local_ids].contiguous()
-                weights_sq0 = weights_sq[total_local_ids].contiguous()
-        else:
-            q0 = q_fp8[:0]
-            weights_sq0 = weights_sq[:0]
-
         # Full KV from cache (KV not split).
         k_fp8 = torch.empty(
             (total_kv_tokens, self.index_head_dim),
@@ -1111,6 +1057,100 @@ class IndexerOp(nn.Module):
                 block_table,
                 cu_kv_seqlens_global,
             )
+        return k_fp8, k_scale
+
+    def _get_topk_ragged_cp(
+        self,
+        q_fp8: torch.Tensor,
+        weights: torch.Tensor,
+        kv_cache: KVCache,
+        fmha_params: Any,
+        attention_inputs: Any,
+        total_local_ids: torch.Tensor,
+        cu_kv_seqlens_global: torch.Tensor,
+        num_kv_tokens: int,
+        precomputed_ks: torch.Tensor,
+        precomputed_ke: torch.Tensor,
+        precomputed_lengths: torch.Tensor,
+        precomputed_topk_off: torch.Tensor,
+        kv_cache_sharded: bool = False,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+        kv_owner_tokens_per_block: int = 0,
+        indexer_cp_plan: Optional[Any] = None,
+        indexer_cp_local_cu: Optional[torch.Tensor] = None,
+        indexer_copy_dst_idx: Optional[torch.Tensor] = None,
+        indexer_src_for_padded: Optional[torch.Tensor] = None,
+        total_local_ids_is_identity: bool = False,
+        prepared_k=None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute TopK indices for ragged attention (prefill phase) with context parallel
+        chunking. Splits q by CP chunk indices, runs fp8_mqa_logits + topk per chunk,
+        and returns (topk0, topk1) for the two CP chunks so the caller can use them directly.
+
+        Full KV for logits: deep_gemm.fp8_mqa_logits requires full kv_fp8 for mathematical
+        correctness. Each row i uses K[ks[i]:ke[i]] (ragged); we only chunk the q dimension,
+        so we still pass the full gathered kv_fp8 and per-chunk ks/ke for each chunk.
+
+        Args:
+            q_fp8: Local quantized query for this CP rank [local_tokens, ...].
+            weights: Weights tensor for this rank, shape [local_tokens, ...].
+            kv_cache: KV cache object
+            fmha_params: FMHA parameters (ks/ke/etc. on the full tensor; not used for indexing).
+            attention_inputs: Attention inputs with kv_cache_kernel_block_id_device.
+            total_local_ids: Rows of ``q_fp8`` / ``weights`` to participate in logits.
+            cu_kv_seqlens_global: Cumulative KV lengths for the full (gathered) sequence.
+            num_kv_tokens: Full KV token count (length of logical KV after restore).
+            precomputed_ks: ``fmha_params.ks[total_global_ids]``, precomputed in plan().
+            precomputed_ke: ``fmha_params.ke[total_global_ids]``, precomputed in plan().
+            precomputed_lengths: ``fmha_params.expanded_seq_lens[total_global_ids]``, precomputed in plan().
+            precomputed_topk_off: ``fmha_params.topk_indices_offset[total_global_ids]``, precomputed in plan().
+
+        Returns:
+            TopK indices for this CP rank, shape [len(total_local_ids), index_topk].
+            Ranks with no local query tokens return an empty tensor instead of
+            ``None`` so shared DSA layers can keep propagating the last full
+            layer's top-k object.
+        """
+        device = q_fp8.device
+        has_local_ids = total_local_ids is not None and int(total_local_ids.numel()) > 0
+        sharded_cp_kv = kv_cache_sharded and int(cp_size) > 1
+        if not has_local_ids and not sharded_cp_kv:
+            return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
+
+        total_kv_tokens = num_kv_tokens
+        assert total_kv_tokens > 0, "num_kv_tokens must be positive"
+
+        weights_sq = weights.squeeze(-1)
+
+        if has_local_ids:
+            if total_local_ids_is_identity:
+                n_local = int(total_local_ids.numel())
+                q0 = q_fp8[:n_local]
+                weights_sq0 = weights_sq[:n_local]
+            else:
+                q0 = q_fp8[total_local_ids].contiguous()
+                weights_sq0 = weights_sq[total_local_ids].contiguous()
+        else:
+            q0 = q_fp8[:0]
+            weights_sq0 = weights_sq[:0]
+
+        if prepared_k is None:
+            k_fp8, k_scale = self.prepare_cp_k(
+                kv_cache,
+                attention_inputs,
+                num_kv_tokens,
+                cu_kv_seqlens_global,
+                kv_cache_sharded,
+                cp_size,
+                indexer_cp_plan,
+                indexer_cp_local_cu,
+                indexer_copy_dst_idx,
+                indexer_src_for_padded,
+            )
+        else:
+            k_fp8, k_scale = prepared_k
         if not has_local_ids:
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))

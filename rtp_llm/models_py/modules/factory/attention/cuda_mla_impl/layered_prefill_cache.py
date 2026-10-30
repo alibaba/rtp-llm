@@ -98,7 +98,17 @@ class _PrefillStaging:
         )
         # Plan once per batch. No per-layer index D2H or allocator-generation
         # cache: every forward reloads the live pages, including reused IDs.
-        slots_cpu = self.original_slots.detach().cpu().to(torch.int64)
+        slots_host = getattr(op, "sharded_slot_mapping_host", None)
+        if (
+            getattr(op, "kv_cache_sharded", False)
+            and getattr(op, "_host_slot_mapping_source", None) is self.original_slots
+            and isinstance(slots_host, torch.Tensor)
+            and slots_host.device.type == "cpu"
+            and slots_host.shape == self.original_slots.shape
+        ):
+            slots_cpu = slots_host.to(torch.int64)
+        else:
+            slots_cpu = self.original_slots.detach().cpu().to(torch.int64)
         table_cpu = table.to(torch.int64)
         pages = torch.unique(table_cpu[table_cpu >= 0], sorted=True)
         if pages.numel() > self.capacity:

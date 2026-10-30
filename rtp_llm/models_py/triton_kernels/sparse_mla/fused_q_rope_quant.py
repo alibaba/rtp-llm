@@ -12,6 +12,7 @@ L1 cache).  Algorithm adapted from SGLang's fused_q_indexer_rope_hadamard_quant.
 """
 
 import math
+import os
 
 import torch
 import triton
@@ -130,6 +131,110 @@ def _fused_q_rope_hadamard_quant_kernel(
     tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale_f32)
 
 
+@triton.jit
+def _fused_q_rope_hadamard_quant_register_kernel(
+    pos_ptr,
+    q_ptr,
+    q_stride0,
+    q_stride1,
+    cos_sin_cache_ptr,
+    cos_sin_cache_stride,
+    HALF_ROT_DIM: tl.constexpr,
+    q_fp8_ptr,
+    q_fp8_stride0,
+    q_fp8_stride1,
+    q_scale_ptr,
+    q_scale_stride0,
+    HEAD_DIM: tl.constexpr,
+    IS_NEOX_STYLE: tl.constexpr,
+    LOG2_HEAD_DIM: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+):
+    """Fused RoPE + Hadamard + ue8m0 FP8 quant for indexer Q.
+
+    Grid: [num_tokens, num_heads / HEAD_BLOCK]
+    Each warp processes one head; Hadamard stays in registers.
+
+    Pipeline: Load → RoPE → Hadamard (7 butterfly stages) → FP8 quant
+    """
+    ROT_DIM: tl.constexpr = 2 * HALF_ROT_DIM
+    NOPE_DIM: tl.constexpr = HEAD_DIM - ROT_DIM
+    tl.static_assert(NOPE_DIM >= 0)
+
+    # Long prefill can push token-row offsets beyond int32 when T * H * D is
+    # near 2^31. Keep token-derived pointer math in int64.
+    tok_idx = tl.program_id(0).to(tl.int64)
+    head_ids = tl.program_id(1) * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)
+    head_idx = head_ids[:, None]
+    pos = tl.load(pos_ptr + tok_idx)
+    base_ptr = q_ptr + tok_idx * q_stride0 + head_idx * q_stride1
+
+    # ---- Step 1: RoPE on first ROT_DIM dims → registers ----
+    half_offset = tl.arange(0, HALF_ROT_DIM)
+    cos = tl.load(cos_sin_cache_ptr + pos * cos_sin_cache_stride + half_offset).to(
+        tl.float32
+    )
+    sin = tl.load(
+        cos_sin_cache_ptr + pos * cos_sin_cache_stride + half_offset + HALF_ROT_DIM
+    ).to(tl.float32)
+
+    if IS_NEOX_STYLE:
+        x_first = tl.load(base_ptr + half_offset).to(tl.float32)
+        x_second = tl.load(base_ptr + half_offset + HALF_ROT_DIM).to(tl.float32)
+        r_first = x_first * cos - x_second * sin
+        r_second = x_second * cos + x_first * sin
+        # bf16 roundtrip for numerical parity with unfused path
+        r_first = r_first.to(tl.bfloat16).to(tl.float32)
+        r_second = r_second.to(tl.bfloat16).to(tl.float32)
+        rotated = (
+            tl.join(r_first, r_second).trans(0, 2, 1).reshape((HEAD_BLOCK, ROT_DIM))
+        )
+    else:
+        x_even = tl.load(base_ptr + half_offset * 2).to(tl.float32)
+        x_odd = tl.load(base_ptr + half_offset * 2 + 1).to(tl.float32)
+        r_first = x_even * cos - x_odd * sin
+        r_second = x_odd * cos + x_even * sin
+        r_first = r_first.to(tl.bfloat16).to(tl.float32)
+        r_second = r_second.to(tl.bfloat16).to(tl.float32)
+        rotated = tl.join(r_first, r_second).reshape((HEAD_BLOCK, ROT_DIM))
+
+    # ---- Step 2: NoPE dims (pass-through) → registers ----
+    if NOPE_DIM > 0:
+        nope_offset = tl.arange(0, NOPE_DIM)
+        x_nope = tl.load(base_ptr + ROT_DIM + nope_offset).to(tl.float32)
+        values = tl.join(rotated, x_nope).trans(0, 2, 1).reshape((HEAD_BLOCK, HEAD_DIM))
+    else:
+        values = rotated
+
+    # ---- Step 3: Walsh-Hadamard Transform (LOG2_HEAD_DIM butterfly stages) ----
+    # Each stage: partner = idx XOR stride
+    #   lower half (bit not set): result = self + partner
+    #   upper half (bit set):     result = partner - self
+    idx = tl.arange(0, HEAD_DIM)[None, :]
+    for s_log in tl.static_range(LOG2_HEAD_DIM):
+        stride = 1 << s_log
+        partner = tl.gather(
+            values, tl.broadcast_to(idx ^ stride, (HEAD_BLOCK, HEAD_DIM)), 1
+        )
+        values = tl.where((idx & stride) != 0, partner - values, values + partner)
+    data = values * (HEAD_DIM**-0.5)
+
+    # ---- Step 4: ue8m0 FP8 quantization ----
+    amax = tl.max(tl.abs(data), 1)
+    q_scale_val = tl.maximum(amax, 1e-4) / 448.0
+    q_scale_val = tl.math.exp2(tl.math.ceil(tl.math.log2(q_scale_val)))
+
+    fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
+    tl.store(fp8_base + idx, (data / q_scale_val[:, None]).to(tl.float8e4nv))
+
+    # Store ue8m0 scale directly as float32 via bitcast
+    log2_scale = tl.math.ceil(tl.math.log2(tl.maximum(amax, 1e-4) / 448.0)) + 127.0
+    log2_scale = tl.minimum(tl.maximum(log2_scale, 0.0), 255.0)
+    scale_i32 = log2_scale.to(tl.int32) << 23
+    scale_f32 = scale_i32.to(tl.float32, bitcast=True)
+    tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_ids, scale_f32)
+
+
 def fused_q_rope_quant(
     q: torch.Tensor,
     positions: torch.Tensor,
@@ -170,6 +275,36 @@ def fused_q_rope_quant(
         dtype=torch.float32,
         device=q.device,
     )
+    if (
+        os.environ.get("RTP_LLM_CP_REGISTER_Q_HADAMARD", "0") == "1"
+        and num_tokens >= 512
+        and index_head_dim == 128
+        and rope_head_dim in (64, 128)
+        and index_n_heads % 4 == 0
+        and q.dtype == torch.bfloat16
+        and q.stride(-1) == 1
+    ):
+        _fused_q_rope_hadamard_quant_register_kernel[(num_tokens, index_n_heads // 4)](
+            positions,
+            q,
+            q.stride(0),
+            q.stride(1),
+            cos_sin_cache,
+            cos_sin_cache.stride(0),
+            half_rot_dim,
+            q_fp8,
+            q_fp8.stride(0),
+            q_fp8.stride(1),
+            q_scale,
+            q_scale.stride(0),
+            index_head_dim,
+            is_neox_style,
+            log2_head_dim,
+            4,
+            num_warps=4,
+        )
+        return q_fp8, q_scale.unsqueeze(-1)
+
     # Scratch for Hadamard butterfly (HEAD_DIM float32s per program instance)
     scratch = torch.empty(
         num_tokens * index_n_heads * index_head_dim,
@@ -229,6 +364,7 @@ def _fused_qk_rope_hadamard_quant_kernel(
     HEAD_DIM: tl.constexpr,
     IS_NEOX_STYLE: tl.constexpr,
     LOG2_HEAD_DIM: tl.constexpr,
+    K_ONLY: tl.constexpr = False,
 ):
     """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+ue8m0 FP8).
 
@@ -300,57 +436,58 @@ def _fused_qk_rope_hadamard_quant_kernel(
             (tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)).to(tl.bfloat16),
         )
 
-    # ── Q path (all heads) ──
-    q_base = q_ptr + tok_idx * q_stride0 + head_idx * q_stride1
-    if IS_NEOX_STYLE:
-        x_first = tl.load(q_base + half_offset).to(tl.float32)
-        x_second = tl.load(q_base + half_offset + HALF_ROT_DIM).to(tl.float32)
-        r_first = (x_first * cos - x_second * sin).to(tl.bfloat16).to(tl.float32)
-        r_second = (x_second * cos + x_first * sin).to(tl.bfloat16).to(tl.float32)
-        tl.store(scratch_base + half_offset, r_first)
-        tl.store(scratch_base + half_offset + HALF_ROT_DIM, r_second)
-    else:
-        x_even = tl.load(q_base + half_offset * 2).to(tl.float32)
-        x_odd = tl.load(q_base + half_offset * 2 + 1).to(tl.float32)
-        r_first = (x_even * cos - x_odd * sin).to(tl.bfloat16).to(tl.float32)
-        r_second = (x_odd * cos + x_even * sin).to(tl.bfloat16).to(tl.float32)
-        tl.store(scratch_base + half_offset * 2, r_first)
-        tl.store(scratch_base + half_offset * 2 + 1, r_second)
+    if not K_ONLY:
+        # ── Q path (all heads) ──
+        q_base = q_ptr + tok_idx * q_stride0 + head_idx * q_stride1
+        if IS_NEOX_STYLE:
+            x_first = tl.load(q_base + half_offset).to(tl.float32)
+            x_second = tl.load(q_base + half_offset + HALF_ROT_DIM).to(tl.float32)
+            r_first = (x_first * cos - x_second * sin).to(tl.bfloat16).to(tl.float32)
+            r_second = (x_second * cos + x_first * sin).to(tl.bfloat16).to(tl.float32)
+            tl.store(scratch_base + half_offset, r_first)
+            tl.store(scratch_base + half_offset + HALF_ROT_DIM, r_second)
+        else:
+            x_even = tl.load(q_base + half_offset * 2).to(tl.float32)
+            x_odd = tl.load(q_base + half_offset * 2 + 1).to(tl.float32)
+            r_first = (x_even * cos - x_odd * sin).to(tl.bfloat16).to(tl.float32)
+            r_second = (x_odd * cos + x_even * sin).to(tl.bfloat16).to(tl.float32)
+            tl.store(scratch_base + half_offset * 2, r_first)
+            tl.store(scratch_base + half_offset * 2 + 1, r_second)
 
-    if NOPE_DIM > 0:
-        nope_offset = tl.arange(0, NOPE_DIM)
-        tl.store(
-            scratch_base + ROT_DIM + nope_offset,
-            tl.load(q_base + ROT_DIM + nope_offset).to(tl.float32),
-        )
+        if NOPE_DIM > 0:
+            nope_offset = tl.arange(0, NOPE_DIM)
+            tl.store(
+                scratch_base + ROT_DIM + nope_offset,
+                tl.load(q_base + ROT_DIM + nope_offset).to(tl.float32),
+            )
 
-    tl.debug_barrier()
-    for s_log in range(LOG2_HEAD_DIM):
-        stride = 1 << s_log
-        is_upper = (idx & stride) != 0
-        self_val = tl.load(scratch_base + idx)
-        partner_val = tl.load(scratch_base + (idx ^ stride))
-        tl.store(
-            scratch_base + idx,
-            tl.where(is_upper, partner_val - self_val, self_val + partner_val),
-        )
         tl.debug_barrier()
+        for s_log in range(LOG2_HEAD_DIM):
+            stride = 1 << s_log
+            is_upper = (idx & stride) != 0
+            self_val = tl.load(scratch_base + idx)
+            partner_val = tl.load(scratch_base + (idx ^ stride))
+            tl.store(
+                scratch_base + idx,
+                tl.where(is_upper, partner_val - self_val, self_val + partner_val),
+            )
+            tl.debug_barrier()
 
-    data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
+        data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
 
-    # ue8m0 FP8 quantization
-    amax = tl.max(tl.abs(data))
-    q_scale_val = tl.maximum(amax, 1e-4) / 448.0
-    q_scale_val = tl.math.exp2(tl.math.ceil(tl.math.log2(q_scale_val)))
+        # ue8m0 FP8 quantization
+        amax = tl.max(tl.abs(data))
+        q_scale_val = tl.maximum(amax, 1e-4) / 448.0
+        q_scale_val = tl.math.exp2(tl.math.ceil(tl.math.log2(q_scale_val)))
 
-    fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
-    tl.store(fp8_base + idx, (data / q_scale_val).to(tl.float8e4nv))
+        fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
+        tl.store(fp8_base + idx, (data / q_scale_val).to(tl.float8e4nv))
 
-    log2_scale = tl.math.ceil(tl.math.log2(tl.maximum(amax, 1e-4) / 448.0)) + 127.0
-    log2_scale = tl.minimum(tl.maximum(log2_scale, 0.0), 255.0)
-    scale_i32 = log2_scale.to(tl.int32) << 23
-    scale_f32 = scale_i32.to(tl.float32, bitcast=True)
-    tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale_f32)
+        log2_scale = tl.math.ceil(tl.math.log2(tl.maximum(amax, 1e-4) / 448.0)) + 127.0
+        log2_scale = tl.minimum(tl.maximum(log2_scale, 0.0), 255.0)
+        scale_i32 = log2_scale.to(tl.int32) << 23
+        scale_f32 = scale_i32.to(tl.float32, bitcast=True)
+        tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale_f32)
 
 
 def fused_qk_rope_quant(
@@ -434,3 +571,40 @@ def fused_qk_rope_quant(
         )
 
     return q_fp8, q_scale.unsqueeze(-1), k_out
+
+
+def fused_k_rope_hadamard(
+    k, positions, cos_sin_cache, index_head_dim, rope_head_dim, is_neox_style=True
+):
+    """Run the original fused-QK K branch before independent Q projection."""
+    n = k.shape[0]
+    log2_dim = int(math.log2(index_head_dim))
+    assert 2**log2_dim == index_head_dim
+    output = torch.empty((n, index_head_dim), device=k.device, dtype=torch.bfloat16)
+    scratch = torch.empty(n * index_head_dim, device=k.device, dtype=torch.float32)
+    if n:
+        _fused_qk_rope_hadamard_quant_kernel[(n, 1)](
+            positions,
+            None,
+            0,
+            0,
+            k,
+            k.stride(0),
+            cos_sin_cache,
+            cos_sin_cache.stride(0),
+            rope_head_dim // 2,
+            None,
+            0,
+            0,
+            None,
+            0,
+            output,
+            output.stride(0),
+            scratch,
+            index_head_dim,
+            is_neox_style,
+            log2_dim,
+            K_ONLY=True,
+            num_warps=1,
+        )
+    return output

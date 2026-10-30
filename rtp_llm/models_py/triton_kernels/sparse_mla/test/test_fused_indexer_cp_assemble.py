@@ -70,9 +70,7 @@ def test_master_switch_off_uses_two_separate_all_gathers(monkeypatch):
         fused_indexer_cp_assemble as assemble,
     )
 
-    local_q = torch.arange(12, dtype=torch.uint8).view(3, 4).view(
-        torch.float8_e4m3fn
-    )
+    local_q = torch.arange(12, dtype=torch.uint8).view(3, 4).view(torch.float8_e4m3fn)
     local_s = torch.arange(6, dtype=torch.uint8).view(3, 2)
     calls = []
 
@@ -317,3 +315,44 @@ class TestEndToEndAgainstReference:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.skipif(not _has_cuda(), reason=SKIP_REASON)
+@pytest.mark.parametrize(
+    "actual_lens,padded_lens",
+    [
+        ([0], [0]),
+        ([0], [5]),
+        ([7], [7]),
+        ([3], [8]),
+        ([0, 3, 0, 2], [4, 4, 4, 4]),
+        ([513, 1, 0], [768, 256, 256]),
+    ],
+)
+@pytest.mark.parametrize("width,scale_width", [(128, 4), (256, 8), (17, 3)])
+def test_fused_padded_wire_bytes(actual_lens, padded_lens, width, scale_width):
+    from rtp_llm.models_py.triton_kernels.sparse_mla.fused_indexer_cp_assemble import (
+        _pack_padded_k_scale,
+    )
+
+    n, rows = sum(actual_lens), sum(padded_lens)
+    # Arbitrary bytes cover FP8 NaNs too: no numeric conversion is allowed.
+    k = torch.randint(0, 256, (n, width), dtype=torch.uint8, device="cuda")
+    scales = torch.randint(0, 256, (n, scale_width), dtype=torch.uint8, device="cuda")
+    mapping = torch.full((rows,), -1, dtype=torch.int64, device="cuda")
+    ref = torch.zeros((rows, width + scale_width), dtype=torch.uint8, device="cuda")
+    src = dst = 0
+    for actual, padded in zip(actual_lens, padded_lens):
+        mapping[dst : dst + actual] = torch.arange(src, src + actual, device="cuda")
+        ref[dst : dst + actual, :width] = k[src : src + actual]
+        ref[dst : dst + actual, width:] = scales[src : src + actual]
+        src += actual
+        dst += padded
+    for repeat in range(3):
+        result = _pack_padded_k_scale(
+            k.view(torch.float8_e4m3fn), scales, rows, mapping
+        )
+        assert torch.equal(result, ref)
+    if n == rows or n == 0:
+        result = _pack_padded_k_scale(k, scales, rows)
+        assert torch.equal(result, ref)

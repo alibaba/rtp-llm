@@ -26,7 +26,7 @@ def run_case(rank, prefixes, lengths, producer):
     )
     from rtp_llm.ops.compute_ops import LayerKVCache
 
-    size, owner, page, layers = 8, 512, 64, 8
+    size, owner, page, layers = dist.get_world_size(), 512, 64, 8
     totals = [p + q for p, q in zip(prefixes, lengths)]
     # Independent scalar ownership/reference: cache pages are deliberately
     # permuted and sparse, then the real staging cache compacts them again.
@@ -96,7 +96,16 @@ def run_case(rank, prefixes, lengths, producer):
         backing.append(source.cuda() if layer < 2 else source.pin_memory())
         expected.append(decoded.cuda())
     plan = prefix_plan(totals, [0] * len(totals), size, rank, owner)
+    padded_lengths = [
+        ((n + size * owner - 1) // (size * owner)) * owner for n in totals
+    ]
     op = SimpleNamespace(
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        use_cuda_graph=False,
+        sharded_workspace_starts=torch.tensor(
+            [sum(padded_lengths[:i]) for i in range(len(totals))], dtype=torch.int32
+        ),
         block_table=table.cuda(),
         kv_cache_sharded=True,
         sharded_slot_mapping=slots_cpu.cuda(),
@@ -149,7 +158,22 @@ def run_case(rank, prefixes, lengths, producer):
     )
     fmha._cross_layer_prefetch = pipeline
     compute = torch.cuda.current_stream()
-    results, timing = [], []
+    results, timing, attention_pairs = [], [], []
+    valid_requests = [i for i, n in enumerate(totals) if n]
+    topk = torch.full((len(valid_requests), 2048), -1, dtype=torch.int32, device="cpu")
+    for row, request in enumerate(valid_requests):
+        count = min(totals[request], 2048)
+        topk[row, :count] = torch.arange(count, dtype=torch.int32, device="cpu")
+    topk = topk.cuda()
+    op.precomputed_kv_offsets = torch.tensor(
+        [sum(totals[:i]) for i in valid_requests], dtype=torch.int32, device="cuda"
+    )
+    op.scale = 576**-0.5
+    op.kv_lora_rank = 512
+    queries = (
+        torch.randn((len(valid_requests), 64, 576), dtype=torch.bfloat16, device="cuda")
+        * 0.01
+    )
     # Both fused slots must own distinct memory for the whole forward.
     assert pipeline.buffers[0].data_ptr() != pipeline.buffers[1].data_ptr()
     try:
@@ -166,7 +190,24 @@ def run_case(rank, prefixes, lengths, producer):
                 torch.cuda._sleep(100_000)  # independent Q work
                 compute.wait_event(ready)
                 pipeline.consume(layer)
-                results.append(fused.clone())  # attention reads the current slot
+                if isinstance(fused, torch.Tensor):
+                    results.append(fused.clone())
+                else:
+                    # Consume selected rows on compute before releasing the slot.
+                    results.append(fused.values.index_select(0, fused.restore_indices))
+                if pipeline.rank_major:
+                    # Exercise the production index-remap + sparse-attention
+                    # consumer, including per-request offsets and -1 padding.
+                    attention_pairs.append(
+                        (
+                            SparseMlaFp8CPOp._attend_gather(
+                                op, queries, None, topk, fused
+                            ),
+                            SparseMlaFp8CPOp._attend_gather(
+                                op, queries, None, topk, expected[layer]
+                            ),
+                        )
+                    )
                 torch.cuda._sleep(200_000)
                 pipeline.release(layer)
             torch.cuda._sleep(100_000)  # O projection window
@@ -181,6 +222,10 @@ def run_case(rank, prefixes, lengths, producer):
         cache.end_forward(failed=True)
         raise
     torch.cuda.synchronize()
+    for actual_attention, reference_attention in attention_pairs:
+        torch.testing.assert_close(
+            actual_attention, reference_attention, rtol=0, atol=0
+        )
     for producer_end, before_moe in timing:
         assert (
             producer_end.elapsed_time(before_moe) >= 0
@@ -206,6 +251,8 @@ def run_case(rank, prefixes, lengths, producer):
         "zero_owned_new": not bool(len(fresh_owned)),
         "bit_exact": True,
         "registered": pipeline.registered,
+        "rank_major": pipeline.rank_major,
+        "attention_pairs_bit_exact": len(attention_pairs),
     }
 
 
@@ -310,7 +357,7 @@ def check_registered_indexer(rank, producer):
             )
             assert torch.equal(snapshot.view(torch.uint8), reference.view(torch.uint8))
             compute.wait_stream(producer)
-            for peer in range(8):
+            for peer in range(dist.get_world_size()):
                 assert bool(
                     (houtput[peer * 8192 : (peer + 1) * 8192] == peer + iteration).all()
                 )
@@ -414,13 +461,14 @@ def check_registered_failure_cleanup(rank):
 
 
 def worker(rank, port):
+    torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     torch.set_default_device(f"cuda:{rank}")
     dist.init_process_group(
         "nccl",
         init_method=f"tcp://127.0.0.1:{port}",
         rank=rank,
-        world_size=8,
+        world_size=int(os.environ.get("KV_TEST_WORLD_SIZE", "8")),
         timeout=timedelta(seconds=180),
     )
     from rtp_llm.models_py.distributed import collective_torch, pynccl_cp
@@ -428,14 +476,21 @@ def worker(rank, port):
     collective_torch._group_map[collective_torch.Group.DP_AND_TP] = dist.group.WORLD
     collective_torch._initialized = True
     collective_torch._parallelism_config = SimpleNamespace(
-        tp_size=8, dp_size=1, world_size=8
+        tp_size=dist.get_world_size(), dp_size=1, world_size=dist.get_world_size()
     )
+    if os.environ.get("RTP_LLM_CP_TORCH_SYMM_GATHER", "0") == "1":
+        from rtp_llm.models_py.distributed.symm_mem import init_symm_mem_communicator
+
+        assert init_symm_mem_communicator(dist.group.WORLD) is not None
     producer = pynccl_cp.warmup_kv_overlap(dist.group.WORLD)
+    if os.environ.get("RTP_LLM_CP_TORCH_SYMM_GATHER", "0") == "1":
+        assert all(v is not None for v in pynccl_cp._OVERLAP_SYMM_COMMS.values())
     pynccl_cp.warmup(dist.group.WORLD)
     cases = [
         ([1, 511, 4097, 0], [6, 1025, 13, 0]),
         ([0, 64, 513], [257, 0, 1]),
         ([4096, 512, 8192], [257, 1, 0]),
+        ([512, 4096], [0, 0]),
     ]
     real_event = torch.cuda.Event
 
@@ -453,7 +508,10 @@ def worker(rank, port):
                 ):
                     for p, q in cases:
                         result = run_case(rank, p, q, producer)
-                        result["direct_new_rows_nccl"] = direct
+                        result["direct_main_communicator"] = direct
+                        result["symmetric_initialized"] = (
+                            os.environ.get("RTP_LLM_CP_TORCH_SYMM_GATHER", "0") == "1"
+                        )
                         result["index_opt"] = index_opt
                         results.append(result)
     Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]).joinpath(
@@ -470,9 +528,10 @@ def worker(rank, port):
 
 
 if __name__ == "__main__":
-    if torch.cuda.device_count() < 8:
-        raise RuntimeError("requires eight allocated GPUs")
+    size = int(os.environ.get("KV_TEST_WORLD_SIZE", "8"))
+    if size not in (4, 8) or torch.cuda.device_count() < size:
+        raise RuntimeError("requires four or eight allocated GPUs")
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    mp.spawn(worker, args=(port,), nprocs=8, join=True)
+    mp.spawn(worker, args=(port,), nprocs=size, join=True)

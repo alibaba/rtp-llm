@@ -216,6 +216,8 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
+        *,
+        cache_key=None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if q_c_fp8 is not None and q_c_scale is not None:
             q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
@@ -239,7 +241,7 @@ class Indexer(nn.Module):
             if bool(getattr(cp_params, "kv_cache_sharded", False))
             else fmha_params.slot_mapping
         )
-        self.indexer_op.quant_k_cp_only(
+        (cache_key or self.indexer_op.quant_k_cp_only)(
             key,
             kv_cache,
             slot_mapping,
@@ -325,6 +327,7 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        prepared_k=None,
     ) -> torch.Tensor:
         is_multi_token_decode = bool(
             getattr(attention_inputs, "is_target_verify", False)
@@ -358,6 +361,7 @@ class Indexer(nn.Module):
                 indexer_src_for_padded=getattr(
                     cp_params, "indexer_src_for_padded", None
                 ),
+                **({"prepared_k": prepared_k} if prepared_k is not None else {}),
                 total_local_ids_is_identity=bool(
                     getattr(cp_params, "total_local_ids_is_identity", False)
                 ),
@@ -365,6 +369,146 @@ class Indexer(nn.Module):
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
         )
+
+    def _fused_forward_prefill_cp_early_k(
+        self,
+        q_lora,
+        x,
+        kv_cache,
+        fmha_params,
+        cp_params,
+        x_fp8=None,
+        x_scale=None,
+        q_c_fp8=None,
+        q_c_scale=None,
+        *,
+        cache_key,
+    ):
+        # K depends on x, not on Q projection. Submit its communication before
+        # Q GEMM; keep the exact RoPE/Hadamard branch of the fused QK kernel.
+        if x_fp8 is not None and x_scale is not None:
+            k = self.wk(x_fp8, input_scales=x_scale)
+        else:
+            k = self.wk(x)
+        k = self.k_norm(k)
+        key = self.indexer_op.fused_rope_hadamard_k(k, cp_params.full_rope_pos_ids)
+        cache_key(
+            key,
+            kv_cache,
+            cp_params.sharded_slot_mapping,
+            cp_params.kv_restore_unpad_indices,
+        )
+        if q_c_fp8 is not None and q_c_scale is not None:
+            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
+        else:
+            q = self.wq_b(q_lora)
+        q = q.view(-1, self.index_n_heads, self.index_head_dim)
+        return self.indexer_op.fused_rope_quant_q(q, cp_params.full_rope_pos_ids)
+
+    def _forward_cp_overlap(
+        self,
+        stream,
+        hidden_states,
+        q_lora,
+        kv_cache,
+        fmha_params,
+        attention_inputs,
+        cp_params,
+        x_fp8,
+        x_scale,
+        q_c_fp8,
+        q_c_scale,
+    ):
+        # Per-call state: never retained on the shared model/runner instance.
+        compute = torch.cuda.current_stream(hidden_states.device)
+        prepared_k = None
+        ready = None
+        keepalive = []
+
+        def submit_key(key, cache, slots, restore):
+            nonlocal prepared_k, ready
+            # K was produced on compute. Retain it until compute joins the
+            # consumer event, including failures during the auxiliary submit.
+            keepalive.append(key)
+            stream.wait_stream(compute)
+            with torch.cuda.stream(stream):
+                self.indexer_op.quant_k_cp_only(key, cache, slots, restore)
+                prepared_k = self.indexer_op.prepare_cp_k(
+                    cache,
+                    attention_inputs,
+                    cp_params.total_kv_len,
+                    cp_params.cu_kv_seqlens_global,
+                    kv_cache_sharded=True,
+                    cp_size=cp_params.cp_size,
+                    indexer_cp_plan=cp_params.indexer_cp_plan,
+                    indexer_cp_local_cu=cp_params.indexer_cp_local_cu,
+                    indexer_copy_dst_idx=getattr(
+                        cp_params, "indexer_copy_dst_idx", None
+                    ),
+                    indexer_src_for_padded=getattr(
+                        cp_params, "indexer_src_for_padded", None
+                    ),
+                )
+                ready = torch.cuda.Event()
+                ready.record(stream)
+
+        try:
+            if (
+                self._prefill_cp_fused_quant_enabled()
+                and cp_params.full_rope_pos_ids is not None
+            ):
+                q_fp8, q_scale = self._fused_forward_prefill_cp_early_k(
+                    q_lora,
+                    hidden_states,
+                    kv_cache,
+                    fmha_params,
+                    cp_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                    cache_key=submit_key,
+                )
+            else:
+                query, key = self._get_q_k_bf16(
+                    q_lora,
+                    hidden_states,
+                    fmha_params,
+                    cp_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                )
+                q_fp8, q_scale = self.indexer_op.quant_q_k_cp(
+                    query,
+                    key,
+                    kv_cache,
+                    cp_params.sharded_slot_mapping,
+                    cp_params.kv_restore_unpad_indices,
+                    cache_key=submit_key,
+                )
+            # Independent work runs while both K gathers/cache assembly progress.
+            weights = self._get_logits_head_gate(hidden_states, q_scale)
+            assert ready is not None and prepared_k is not None
+            compute.wait_event(ready)
+            for tensor in prepared_k:
+                # Allocated on auxiliary, consumed by logits on compute. The
+                # allocator must not recycle it on auxiliary before logits end.
+                tensor.record_stream(compute)
+            keepalive.clear()
+            return self._compute_topk(
+                q_fp8,
+                weights,
+                kv_cache,
+                fmha_params,
+                attention_inputs,
+                cp_params,
+                prepared_k=prepared_k,
+            )
+        except BaseException:
+            compute.wait_stream(stream)
+            raise
 
     def forward(
         self,
@@ -387,6 +531,33 @@ class Indexer(nn.Module):
 
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
+
+        if (
+            _DEVICE_TYPE == DeviceType.Cuda
+            and self._is_sparse_prefill_cp(attention_inputs)
+            and bool(getattr(cp_params, "kv_cache_sharded", False))
+            and int(getattr(cp_params, "cp_size", 1)) > 1
+            and hidden_states.is_cuda
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            from rtp_llm.models_py.distributed.collective_torch import Group
+            from rtp_llm.models_py.distributed.pynccl_cp import indexer_overlap_stream
+
+            stream = indexer_overlap_stream(Group.TP, hidden_states.device)
+            if stream is not None:
+                return self._forward_cp_overlap(
+                    stream,
+                    hidden_states,
+                    q_lora,
+                    kv_cache,
+                    fmha_params,
+                    attention_inputs,
+                    cp_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                )
 
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).

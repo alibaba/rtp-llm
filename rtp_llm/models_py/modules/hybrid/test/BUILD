@@ -123,3 +123,6 @@ py_test(
     srcs = ["mtp_mega_buf_share_test.py"],
     deps = py_test_deps + ["//rtp_llm:testlib"],
 )
+
+py_test(name = "indexer_cp_overlap_test", srcs = ["indexer_cp_overlap_test.py"], deps = py_test_deps + ["//rtp_llm:testlib"])
+py_test(name = "indexer_cp_overlap_gpu_test", srcs = ["indexer_cp_overlap_gpu_test.py"], deps = py_test_deps + ["//rtp_llm:testlib"], tags = ["manual", "H20", "open_skip"])

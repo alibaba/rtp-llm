@@ -247,6 +247,86 @@ def _cp_sharded_slot_mapping(
     return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
 
 
+def _cp_inputs_with_host_prefix(params, inputs, *, use_host=False):
+    """Recover this eager forward's prefix from fill_params' host KV indptr."""
+    actual = getattr(inputs, "input_lengths", None)
+    prefix = getattr(inputs, "prefix_lengths", None)
+    indptr = getattr(params, "prefill_ragged_kv_len_indptr_h", None)
+    if not (
+        use_host
+        and getattr(inputs, "is_prefill", False)
+        and isinstance(actual, torch.Tensor)
+        and actual.device.type == "cpu"
+        and actual.ndim == 1
+        and actual.dtype == torch.int32
+        and isinstance(prefix, torch.Tensor)
+        and prefix.shape == actual.shape
+        and isinstance(indptr, torch.Tensor)
+        and indptr.device.type == "cpu"
+        and indptr.ndim == 1
+        and indptr.dtype == torch.int32
+        and indptr.numel() >= actual.numel() + 1
+    ):
+        return inputs
+    result = copy.copy(inputs)
+    ptr = indptr[: actual.numel() + 1]
+    # Own the derived snapshot; do not retain a mutable view of the pinned pool.
+    result.prefix_lengths = ptr[1:] - ptr[:-1] - actual
+    return result
+
+
+def _plan_cp_sharded_slots(
+    params,
+    block_table,
+    attn_inputs,
+    kernel_tpb,
+    cp_size,
+    cp_rank,
+    owner_tpb,
+    *,
+    use_host=False,
+):
+    """Use only same-forward fill_params host mirrors; graph plans stay on GPU."""
+    positions = params.positions_d
+    batch = params.batch_indice_d
+    host_positions = getattr(params, "positions_h", None)
+    host_batch = getattr(params, "batch_indice_h", None)
+    host_table = getattr(attn_inputs, "kv_cache_kernel_block_id_host", None)
+    if not isinstance(host_table, torch.Tensor) or host_table.numel() == 0:
+        host_table = getattr(attn_inputs, "kv_cache_block_id_host", None)
+    host_inputs = (host_positions, host_batch, host_table)
+    expected = (positions, batch, block_table)
+    if use_host and all(
+        isinstance(h, torch.Tensor)
+        and h.device.type == "cpu"
+        and h.shape == d.shape
+        and h.dtype == d.dtype
+        for h, d in zip(host_inputs, expected)
+    ):
+        slots_h = _cp_sharded_slot_mapping(
+            host_positions,
+            host_table,
+            host_batch,
+            kernel_tpb,
+            cp_size,
+            cp_rank,
+            owner_tokens_per_block=owner_tpb,
+        )
+        return slots_h.to(block_table.device), slots_h
+    return (
+        _cp_sharded_slot_mapping(
+            positions,
+            block_table,
+            batch,
+            kernel_tpb,
+            cp_size,
+            cp_rank,
+            owner_tokens_per_block=owner_tpb,
+        ),
+        None,
+    )
+
+
 def _safe_expand_cp_sharded_block_table(
     attn_inputs: PyAttentionInputs,
     tokens_per_block: int,
@@ -549,6 +629,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
     ) -> None:
         self.block_table = block_table
         self.mla_params = mla_params
+        attn_inputs = _cp_inputs_with_host_prefix(
+            mla_params,
+            attn_inputs,
+            use_host=(
+                not self.use_cuda_graph
+                and os.environ.get("RTP_LLM_CP_HOST_PLAN", "0") == "1"
+            ),
+        )
         self.attn_inputs = attn_inputs
         self.cp_info = attn_inputs.context_parallel_info
         assert self.cp_info is not None, "context_parallel_info required for CP"
@@ -612,16 +700,23 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         self.total_kv_len = mla_params.cp_total_kv_len
 
+        # Never carry host slot metadata across prepare(), target/draft, or graph replay.
+        self.sharded_slot_mapping_host = None
+        self._host_slot_mapping_source = None
         if self.kv_cache_sharded:
             owner_tpb = int(self.kv_owner_tokens_per_block)
-            new_slot_mapping = _cp_sharded_slot_mapping(
-                mla_params.positions_d,
+            new_slot_mapping, slots_host = _plan_cp_sharded_slots(
+                mla_params,
                 block_table,
-                mla_params.batch_indice_d,
+                attn_inputs,
                 self.token_per_block,
                 self.prefill_cp_size,
                 self.prefill_cp_rank,
-                owner_tokens_per_block=owner_tpb,
+                owner_tpb,
+                use_host=(
+                    not self.use_cuda_graph
+                    and os.environ.get("RTP_LLM_CP_HOST_PLAN", "0") == "1"
+                ),
             )
             self.sharded_slot_mapping = _copy_or_replace_graph_tensor(
                 self.sharded_slot_mapping,
@@ -629,6 +724,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 "CP sparse MLA sharded_slot_mapping",
                 self.use_cuda_graph,
             )
+            self.sharded_slot_mapping_host = slots_host
+            if slots_host is not None:
+                self._host_slot_mapping_source = self.sharded_slot_mapping
             per_req_total_kv_lens = (
                 self.cu_kv_seqlens_global[1:].to(torch.int64)
                 - self.cu_kv_seqlens_global[:-1].to(torch.int64)
@@ -856,7 +954,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert self.mla_params is not None and self.block_table is not None
         batch_size = int(self.block_table.shape[0])
         indptr = self.mla_params.prefill_ragged_kv_len_indptr_d[: batch_size + 1]
-        total_kv_len = int(indptr[batch_size].item())
+        host_indptr = getattr(self.mla_params, "prefill_ragged_kv_len_indptr_h", None)
+        use_host = (
+            not self.use_cuda_graph
+            and os.environ.get("RTP_LLM_CP_HOST_PLAN", "0") == "1"
+            and isinstance(host_indptr, torch.Tensor)
+            and host_indptr.device.type == "cpu"
+            and host_indptr.ndim == 1
+            and host_indptr.numel() >= batch_size + 1
+        )
+        # fill_params populates the eager host mirror before uploading indptr.
+        total_kv_len = int((host_indptr if use_host else indptr)[batch_size].item())
         if total_kv_len == 0:
             return None
         return _GatherWorkspace(
@@ -1447,7 +1555,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             or os.environ.get("RTP_LLM_CP_KV_CROSS_LAYER", "1") != "1"
             or not cache.layerwise
             or len(cache.staging) < 2
-            or not any(self.attn_inputs.prefix_lengths.reshape(-1).tolist())
+            or not any(self.fmha_impl.attn_inputs.prefix_lengths.reshape(-1).tolist())
         ):
             return None
         from .cp_kv_prefetch import CrossLayerKvPrefetch
@@ -1939,11 +2047,20 @@ class SparseMlaCpImpl(SparseMlaImpl):
             q_transformed = self._apply_input_bmm(q, layer_id, out=q_transform_out)
         # For a full permutation, V BMM keeps exactly the same matrix shape.
         # Reorder its narrower output instead of the 512-wide Attention result.
-        # Partial/padded layouts retain the original GEMM and scatter behavior.
+        # Large BF16 padded layouts can opt into the narrower scatter too.
+        # Invalid output rows are zeroed by the scatter after V projection;
+        # small batches keep their original launch/matrix shapes.
         defer_output_scatter = (
             os.environ.get("RTP_LLM_CP_KV_INDEX_OPT", "1") == "1"
             and original_q_len is not None
-            and local_ids.numel() == original_q_len
+            and (
+                local_ids.numel() == original_q_len
+                or (
+                    os.environ.get("RTP_LLM_CP_DEFER_PADDED_SCATTER", "0") == "1"
+                    and local_ids.numel() >= 1024
+                    and q.dtype == torch.bfloat16
+                )
+            )
             and original_q_len >= 256
             and self.weights[layer_id][W.mla_vc].size(-1) < self.kv_lora_rank
         )

@@ -124,7 +124,15 @@ class CpKvOverlapTest(unittest.TestCase):
                                 wrapper = self.make_wrapper()
                                 wrapper.overlap_kv = overlap
                                 wrapper._cross_layer_prefetch = None
+                                # prepare() may replace the op inputs with an owned
+                                # host-prefix snapshot. The wrapper's original input
+                                # must not decide whether this forward has history.
                                 wrapper.attn_inputs = SimpleNamespace(
+                                    prefix_lengths=torch.tensor(
+                                        [64, 64] if not any(prefixes) else [0, 0]
+                                    )
+                                )
+                                wrapper.fmha_impl.attn_inputs = SimpleNamespace(
                                     prefix_lengths=torch.tensor(prefixes)
                                 )
                                 cache = SimpleNamespace(

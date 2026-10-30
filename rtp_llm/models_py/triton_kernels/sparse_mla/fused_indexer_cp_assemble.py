@@ -5,6 +5,7 @@ Replaces the element-wise kernel sequences in:
   2. assemble_indexer_k post-allgather restore (gather by restore_indices)
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -12,10 +13,78 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.distributed.pynccl_cp import (
-    all_gather,
-    enabled as cp_opt_enabled,
-)
+from rtp_llm.models_py.distributed.pynccl_cp import all_gather
+from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
+
+
+@triton.jit
+def _pack_padded_k_scale_kernel(
+    K,
+    S,
+    Map,
+    Out,
+    KCOL: tl.constexpr,
+    SCOL: tl.constexpr,
+    ACTUAL: tl.constexpr,
+    USE_MAP: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    src = tl.load(Map + row).to(tl.int64) if USE_MAP else row
+    col = tl.arange(0, BLOCK)
+    valid = (src >= 0) & (src < ACTUAL)
+    kval = tl.load(K + src * KCOL + col, mask=valid & (col < KCOL), other=0)
+    sval = tl.load(
+        S + src * SCOL + col - KCOL,
+        mask=valid & (col >= KCOL) & (col < KCOL + SCOL),
+        other=0,
+    )
+    tl.store(
+        Out + row * (KCOL + SCOL) + col,
+        tl.where(col < KCOL, kval, sval),
+        mask=col < KCOL + SCOL,
+    )
+
+
+def _pack_padded_k_scale(k, scale, rows, src_for_padded=None):
+    """Byte-exact padding and K/scale packing in one launch, without temporaries."""
+    if (
+        k.ndim != 2
+        or scale.ndim != 2
+        or k.size(0) != scale.size(0)
+        or k.device != scale.device
+        or k.element_size() != 1
+        or scale.element_size() != 1
+        or not k.is_contiguous()
+        or not scale.is_contiguous()
+        or rows < 0
+    ):
+        raise ValueError("invalid contiguous one-byte K/scale payload")
+    if src_for_padded is not None and (
+        src_for_padded.ndim != 1
+        or src_for_padded.numel() != rows
+        or src_for_padded.device != k.device
+        or src_for_padded.dtype != torch.int64
+        or not src_for_padded.is_contiguous()
+    ):
+        raise ValueError("invalid padded K row map")
+    if src_for_padded is None and k.size(0) not in (0, rows):
+        raise ValueError("nonempty padded payload requires a row map")
+    width = k.size(1) + scale.size(1)
+    out = torch.empty((rows, width), dtype=torch.uint8, device=k.device)
+    if rows:
+        _pack_padded_k_scale_kernel[(rows,)](
+            k.view(torch.uint8),
+            scale.view(torch.uint8),
+            src_for_padded,
+            out,
+            k.size(1),
+            scale.size(1),
+            k.size(0),
+            src_for_padded is not None,
+            triton.next_power_of_2(width),
+        )
+    return out
 
 
 @triton.jit
@@ -97,6 +166,86 @@ def _gather_restore_fused_kernel(
         mask=s_mask,
     )
     tl.store(out_s_ptr + row_id * s_stride + s_cols, s_data, mask=s_mask)
+
+
+@triton.jit
+def _gather_restore_tiled_kernel(
+    P,
+    K,
+    S,
+    I,
+    ROWS,
+    PACK: tl.constexpr,
+    KD: tl.constexpr,
+    SD: tl.constexpr,
+    BK: tl.constexpr,
+    BS: tl.constexpr,
+    BR: tl.constexpr,
+):
+    rows = tl.program_id(0).to(tl.int64) * BR + tl.arange(0, BR)
+    valid = rows < ROWS
+    src = tl.load(I + rows, valid, other=0).to(tl.int64)
+    col = tl.arange(0, BK)
+    val = tl.load(
+        P + src[:, None] * PACK + col[None, :],
+        valid[:, None] & (col[None, :] < KD),
+        other=0,
+    )
+    tl.store(
+        K + rows[:, None] * KD + col[None, :], val, valid[:, None] & (col[None, :] < KD)
+    )
+    sc = tl.arange(0, BS)
+    val = tl.load(
+        P + src[:, None] * PACK + KD + sc[None, :],
+        valid[:, None] & (sc[None, :] < SD),
+        other=0,
+    )
+    tl.store(
+        S + rows[:, None] * SD + sc[None, :], val, valid[:, None] & (sc[None, :] < SD)
+    )
+
+
+def _restore_packed_indexer_k(packed, out_k, out_s, indices):
+    """Byte-preserving restore; tile rows without specializing on sequence length."""
+    rows, k_cols = out_k.shape
+    s_cols = out_s.shape[1]
+    if rows == 0:
+        return
+    block_k = triton.next_power_of_2(k_cols)
+    block_s = triton.next_power_of_2(s_cols)
+    if (
+        os.environ.get("RTP_LLM_CP_TILED_INDEXER_RESTORE", "0") == "1"
+        and rows >= 4096
+        and k_cols == 128
+        and s_cols in (1, 4)
+    ):
+        _gather_restore_tiled_kernel[(triton.cdiv(rows, 16),)](
+            packed,
+            out_k,
+            out_s,
+            indices,
+            rows,
+            k_cols + s_cols,
+            k_cols,
+            s_cols,
+            block_k,
+            block_s,
+            16,
+            num_warps=4,
+        )
+    else:
+        _gather_restore_fused_kernel[(rows,)](
+            packed,
+            out_k,
+            out_s,
+            indices,
+            k_cols + s_cols,
+            k_cols,
+            s_cols,
+            rows,
+            block_k,
+            block_s,
+        )
 
 
 @triton.jit
@@ -185,15 +334,11 @@ def _all_gather_indexer_k_payload(
     group,
 ):
     """Pack K+scale and issue exactly one rank-major AllGather."""
-    local_packed, q_cols, s_cols = _pack_indexer_k_payload(
-        local_k_quant, local_k_scale
-    )
+    local_packed, q_cols, s_cols = _pack_indexer_k_payload(local_k_quant, local_k_scale)
     # This role is deliberately absent from the SYMM whitelist. Long-context
     # packed payloads can exceed a persistent window, while ordinary pynccl
     # still removes the second collective launch.
-    gathered_packed = all_gather(
-        local_packed, group=group, role="indexer_k_packed"
-    )
+    gathered_packed = all_gather(local_packed, group=group, role="indexer_k_packed")
     return gathered_packed, q_cols, s_cols
 
 
@@ -211,12 +356,8 @@ def _all_gather_indexer_k(
         )
         return gathered, None, q_cols, s_cols
 
-    gathered_k = all_gather(
-        local_k_quant, group=group, role="indexer_k_quant"
-    )
-    gathered_s = all_gather(
-        local_k_scale, group=group, role="indexer_k_scale"
-    )
+    gathered_k = all_gather(local_k_quant, group=group, role="indexer_k_quant")
+    gathered_s = all_gather(local_k_scale, group=group, role="indexer_k_scale")
     return gathered_k, gathered_s, q_cols, s_cols
 
 
@@ -256,48 +397,66 @@ def fused_copy_and_assemble_indexer_k(
     BLOCK_K = _next_power_of_2(head_dim)
     BLOCK_S = _next_power_of_2(scale_dim)
 
-    # Step 1: build padded local buffer
-    no_padding = total_actual_T == total_local_T
-    if no_padding:
-        local_k = actual_k_quant
-        local_s = actual_k_scale
-    elif src_for_padded is not None and total_actual_T > 0:
-        local_k = torch.empty(
-            (total_local_T, head_dim), dtype=actual_k_quant.dtype, device=device
-        )
-        local_s = torch.empty(
-            (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
-        )
-        _fused_zero_scatter_kernel[(total_local_T,)](
-            actual_k_quant.view(torch.uint8),
-            actual_k_scale,
-            local_k.view(torch.uint8),
-            local_s,
-            src_for_padded,
-            head_dim,
-            scale_dim,
-            total_local_T,
-            BLOCK_K,
-            BLOCK_S,
-        )
-    else:
-        local_k = torch.zeros(
-            (total_local_T, head_dim), dtype=actual_k_quant.dtype, device=device
-        )
-        local_s = torch.zeros(
-            (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
-        )
-        if total_actual_T > 0:
-            B = int(plan.per_req_actual_local_kv_lens.numel())
-            if B == 1:
-                local_k[:total_actual_T].copy_(actual_k_quant)
-                local_s[:total_actual_T].copy_(actual_k_scale)
-
-    # Step 2: GLM5_CP_OPT packs K and scale into one collective. With the
-    # master switch disabled, preserve the original two-gather behavior.
-    gathered_k, gathered_s, q_cols, s_cols = _all_gather_indexer_k(
-        local_k, local_s, Group.TP
+    # Write the final wire layout directly. This replaces padding/scatter and
+    # two strided copy_ launches; the communicated bytes and restore stay exact.
+    packed_direct = cp_opt_enabled() and (
+        total_actual_T == total_local_T
+        or total_actual_T == 0
+        or src_for_padded is not None
     )
+    if packed_direct:
+        payload = _pack_padded_k_scale(
+            actual_k_quant,
+            actual_k_scale,
+            total_local_T,
+            src_for_padded if total_actual_T != total_local_T else None,
+        )
+        gathered_k = all_gather(payload, group=Group.TP, role="indexer_k_packed")
+        gathered_s = None
+        q_cols, s_cols = head_dim, scale_dim
+    else:
+        # Step 1: build padded local buffer
+        no_padding = total_actual_T == total_local_T
+        if no_padding:
+            local_k = actual_k_quant
+            local_s = actual_k_scale
+        elif src_for_padded is not None and total_actual_T > 0:
+            local_k = torch.empty(
+                (total_local_T, head_dim), dtype=actual_k_quant.dtype, device=device
+            )
+            local_s = torch.empty(
+                (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
+            )
+            _fused_zero_scatter_kernel[(total_local_T,)](
+                actual_k_quant.view(torch.uint8),
+                actual_k_scale,
+                local_k.view(torch.uint8),
+                local_s,
+                src_for_padded,
+                head_dim,
+                scale_dim,
+                total_local_T,
+                BLOCK_K,
+                BLOCK_S,
+            )
+        else:
+            local_k = torch.zeros(
+                (total_local_T, head_dim), dtype=actual_k_quant.dtype, device=device
+            )
+            local_s = torch.zeros(
+                (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
+            )
+            if total_actual_T > 0:
+                B = int(plan.per_req_actual_local_kv_lens.numel())
+                if B == 1:
+                    local_k[:total_actual_T].copy_(actual_k_quant)
+                    local_s[:total_actual_T].copy_(actual_k_scale)
+
+        # Step 2: GLM5_CP_OPT packs K and scale into one collective. With the
+        # master switch disabled, preserve the original two-gather behavior.
+        gathered_k, gathered_s, q_cols, s_cols = _all_gather_indexer_k(
+            local_k, local_s, Group.TP
+        )
     if q_cols != head_dim or s_cols != scale_dim:
         raise RuntimeError(
             "packed indexer K layout mismatch: "
@@ -307,17 +466,8 @@ def fused_copy_and_assemble_indexer_k(
     # Step 3: keep the existing fused local restore in both communication modes.
     restore_indices = plan.restore_indices
     if gathered_s is None:
-        _gather_restore_fused_kernel[(chunk_T,)](
-            gathered_k,
-            out_k_quant.view(torch.uint8),
-            out_k_scale,
-            restore_indices,
-            q_cols + s_cols,
-            head_dim,
-            scale_dim,
-            chunk_T,
-            BLOCK_K,
-            BLOCK_S,
+        _restore_packed_indexer_k(
+            gathered_k, out_k_quant.view(torch.uint8), out_k_scale, restore_indices
         )
     else:
         _gather_restore_separate_kernel[(chunk_T,)](
