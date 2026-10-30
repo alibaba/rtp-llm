@@ -233,7 +233,7 @@ def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses
         calls.append(url)
         return responses[len(calls) - 1]
     monkeypatch.setattr(master, 'post', post)
-    args = master.Targets() if operation == 'leadership' else master.EngineSelection()
+    args = master.Leadership() if operation == 'leadership' else master.EngineSelection()
     assert asyncio.run(getattr(master, operation)(adapter_context(), args)) == expected
     assert calls == ['http://m0', 'http://m1']
 
@@ -250,7 +250,7 @@ def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(monkeypa
     async def post(url, payload):
         return response
     monkeypatch.setattr(master, 'post', post)
-    args = master.Targets(['m0:1']) if operation == 'leadership' else master.EngineSelection(['m0:1'])
+    args = master.Leadership(['m0:1']) if operation == 'leadership' else master.EngineSelection(['m0:1'])
     with pytest.raises(ExecutionError):
         asyncio.run(getattr(master, operation)(adapter_context(), args))
 
@@ -263,12 +263,12 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
         calls.append(url)
         return {'instances': []}
     monkeypatch.setattr(master, 'post', post)
-    assert asyncio.run(master.leadership(adapter_context(), master.Targets(['m1:1']))) == []
+    assert asyncio.run(master.leadership(adapter_context(), master.Leadership(['m1:1']))) == []
     assert calls == ['http://m1']
     with pytest.raises(ValueError):
         master.Targets([])
     with pytest.raises(ExecutionError):
-        asyncio.run(master.leadership(adapter_context(), master.Targets(['missing:1'])))
+        asyncio.run(master.leadership(adapter_context(), master.Leadership(['missing:1'])))
     assert calls == ['http://m1']
 
 
@@ -287,3 +287,20 @@ def test_restart_port_probe_still_rejects_an_active_listener():
         listener.listen()
         with pytest.raises(ExecutionError, match='Cannot bind Master'):
             check_master_ports('127.0.0.1', listener.getsockname()[1])
+
+
+@pytest.mark.parametrize('leaders,expected', [
+    ([True, False], ['m1:1']),
+    ([False, True], ['m0:1']),
+    ([True, True], []),
+    ([False, False], ['m0:1', 'm1:1']),
+])
+def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expected):
+    import asyncio
+    from mock_framework.interfaces import master
+    claims = dict(zip(['http://m0', 'http://m1'], leaders))
+    async def post(url, payload):
+        identity = 'master-0' if url == 'http://m0' else 'master-1'
+        return {'instances': [{'id': identity}] if claims[url] else []}
+    monkeypatch.setattr(master, 'post', post)
+    assert asyncio.run(master.leadership(adapter_context(), master.Leadership(is_leader=False))) == expected

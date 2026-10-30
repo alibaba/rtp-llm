@@ -3,6 +3,8 @@ name: Master 滚动重启
 describe: DeepSeek 原始前缀流量按 0.1 倍速回放，贯穿 A/B 两次接管和重新加入；保守等待后检查近期完成请求成功率。
 environment:
   master:
+    deployment:
+      replicas: 2
     config: configs/master.yaml
   prefill:
     engine: rtp
@@ -20,20 +22,20 @@ environment:
       replicas: 2
 phases:
 - id: startup
-  describe: 先取得 A 的实际地址，再新增 B；两个 Master 始终为独立 JVM。
+  describe: 启动两个独立 Master JVM，按实际选举结果记录主节点 A 和备用节点 B。
   timeout: 120s
   steps:
   - id: get_master_a
-    describe: 记录首个 Master 的实际地址列表作为 A。
+    describe: 记录当前唯一主 Master 的实际地址列表作为 A。
     interface: master/leadership/get
     expect:
       count: 1
-  - id: start_master_b
-    describe: 新增第二个 Master 并保存其地址列表作为 B。
-    interface: master/start
+  - id: get_master_b
+    describe: 记录声明自己非主的唯一 Master 作为 B。
+    interface: master/leadership/get
+    args: {is_leader: false}
     expect:
       count: 1
-    wait_after: 10s
   - id: check_initial_master_leader
     describe: 检查所有存活 Master 中唯一的主节点。
     interface: master/leadership/get
@@ -82,7 +84,7 @@ phases:
     interface: master/leadership/get
     expect:
       eq:
-        ref: steps.start_master_b
+        ref: steps.get_master_b
   - id: check_client_success_rate_after_kill_a
     describe: 最近 20 秒完成请求的成功率至少 95%；不设请求数门槛，零终态或采集缺失报错。
     interface: client/success_rate
@@ -108,17 +110,17 @@ phases:
     interface: master/leadership/get
     expect:
       eq:
-        ref: steps.start_master_b
+        ref: steps.get_master_b
   - id: kill_master_b
     describe: 强制杀掉指定 Master，保守等待 30 秒供另一节点接管。
     interface: master/stop
     args:
       targets:
-        ref: steps.start_master_b
+        ref: steps.get_master_b
       mode: kill
     expect:
       eq:
-        ref: steps.start_master_b
+        ref: steps.get_master_b
     within: 45s
     wait_after: 30s
   - id: check_master_leader_after_kill_b
@@ -141,10 +143,10 @@ phases:
     interface: master/restart
     args:
       targets:
-        ref: steps.start_master_b
+        ref: steps.get_master_b
     expect:
       eq:
-        ref: steps.start_master_b
+        ref: steps.get_master_b
     within: 120s
     wait_after: 30s
   - id: check_master_leader_after_restart_b

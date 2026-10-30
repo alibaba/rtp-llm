@@ -33,8 +33,13 @@ async def read(ctx, master, operation, args):
                     'timeout_ms': max(1, int(ctx.timeout * 1000))}})
 
 
+@dataclass(frozen=True)
+class Leadership(Targets):
+    is_leader: bool = True
+
+
 @case_interface('master/leadership/get', effect='read')
-async def leadership(ctx, args: Targets) -> list[str]:
+async def leadership(ctx, args: Leadership) -> list[str]:
     """Return each selected Master's actual leadership claim; do not invent a unique leader."""
     result = []
     for master in selected(ctx, args.targets):
@@ -42,7 +47,7 @@ async def leadership(ctx, args: Targets) -> list[str]:
         own = value['instances']
         if own not in ([], [{'id': master['id']}]):
             raise ExecutionError('Master returned an invalid local leadership observation')
-        if own:
+        if bool(own) == args.is_leader:
             result.append(master['rpc'])
     return result
 
