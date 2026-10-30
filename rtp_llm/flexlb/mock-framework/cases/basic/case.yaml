@@ -19,7 +19,8 @@ phases:
     steps:
       - id: check_master_leader
         describe: 只有一个主 Master。
-        interface: master/leadership/get
+        interface: master/get
+        args: {is_leader: true}
         expect: {count: 1}
         wait_after: 2s
   - id: traffic

@@ -458,7 +458,8 @@ phases:
     steps:
       - id: leader
         describe: 检查唯一主 Master
-        interface: master/leadership/get
+        interface: master/get
+        args: {is_leader: true}
         expect: {count: 1}
         wait_after: 1s
       - id: leader_engines
@@ -565,7 +566,8 @@ Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退�
 ```yaml
 - id: old_leader
   describe: 查询当前主节点
-  interface: master/leadership/get
+  interface: master/get
+  args: {is_leader: true}
   expect: {count: 1}
 - id: stopped
   describe: 停止原主 JVM
@@ -574,7 +576,8 @@ Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退�
   wait_after: 10s
 - id: elected
   describe: 检查剩余实例产生唯一新主
-  interface: master/leadership/get
+  interface: master/get
+  args: {is_leader: true}
   expect: {count: 1}
 - id: added
   describe: 补回一个独立 Master JVM
@@ -627,7 +630,7 @@ Runner 先启动独占 ZK，再启动 Engine、Master 和 Client，与 YAML 书�
 
 | 接口 | 行为 |
 | --- | --- |
-| `master/leadership/get` | 读取各 Master 的生产 isMaster 声明，默认返回声明自己为 Leader 的 Master 服务地址列表；`is_leader: false` 返回声明自己非主的地址。数量由 expect 判断，不伪造唯一 Leader 或备用节点。 |
+| `master/get` | 默认返回所选活动 Master 的服务地址列表；`is_leader: true/false` 按各 Master 的生产 isMaster 声明筛选主/非主节点。数量由 expect 判断，不伪造唯一主备。 |
 | `master/engine/get` | 读取各 Master 的 WorkerDirectory，按角色映射 Engine 服务地址，逐 Master 返回。未知地址报错，不能按部署数量补齐或将各节点取并集。 |
 
 单/多 Master 全部使用生产 ZK 选举，不提供 standalone 分支。独立 ZookeeperNode 使用已有依赖、独立 JVM/数据目录；Runner 分配地址和本次 HIPPO_ROLE，运行时同步配置为 needConsistency=true、会话超时 6s，并保存实际值。ready 必须等到真实选举产生 Leader。
@@ -944,4 +947,4 @@ RECEIVED、KV_ALLOCATED、RUNNING、KV 资源和按版本查询的 finished 记�
 
 公共 EngineLoop 使用 Condition 等待事件，避免 Java 21 Object.wait 占用共享虚拟线程承载线程。
 
-Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通过 `master/leadership/get` 记录唯一主节点 A，再以 `is_leader: false` 记录备用节点 B；后续按保存的地址执行故障与恢复，不依赖启动编号，也不通过动态新增节点获得备用身份。
+Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通过 `master/get` 加 `is_leader: true` 记录唯一主节点 A，再以 `is_leader: false` 记录备用节点 B；后续按保存的地址执行故障与恢复，不依赖启动编号，也不通过动态新增节点获得备用身份。

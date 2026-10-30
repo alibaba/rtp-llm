@@ -93,7 +93,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
         'phases': [{'id': 'probe', 'describe': '逐Master读取并由外部Client发请求', 'timeout': '30s', 'steps': [
             {'id': 'prefills', 'describe': '实际登记P集合', 'interface': 'master/engine/get', 'args': {'role': 'prefill'}},
             {'id': 'decodes', 'describe': '实际登记D集合', 'interface': 'master/engine/get', 'args': {'role': 'decode'}},
-            {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/leadership/get', 'expect': {'count': 1},
+            {'id': 'leader', 'describe': 'ZK选举产生唯一Leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'expect': {'count': 1},
              'wait_after': '20s' if replicas == 2 else '12s'}]}]}
     if history_overflow:
         document['phases'][0]['steps'].append({'id': 'still_healthy', 'describe': '多轮同步后Engine仍可发现',
@@ -219,7 +219,7 @@ def adapter_context():
 
 
 @pytest.mark.parametrize('operation,responses,expected', [
-    ('leadership', [{'instances': [{'id': 'master-0'}]}, {'instances': []}], ['m0:1']),
+    ('get', [{'instances': [{'id': 'master-0'}]}, {'instances': []}], ['m0:1']),
     ('engines', [{'instances': {'master-0': ['removed:1']}},
                  {'instances': {'master-1': []}}], {'m0:1': ['removed:1'], 'm1:1': []}),
     ('engines', [{'instances': {'master-0': ['p0:1']}},
@@ -233,13 +233,13 @@ def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses
         calls.append(url)
         return responses[len(calls) - 1]
     monkeypatch.setattr(master, 'post', post)
-    args = master.Leadership() if operation == 'leadership' else master.EngineSelection()
+    args = master.MasterSelection(is_leader=True) if operation == 'get' else master.EngineSelection()
     assert asyncio.run(getattr(master, operation)(adapter_context(), args)) == expected
     assert calls == ['http://m0', 'http://m1']
 
 
 @pytest.mark.parametrize('operation,response', [
-    ('leadership', {'instances': [{'id': 'master-1'}]}),
+    ('get', {'instances': [{'id': 'master-1'}]}),
     ('engines', {'instances': {'master-1': []}}),
     ('engines', {'instances': {'master-0': [None]}}),
     ('engines', {'instances': {'master-0': ['p0:1', 'p0:1']}}),
@@ -250,7 +250,7 @@ def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(monkeypa
     async def post(url, payload):
         return response
     monkeypatch.setattr(master, 'post', post)
-    args = master.Leadership(['m0:1']) if operation == 'leadership' else master.EngineSelection(['m0:1'])
+    args = master.MasterSelection(['m0:1'], is_leader=True) if operation == 'get' else master.EngineSelection(['m0:1'])
     with pytest.raises(ExecutionError):
         asyncio.run(getattr(master, operation)(adapter_context(), args))
 
@@ -263,12 +263,12 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
         calls.append(url)
         return {'instances': []}
     monkeypatch.setattr(master, 'post', post)
-    assert asyncio.run(master.leadership(adapter_context(), master.Leadership(['m1:1']))) == []
+    assert asyncio.run(master.get(adapter_context(), master.MasterSelection(['m1:1'], is_leader=True))) == []
     assert calls == ['http://m1']
     with pytest.raises(ValueError):
         master.Targets([])
     with pytest.raises(ExecutionError):
-        asyncio.run(master.leadership(adapter_context(), master.Leadership(['missing:1'])))
+        asyncio.run(master.get(adapter_context(), master.MasterSelection(['missing:1'], is_leader=True)))
     assert calls == ['http://m1']
 
 
@@ -303,4 +303,14 @@ def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expe
         identity = 'master-0' if url == 'http://m0' else 'master-1'
         return {'instances': [{'id': identity}] if claims[url] else []}
     monkeypatch.setattr(master, 'post', post)
-    assert asyncio.run(master.leadership(adapter_context(), master.Leadership(is_leader=False))) == expected
+    assert asyncio.run(master.get(adapter_context(), master.MasterSelection(is_leader=False))) == expected
+
+
+@pytest.mark.parametrize('targets,expected', [(None, ['m0:1', 'm1:1']), (['m1:1'], ['m1:1'])])
+def test_master_get_without_leadership_filter_lists_selected_active_masters(monkeypatch, targets, expected):
+    import asyncio
+    from mock_framework.interfaces import master
+    async def unexpected_read(*args):
+        raise AssertionError('An unfiltered listing does not query leadership')
+    monkeypatch.setattr(master, 'read', unexpected_read)
+    assert asyncio.run(master.get(adapter_context(), master.MasterSelection(targets))) == expected
