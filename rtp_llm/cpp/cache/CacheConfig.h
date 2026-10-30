@@ -51,6 +51,9 @@ public:
     bool disable_decode_first_malloc_device_reuse = false;
     /** Keep the target's group transfer policy in the MTP cache config. */
     bool model_has_multiple_cache_groups = false;
+    // Resolved before allocator construction. Only FULL/BLOCK_ROUND_ROBIN
+    // groups use compact owned-page tables; LINEAR state keeps its own policy.
+    bool local_kv_cache_sharded = false;
 
     rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num          = 0;  // the number of main model layers

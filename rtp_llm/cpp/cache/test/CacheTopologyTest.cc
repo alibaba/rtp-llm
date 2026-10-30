@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 
 namespace rtp_llm {
 namespace {
@@ -103,6 +104,9 @@ TEST(CacheTopologyTest, ResolvesLinearTransferFromLocalGeometryAndPreservesItOnC
     EXPECT_EQ(clone->fingerprint(), spec->fingerprint());
     clone->tp_transfer.mode = TpCacheTransferMode::LEGACY;
     EXPECT_NE(clone->fingerprint(), spec->fingerprint());
+    desc.tp_transfer_mode = TpCacheTransferMode::LEGACY;
+    const auto legacy     = SpecBuilder::build(desc, context);
+    EXPECT_EQ(legacy->tp_transfer.q_row_bytes, 0u);
     desc.tp_transfer_mode = TpCacheTransferMode::MHA_HEADS;
     EXPECT_ANY_THROW(SpecBuilder::build(desc, context));
     desc.tp_transfer_mode = TpCacheTransferMode::REPLICATED;

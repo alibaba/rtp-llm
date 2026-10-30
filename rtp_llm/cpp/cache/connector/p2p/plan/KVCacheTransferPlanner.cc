@@ -24,6 +24,50 @@ std::string sideName(bool is_src) {
     return is_src ? "src" : "dst";
 }
 
+bool supportsAsymmetricPageRR(const ShardLayout& src, const ShardLayout& dst, const std::string& tag) {
+    const auto src_cp = src.routeCpSize(tag);
+    const auto dst_cp = dst.routeCpSize(tag);
+    return src.local_full_page_rr && dst.local_full_page_rr && src_cp > 0 && dst_cp > 0
+           && src.effectiveMapping(tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN
+           && dst.effectiveMapping(tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN
+           && src.group(tag).policy.active_tail_blocks == 0 && std::max(src_cp, dst_cp) % std::min(src_cp, dst_cp) == 0;
+}
+
+bool validLinearQkvPayload(const ShardLayout::GroupLayout& group) {
+    if (group.kv_scale_stride_bytes != 0 || group.pre_sliced || group.linear_history_rows == 0
+        || group.k_block_payload_bytes == 0 || group.k_block_payload_bytes >= group.kv_block_stride_bytes) {
+        return false;
+    }
+    const auto conv_bytes = group.kv_block_stride_bytes - group.k_block_payload_bytes;
+    const auto row_bytes  = conv_bytes / group.linear_history_rows;
+    return conv_bytes % group.linear_history_rows == 0 && group.linear_q_row_bytes > 0 && group.linear_k_row_bytes > 0
+           && group.linear_v_row_bytes > 0 && group.linear_q_row_bytes <= row_bytes
+           && group.linear_k_row_bytes <= row_bytes - group.linear_q_row_bytes
+           && group.linear_v_row_bytes == row_bytes - group.linear_q_row_bytes - group.linear_k_row_bytes;
+}
+
+bool compatibleLinearQkvLayouts(const ShardLayout& src, const ShardLayout& dst, const std::string& tag) {
+    const auto& sg = src.group(tag);
+    const auto& dg = dst.group(tag);
+    const auto  sh = src.headShardCount(tag);
+    const auto  dh = dst.headShardCount(tag);
+    if (sh <= 0 || dh <= 0 || !validLinearQkvPayload(sg) || !validLinearQkvPayload(dg)
+        || sg.linear_history_rows != dg.linear_history_rows || std::max(sh, dh) % std::min(sh, dh) != 0) {
+        return false;
+    }
+
+    // The side with fewer head shards owns a larger local block. Verify each
+    // transferred component, not just the total byte count.
+    const auto& large   = sh < dh ? sg : dg;
+    const auto& small   = sh < dh ? dg : sg;
+    const auto  ratio   = static_cast<size_t>(std::max(sh, dh) / std::min(sh, dh));
+    const auto  matches = [ratio](size_t wide, size_t narrow) { return wide % ratio == 0 && wide / ratio == narrow; };
+    return matches(large.k_block_payload_bytes, small.k_block_payload_bytes)
+           && matches(large.linear_q_row_bytes, small.linear_q_row_bytes)
+           && matches(large.linear_k_row_bytes, small.linear_k_row_bytes)
+           && matches(large.linear_v_row_bytes, small.linear_v_row_bytes);
+}
+
 // Sub-block count produced by MemoryLayoutStrategy for one block:
 //  - head 不分片的 spec（MLA / Opaque）走 createBasicBlockInfo -> 1 个子块（+scale）
 //  - head 分片的 spec 走 createPartitionedBlockInfo -> K/V 两个子块（+scale 两个）
@@ -101,7 +145,7 @@ std::vector<size_t> KVCacheTransferPlanner::resolveKeys(const KeyShardSpec& spec
 
 bool KVCacheTransferPlanner::ownsPosition(
     const ShardLayout& side, const std::string& tag, size_t pos, size_t count, int cp_rank) {
-    const int cp_size = side.cpSize();
+    const int cp_size = side.routeCpSize(tag);
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size) {
         return false;
     }
@@ -159,11 +203,16 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
                          + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
     }
 
-    // Linear state is [ssm][conv], not equally sized K/V regions. The
-    // execution converter cannot repartition it across unequal head shards.
-    if (sg.spec_type == KVCacheSpecType::LinearAttention
-        && src.headShardCount(tag) != dst.headShardCount(tag)) {
-        return planError("LinearAttention asymmetric head sharding is unsupported for tag '" + tag + "'");
+    if (sg.spec_type == KVCacheSpecType::LinearAttention) {
+        // Asymmetric routes use explicit per-history-row Q/K/V subspans.
+        // Legacy LINEAR layouts continue to require equal head shards.
+        if (sg.linear_history_rows != 0 || dg.linear_history_rows != 0) {
+            if (!compatibleLinearQkvLayouts(src, dst, tag)) {
+                return planError("incompatible LINEAR_QKV layout for tag '" + tag + "'");
+            }
+        } else if (src.headShardCount(tag) != dst.headShardCount(tag)) {
+            return planError("LinearAttention asymmetric head sharding is unsupported for tag '" + tag + "'");
+        }
     }
     // The side with fewer shards must partition each larger block. Even an
     // MHA spec uses whole-block conversion in a model configured for MLA.
@@ -219,16 +268,12 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
         return planError("sub block count mismatch for tag '" + tag + "'");
     }
 
-    // (b0) CP 形态白名单：只允许 dst 不分片（prefill CP N -> decode CP 1）或两侧完全相等
-    // （今天 §2.1 唯一允许的对称形态）。两侧都分片且不相等（如 p cp=2 -> d cp=4）不予支持：
-    // 那需要「模 lcm(src,dst) 的剩余类 + CRT 求 residue」整套机制，而 vLLM
-    // (_validate_remote_parallel_config) 与 SGLang (common/conn.py 的 assert) 同样禁止
-    // 两侧 CP 并存。挡在这里之后 modulus 恒等于 src.cpSize()，residue 恒等于 src_cp。
-    if (dst.cpSize() != 1 && dst.cpSize() != src.cpSize()) {
+    const int src_cp = src.routeCpSize(tag);
+    const int dst_cp = dst.routeCpSize(tag);
+    if (dst_cp != 1 && dst_cp != src_cp && !supportsAsymmetricPageRR(src, dst, tag)) {
         std::ostringstream oss;
-        oss << "unsupported CP topology for tag '" << tag << "': src cp_size=" << src.cpSize()
-            << " dst cp_size=" << dst.cpSize()
-            << "; dst must be either unsharded (1) or exactly match src";
+        oss << "unsupported CP topology for tag '" << tag << "': src cp_size=" << src_cp << " dst cp_size=" << dst_cp
+            << "; dst must be unsharded, match src, or use divisible local FULL PageRR widths";
         return planError(oss.str());
     }
 
@@ -358,10 +403,24 @@ ErrorInfo KVCacheTransferPlanner::buildCpPairs(const ShardLayout&   src,
                                                const std::string&   tag,
                                                std::vector<CpPair>& out) {
     out.clear();
-    const int src_cp_size = src.cpSize();
-    const int dst_cp_size = dst.cpSize();
+    const int src_cp_size = src.routeCpSize(tag);
+    const int dst_cp_size = dst.routeCpSize(tag);
     if (src_cp_size <= 0 || dst_cp_size <= 0) {
         return planError("invalid cp size for tag '" + tag + "'");
+    }
+    if (src_cp_size != dst_cp_size && dst_cp_size > 1 && supportsAsymmetricPageRR(src, dst, tag)) {
+        // Divisible widths keep the joint period bounded by the larger side.
+        const int modulus = std::max(src_cp_size, dst_cp_size);
+        for (int residue = 0; residue < modulus; ++residue) {
+            CpPair pair;
+            pair.src_cp       = residue % src_cp_size;
+            pair.dst_cp       = residue % dst_cp_size;
+            pair.keys.modulus = modulus;
+            pair.keys.residue = residue;
+            pair.filter_prefill_keys = src_cp_size < dst_cp_size;
+            out.push_back(pair);
+        }
+        return ErrorInfo::OkStatus();
     }
 
     // FULL key ownership follows CP; state/SWA endpoint spacing follows group span.
@@ -558,14 +617,14 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
         using Coord = std::pair<int, int>;
         std::map<Coord, std::vector<int>> source_ranks;
         for (int rank = 0; rank < src.rankCount(); ++rank) {
-            source_ranks[{src.cpRank(rank), src.headShard(rank, tag)}].push_back(rank);
+            source_ranks[{src.routeCpRank(rank, tag), src.headShard(rank, tag)}].push_back(rank);
         }
         std::map<Coord, size_t> destination_counts;
         std::vector<size_t>     destination_indices(dst.rankCount());
         for (int rank = 0; rank < dst.rankCount(); ++rank) {
-            destination_indices[rank] = destination_counts[{dst.cpRank(rank), dst.headShard(rank, tag)}]++;
+            destination_indices[rank] = destination_counts[{dst.routeCpRank(rank, tag), dst.headShard(rank, tag)}]++;
         }
-        std::vector<std::vector<const CpPair*>> cp_by_destination(dst.cpSize());
+        std::vector<std::vector<const CpPair*>> cp_by_destination(dst.routeCpSize(tag));
         for (const auto& pair : cp_pairs) {
             cp_by_destination[pair.dst_cp].push_back(&pair);
         }
@@ -575,7 +634,7 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
         }
 
         for (int dst_rank = 0; dst_rank < dst.rankCount(); ++dst_rank) {
-            const int    dst_cp         = dst.cpRank(dst_rank);
+            const int    dst_cp         = dst.routeCpRank(dst_rank, tag);
             const int    dst_head       = dst.headShard(dst_rank, tag);
             const size_t dst_index      = destination_indices[dst_rank];
             const size_t dst_class_size = destination_counts.at({dst_cp, dst_head});
@@ -606,8 +665,11 @@ PlanResult KVCacheTransferPlanner::plan(const ShardLayout&              src,
                     route.dst_rank      = dst_rank;
                     route.cache_tag     = tag;
                     route.src_keys      = cp_pair.keys;
+                    route.filter_prefill_keys = cp_pair.filter_prefill_keys;
                     route.src_partition = head_pair.src_partition;
                     route.dst_partition = head_pair.dst_partition;
+                    route.linear_qkv_segments =
+                        src.group(tag).linear_history_rows != 0 && src.headShardCount(tag) != dst.headShardCount(tag);
                     assignSlices(src, dst, tag, cp_pair, route.src_slice, route.dst_slice);
 
                     route.src_bytes = viewBytes(src.group(tag), route.src_partition, route.src_slice);
@@ -713,6 +775,12 @@ ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers,
                 digest.mix(group.pre_sliced);
                 digest.mix(group.global_kv_heads);
                 digest.mix(heads);
+                if (group.linear_history_rows != 0) {
+                    digest.mix(group.linear_history_rows);
+                    digest.mix(group.linear_q_row_bytes);
+                    digest.mix(group.linear_k_row_bytes);
+                    digest.mix(group.linear_v_row_bytes);
+                }
                 digest.mix(shards->physicalCpSize(tag));
             }
         }
@@ -891,6 +959,9 @@ uint64_t TransferPlan::digest() const {
         mix(static_cast<uint64_t>(r.dst_bytes));
         mix(static_cast<uint64_t>(r.cache_key_tokens_per_block));
         mix(static_cast<uint64_t>(r.group_tokens_per_block));
+        if (r.linear_qkv_segments) {
+            mix(1);
+        }
     }
     return digest.hash;
 }

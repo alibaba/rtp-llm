@@ -329,6 +329,15 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
+    const auto& cp = parallelism_config.prefill_cp_config;
+    config.local_kv_cache_sharded =
+        parallelism_config.tp_size > 1
+        && (model_config.use_page_rr_kv_cache
+            || (cp.kv_cache_sharded && (cp.is_enabled() || cp.is_prefill_enabled())
+                && parallelism_config.role_type != RoleType::DECODE));
+    RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
+                            "local PageRR allocation requires kv_cache_sharded transport metadata");
+
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;

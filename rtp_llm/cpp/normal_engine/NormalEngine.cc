@@ -1254,7 +1254,6 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
 
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     auto stream = createStream(input);
-    // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
     (void)validateStreamForScheduling(stream);
     return stream;

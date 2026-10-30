@@ -36,6 +36,8 @@ inline void encodeP2PShardLayout(const ShardLayout& layout, P2PShardLayoutPB* pb
     pb->set_cache_key_tokens_per_block(layout.cache_key_tokens_per_block);
     pb->set_use_group_cache_transfer_policy(layout.use_group_cache_transfer_policy);
     pb->set_use_mla(layout.use_mla);
+    pb->set_local_full_page_rr(layout.local_full_page_rr);
+    pb->set_preserve_tp_layout(cp.preserve_tp_layout);
     for (const auto& [tag, group] : layout.groups) {
         auto* g = pb->add_groups();
         g->set_tag(tag);
@@ -50,6 +52,10 @@ inline void encodeP2PShardLayout(const ShardLayout& layout, P2PShardLayoutPB* pb
         g->set_seq_size_per_block(group.seq_size_per_block);
         g->set_pre_sliced(group.pre_sliced);
         g->set_global_kv_heads(group.global_kv_heads);
+        g->set_linear_q_row_bytes(group.linear_q_row_bytes);
+        g->set_linear_k_row_bytes(group.linear_k_row_bytes);
+        g->set_linear_v_row_bytes(group.linear_v_row_bytes);
+        g->set_linear_history_rows(group.linear_history_rows);
     }
 }
 
@@ -66,6 +72,8 @@ inline bool decodeP2PShardLayout(const P2PShardLayoutPB& pb, RoleType role, Shar
     layout.cache_key_tokens_per_block            = pb.cache_key_tokens_per_block();
     layout.use_group_cache_transfer_policy       = pb.use_group_cache_transfer_policy();
     layout.use_mla                               = pb.use_mla();
+    layout.local_full_page_rr                      = pb.local_full_page_rr();
+    layout.pc.prefill_cp_config.preserve_tp_layout = pb.preserve_tp_layout();
     for (const auto& g : pb.groups()) {
         if (g.tag().empty() || g.group_type() < 0 || g.group_type() > static_cast<int>(CacheGroupType::SWA)
             || g.spec_type() < 0 || g.spec_type() > KVCacheSpecType::OpaqueState || g.cp_mapping() < 0
@@ -85,6 +93,10 @@ inline bool decodeP2PShardLayout(const P2PShardLayoutPB& pb, RoleType role, Shar
         group.seq_size_per_block        = g.seq_size_per_block();
         group.pre_sliced                = g.pre_sliced();
         group.global_kv_heads           = g.global_kv_heads();
+        group.linear_q_row_bytes        = g.linear_q_row_bytes();
+        group.linear_k_row_bytes        = g.linear_k_row_bytes();
+        group.linear_v_row_bytes        = g.linear_v_row_bytes();
+        group.linear_history_rows       = g.linear_history_rows();
         if (!layout.groups.emplace(g.tag(), std::move(group)).second) {
             return false;
         }

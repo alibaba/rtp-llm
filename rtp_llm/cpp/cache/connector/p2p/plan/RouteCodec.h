@@ -27,6 +27,7 @@ public:
         pb->set_slice_count(route.src_slice.count);
         pb->set_slice_index(route.src_slice.index);
         pb->set_slice_payload_bytes(route.src_slice_payload_bytes);
+        pb->set_linear_qkv_segments(route.linear_qkv_segments);
         for (const auto& layer : route.layers) {
             pb->add_prefill_layer_ids(layer.src_local_id);
         }
@@ -43,6 +44,7 @@ public:
         pb->set_slice_count(route.dst_slice.count);
         pb->set_slice_index(route.dst_slice.index);
         pb->set_slice_payload_bytes(route.dst_slice_payload_bytes);
+        pb->set_linear_qkv_segments(route.linear_qkv_segments);
     }
 
     /// @brief 解码出「本侧」的执行参数。方向已在编码时确定，故这里无需再区分。
@@ -52,6 +54,7 @@ public:
         int           peer_index = 0;
         PartitionSpec partition;
         SliceSpec     slice;
+        bool          linear_qkv_segments = false;
     };
 
     static LocalRoute decode(const TransferRoutePB& pb) {
@@ -61,6 +64,7 @@ public:
         out.peer_index  = pb.peer_index();
         out.partition   = PartitionSpec{pb.partition_count(), pb.partition_id()};
         out.slice       = SliceSpec{toSliceMode(pb.slice_mode()), pb.slice_count(), pb.slice_index()};
+        out.linear_qkv_segments = pb.linear_qkv_segments();
         return out;
     }
 

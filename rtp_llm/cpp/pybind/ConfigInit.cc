@@ -2235,6 +2235,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
         .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
+        .def_readwrite("use_page_rr_kv_cache", &ModelConfig::use_page_rr_kv_cache)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
@@ -2416,6 +2417,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
         .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def_readwrite("prefill_cp_size", &PrefillCPConfig::prefill_cp_size)
+        .def_readwrite("preserve_tp_layout", &PrefillCPConfig::preserve_tp_layout)
         .def("to_string", &PrefillCPConfig::to_string)
         .def("is_enabled", &PrefillCPConfig::is_enabled)
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
@@ -2425,10 +2427,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.comm_buffer_size,
                                       self.kv_cache_sharded,
                                       self.prefill_cp_size,
-                                      self.all_gather_impl);
+                                      self.all_gather_impl,
+                                      self.preserve_tp_layout);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 5)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 PrefillCPConfig c;
                 try {
@@ -2438,8 +2441,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.kv_cache_sharded = t[2].cast<bool>();
                         c.prefill_cp_size  = t[3].cast<int64_t>();
                     }
-                    if (t.size() >= 5) {
+                    if (t.size() == 5 && py::isinstance<py::bool_>(t[4])) {
+                        c.preserve_tp_layout = t[4].cast<bool>();
+                    } else if (t.size() >= 5) {
                         c.all_gather_impl = t[4].cast<CPAllGatherImpl>();
+                    }
+                    if (t.size() == 6) {
+                        c.preserve_tp_layout = t[5].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());

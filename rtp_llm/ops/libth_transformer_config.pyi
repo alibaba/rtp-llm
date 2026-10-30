@@ -1078,6 +1078,7 @@ class ModelConfig:
     embedding_size: int
     eplb_config: EPLBConfig
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
+    use_page_rr_kv_cache: bool
     cache_min_replay_tokens: int
     cache_key_hash_seed: int
     expert_num: int
@@ -1331,6 +1332,7 @@ class PrefillCPConfig:
     kv_cache_sharded: bool
     method: CPRotateMethod
     prefill_cp_size: int
+    preserve_tp_layout: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
