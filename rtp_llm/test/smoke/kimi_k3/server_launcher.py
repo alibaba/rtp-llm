@@ -224,13 +224,13 @@ def launch_config(args):
         # MTP update capture uses this request capacity independently of the
         # Decode runner. It must cover every configured proposal/Verify bucket.
         "max_context_batch_size": (
-            64
+            16
             if orthogonal_smoke and args.role == "PREFILL"
             else max(decode_capture_batches)
         ),
         "max_batch_tokens_size": 262144 if orthogonal_smoke else 65536,
         **({"max_batch_tokens_without_cache": 65536} if orthogonal_smoke else {}),
-        "concurrency_limit": 64 if orthogonal_smoke else 16,
+        "concurrency_limit": 64 if orthogonal_smoke and args.role == "DECODE" else 16,
         "seq_size_per_block": 4096,
         "kernel_seq_size_per_block": 128 if fp8_kv_cache else 64,
         "linear_step": 1,

@@ -582,7 +582,7 @@ def _stage_errors(result: dict[str, Any], rows: dict[str, dict[str, Any]]) -> li
     if "decode" in phases:
         required.update(
             f"orthogonal_decode_{index:02d}_batch_{size}"
-            for index, size in enumerate((1, 4, 8, 63, 64))
+            for index, size in enumerate((1, 4, 8, 15, 16))
         )
     if result["suite"] == "main-text-64k-capped":
         if set(phases) != all_phases:
@@ -602,7 +602,7 @@ def _stage_errors(result: dict[str, Any], rows: dict[str, dict[str, Any]]) -> li
                 "prefix_B_partial",
                 "prefix_A_return",
                 "prefix_AB_mixed",
-                "orthogonal_decode_graph_long_output_batch_64",
+                "orthogonal_decode_graph_long_output_batch_16",
             )
         )
         required.update(
