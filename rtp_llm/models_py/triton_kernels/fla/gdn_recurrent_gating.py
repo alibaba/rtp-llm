@@ -1,13 +1,12 @@
 """Fuse the private GDN gate/beta producer into small-batch recurrent decode."""
 
-import os
-
 import torch
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule_fwd,
 )
+from rtp_llm.models_py.utils.arch import sm120_fusion_enabled
 
-_ENABLED = os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+_ENABLED = sm120_fusion_enabled()
 
 
 def is_enabled_for_shape(q):

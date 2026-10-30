@@ -17,7 +17,6 @@ import torch.distributed as dist
 
 def _check_fused_norm(comm, rank, cycle):
     from flashinfer import fp4_quantize
-
     from rtp_llm.models_py.kernels.cuda import modelopt_fp4_quant as quant
     from rtp_llm.models_py.modules.base import RMSResNorm
 
@@ -98,7 +97,7 @@ def _check_fused_fp8_norm(comm, rank, cycle):
     norm = RMSResNorm(gamma)
     rows = []
     with patch.object(quant, "_FUSED_PRODUCER_ENABLED", True):
-        for m in [1, 5, 10, 17, 20, 40, 71, 257, 512]:
+        for m in [*range(1, 18), 20, 40, 71, 127, 128, 129, 257, 511, 512]:
             torch.manual_seed(1548 + rank + m)
             partials = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)
             residual = torch.randn_like(partials)
@@ -305,7 +304,7 @@ class Sm120IpcAllReduceTest(unittest.TestCase):
                     self.assertTrue(result["passed"], result)
                     self.assertEqual(len(result["rows"]), 24)
                     self.assertEqual(len(result["fused_norm_rows"]), 14)
-                    self.assertEqual(len(result["fused_fp8_norm_rows"]), 18)
+                    self.assertEqual(len(result["fused_fp8_norm_rows"]), 52)
             finally:
                 for process in processes:
                     if process.is_alive():

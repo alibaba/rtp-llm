@@ -1,16 +1,16 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
-
-import torch
-from flashinfer import fp4_quantize
+from unittest.mock import Mock, patch
 
 import rtp_llm.models_py.kernels.cuda.modelopt_fp4_quant as quant
+import torch
+from flashinfer import fp4_quantize
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
 )
+from rtp_llm.models_py.utils.arch import sm120_fusion_enabled
 
 
 @unittest.skipUnless(
@@ -67,6 +67,31 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
         x[:, :8704] = torch.linspace(-80, 80, 8704, device="cuda")
         x[:, 8704:] = 0.0001
         self.assert_quant_equal(x, scale)
+
+    def test_prefill_quant_bytes_and_scale_layout(self):
+        for k in (8704, 17408):
+            for m in (65, 127, 128, 129, 512, 513, 4096):
+                with self.subTest(k=k, m=m):
+                    x = torch.randn(m, 2 * k, device="cuda", dtype=torch.bfloat16)
+                    self.assert_quant_equal(x, torch.tensor([3.7], device="cuda"))
+
+    def test_sm120_fusion_requires_validated_cuda_stack(self):
+        with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "1"}):
+            for version, enabled in [
+                (None, False),
+                ("12.8", False),
+                ("12.9", False),
+                ("13.0", True),
+                ("13.2", True),
+            ]:
+                with self.subTest(version=version), patch.object(
+                    torch.version, "cuda", version
+                ), patch.object(torch.version, "hip", None):
+                    self.assertEqual(sm120_fusion_enabled(), enabled)
+            with patch.object(torch.version, "hip", "7.0"):
+                self.assertFalse(sm120_fusion_enabled())
+        with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "0"}):
+            self.assertFalse(sm120_fusion_enabled())
 
     def test_graph_replay_reads_current_input_and_scale(self):
         x = torch.randn(17, 17408, device="cuda", dtype=torch.bfloat16)
@@ -276,7 +301,7 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
             )
 
         with patch.dict(os.environ, {"RTP_LLM_SM120_FUSION": "1"}):
-            for error in (ImportError, AttributeError, TypeError):
+            for error in (ImportError, AttributeError, TypeError, RuntimeError):
                 with self.subTest(error=error), patch(runner_path, side_effect=error):
                     layer = new_layer(up)
                     self.assertIsNone(layer._decode_tiled_runner)
@@ -292,6 +317,25 @@ class ModelOptFp4ProducerTest(unittest.TestCase):
                 self.assertIsNone(layer._swiglu_weights)
                 self.assertFalse(down_layer._decode_auto_backend)
                 torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+
+    def test_tiled_call_interface_failure_retains_cutlass(self):
+        layer, _ = self._fused_mlp_layers(enabled=False)
+        layer.bias = torch.randn(layer.output_size, device="cuda", dtype=torch.bfloat16)
+        x = torch.randn(17, 5120, device="cuda", dtype=torch.bfloat16)
+        expected = layer(x)
+        for error in (ImportError, AttributeError, TypeError):
+            runner = SimpleNamespace(forward=Mock(side_effect=error))
+            layer._decode_tiled_runner = runner
+            with self.subTest(error=error):
+                torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+                self.assertIsNone(layer._decode_tiled_runner)
+                torch.testing.assert_close(layer(x), expected, rtol=0, atol=0)
+                self.assertEqual(runner.forward.call_count, 1)
+        layer._decode_tiled_runner = SimpleNamespace(
+            forward=Mock(side_effect=RuntimeError("CUDA execution failed"))
+        )
+        with self.assertRaisesRegex(RuntimeError, "CUDA execution failed"):
+            layer(x)
 
     def test_deferred_reduction_requires_ffn_tensor_parallelism(self):
         from rtp_llm.models_py.model_desc import qwen3_next as qwen

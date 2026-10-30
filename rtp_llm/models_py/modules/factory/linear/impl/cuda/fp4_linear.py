@@ -5,19 +5,17 @@ import os
 from typing import Optional
 
 import torch
-
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 logger = logging.getLogger(__name__)
 
 from flashinfer import fp4_quantize, mm_fp4
-
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
 from rtp_llm.models_py.kernels.cuda.modelopt_fp4_quant import (
     residual_norm_fp4_quant,
     silu_fp4_quant,
 )
-from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.arch import get_sm, sm120_fusion_enabled
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -77,10 +75,8 @@ class CudaFp4GEMMLinear(LinearBase):
         self.silu_quant_mask = None
         # The private CuTe runner is validated with the pinned CUDA 13 stack.
         sm120_decode_enabled = (
-            os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+            sm120_fusion_enabled()
             and self.backend == "cutlass"
-            and torch.version.cuda is not None
-            and torch.version.cuda.startswith("13.")
             and weight.is_cuda
             and get_sm(weight.device) == (12, 0)
         )
@@ -99,9 +95,9 @@ class CudaFp4GEMMLinear(LinearBase):
                 self._decode_tiled_runner = _b12x_gemm_fp4_runner(
                     12, 0, True, torch.bfloat16, True
                 )
-            except (ImportError, AttributeError, TypeError) as error:
+            except (ImportError, AttributeError, TypeError, RuntimeError) as error:
                 logger.warning("SM120 FP4 tiled runner unavailable: %s", error)
-        if os.getenv("RTP_LLM_SM120_FUSION", "0") == "1" and weight.is_cuda:
+        if sm120_fusion_enabled() and weight.is_cuda:
             # The expert quantizer also bounds every row by the input shape.
             # All rows of a dense matrix are valid; prepare this outside capture.
             self.silu_quant_mask = torch.full(
@@ -231,21 +227,30 @@ class CudaFp4GEMMLinear(LinearBase):
             output = torch.empty(
                 output_shape, device=input_fp4.device, dtype=output_dtype
             )
-            self._decode_tiled_runner.forward(
-                [
-                    input_fp4,
-                    self.weight.T,
-                    input_scale_interleaved,
-                    self.weight_scales.T,
-                    self.alpha,
-                    output_dtype,
-                    output,
-                    16,
-                    True,
-                    None,
-                ],
-                tactic=((64, 128), (1, 1), False, False, "sm120", None),
-            )
+            try:
+                self._decode_tiled_runner.forward(
+                    [
+                        input_fp4,
+                        self.weight.T,
+                        input_scale_interleaved,
+                        self.weight_scales.T,
+                        self.alpha,
+                        output_dtype,
+                        output,
+                        16,
+                        True,
+                        None,
+                    ],
+                    tactic=((64, 128), (1, 1), False, False, "sm120", None),
+                )
+            except (ImportError, AttributeError, TypeError) as error:
+                # Interface failures can fall back before any valid output is used.
+                # CUDA execution errors must propagate; the stream may be poisoned.
+                logger.warning("SM120 FP4 tiled runner incompatible: %s", error)
+                self._decode_tiled_runner = None
+                return self._forward_quantized(
+                    input_fp4, input_scale_interleaved, input_m, output_dtype
+                )
         elif self.backend == "sgl_cutlass":
             output = cutlass_scaled_fp4_mm_wrapper(
                 input_fp4,

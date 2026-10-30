@@ -5,15 +5,14 @@ import os
 import torch
 import triton as tr
 import triton.language as tl
-
-from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.arch import get_sm, sm120_fusion_enabled
 
 # This fast path is bounded by the shapes/architecture validated against the
 # native quantizer. Other layouts retain the existing implementation.
 _VALIDATED_WIDTHS = frozenset((3072, 5120, 6144))
 _VALIDATED_SM = (12, 0)
 _FUSED_QUANT_ENABLED = os.getenv("RTP_LLM_MODELOPT_FP8_FUSED_QUANT", "1") == "1"
-_FUSED_PRODUCER_ENABLED = os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+_FUSED_PRODUCER_ENABLED = sm120_fusion_enabled()
 
 
 def residual_norm_fp8_quant(input, residual, weight, scale, eps, communicator=None):

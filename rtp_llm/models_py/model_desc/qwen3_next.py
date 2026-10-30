@@ -5,8 +5,6 @@ from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
@@ -52,6 +50,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_ba_gating import fused_ba_gdn_gating
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.utils.arch import sm120_fusion_enabled
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -72,6 +71,7 @@ from rtp_llm.utils.swizzle_utils import (
     should_swizzle_linear_attn_ba,
 )
 from rtp_llm.utils.util import to_torch_dtype
+from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -1399,7 +1399,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
         self._fused_ar_norm = (
-            os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+            sm120_fusion_enabled()
             and config.moe_style == 0
             and self.mlp.is_gated
             and parallelism_config.get_attn_tp_size() == 2

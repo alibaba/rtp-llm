@@ -1,7 +1,6 @@
 """Static FP8 projections with the checkpoint's per-projection scales intact."""
 
 import torch
-
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
 from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import (
     gated_fp8_quant_rows,
@@ -10,7 +9,7 @@ from rtp_llm.models_py.kernels.cuda.modelopt_fp8_quant import (
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_per_tensor_linear import (
     CudaFp8PerTensorLinear,
 )
-from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.arch import get_sm, sm120_fusion_enabled
 
 
 class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
@@ -62,6 +61,23 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
                 )
             )
 
+        self._use_skinny = (
+            sm120_fusion_enabled()
+            and weight.is_cuda
+            and get_sm(weight.device) == (12, 0)
+        )
+
+    def _scaled_projection(self, qinput, weight, scale_a, scale_b, dtype):
+        if getattr(self, "_use_skinny", False):
+            from rtp_llm.models_py.kernels.cuda.sm120_fp8_skinny import skinny_fp8_mm
+
+            output = skinny_fp8_mm(qinput, weight, scale_a, scale_b)
+            if output is not None:
+                return output
+        return torch._scaled_mm(
+            qinput, weight, scale_a=scale_a, scale_b=scale_b, out_dtype=dtype
+        )
+
     def forward(self, input):
         if input.dtype != torch.bfloat16:
             raise ValueError("ModelOpt mixed FP8 linear requires BF16 activations")
@@ -92,13 +108,7 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
                 scale_a = scale_a.reshape(1, 1).expand(qinput.shape[0], 1).contiguous()
             else:
                 qinput, scale_a = fused
-            output = torch._scaled_mm(
-                qinput,
-                weight,
-                scale_a=scale_a,
-                scale_b=scale,
-                out_dtype=x.dtype,
-            )
+            output = self._scaled_projection(qinput, weight, scale_a, scale, x.dtype)
             if isinstance(output, tuple):
                 output = output[0]
             outputs.append(output[: x.shape[0]])
@@ -129,9 +139,7 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
         ):
             return None
         weight, scale, _ = self.parts[0]
-        output = torch._scaled_mm(
-            qinput, weight, scale_a=scale_a, scale_b=scale, out_dtype=input.dtype
-        )
+        output = self._scaled_projection(qinput, weight, scale_a, scale, input.dtype)
         if isinstance(output, tuple):
             output = output[0]
         output = output[: input.shape[0]]
@@ -152,9 +160,7 @@ class CudaModelOptFp8Linear(CudaFp8PerTensorLinear):
         if fused is None:
             return None
         qinput, scale_a = fused
-        output = torch._scaled_mm(
-            qinput, weight, scale_a=scale_a, scale_b=scale, out_dtype=input.dtype
-        )
+        output = self._scaled_projection(qinput, weight, scale_a, scale, input.dtype)
         if isinstance(output, tuple):
             output = output[0]
         output = output[: input.shape[0]]

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+from rtp_llm.models_py.utils.arch import sm120_fusion_enabled
 
 _communicator = None
 
@@ -100,7 +101,7 @@ class Sm120IpcAllReduce:
         torch.cuda.synchronize()
         dist.barrier(group)
         # Exercise IPC reads/writes before graph capture, on this process group.
-        for rows in (1, 513, 4096):
+        for rows in (1, 16, 17, 512, 513, 4096):
             probe = torch.full(
                 (rows, 5120), self.rank + 1, device=self.device, dtype=torch.bfloat16
             )
@@ -169,6 +170,8 @@ class Sm120IpcAllReduce:
             return
         torch.cuda.synchronize()
         dist.barrier(self.group)
+        # FlashInfer 0.6.9 free_shared_buffer only cudaFree's the local
+        # allocation; close imported peer mappings before either rank frees it.
         for pointers in (self.buffers, self.signals, *self.trt_buffers):
             self.module.close_ipc_pointer(pointers[1 - self.rank])
         dist.barrier(self.group)
@@ -182,7 +185,7 @@ def prepare_communicator(parallelism, hidden_size, quant_config):
     global _communicator
     if (
         _communicator is not None
-        or os.getenv("RTP_LLM_SM120_FUSION", "0") != "1"
+        or not sm120_fusion_enabled()
         or not torch.cuda.is_available()
         or torch.version.hip is not None
         or hidden_size != 5120

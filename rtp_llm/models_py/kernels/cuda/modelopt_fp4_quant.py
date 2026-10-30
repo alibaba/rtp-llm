@@ -2,19 +2,17 @@
 
 import functools
 import hashlib
-import os
 from pathlib import Path
 
 import torch
-
-from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.arch import get_sm, sm120_fusion_enabled
 
 try:
     from flashinfer import silu_and_mul_scaled_nvfp4_experts_quantize
 except ImportError:
     silu_and_mul_scaled_nvfp4_experts_quantize = None
 
-_FUSED_PRODUCER_ENABLED = os.getenv("RTP_LLM_SM120_FUSION", "0") == "1"
+_FUSED_PRODUCER_ENABLED = sm120_fusion_enabled()
 
 
 @functools.lru_cache(maxsize=1)
