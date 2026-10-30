@@ -161,4 +161,4 @@ def compile_case(path: str | Path, registry: Registry | None = None, *, shared_r
             previous[step_id] = interface.returns
         phases.append(Phase(phase_id, phase['describe'], phase['timeout'], tuple(steps)))
     return CompiledCase(case_id, describe, name, path.parent, environment, tuple(phases),
-                        asset(raw['view']) if 'view' in raw else None, path)
+                        asset(raw['view']) if 'view' in raw else Path(__file__).resolve().parents[3] / 'views/default.json', path)
