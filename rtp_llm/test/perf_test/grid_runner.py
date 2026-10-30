@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -77,6 +78,12 @@ class GridRunner:
     def _iter_cases(self) -> List[Tuple[int, int]]:
         if self._grid_cases:
             return self._grid_cases
+        if os.environ.get("PERF_GRID_CONTEXT_FIRST") == "1":
+            return [
+                (batch_size, input_len)
+                for input_len in self._input_len_list
+                for batch_size in self._batch_size_list
+            ]
         return [
             (batch_size, input_len)
             for batch_size in self._batch_size_list
@@ -90,11 +97,49 @@ class GridRunner:
         metrics_list: List[MetricState] = []
 
         grid_cases = self._iter_cases()
+        # Opt-in guard for controlled fixed-batch decode. The scheduler waits
+        # for the entire local batch, so over-capacity admission can deadlock.
+        capacity = int(os.environ.get("PERF_KV_BLOCK_CAPACITY", "0"))
+        block_tokens = int(os.environ.get("PERF_KV_TOKENS_PER_BLOCK", "0"))
+        if capacity and (not self._is_decode or block_tokens <= 0):
+            raise ValueError(
+                "KV capacity guard requires decode mode and a positive block size"
+            )
+        statuses = []
+        failures = []
 
         with tqdm(
             total=len(grid_cases), desc=f"Running {self._title}", unit="test"
         ) as pbar:
             for batch_size, input_len in grid_cases:
+                required_blocks = (
+                    batch_size
+                    * (
+                        (input_len + self._decode_test_length + block_tokens - 1)
+                        // block_tokens
+                    )
+                    if capacity
+                    else None
+                )
+                status = dict(
+                    batch_size=batch_size,
+                    input_len=input_len,
+                    required_blocks_per_rank=required_blocks,
+                    usable_blocks_per_rank=capacity or None,
+                )
+                statuses.append(status)
+                if capacity and required_blocks > capacity:
+                    status.update(
+                        status="N/A", reason="insufficient physical KV blocks"
+                    )
+                    logging.warning("[PERF_CAPACITY_NA] %s", status)
+                    os.makedirs(self._dump_json_path, exist_ok=True)
+                    with open(
+                        os.path.join(self._dump_json_path, "Grid_Status.json"), "w"
+                    ) as f:
+                        json.dump(statuses, f, indent=2)
+                    pbar.update(1)
+                    continue
                 pbar.set_description(
                     f"Running {self._title} - "
                     f"batch_size: {batch_size}, input_len: {input_len}"
@@ -115,7 +160,7 @@ class GridRunner:
                 target_reuse_len = (
                     reuse_cache_query.target_reuse_len if reuse_cache_query else 0
                 )
-                metric = BatchPerfImpl(
+                impl = BatchPerfImpl(
                     self._port,
                     self._dp_size,
                     batch_size * self._dp_size,
@@ -129,8 +174,22 @@ class GridRunner:
                     reuse_cache_seed_query=seed_query,
                     query_variants=query_variants,
                     target_reuse_len=target_reuse_len,
-                ).run()
+                    expected_input_len=input_len,
+                )
+                metric = impl.run()
                 metrics_list.append(MetricState(input_len, batch_size, metric))
+                if os.environ.get("PERF_VALIDATE_DECODE") == "1":
+                    errors = list(impl.validation_errors)
+                    if metric.avg_input_len != input_len:
+                        errors.append(
+                            f"input length {metric.avg_input_len} != {input_len}"
+                        )
+                    status.update(status="FAIL" if errors else "PASS", errors=errors)
+                    failures.extend(errors)
+                    with open(
+                        os.path.join(self._dump_json_path, "Grid_Status.json"), "w"
+                    ) as f:
+                        json.dump(statuses, f, indent=2)
 
                 pbar.update(1)
 
@@ -143,4 +202,6 @@ class GridRunner:
             self._generate_config,
         )
         logging.info("metrics_table: \n" + str(metrics_table))
+        if failures:
+            raise RuntimeError(f"Decode grid validation failed: {failures}")
         return metrics_list

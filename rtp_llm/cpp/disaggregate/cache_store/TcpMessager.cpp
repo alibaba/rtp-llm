@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpMessager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "autil/ThreadPool.h"
 
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TimerManager.h"
@@ -7,8 +8,26 @@
 
 namespace rtp_llm {
 
+TcpMessager::~TcpMessager() {
+    tcp_server_.reset();
+    // Stop RPC callbacks before draining the workers that own their responses.
+    if (tcp_client_) {
+        tcp_client_->stop();
+    }
+    if (load_response_pool_) {
+        load_response_pool_->stop();
+    }
+}
+
 bool TcpMessager::init(MessagerInitParams params) {
     init_params_ = params;
+
+    load_response_pool_ = std::make_unique<autil::ThreadPool>(
+        params.worker_thread_count, params.worker_queue_size, false, "CacheLoadCopy");
+    if (!load_response_pool_->start()) {
+        RTP_LLM_LOG_ERROR("tcp messager failed to start load response workers");
+        return false;
+    }
 
     tcp_client_ = std::make_shared<TcpClient>();
     if (!tcp_client_->init(init_params_.io_thread_count)) {
@@ -74,7 +93,8 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
                                                         load_response,
                                                         request->callback,
                                                         collector,
-                                                        init_params_.device_id);
+                                                        init_params_.device_id,
+                                                        load_response_pool_.get());
 
     collector->markRequestCallBegin();
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),

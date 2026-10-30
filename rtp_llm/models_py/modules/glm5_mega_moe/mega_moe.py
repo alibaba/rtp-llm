@@ -322,19 +322,33 @@ class GLM5MegaMoE(nn.Module):
         If your checkpoint already has FP4 weights (int8 packed + UE8M0 scales),
         use this method directly.
         """
-        import deep_gemm
-        import torch.distributed as dist
-
         cfg = self.cfg
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
-        device = w1_w.device
-
         # Transform scales to DeepGEMM int32 layout
         s13_int = prepare_fp4_weight_scale_for_deepgemm(w1_s, 2 * inter, D, E)
         s2_int = prepare_fp4_weight_scale_for_deepgemm(w2_s, D, inter, E)
 
+        (l1_w, l1_sf), (l2_w, l2_sf) = self._transform_routed_fp4_weights(
+            (w1_w, s13_int), (w2_w, s2_int), w1_layout
+        )
+        del s13_int, s2_int
+        torch.cuda.empty_cache()
+
+        self._mega_l1_w = l1_w
+        self._mega_l1_sf = l1_sf
+        self._mega_l2_w = l2_w
+        self._mega_l2_sf = l2_sf
+
+        self._setup_buffer_and_warmup()
+
+    def _transform_routed_fp4_weights(self, l1, l2, w1_layout: str):
+        """Apply the DeepGEMM layout; GC overrides only this transform."""
+        import deep_gemm
+
+        w1_w, s13_int = l1
+        w2_w, s2_int = l2
         # Apply mega MoE transform: L1 gate/up interleave + UTCCP transpose SF.
         # RTP checkpoints store L1 as [up | gate].  Transforming that layout
         # directly avoids split, restack, and torch.stack copies of the full
@@ -353,15 +367,7 @@ class GLM5MegaMoE(nn.Module):
             )
         else:
             raise ValueError(f"Unsupported FP4 W1 layout: {w1_layout}")
-        del s13_int, s2_int
-        torch.cuda.empty_cache()
-
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
-
-        self._setup_buffer_and_warmup()
+        return (l1_w, l1_sf), (l2_w, l2_sf)
 
     def setup_weights_from_fp8(
         self,
@@ -481,9 +487,8 @@ class GLM5MegaMoE(nn.Module):
         torch.cuda.empty_cache()
 
         # Apply mega MoE transform
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w13_packed, s13_int),
-            (w2_packed, s2_int),
+        (l1_w, l1_sf), (l2_w, l2_sf) = self._transform_routed_fp4_weights(
+            (w13_packed, s13_int), (w2_packed, s2_int), "gate_up"
         )
         del w13_packed, s13_int, w2_packed, s2_int
         torch.cuda.empty_cache()
@@ -549,9 +554,8 @@ class GLM5MegaMoE(nn.Module):
         del s2_raw
         torch.cuda.empty_cache()
 
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w13_packed, s13_int),
-            (w2_packed, s2_int),
+        (l1_w, l1_sf), (l2_w, l2_sf) = self._transform_routed_fp4_weights(
+            (w13_packed, s13_int), (w2_packed, s2_int), "gate_up"
         )
         del w13_packed, s13_int, w2_packed, s2_int
         torch.cuda.empty_cache()

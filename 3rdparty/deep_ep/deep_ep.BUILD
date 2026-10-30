@@ -95,6 +95,10 @@ genrule(
     # considers every TU even if it appears unused at that point.
     archive=$$(realpath $(location @nvshmem//:nvshmem_device_archive))
     mkdir -p nvshmem_device_objs && (cd nvshmem_device_objs && ar x "$$archive")
+    # nvcc resolves its host compiler from PATH (gcc-toolset-13 g++), whose ld
+    # needs LIBCTF_1.1 from gcc-toolset-13's own lib64; the action env puts
+    # /lib64 first, whose libctf is older, so prepend the toolchain lib64.
+    export LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:$$LD_LIBRARY_PATH
     /usr/local/cuda/bin/nvcc --compiler-options "-fPIC" -gencode=arch=compute_90,code=sm_90 --device-link $$o1 $$o2 $$o3 $$o4 nvshmem_device_objs/*.o -o tmp.o
     g++ -shared $$o1 $$o2 $$o3 $$o4 tmp.o nvshmem_device_objs/*.o $(location @nvshmem//:nvshmem_host_archive) -L/usr/local/cuda/lib64 -lcudart -L/usr/local/cuda/lib64/stubs -lcuda -ldl -lpthread -lrt -o $(OUTS)
     """,

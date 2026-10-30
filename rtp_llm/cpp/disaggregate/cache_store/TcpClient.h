@@ -13,11 +13,11 @@ public:
 
 public:
     bool                                  init(int io_thread_count);
+    void                                  stop();
     std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip, uint32_t port);
     std::shared_ptr<TransferConnection>   getTransferConnection(const std::string& ip, uint32_t port);
 
 private:
-    void                                  stop();
     std::shared_ptr<arpc::RPCChannelBase> openChannel(const std::string& spec);
 
 private:
