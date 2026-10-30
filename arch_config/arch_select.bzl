@@ -153,7 +153,7 @@ def whl_deps():
             # Keep the ROCm AITER/FlyDSL pins synchronized with
             # deps/requirements{,_lock}_rocm.txt.
             "amd-aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl",
-            "flydsl==0.3.2",
+            "flydsl==0.3.4.1",
             "triton@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.8.0%2Bamd.rocm7.2.0.git111ff227-cp310-cp310-linux_x86_64.whl",
             "triton-kernels@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.git111ff227-py3-none-any.whl",
         ],

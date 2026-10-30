@@ -1,0 +1,20 @@
+diff --git a/atom/plugin/prepare.py b/atom/plugin/prepare.py
+--- a/atom/plugin/prepare.py
++++ b/atom/plugin/prepare.py
+@@ -126,4 +126,16 @@ def _prepare_model_atom_rtpllm(
+         hf = (
+             getattr(atom_config.hf_config, "text_config", None) or atom_config.hf_config
+         )
++        # Block-FP8 quantizes linear weights, not the PLE lookup table.  The
++        # checkpoint leaves the table in BF16 and does not set its optional
++        # dtype field; without this, the generic FP8 policy allocates FP8.
++        quantization = getattr(hf, "quantization_config", None) or getattr(
++            atom_config.hf_config, "quantization_config", None
++        )
++        if (
++            getattr(hf, "ple_embedding_dtype", None) is None
++            and isinstance(quantization, dict)
++            and quantization.get("weight_block_size")
++        ):
++            hf.ple_embedding_dtype = "bfloat16"
+         packed = qwen4_exp_packed_modules_mapping(

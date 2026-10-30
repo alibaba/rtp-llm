@@ -549,8 +549,8 @@ filelock==3.20.0 \
     #   huggingface-hub
     #   torch
     #   transformers
-flydsl==0.3.2 \
-    --hash=sha256:e1ea923b79d58fc2c979f5f2faa94cd5cdd0d26203bc7385352acb19c2b6a5d5
+flydsl==0.3.4.1 \
+    --hash=sha256:64903d7d328f1f6f9834e0bbc057106148706db290cc71daa4fcfabfd627eb32
     # via
     #   -r requirements_rocm.txt
     #   aiter
