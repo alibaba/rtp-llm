@@ -192,6 +192,24 @@ TEST_F(QueryConverterTest, NegativeMaxNewTokensIsRejected) {
     }
 }
 
+TEST_F(QueryConverterTest, MultimodalInputPreservesUrlWithEmptyTensor) {
+    GenerateInputPB input;
+    input.add_token_ids(1);
+    auto* url_input = input.add_multimodal_inputs();
+    url_input->set_multimodal_url("data:image/png;base64,iVBORw0KGgo=");
+    url_input->set_multimodal_type(1);
+
+    auto converted = QueryConverter::transQuery(&input);
+    ASSERT_TRUE(converted->multimodal_inputs.has_value());
+    ASSERT_EQ(converted->multimodal_inputs->size(), 1);
+    const auto& url_result = converted->multimodal_inputs->at(0);
+    EXPECT_EQ(url_result.url, url_input->multimodal_url());
+    EXPECT_EQ(url_result.tensor.numel(), 0);
+    TensorPB forwarded_tensor;
+    QueryConverter::transTensorPB(&forwarded_tensor, url_result.tensor);
+    EXPECT_EQ(QueryConverter::transTensor(forwarded_tensor).numel(), 0);
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_TRUE(GenerateConfig().enable_disk_cache);
 

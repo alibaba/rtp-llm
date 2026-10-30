@@ -98,8 +98,13 @@ public:
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
+    bool                    requiresGlobalMtpPrefillHidden() const override;
+    torch::Tensor           restoreMtpPrefillHiddenStates(torch::Tensor hidden, const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                    prepareAttentionInputs(const GptModelInputs& inputs,
+                                                   bool                  skip_forward_event_sync,
+                                                   const GptModelInputs* publication_inputs = nullptr,
+                                                   bool                  resolve_moe_phase = true);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
@@ -118,6 +123,18 @@ private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
+    bool                                              sequence_parallel_padding_enabled_  = false;
+    bool                                              requires_global_mtp_prefill_hidden_ = false;
+    std::optional<torch_ext::PyContextParallelParams> mtp_prefill_cp_params_;
+    bool                                              usesSequenceParallelPadding(const GptModelInputs& inputs) const {
+        // CP owns Prefill's per-request padding. Decode/verify still need SP
+        // alignment even when the same model also serves Query-CP Prefill.
+        const bool cp_prefill = device_props_.enable_prefill_cp && inputs.sequence_lengths.numel() == 0
+                                && !inputs.is_target_verify && !inputs.is_mtp_draft_update;
+        return sequence_parallel_padding_enabled_ && !cp_prefill;
+    }
+    GptModelInputs                                    padSequenceParallelInputs(const GptModelInputs& inputs);
+
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
@@ -125,6 +142,7 @@ private:
     torch_ext::BertEmbeddingInputs
                                     buildBertEmbeddingInputs(const GptModelInputs& inputs,
                                                              const torch::Tensor&  prepared_position_ids = torch::Tensor());
+    PyModelInputs                   buildPyModelInputs(const GptModelInputs& inputs);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -370,6 +388,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (params.kv_cache_layer_layout.has_value()) {
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
+        if (cache_manager_ && !params.mtp_cache_config_index.has_value()) {
+            init_resources.kv_cache->setLinearReplayByTag(cache_manager_->linearReplayByTag());
+        }
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
@@ -424,6 +445,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK(py::hasattr(py_model_, "set_mtp_indexer_role"));
         py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
     }
+    sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
+                                         && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
+    requires_global_mtp_prefill_hidden_ = py::hasattr(py_instance, "requires_global_mtp_prefill_hidden")
+                                          && py_instance.attr("requires_global_mtp_prefill_hidden").cast<bool>();
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -484,6 +509,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+        }
+        if (cache_manager_ && cache_manager_->cacheConfig().linear_replay.enabled()) {
+            graph_params.linear_replay_group_count = static_cast<int>(graph_params.kv_cache_group_tags.size());
+            RTP_LLM_CHECK_WITH_INFO(graph_params.linear_replay_group_count > 0,
+                                    "LINEAR replay CUDA graph requires cache group tags");
         }
         // Most models transport explicit positions only for MRoPE. A model
         // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)
@@ -548,6 +578,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
+        graph_params.sequence_parallel_size =
+            sequence_parallel_padding_enabled_ ? params.parallelism_config.tp_size : 1;
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
         {

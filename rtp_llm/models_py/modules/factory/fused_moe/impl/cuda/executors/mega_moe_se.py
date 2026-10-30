@@ -53,6 +53,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     includes_shared_expert = True
     _defer_buffer_until_shared_weights = True
     _defer_jit_until_shared_weights = True
+    supported_activations = ("swiglu",)
 
     @property
     def _shared_recipe(self) -> tuple[int, int, int]:

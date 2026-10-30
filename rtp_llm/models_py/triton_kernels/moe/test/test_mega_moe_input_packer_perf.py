@@ -24,11 +24,16 @@ def _make_buf(tokens: int, dim: int, topk: int, device: str):
 
 
 def _time_batch(fn, iters: int) -> float:
+    # Replay a captured batch so Python/Triton launch gaps do not dominate the
+    # packer comparison. This measures amortized graph-replay stream latency.
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for _ in range(iters):
+            fn()
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record()
-    for _ in range(iters):
-        fn()
+    graph.replay()
     end.record()
     end.synchronize()
     return start.elapsed_time(end) / iters

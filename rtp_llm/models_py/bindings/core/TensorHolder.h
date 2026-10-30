@@ -25,12 +25,22 @@ struct TensorHolder {
         }
     }
 
-    void release() {
+    void release(bool defer_reclaim = false) {
+        // Finish any deferred reclamation left by an interrupted phase before
+        // advancing the retention window again.
+        reclaim();
         // Move the current hold set into clear_tensors. Keep two released
         // rounds alive so tensors created for async H2D/D2H copies or CUDA
-        // kernels are not freed until the third release point.
+        // kernels remain retained until the third release point.
         clear_tensors.push(std::move(tensors));
         tensors.clear();
+        if (!defer_reclaim) {
+            reclaim();
+        }
+    }
+
+    // Reclaim only expired rounds; the two retained rounds stay alive.
+    void reclaim() {
         while (clear_tensors.size() > kReleasedHoldRounds) {
             clear_tensors.pop();
         }

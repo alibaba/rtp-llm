@@ -132,6 +132,7 @@ struct PDFusionRatioScheduler::AdmissionPeakState {
     std::vector<AdmissionStreamInfo> streams;
     AdmissionPeak                    peak;
     int64_t                          initial_need_blocks = 0;
+    int64_t                          batch_size          = 0;
 };
 
 PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&                   runtime_config,
@@ -140,13 +141,15 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                                                const ParallelismConfig&               parallelism_config,
                                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                                const kmonitor::MetricsReporterPtr     metrics_reporter,
-                                               const int                              max_score_len):
+                                               const int                              max_score_len,
+                                               const ModelExecutionCapacity&          execution_capacity):
     FIFOSchedulerBase(runtime_config,
                       model_config,
                       pd_sep_config,
                       parallelism_config,
                       cache_manager,
-                      metrics_reporter),
+                      metrics_reporter,
+                      execution_capacity),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     decode_since_prefill_(0),
     prefill_since_decode_(0) {
@@ -164,9 +167,13 @@ PDFusionRatioScheduler::~PDFusionRatioScheduler() {
     RTP_LLM_LOG_INFO("destory PDFusionRatioScheduler");
 }
 
-bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
+bool PDFusionRatioScheduler::evaluateRunningMemory(const ScheduleRuntime&   runtime,
                                                    const GenerateStreamPtr&       new_stream) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (!FIFOSchedulerBase::evaluateRunningMemory(runtime, new_stream)) {
+        return false;
+    }
+    const auto& streams = runtime.admitted_streams;
     if (!new_stream->isContextStream()) {
         return false;
     }
@@ -178,8 +185,10 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     // Completed loads are already in the peak snapshot. They still need this round's mode/token
     // admission, but counting their batch/KV cost again can prevent them from ever releasing KV.
     const bool already_in_peak   = isAdmittedWaitingStream(new_stream);
-    const auto in_flight_streams = admission_peak_state_->streams.size();
-    if (!already_in_peak && in_flight_streams + 1 > max_generate_batch_size_) {
+    const auto batch_limit = static_cast<int64_t>(max_generate_batch_size_);
+    if (!already_in_peak
+        && (admission_peak_state_->batch_size > batch_limit
+            || admissionBatchSize(new_stream) > batch_limit - admission_peak_state_->batch_size)) {
         return false;
     }
 
@@ -255,14 +264,13 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
         decode_since_prefill_ += 1;
         prefill_since_decode_ = 0;
     }
-    if (!pending_decode_streams_.empty() || !new_streams_.empty()
-        || (made_progress && !waiting_streams_.empty())) {
+    if (!new_streams_.empty() || (made_progress && (!pending_decode_streams_.empty() || !waiting_streams_.empty()))) {
         schedule_trigger_ = true;
     }
-    if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
+    if (running_streams_.empty() && !made_progress && (!waiting_streams_.empty() || !pending_decode_streams_.empty())) {
         cond_.wait_for(lock, kNoProgressScheduleGap, [this] {
             return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
-                   || !pending_decode_streams_.empty() || !new_streams_.empty();
+                   || !new_streams_.empty();
         });
     }
 
@@ -295,6 +303,7 @@ void PDFusionRatioScheduler::buildAdmissionPeakState() {
     auto append_stream = [&](const GenerateStreamPtr& s) {
         state->streams.push_back({s, remainingKVAllocationSteps(s)});
         state->initial_need_blocks += estimateInitialNeedBlocks(s);
+        state->batch_size += admissionBatchSize(s);
     };
     for (const auto& s : loading_cache_streams_) {
         append_stream(s);
@@ -346,6 +355,7 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
     }
 
     state.initial_need_blocks += initial_delta;
+    state.batch_size += admissionBatchSize(new_stream);
     state.peak = candidate_peak;
     return true;
 }
@@ -367,6 +377,10 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
     // KV gating intentionally preserves that behavior.
     return tryAddToAdmissionPeakState(
         new_stream, static_cast<int64_t>(initial_capacity), static_cast<int64_t>(available));
+}
+
+void PDFusionRatioScheduler::appendExtraExecutionReservations(std::vector<GenerateStreamPtr>& streams) const {
+    streams.insert(streams.end(), pending_decode_streams_.begin(), pending_decode_streams_.end());
 }
 
 bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
@@ -399,7 +413,7 @@ bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
 }
 
 bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
-    const bool processed = !pending_decode_streams_.empty();
+    bool processed = false;
     for (auto it = pending_decode_streams_.begin(); it != pending_decode_streams_.end();) {
         const auto& stream = *it;
         const auto state = stream->getStatus();
@@ -408,6 +422,12 @@ bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
             stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "invalid pending-decode stream state");
         }
 
+        if (state == StreamState::RUNNING && !stream->hasError() && !stream->hasEvent(StreamEvents::GenerateDone)
+            && !stream->streamCacheResource().reserveLinearReplaySlot()) {
+            ++it;
+            continue;
+        }
+        processed            = true;
         const auto new_state = stream->moveToNext();
         if (new_state == StreamState::RUNNING) {
             auto current = it++;

@@ -4,6 +4,20 @@ py_test(
     deps = ["//rtp_llm/models_py:utils"],
 )
 
+py_test(
+    name = "flash_mla_route_test",
+    srcs = ["flash_mla_route_test.py"],
+    data = ["//rtp_llm/models_py:flash_mla_route_sources"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "deepgemm_api_route_test",
+    srcs = ["deepgemm_api_route_test.py"],
+    data = ["//rtp_llm/models_py:deepgemm_api_route_sources"],
+    env = {"GPU_COUNT": "0"},
+)
+
 py_test (
     name = "arch_test",
     srcs = ["arch_test.py"],

@@ -23,7 +23,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
-from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.config.response_format_compiler import ReasoningFormat, ResponseFormatPlan
 from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -40,6 +40,7 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
     UsageInfo,
+    get_tool_choice_function_name,
 )
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
@@ -242,14 +243,33 @@ class OpenaiEndpoint(object):
                     stop_word_ids.append(list(token_ids))
         return stop_word_ids
 
+    @staticmethod
+    def _validate_renderer_tool_choice(
+        request: ChatCompletionRequest,
+        renderer: CustomChatRenderer,
+    ) -> None:
+        tool_name = get_tool_choice_function_name(request.tool_choice)
+        if request.tool_choice == "required" or tool_name is not None:
+            names_provider = getattr(renderer, "get_chat_completion_tool_names", None)
+            names = (
+                names_provider(request)
+                if names_provider is not None
+                else {tool.function.name for tool in request.tools or []}
+            )
+            if not names or (tool_name is not None and tool_name not in names):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "tool_choice requires a tool supported by the selected renderer",
+                )
+
     def _extract_generation_config(
         self,
         request: ChatCompletionRequest,
         input_ids: Optional[List[int]] = None,
         renderer: Optional[CustomChatRenderer] = None,
     ) -> GenerateConfig:
-        # TODO(wangyin): implement this
         renderer = renderer or self.chat_renderer
+        self._validate_renderer_tool_choice(request, renderer)
         config = (
             request.extra_configs.model_copy(deep=True)
             if request.extra_configs is not None
@@ -292,12 +312,25 @@ class OpenaiEndpoint(object):
             # output so the recipe parser can stop generation promptly.
             config.is_streaming = True
         request_stop_words_list.extend(config.stop_words_str)
+        # Force overrides configured defaults, while renderer/tokenizer framing
+        # remains required. Both engine and renderer consume this effective config.
+        tokenizer_stop_words_str = list(
+            getattr(self.tokenizer, "stop_words_str_list", []) or []
+        )
         config.stop_words_str = list(
-            set(self.stop_words_str_list + request_stop_words_list)
+            set(
+                self.stop_words_str_list
+                + tokenizer_stop_words_str
+                + request_stop_words_list
+            )
         )
         config.stop_words_list = self._dedup_stop_words_list(
             self.stop_words_id_list
-            + self.chat_renderer.tokenize_words(self.stop_words_str_list)
+            + renderer.get_all_extra_stop_word_ids_list()
+            + list(getattr(self.tokenizer, "stop_words_id_list", []) or [])
+            + renderer.tokenize_words(
+                self.stop_words_str_list + tokenizer_stop_words_str
+            )
             + self._tokenize_request_stop_words(request_stop_words_list)
             + config.stop_words_list
         )
@@ -356,18 +389,31 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
-        config.add_thinking_params(
-            self.tokenizer,
+        # Model-specific request constraints must be installed before the
+        # common thinking/response-format compiler consumes grammar fields.
+        # This path is shared by single, batch, and chat_render requests.
+        self._apply_renderer_chat_constraints(renderer, request, config)
+        config.prepare_thinking_params(
             self.generate_env_config,
             enable_thinking=(
                 None
                 if config.thinking_mode == ThinkingMode.ADAPTIVE
                 else config.thinking_mode == ThinkingMode.ENABLED
             ),
-            reasoning_format=self._reasoning_format_for_prompt(
-                config, renderer, input_ids
-            ),
         )
+        build_plan = getattr(
+            renderer, "build_chat_completion_response_format_plan", None
+        )
+        if build_plan is None:
+            reasoning_format = config.prepare_thinking_boundaries(
+                self.tokenizer,
+                self.generate_env_config,
+                self._reasoning_format_for_prompt(config, renderer, input_ids),
+            )
+            plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
+        else:
+            plan = build_plan(request, config, input_ids=input_ids)
+        plan.apply_to_config(config)
         if request.debug_info:
             config.return_output_ids = True
         return config
@@ -466,7 +512,10 @@ class OpenaiEndpoint(object):
         aux_info = None
         extra_outputs = None
         async for response in choice_generator:
-            if len(response.choices) != len(all_choices):
+            if not response.choices and response.usage is not None:
+                # The final usage-only stream frame does not replace choices.
+                pass
+            elif len(response.choices) != len(all_choices):
                 if all_choices == []:
                     all_choices = [
                         ChatCompletionResponseChoice(
@@ -648,9 +697,24 @@ class OpenaiEndpoint(object):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
+        self._validate_renderer_tool_choice(chat_request, renderer)
+        validate_prefix = getattr(renderer, "validate_chat_completion_prefix", None)
+        if validate_prefix is not None:
+            validate_prefix(chat_request)
         prepopulate_str = ""
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
+            if prepopulate_str and (
+                chat_request.json_format
+                or (
+                    chat_request.response_format is not None
+                    and chat_request.response_format.type != "text"
+                )
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "partial does not support structured output without grammar prefix state",
+                )
             chat_request.messages.pop()
         from rtp_llm.openai.reasoning_effort import validate_reasoning_effort_for_model
 
@@ -738,7 +802,6 @@ class OpenaiEndpoint(object):
         parse_and_fill_banned_combo(
             rendered_input.rendered_prompt, generate_config, self.tokenizer
         )
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         mm_inputs = rendered_input.multimodal_inputs
 
@@ -934,6 +997,5 @@ class OpenaiEndpoint(object):
         generate_config = self._extract_generation_config(
             chat_request, rendered_input.input_ids, renderer
         )
-        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

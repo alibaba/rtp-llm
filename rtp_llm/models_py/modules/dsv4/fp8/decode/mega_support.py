@@ -100,7 +100,7 @@ _REQUIRED_EXTENSION_PARAMETERS = {
 _DEEP_GEMM_SYMBOLS_BY_COMPONENT = {
     "csa": (
         "get_num_sms",
-        "get_paged_mqa_logits_metadata",
+        "get_legacy_paged_mqa_logits_metadata",
         "tf32_hc_prenorm_gemm",
     ),
     "hca": ("tf32_hc_prenorm_gemm",),

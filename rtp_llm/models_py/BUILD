@@ -1,5 +1,8 @@
 load("@arch_config//:arch_select.bzl", "requirement", "triton_deps")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
+load("@arch_config//:arch_select.bzl", "requirement")
+load("@pip_cuda13_arm_torch//:requirements.bzl", cuda13_arm_requirement = "requirement")
+load("@pip_gpu_cuda13_torch//:requirements.bzl", cuda13_x86_requirement = "requirement")
 
 exports_files(
     ["modules/factory/linear/fixed_m_linear.py"],
@@ -34,6 +37,7 @@ py_library(
         "modules/dsv4/fp8/decode/__init__.py",
         "modules/dsv4/fp8/decode/pool_slot_mapping.py",
         "modules/dsv4/kv_cache_utils.py",
+        "utils/cutlass.py",
     ],
     data = [
         "//rtp_llm:__init__.py",
@@ -51,12 +55,40 @@ flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn2 = ["flash_attn"]
 flashattn = flashattn2 + ["flash-attn-3"]
+kda_prefill = ["cuda-linear-attention", "flash-linear-attention"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
+
+filegroup(
+    name = "collective_projection_gemm_rs_test_sources",
+    srcs = [
+        "modules/factory/linear/impl/cuda/bf16_comm_fusion.py",
+        "modules/factory/linear/impl/cuda/fp8_comm_fusion.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/factory/linear/impl/cuda/test:__pkg__"],
+)
+
+filegroup(
+    name = "bounded_projection_jit_test_sources",
+    srcs = [
+        "modules/kimi_k3/bounded_projection_jit_warmup.py",
+        "modules/kimi_k3/kernel_jit_warmup.py",
+        "modules/dsv41/dsv4_kernel_jit_warmup.py",
+        "modules/factory/attention/mla_prefill_plan.py",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
+
+
+filegroup(
+    name = "flash_mla_prefill_api_test_sources",
+    srcs = ["modules/kimi_k3/mla.py"],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
 
 filegroup(
     name = "cutlass_moe_config",
@@ -184,7 +216,7 @@ cc_binary(
 
 py_library(
     name = "modules",
-    srcs = glob([
+    srcs = ["mla_routes.py"] + glob([
         "modules/*.py",
         "modules/**/*.py",
     ], exclude = _DSV4_PPU_MODULES + ["modules/qwen4_exp/test/**"]) + select({
@@ -212,9 +244,19 @@ py_library(
         "//rtp_llm/models_py/distributed:rank_layout",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
-        # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep,
-        "@//:using_cuda13_arm": flashinfer + deep,
+        # K3 FP8 Prefill loads the TRTLLM kernels from the pinned cubin package.
+        "@//:using_cuda13_x86": flashinfer + deep + [
+            "//rtp_llm:flashinfer-cubin",
+            "//rtp_llm:nvidia-cutlass-dsl",
+        ] + [
+            cuda13_x86_requirement(name) for name in kda_prefill
+        ],
+        "@//:using_cuda13_arm": flashinfer + deep + [
+            "//rtp_llm:flashinfer-cubin",
+            "//rtp_llm:nvidia-cutlass-dsl",
+        ] + [
+            cuda13_arm_requirement(name) for name in kda_prefill
+        ],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
@@ -255,7 +297,10 @@ py_library(
 )
 
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
-exports_files(["modules/factory/sitecustomize.py"])
+exports_files([
+    "modules/factory/fused_moe/utils/mega_moe/buffer.py",
+    "modules/factory/sitecustomize.py",
+])
 
 exports_files(
     [
@@ -435,4 +480,30 @@ filegroup(
 exports_files(
     ["model_desc/cp_mtp_hidden_handoff.py"],
     visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
+)
+
+filegroup(
+    name = "dsa_kv_chunk_plan_sources",
+    srcs = ["modules/factory/attention/cuda_mla_impl/dsa_kv_chunk_plan.py"],
+    visibility = ["//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:__pkg__"],
+)
+
+filegroup(
+    name = "flash_mla_route_sources",
+    srcs = [
+        "utils/flash_mla_current.py",
+        "utils/flash_mla_legacy.py",
+        "modules/dsv41/flash_mla.py",
+        "modules/factory/attention/cuda_mla_impl/flashmla_sparse_page_rr_impl.py",
+    ],
+    visibility = ["//rtp_llm/models_py/utils/test:__pkg__"],
+)
+
+filegroup(
+    name = "deepgemm_api_route_sources",
+    srcs = [
+        "kernels/cuda/deepgemm_wrapper.py",
+        "//rtp_llm:utils/module_util.py",
+    ],
+    visibility = ["//rtp_llm/models_py/utils/test:__pkg__"],
 )

@@ -892,7 +892,7 @@ class SparsePrefillCUDA(unittest.TestCase):
         )
 
     def dense_bf16(self, q_payload, q_sf, keys, weights, plan):
-        return score_backend._deep_gemm.fp8_fp4_mqa_logits(
+        return score_backend._deep_gemm.fp8_fp4_mqa_logits_main_compat(
             (q_payload, q_sf),
             (keys.quant, keys.scale),
             weights.bfloat16(),

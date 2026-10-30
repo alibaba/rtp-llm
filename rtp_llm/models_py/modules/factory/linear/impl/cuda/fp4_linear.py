@@ -3,7 +3,8 @@
 import inspect
 import logging
 import os
-from typing import Optional
+from functools import partial
+from typing import NamedTuple, Optional
 
 import torch
 
@@ -13,8 +14,39 @@ logger = logging.getLogger(__name__)
 
 from flashinfer import fp4_quantize, mm_fp4
 
-from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
+from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
+    cutlass_scaled_fp4_mm_wrapper,
+)
 from rtp_llm.ops import HWKernelConfig
+
+
+class Fp4Activation(NamedTuple):
+    values: torch.Tensor
+    block_scales: torch.Tensor
+    scale: torch.Tensor
+
+
+def _uses_rtp_nvfp4(input: torch.Tensor) -> bool:
+    return (
+        input.is_cuda
+        and torch.version.cuda is not None
+        and int(torch.version.cuda.split(".")[0]) >= 13
+        and torch.cuda.get_device_capability(input.device) in ((10, 0), (10, 3))
+    )
+
+
+def _quantize_with_scale(input: torch.Tensor, inverse_scale: torch.Tensor):
+    if _uses_rtp_nvfp4(input):
+        from rtp_llm.models_py.triton_kernels.common.nvfp4 import (
+            quantize_nvfp4_with_scale,
+        )
+
+        return quantize_nvfp4_with_scale(input, inverse_scale)
+    # Retain the existing backend for CUDA12/other GPU architectures. K3.1's
+    # CUDA13 SM100/SM103 path must never fall back to FlashInfer quantization.
+    from flashinfer import fp4_quantize
+
+    return fp4_quantize(input, inverse_scale)
 
 
 class CudaFp4GEMMLinear(LinearBase):
@@ -31,11 +63,11 @@ class CudaFp4GEMMLinear(LinearBase):
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
         """Check if this strategy can handle the given configuration"""
+        if weight_scales is None or quant_config is None or weight_scale_2 is None:
+            return False
         if (
-            weight_scales is None
-            or quant_config is None
-            or weight_scale_2 is None
-            or input_scale is None
+            input_scale is None
+            and getattr(quant_config, "activation_scheme", "static") != "dynamic"
         ):
             return False
 
@@ -64,23 +96,196 @@ class CudaFp4GEMMLinear(LinearBase):
         self.weight_scale_2 = weight_scale_2
         self.input_scale = input_scales
         self.bias = bias
-        # CUDA12 pins FlashInfer 0.6.0, which has no quantization backend
-        # argument or CuTe GEMM. Resolve this once, outside graph capture.
+        self.quant_config = quant_config
+        self.dynamic_input_scale = (
+            getattr(quant_config, "activation_scheme", "static") == "dynamic"
+        )
         self._quantize_kwargs = (
             {"backend": "cute-dsl"}
             if "backend" in inspect.signature(fp4_quantize).parameters
             else {}
         )
-        default_backend = "cute-dsl" if self._quantize_kwargs else "cutlass"
+        default_backend = (
+            "cute-dsl" if self._quantize_kwargs and not self.dynamic_input_scale else "cutlass"
+        )
         self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", default_backend)
-        self.alpha = self.weight_scale_2 * self.input_scale
-        self.input_scale_inv = 1 / self.input_scale
+        if self.dynamic_input_scale:
+            if self.backend != "cutlass":
+                raise ValueError("Dynamic NVFP4 Linear requires the cutlass backend")
+        else:
+            self.alpha = self.weight_scale_2 * self.input_scale
+            self.input_scale_inv = 1 / self.input_scale
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def quantize_dynamic(input: torch.Tensor) -> Fp4Activation:
+        # Short batches benefit from keeping the per-tensor reduction and pack
+        # in one launch. Producer-fused callers continue passing packed input.
+        if (
+            input.is_cuda
+            and input.dtype == torch.bfloat16
+            and input.stride(1) == 1
+            and 0 < input.shape[0] <= 512
+            and input.shape[1] % 64 == 0
+            and input.stride(0) >= input.shape[1]
+            and torch.cuda.get_device_capability(input.device) in ((10, 0), (10, 3))
+        ):
+            from rtp_llm.models_py.triton_kernels.common.nvfp4 import (
+                quantize_strided_nvfp4,
+            )
+
+            return quantize_strided_nvfp4(input)
+        input = input.contiguous()
+        if (
+            _uses_rtp_nvfp4(input)
+            and input.dtype == torch.bfloat16
+            and input.shape[1] % 64 == 0
+        ):
+            from rtp_llm.models_py.triton_kernels.common.nvfp4 import (
+                quantize_dynamic_nvfp4,
+            )
+
+            return quantize_dynamic_nvfp4(input)
+        # Singleton row slices can be contiguous with a misaligned storage offset.
+        if input.data_ptr() % 16:
+            input = input.clone(memory_format=torch.contiguous_format)
+        scale = input.abs().amax().float().clamp_min(1e-8).reshape(1) / (6.0 * 448.0)
+        values, block_scales = _quantize_with_scale(input, scale.reciprocal())
+        return Fp4Activation(values, block_scales, scale)
+
+    def prepare_quantized_gemms(self, activation: Fp4Activation, out, *, num_streams):
+        """Reuse the CUTLASS dispatch for same-shape shards, with one workspace per stream."""
+        from flashinfer.gemm import gemm_base
+
+        from rtp_llm.models_py.kernels.cuda.fp4_kernel.flashinfer_dual_scale import (
+            select_runner,
+        )
+
+        if not self.dynamic_input_scale or self.bias is not None:
+            raise ValueError(
+                "Prepared NVFP4 GEMMs require a dynamic projection without bias"
+            )
+        device = activation.values.device
+        workspaces = [
+            torch.empty(
+                gemm_base.DEFAULT_WORKSPACE_SIZE, dtype=torch.uint8, device=device
+            )
+            for _ in range(num_streams)
+        ]
+
+        def operands(a, target, workspace):
+            return [
+                a.values,
+                self.weight,
+                a.block_scales,
+                self.weight_scales,
+                a.scale,
+                torch.bfloat16,
+                target,
+                16,
+                True,
+                workspace,
+                self.weight_scale_2,
+            ]
+
+        runner, tactic = select_runner(
+            operands(activation, out, workspaces[0]),
+            row_scale=activation.scale.numel() != 1,
+        )
+
+        def launch(a, target, *, workspace):
+            runner(inputs=operands(a, target, workspace), tactic=tactic)
+            return target
+
+        return tuple(partial(launch, workspace=workspace) for workspace in workspaces)
+
+    def forward_quantized(self, activation: Fp4Activation, *, out=None, gemm=None):
+        return self(activation, out=out, gemm=gemm)
+
+    def _dynamic_gemm(self, activation: Fp4Activation, out, gemm=None):
+        values, block_scales, scale = activation
+        if (
+            not self.dynamic_input_scale
+            or values.ndim != 2
+            or values.shape[1] * 2 != self.hidden_size
+            or values.dtype != torch.uint8
+            or scale.shape not in ((1,), (values.shape[0],))
+            or scale.dtype != torch.float32
+            or not scale.is_contiguous()
+            or scale.device != values.device
+        ):
+            raise ValueError(
+                "Prequantized NVFP4 GEMM requires packed values and scalar or row FP32 scales"
+            )
+        shape = (values.shape[0], self.output_size)
+        if out is not None and (
+            out.shape != shape
+            or out.dtype != torch.bfloat16
+            or not out.is_contiguous()
+            or out.device != values.device
+            or self.bias is not None
+        ):
+            raise ValueError(
+                "Preallocated NVFP4 output requires contiguous BF16 and no bias"
+            )
+        if not values.shape[0]:
+            return (
+                out
+                if out is not None
+                else values.new_empty(shape, dtype=torch.bfloat16)
+            )
+        if gemm is not None:
+            if out is None:
+                raise ValueError("Prepared NVFP4 GEMM requires a caller-owned output")
+            return gemm(activation, out)
+        from flashinfer.gemm import gemm_base
+
+        from rtp_llm.models_py.kernels.cuda.fp4_kernel.flashinfer_dual_scale import (
+            select_runner,
+        )
+
+        if out is None:
+            out = values.new_empty(shape, dtype=torch.bfloat16)
+        workspace = gemm_base._get_cache_buf(
+            f"rtp_nvfp4_workspace_{torch.cuda.current_stream(values.device).cuda_stream}",
+            gemm_base.DEFAULT_WORKSPACE_SIZE,
+            values.device,
+        )
+        inputs = [
+            values,
+            self.weight,
+            block_scales,
+            self.weight_scales,
+            scale,
+            torch.bfloat16,
+            out,
+            16,
+            True,
+            workspace,
+            self.weight_scale_2,
+        ]
+        runner, tactic = select_runner(inputs, row_scale=scale.numel() != 1)
+        output = runner(inputs=inputs, tactic=tactic)
+        return output if self.bias is None else output + self.bias.to(output.dtype)
+
+    def forward(
+        self, input: torch.Tensor | Fp4Activation, *, out=None, gemm=None
+    ) -> torch.Tensor:
+        if isinstance(input, Fp4Activation):
+            return self._dynamic_gemm(input, out, gemm)
+        if out is not None or gemm is not None:
+            raise ValueError(
+                "A preallocated output or prepared GEMM requires prequantized NVFP4 input"
+            )
+        if self.dynamic_input_scale and (
+            input.ndim != 2 or input.shape[1] != self.hidden_size
+        ):
+            raise ValueError(
+                f"Dynamic FP4 GEMM expects [M,{self.hidden_size}], got {tuple(input.shape)}"
+            )
         # Get input dimensions
         input_m = input.shape[0]
         output_n = self.output_size
-        output_dtype = input.dtype
+        output_dtype = torch.bfloat16 if self.dynamic_input_scale else input.dtype
         output_shape = [input_m, output_n]
 
         # Check input dtype - accept BF16 and FP16
@@ -99,6 +304,13 @@ class CudaFp4GEMMLinear(LinearBase):
             )
             logger.error(error_msg)
             raise ValueError(error_msg)
+
+        if self.dynamic_input_scale:
+            if input_m == 0:
+                return input.new_empty(output_shape, dtype=output_dtype)
+            return self._dynamic_gemm(self.quantize_dynamic(input), None)
+
+        input_scale_inv, alpha = self.input_scale_inv, self.alpha
 
         # Quantize BF16 or FP16 input to (FP4 and interleaved block scale)
         input_fp4, input_scale_interleaved = fp4_quantize(
@@ -122,7 +334,7 @@ class CudaFp4GEMMLinear(LinearBase):
                 self.weight.T,
                 input_scale_interleaved,
                 self.weight_scales.T,
-                self.alpha,
+                alpha,
                 output_dtype,
                 block_size=16,
                 use_nvfp4=True,

@@ -5,6 +5,7 @@ import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheDirectory.Candidate;
@@ -49,8 +50,7 @@ public class VitCacheSelector {
             return null;
         }
         WorkerEndpoint.GenerationPin pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
+                workers.captureEndpoint(RoleType.VIT, result.getLogicalIpPort());
         if (pin == null) {
             return null;
         }
@@ -64,7 +64,6 @@ public class VitCacheSelector {
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
         var keys = ctx.getRequest().getCacheAffinityKeys();
         if (keys == null
-                || keys.isEmpty()
                 || keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
@@ -73,7 +72,8 @@ public class VitCacheSelector {
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         long now = System.currentTimeMillis();
         if (now - pendingPrunedAt >= 5000) {
-            pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getIpPort()), now));
+            pending.values()
+                    .removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
             pendingPrunedAt = now;
         }
         List<Candidate> best = new ArrayList<>();
@@ -131,12 +131,19 @@ public class VitCacheSelector {
      */
     public synchronized ServerStatus validate(BalanceContext ctx, String group) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
-        if (selected == null) {
+        if (selected == null || selected.getServerIp() == null || selected.getHttpPort() <= 0) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         try (var pin =
                 workers.captureEndpoint(
-                        RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
+                        RoleType.VIT,
+                        new WorkerIdentity(
+                                        selected.getServerIp(),
+                                        selected.getHttpPort(),
+                                        selected.getEngineIndex() == null
+                                                ? 0
+                                                : selected.getEngineIndex())
+                                .getLogicalIpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT
                     || worker == null
@@ -165,6 +172,7 @@ public class VitCacheSelector {
         status.setHttpPort(worker.getPort());
         status.setGrpcPort(worker.getGrpcPort());
         status.setGroup(worker.getGroup());
+        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
         status.setRequestId(requestId);
         status.setSuccess(true);
         return status;

@@ -717,7 +717,9 @@ class DeepSeekV4Model(GptModelBase):
                     device=_torch.device(device_str),
                 )
             try:
-                from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+                from rtp_llm.models_py.utils.flash_mla_current import (
+                    flash_mla_sparse_fwd as _flash_mla_sparse_fwd,
+                )
 
                 _swa_attn = self.v4.layers[0].attn
                 _H_swa = int(_swa_attn.n_heads)

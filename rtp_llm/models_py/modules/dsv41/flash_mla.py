@@ -23,7 +23,7 @@ def _pad_heads(q, attn_sink):
 def flash_mla_sparse_fwd(
     q, kv, indices, sm_scale, d_v=512, attn_sink=None, topk_length=None
 ):
-    from flash_mla import flash_mla_sparse_fwd as native
+    from rtp_llm.models_py.utils.flash_mla_current import flash_mla_sparse_fwd as native
 
     q, sink, heads = _pad_heads(q, attn_sink)
     output, maximum, lse = native(
@@ -33,7 +33,9 @@ def flash_mla_sparse_fwd(
 
 
 def flash_mla_with_kvcache(*, q, attn_sink=None, **kwargs):
-    from flash_mla import flash_mla_with_kvcache as native
+    from rtp_llm.models_py.utils.flash_mla_current import (
+        flash_mla_with_kvcache as native,
+    )
 
     q, sink, heads = _pad_heads(q, attn_sink)
     output, lse = native(q=q, attn_sink=sink, **kwargs)
