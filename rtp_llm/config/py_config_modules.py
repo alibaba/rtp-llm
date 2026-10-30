@@ -4,7 +4,10 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
+
+if TYPE_CHECKING:
+    from rtp_llm.config.response_format_compiler import GrammarFormat
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -484,6 +487,7 @@ class VitConfig:
 
 class GenerateEnvConfig:
     def __init__(self):
+        self.grammar_format: Optional["GrammarFormat"] = None
         self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
         self.max_thinking_tokens: Optional[int] = None
