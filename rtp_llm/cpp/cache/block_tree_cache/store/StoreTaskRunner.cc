@@ -55,7 +55,7 @@ void StoreTaskRunner::runTransfer(TaskPtr                        task,
                                                                  transfer_begin,
                                                                  callback](TransferResult result) mutable {
             auto observation =
-                CompletionStageContext::forTask(metrics_reporter, task->transfer_task, "store", result.ok());
+                CompletionStageContext::forTransfer(metrics_reporter, task->transfer_task, "store", result.ok());
             CompletionStageScope total(observation, "callback_total", "workflow_callback");
             try {
                 {
