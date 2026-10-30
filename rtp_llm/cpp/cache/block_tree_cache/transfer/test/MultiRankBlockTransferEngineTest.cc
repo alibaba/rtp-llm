@@ -344,22 +344,30 @@ TEST_F(MultiRankBlockTransferEngineTest, DiskLoadDiagnosticsCoverAllRanksAndKeep
     TransferTask                 task({TransferDescriptor::diskToDevice(0, 1, {2})}, std::chrono::seconds(5), 42);
     const auto                   transfer_id = task.traceId();
     auto                         session     = AsyncProfileSession::start();
-    auto                         context     = engine.execute(std::move(task));
+    auto                         context     = engine.execute(std::move(task), "load");
     context->waitDone();
     EXPECT_TRUE(context->success());
     auto events = session->finish();
-    ASSERT_EQ(events.size(), 2u);
     const AsyncProfileEvent* total = nullptr;
     const AsyncProfileEvent* skew  = nullptr;
+    size_t                   physical_stages = 0;
     for (const auto& event : events) {
         EXPECT_NE(event.name.find("request_id=42"), std::string::npos);
         EXPECT_NE(event.name.find("transfer_id=" + std::to_string(transfer_id)), std::string::npos);
+        if (event.name.find("scope=coordinator_completion") != std::string::npos) {
+            EXPECT_NE(event.name.find("operation=load"), std::string::npos);
+            // waitDone publishes the result before the notifying callback has
+            // returned; stopping capture here may clip the new callback span.
+            continue;
+        }
+        ++physical_stages;
         EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
         if (event.name.find("multi_rank_wait") != std::string::npos)
             total = &event;
         if (event.name.find("rank_completion_skew") != std::string::npos)
             skew = &event;
     }
+    EXPECT_EQ(physical_stages, 2u);
     ASSERT_NE(total, nullptr);
     ASSERT_NE(skew, nullptr);
     EXPECT_LE(total->start_us, skew->start_us);

@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 namespace {
@@ -524,8 +525,33 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
 
         MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
         ASSERT_EQ(request_holder.size(), 1u);
+        auto session = AsyncProfileSession::start();
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+        const auto        events           = session->finish();
+        const std::string direction        = target_tier == Tier::HOST ? "device_to_host" : "device_to_disk";
+        const auto        completion_event = [&](const char* stage) -> const AsyncProfileEvent* {
+            const auto name = "cache.transfer." + direction + "." + stage + "(";
+            for (const auto& event : events)
+                if (event.name.find(name) == 0 && event.name.find("operation=store") != std::string::npos)
+                    return &event;
+            return nullptr;
+        };
+        const auto* total   = completion_event("completion_total");
+        const auto* queue   = completion_event("completion_queue_wait");
+        const auto* execute = completion_event("completion_execute");
+        ASSERT_NE(total, nullptr);
+        ASSERT_NE(queue, nullptr);
+        ASSERT_NE(execute, nullptr);
+        EXPECT_LE(total->start_us, queue->start_us);
+        EXPECT_LE(queue->end_us, execute->start_us);
+        EXPECT_GE(total->end_us, execute->end_us);
+        for (const char* stage : {"callback_total",
+                                  "completion_lock_wait",
+                                  "completion_publish_tree",
+                                  "completion_release_refs",
+                                  "completion_watermark"})
+            EXPECT_NE(completion_event(stage), nullptr) << stage;
 
         auto find = env.cache->tree()->findNode({100});
         ASSERT_EQ(find.size(), 1u);

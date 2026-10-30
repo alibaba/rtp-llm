@@ -60,7 +60,7 @@ private:
                                          std::optional<int64_t>                            request_id);
     void           runStoreTask(const StoreTaskPtr& task);
     void           scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
-    void           settleTask(const StoreTask& task, bool copy_success);
+    bool           settleTask(const StoreTask& task, bool copy_success);
     size_t         settleLocked(const StoreTask& task, bool publish);
 
     BlockTree*                      tree_;
