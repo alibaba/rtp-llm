@@ -70,9 +70,21 @@ _PPU_LOCK_SKIPPED = [
 def requirement(names):
     for name in names:
         if name == "flash-mla-legacy":
+            # Compatibility label: current CUDA13 FlashMLA includes legacy ops.
             native.py_library(
                 name = name,
                 deps = select({
+                    "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm("flash-mla")],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
+        if name == "tokenspeed-mla":
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
                     "@rtp_llm//:using_cuda13_arm": [requirement_cuda13_arm(name)],
                     "//conditions:default": [],
                 }),
@@ -155,9 +167,9 @@ def whl_deps():
             # source upstream is download.pytorch.org/whl/cu130).
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # CI-built DeepGEMM: opt_glm5 with isolated SM120 GEMMs.
-            "deep_gemm==2.8.0+122e18b.cu132",
-            "flash-mla==1.0.0+9241ae3",
+            # DeepGEMM with the K3 Mega MoE kernels.
+            "deep_gemm==2.8.2+98a672e.cu132",
+            "flash-mla==1.0.0+3ca6856.cu132",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
@@ -173,17 +185,17 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
-            "nvidia-cutlass-dsl==4.4.2",
-            "nvidia-cutlass-dsl-libs-cu13==4.4.2",
-            # flash_attn_3 remains deferred for torch2.11+cu130.
+            "tokenspeed-mla@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3",
+            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl#sha256=aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4",
+            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl#sha256=20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de",
+            "nvidia-cutlass-dsl==4.5.3",
+            "nvidia-cutlass-dsl-libs-cu13==4.5.3",
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
-            "deep_gemm==2.8.1+057ca59",
-            "flash-mla==1.0.0+2e5429f",
-            "flash-mla-legacy==1.0.0+92fd68b.rtp1",
+            "deep_gemm==2.8.2+98a672e.cu132",
+            "flash-mla==1.0.0+3ca6856.cu132",
             "deep-ep==2.1.0+a56d615",
             "flashinfer-python==0.6.9+8c4f4dcf",
             "flashinfer-cubin==0.6.9+8c4f4dcf",
@@ -192,8 +204,10 @@ def whl_deps():
             "fastsafetensors==0.1.20+ali",
             "tilelang==0.1.15+cuda.gita35f8ddf",
             "apache-tvm-ffi==0.1.12",
-            # flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl
-            # remain deferred.
+            "tokenspeed-mla@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3",
+            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_aarch64.whl#sha256=007154cc956e143d8a2ff0fac2c6a9fbbc7dffd5fbe2f7adaba89696d7fd0ab1",
+            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl#sha256=20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de",
+            "nvidia-cutlass-dsl==4.5.3",
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
@@ -285,8 +299,12 @@ def ml_pin_reqs():
             "transformers==5.2.0",
             "sentence-transformers==5.2.0",
             "pyarrow==14.0.0",
-            "xgrammar==0.2.5",
         ],
+    }) + select({
+        "@rtp_llm//:using_cuda13_x86": ["xgrammar==0.2.8"],
+        "@rtp_llm//:using_cuda13_arm": ["xgrammar==0.2.8"],
+        "@rtp_llm//:using_ppu": [],
+        "//conditions:default": ["xgrammar==0.2.5"],
     })
 
 def platform_deps():

@@ -22,6 +22,7 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm:collective_config",
         "//rtp_llm/models_py/triton_kernels:peer_all_reduce",
+        "//rtp_llm/models_py/triton_kernels:mla",
     ],
     visibility = ["//visibility:public"],
 )

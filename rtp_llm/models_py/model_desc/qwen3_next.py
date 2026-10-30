@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
@@ -63,6 +64,8 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.linear_replay import LinearReplay
+from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -460,6 +463,7 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         self.conv_weights = weights[W.linear_attn_conv1d_w].squeeze(1)
         self.dt_bias = weights[W.linear_attn_dt_b]
         self.alog = weights[W.linear_attn_alog]
+        self._linear_replay: Optional[LinearReplay] = None
 
     def forward(
         self,
@@ -928,6 +932,20 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
+        if (
+            is_target_verify
+            and attn_inputs.linear_replay is not None
+            and mixed_qkv.is_cuda
+            and is_cuda()
+        ):
+            self._linear_replay = LinearReplay.bind(
+                self._linear_replay,
+                self,
+                kv_cache,
+                vector_gate=False,
+                state_v_first=True,
+            )
+            return self._linear_replay(mixed_qkv, a, b, attn_inputs.linear_replay)
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,

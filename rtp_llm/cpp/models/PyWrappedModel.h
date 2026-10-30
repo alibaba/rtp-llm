@@ -94,7 +94,9 @@ public:
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                       prepareAttentionInputs(const GptModelInputs& inputs,
+                                                      bool                  skip_forward_event_sync,
+                                                      const GptModelInputs* publication_inputs = nullptr);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
@@ -111,6 +113,9 @@ private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
+    bool           sequence_parallel_padding_enabled_ = false;
+    GptModelInputs padSequenceParallelInputs(const GptModelInputs& inputs);
+
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
@@ -118,6 +123,8 @@ private:
     torch_ext::BertEmbeddingInputs
                                     buildBertEmbeddingInputs(const GptModelInputs& inputs,
                                                              const torch::Tensor&  prepared_position_ids = torch::Tensor());
+    PyModelInputs                   buildPyModelInputs(const GptModelInputs& inputs);
+    void                            finalizeLinearReplay(const GptModelInputs& inputs);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -244,8 +251,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     check_nan_(params.profile_debug_logging_config.check_nan) {
 
     c10::InferenceMode inference_guard(true);
-
-    const auto& generation_prefill_cuda_graph_buckets =
+    const auto&        generation_prefill_cuda_graph_buckets =
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
     const int generation_prefill_graph_request_capacity =
         params.hw_kernel_config.generation_prefill_cuda_graph_max_requests;
@@ -352,6 +358,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (params.kv_cache_layer_layout.has_value()) {
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
+        if (cache_manager_ && !params.mtp_cache_config_index.has_value()) {
+            init_resources.kv_cache->setLinearReplayByTag(cache_manager_->linearReplayByTag());
+        }
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
@@ -359,7 +368,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_             = py_instance;
+    py_model_ = py_instance;
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.
@@ -396,6 +405,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "speculative target transactions require a CPU TP status reducer");
     }
 
+    sequence_parallel_padding_enabled_ = py::hasattr(py_instance, "requires_sequence_parallel_padding")
+                                         && py_instance.attr("requires_sequence_parallel_padding").cast<bool>();
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -449,13 +460,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
-        graph_params.model_data_type        = dtype;
-        graph_params.max_context_batch_size = params.concurrency_config.concurrency_limit;
+        graph_params.model_data_type            = dtype;
+        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+        }
+        if (cache_manager_ && cache_manager_->cacheConfig().linear_replay.enabled()) {
+            graph_params.linear_replay_group_count = static_cast<int>(graph_params.kv_cache_group_tags.size());
+            RTP_LLM_CHECK_WITH_INFO(graph_params.linear_replay_group_count > 0,
+                                    "LINEAR replay CUDA graph requires cache group tags");
         }
         // Most models transport explicit positions only for MRoPE. A model
         // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)
@@ -520,6 +536,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
+        graph_params.sequence_parallel_size =
+            sequence_parallel_padding_enabled_ ? params.parallelism_config.tp_size : 1;
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
         {

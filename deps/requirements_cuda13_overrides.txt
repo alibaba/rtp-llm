@@ -14,3 +14,7 @@ nvidia-nccl-cu13==2.30.4
 nvidia-nvshmem-cu13==3.5.19
 # CCCL 13.2.86 matches the CUDA 13.2 toolkit the cu13 stack is built against
 nvidia-cuda-cccl==13.2.86
+# Use the same ARM Z3 rebuild as the Bazel lock in production installations.
+# Both marker branches are required: uv replaces the original requirement.
+z3-solver @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/z3_solver-4.13.0.0-py2.py3-none-manylinux2014_aarch64.whl#sha256=e94170200c64f5d67295529e0568b15ba59a5f3b29c496402f8c941aec4aaa9b ; platform_machine == "aarch64"
+z3-solver>=4.13,<4.15.5; platform_machine != "aarch64"

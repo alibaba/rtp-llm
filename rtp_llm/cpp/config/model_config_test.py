@@ -65,5 +65,14 @@ class ModelConfigMtpHiddenSizeTest(unittest.TestCase):
                     config.getMtpInputHiddenSize()
 
 
+class ModelConfigLocalKvShardingTest(unittest.TestCase):
+    def test_layout_override_round_trips_through_cpp_binding(self):
+        config = ModelConfig()
+        self.assertIsNone(config.local_kv_cache_sharded)
+        for value in (True, False, None):
+            config.local_kv_cache_sharded = value
+            self.assertIs(config.local_kv_cache_sharded, value)
+
+
 if __name__ == "__main__":
     unittest.main()

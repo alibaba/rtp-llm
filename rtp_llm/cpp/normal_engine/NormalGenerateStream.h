@@ -31,10 +31,10 @@ public:
 
 private:
     bool                   canDeferTerminalOutput(const StreamUpdateInfo& update_info) const;
-    AuxInfo                prepareAuxInfo(size_t output_len) const;
+    AuxInfo                prepareAuxInfo(size_t output_end) const;
     GenerateOutputs        snapshotTerminalOutput(const StreamUpdateInfo& update_info);
     static GenerateOutputs materializeTerminalOutput(GenerateOutputs output);
-    GenerateOutputs        prepareGenerateOutput(const StreamUpdateInfo& update_info);
+    GenerateOutputs        prepareGenerateOutput(const StreamUpdateInfo& update_info, size_t output_end);
     void                   enqueueGenerateOutput(GenerateOutputs&& generate_results);
     bool                   consumerReadyWithoutLock() const override;
 

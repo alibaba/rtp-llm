@@ -217,7 +217,7 @@ TEST(PPStageCacheConfigTest, DraftInheritsWholeModelTransferPolicyOnLastStage) {
         const auto config =
             CacheConfigCreator::createConfig(target, layout, KVCacheConfig{}, speculative, &draft, true, false);
         ASSERT_EQ(config.groupNums(), 1);
-        ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
         for (const auto& sub : config.mtp_sub_configs) {
             ASSERT_EQ(sub->groupNums(), 1);
             EXPECT_EQ(sub->usesGroupCacheTransferPolicy(), hybrid);
@@ -258,7 +258,7 @@ TEST(PPStageCacheConfigTest, DraftCacheExistsOnlyOnLastStageAndIsNotSliced) {
     auto config =
         CacheConfigCreator::createConfig(target, last_layout, KVCacheConfig{}, speculative, &draft, true, false);
     EXPECT_EQ(config.layer_num, 2u);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_TRUE(sub_config);
         EXPECT_EQ(sub_config->layer_num, 2u);
@@ -279,7 +279,7 @@ TEST(PPStageCacheConfigTest, PerTagOverridesReachEveryDraftModule) {
     config.finalizeBlockNums(/*global_block_num=*/24, RuntimeConfig{}, &overrides);
 
     EXPECT_EQ(config.group("full").block_num, 32u);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
         EXPECT_EQ(sub_config->group("full").block_num, 32u);

@@ -35,8 +35,7 @@ inline ExecProperties buildExecProperties(const ParallelismConfig& parallelism_c
     props.tp_rank                     = parallelism_config.tp_rank;
     props.tp_size                     = parallelism_config.tp_size;
     props.enable_prefill_cp           = parallelism_config.prefill_cp_config.is_enabled();
-    props.prefill_cp_kv_cache_sharded = parallelism_config.prefill_cp_config.is_enabled()
-                                        && parallelism_config.prefill_cp_config.kv_cache_sharded
+    props.prefill_cp_kv_cache_sharded = parallelism_config.prefill_cp_config.kv_cache_sharded
                                         && parallelism_config.tp_size > 1;
     return props;
 }

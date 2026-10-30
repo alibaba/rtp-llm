@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
@@ -425,11 +426,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     const auto reserve_step = reserveStepForStream(stream->generateConfig()->isPrefillOnly());
     stream->setReserveStep(reserve_step);
     if (mode == preRunMode::decode_warm_up) {
+        stream->setIsFakeStream(true);
         stream->setIsContextStream(false);
         const size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
         const size_t reserved_blocks = warmUpReservedBlockCount(stream->seqLength(), reserve_step, seq_size_per_block);
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::prefill_warm_up && resource_context_.cache_manager) {
+        stream->setIsFakeStream(true);
         // Generation-prefill CUDA Graph capture needs a temporary real KV pool, while the
         // framework warmup stream deliberately does not allocate request KV
         // blocks. Keep the model-level KV tensor and per-request block table
@@ -701,15 +704,15 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         const int64_t block_size = model_config_.attn_config.tokens_per_block;
         const int64_t row_count  = std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
+        RTP_LLM_CHECK_WITH_INFO(row_count > 0, "chunked prefill warmup requires max_context_batch_size > 0");
+        const int64_t row_heavy_tokens = std::min(token_budget / row_count, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
         row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
 
-        // Conservatively combine multiple rows with a full chunk per row and a long prefix.
-        // Run once without splitting by the scheduler's global token budget.
-        auto row_heavy_result =
-            runPrefillWarmupShape(row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+        // Warm up multiple rows with a long prefix while sharing the scheduler's token budget.
+        auto row_heavy_result = runPrefillWarmupShape(
+            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), token_budget);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
@@ -845,6 +848,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    CacheConfigCreator::configureLinearReplay(
+        config, model_config_, parallelism_config, runtime_config, sp_config, isMTPEagle());
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
@@ -915,7 +920,7 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    running_                    = false;
     const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
@@ -927,7 +932,7 @@ absl::Status NormalEngine::stop() {
     return scheduler_status;
 }
 
-void NormalEngine::loop() {
+void NormalEngine::loop() try {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
@@ -951,6 +956,11 @@ void NormalEngine::loop() {
     // for the receivers and subsequent model teardown collectives.
     THROW_IF_STATUS_ERROR(executor_->finish());
     tp_broadcaster.finish();
+} catch (const CpuTpPeerClosed& error) {
+    if (running_) {
+        throw;
+    }
+    RTP_LLM_LOG_INFO("CPU TP peer closed during engine shutdown: %s", error.what());
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

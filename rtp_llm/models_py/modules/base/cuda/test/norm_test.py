@@ -9,8 +9,8 @@ from rtp_llm.models_py.modules import RMSNorm, RMSNormTorch
 
 class NormTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
-    NUM_TOKENS = [7, 83, 4096]
-    HIDDEN_SIZES = [768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192, 8199]
+    NUM_TOKENS = [2, 7, 13, 83, 4096]
+    HIDDEN_SIZES = [768, 769, 770, 771, 896, 5120, 5124, 5125, 5126, 8192, 8199]
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():

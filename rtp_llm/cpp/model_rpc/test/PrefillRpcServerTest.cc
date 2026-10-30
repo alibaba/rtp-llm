@@ -153,7 +153,10 @@ private:
 class TestEngineBase final: public EngineBase {
 public:
     explicit TestEngineBase(bool is_mtp_eagle, bool is_dspark = false):
-        EngineBase(EngineInitParams()), is_mtp_eagle_(is_mtp_eagle), is_dspark_(is_dspark) {}
+        EngineBase(EngineInitParams()), is_mtp_eagle_(is_mtp_eagle), is_dspark_(is_dspark) {
+        resource_context_.cache_manager =
+            std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16));
+    }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
         return nullptr;
@@ -175,6 +178,11 @@ public:
         return is_dspark_;
     }
 
+    void setCacheLayout(CacheConfig config, const ParallelismConfig& parallelism) {
+        resource_context_.cache_manager =
+            std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, parallelism);
+    }
+
 private:
     bool is_mtp_eagle_;
     bool is_dspark_;
@@ -182,6 +190,10 @@ private:
 
 class TestPrefillRpcServer: public PrefillRpcServer {
 public:
+    TestPrefillRpcServer() {
+        setEngineForTest(false);
+    }
+
     grpc::Status runWithRetry(PrefillGenerateContext&                             context,
                               const std::function<void(PrefillGenerateContext&)>& operation,
                               int                                                 max_retries       = 3,
@@ -230,6 +242,14 @@ public:
 
     void setPrefillMaxWaitTimeoutForTest(int64_t timeout_ms) {
         maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms = timeout_ms;
+    }
+    void setPrefillKvShardsForTest(int64_t tp_size) {
+        maga_init_params_.parallelism_config.tp_size                            = tp_size;
+        maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+    }
+
+    void setCacheLayoutForTest(CacheConfig config) {
+        std::static_pointer_cast<TestEngineBase>(engine_)->setCacheLayout(config, maga_init_params_.parallelism_config);
     }
 };
 
@@ -1178,7 +1198,7 @@ TEST_F(PrefillRpcServerTest, textOnlyProcessIsRetainedAcrossRetryReset) {
     context->generate_input->input_ids = torch::tensor({10, 20}, torch::kInt32);
     auto original_input                = context->generate_input;
 
-    PrefillRpcServer server;
+    TestPrefillRpcServer server;
     server.multimodalProcess(*context);
 
     EXPECT_TRUE(context->multimodalProcessed());
@@ -1386,7 +1406,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestUsesExpandedTokenIds) {
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
-    PrefillRpcServer server;
+    TestPrefillRpcServer server;
     server.mm_processor_ = std::make_shared<TestMultimodalProcessor>(ErrorCode::NONE_ERROR);
     server.multimodalProcess(*context);
 
@@ -1456,6 +1476,80 @@ TEST_F(PrefillRpcServerTest, allocateRequestCarriesStagePeerGroupsUnderPp) {
     EXPECT_EQ(alloc_request.stage_peer_groups(1).peer_addrs(0), "w2:1:2");
     EXPECT_EQ(alloc_request.stage_peer_groups(1).peer_addrs(1), "w3:1:2");
     EXPECT_EQ(alloc_request.stage_peer_groups(3).peer_addrs(1), "w7:1:2");
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestCarriesKvShardCountWithoutQueryCP) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(10);
+    auto context                              = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1", "rank1:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(2);
+    auto config                   = test::makeSimpleHybridMhaCacheConfig(4, 8, 64, DataType::TYPE_FP16);
+    config.local_kv_cache_sharded = true;
+    server.setCacheLayoutForTest(config);
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    EXPECT_EQ(alloc_request.prefill_cp_size(), 2);
+    EXPECT_EQ(alloc_request.prefill_tp_size(), 2);
+    EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestDoesNotAdvertiseRawShardingWithoutPhysicalLayout) {
+    for (const bool hybrid : {false, true}) {
+        SCOPED_TRACE(hybrid);
+        GenerateInputPB request;
+        request.set_request_id(1);
+        request.add_token_ids(10);
+        auto context                              = makeContext(&request);
+        context->prefill_worker_cache_store_addrs = {"rank0:1", "rank1:1"};
+
+        TestPrefillRpcServer server;
+        server.setPrefillKvShardsForTest(2);
+        auto config = hybrid ? test::makeSimpleHybridMhaCacheConfig(4, 8, 64, DataType::TYPE_FP16) :
+                               test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16);
+        ASSERT_FALSE(config.local_kv_cache_sharded);
+        server.setCacheLayoutForTest(config);
+
+        const auto alloc_request = server.buildAllocateRequest(*context);
+        EXPECT_EQ(alloc_request.prefill_cp_size(), 0);
+        EXPECT_EQ(alloc_request.prefill_tp_size(), 2);
+        EXPECT_EQ(alloc_request.peer_addrs_size(), 2);
+    }
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestRequiresAllPhysicalShardPeers) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    auto context                              = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(2);
+    auto config                   = test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16);
+    config.local_kv_cache_sharded = true;
+    server.setCacheLayoutForTest(config);
+
+    EXPECT_THROW(server.buildAllocateRequest(*context), std::exception);
+}
+
+TEST_F(PrefillRpcServerTest, allocateRequestWithTpOneShardingKeepsLegacyPeerContract) {
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(10);
+    auto context                              = makeContext(&request);
+    context->prefill_worker_cache_store_addrs = {"rank0:1"};
+
+    TestPrefillRpcServer server;
+    server.setPrefillKvShardsForTest(1);
+    auto alloc_request = server.buildAllocateRequest(*context);
+
+    EXPECT_EQ(alloc_request.prefill_cp_size(), 0);
+    ASSERT_EQ(alloc_request.peer_addrs_size(), 1);
+    EXPECT_EQ(alloc_request.peer_addrs(0), "rank0:1");
+    EXPECT_EQ(alloc_request.prefill_tp_size(), 1);
 }
 
 }  // namespace rtp_llm

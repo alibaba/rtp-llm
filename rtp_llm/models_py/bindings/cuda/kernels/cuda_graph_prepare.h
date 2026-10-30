@@ -29,9 +29,32 @@ struct CudaGraphPrepareFillRegion {
 struct CudaGraphPrepareFillParams {
     int32_t                    region_count = 0;
     CudaGraphPrepareFillRegion regions[kMaxCudaGraphPrepareFillRegions];
+    uint8_t*                   zero_bytes                     = nullptr;
+    int64_t                    zero_byte_count                = 0;
+    bool*                      valid_token_mask               = nullptr;
+    const bool*                source_valid_token_mask        = nullptr;
+    int64_t                    mask_count                     = 0;
+    int64_t                    source_mask_count              = 0;
 };
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrepareStream stream);
+
+struct SequenceParallelPadRegion {
+    const uint8_t* source                  = nullptr;
+    uint8_t*       destination             = nullptr;
+    int64_t        source_group_bytes      = 0;
+    int64_t        destination_group_bytes = 0;
+    int64_t        groups                  = 1;
+    uint64_t       fill_bits               = 0;
+    int32_t        element_bytes           = 0;
+};
+
+struct SequenceParallelPadParams {
+    int32_t                   region_count = 0;
+    SequenceParallelPadRegion regions[kMaxCudaGraphPrepareFillRegions];
+};
+
+void invokeSequenceParallelPad(SequenceParallelPadParams params, CudaGraphPrepareStream stream);
 
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          const int32_t* block_ids,

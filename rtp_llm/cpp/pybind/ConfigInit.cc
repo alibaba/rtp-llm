@@ -687,13 +687,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const auto value = [&](size_t index) {
                     return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
                 };
-                c.reuse_cache                          = value(0).cast<bool>();
-                c.multi_task_prompt                    = value(1).cast<std::string>();
-                c.multi_task_prompt_str                = value(2).cast<std::string>();
-                c.multi_task_prompt_tokens             = value(3).cast<std::map<std::string, std::vector<int>>>();
-                c.reserve_block_ratio                  = value(4).cast<int64_t>();
-                c.memory_cache_size_mb                 = value(6).cast<int64_t>();
-                c.memory_cache_sync_timeout_ms         = value(7).cast<int64_t>();
+                c.reuse_cache                  = value(0).cast<bool>();
+                c.multi_task_prompt            = value(1).cast<std::string>();
+                c.multi_task_prompt_str        = value(2).cast<std::string>();
+                c.multi_task_prompt_tokens     = value(3).cast<std::map<std::string, std::vector<int>>>();
+                c.reserve_block_ratio          = value(4).cast<int64_t>();
+                c.memory_cache_size_mb         = value(6).cast<int64_t>();
+                c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
                 if (has_tail_fields) {
                     c.reuse_cache_tail_blocks = tail_state[10].cast<int>();
                     c.linear_pool_blocks      = tail_state[70].cast<uint32_t>();
@@ -704,44 +704,44 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
                     }
                 }
-                c.fp8_kv_cache                         = value(9).cast<int>();
-                c.ssm_state_dtype                      = value(10).cast<std::string>();
-                c.kv_cache_mem_mb                      = value(11).cast<int64_t>();
-                c.seq_size_per_block                   = value(12).cast<int>();
-                c.kernel_seq_size_per_block            = value(13).cast<int>();
-                c.test_block_num                       = value(14).cast<int>();
-                c.enable_device_cache                  = value(16).cast<bool>();
-                c.enable_memory_cache                  = value(17).cast<bool>();
-                c.enable_disk_cache                    = value(19).cast<bool>();
-                c.enable_remote_cache                  = value(20).cast<bool>();
-                c.disk_cache_paths                     = value(21).cast<std::string>();
-                c.disk_cache_size_mb                   = value(22).cast<int64_t>();
-                c.disk_cache_buffered_io               = value(23).cast<bool>();
-                c.disk_cache_sync_timeout_ms           = value(24).cast<int64_t>();
-                c.disk_cache_staging_block_count       = value(25).cast<int64_t>();
-                c.device_eviction_policy               = value(26).cast<std::string>();
-                c.memory_eviction_policy               = value(27).cast<std::string>();
-                c.disk_eviction_policy                 = value(28).cast<std::string>();
-                c.kvcm_enable_vipserver                = value(29).cast<bool>();
-                c.kvcm_vipserver_domain                = value(30).cast<std::string>();
-                c.kvcm_server_address                  = value(31).cast<std::string>();
-                c.kvcm_instance_group                  = value(32).cast<std::string>();
-                c.kvcm_meta_channel_retry_time         = value(33).cast<uint32_t>();
-                c.kvcm_meta_channel_connection_timeout = value(34).cast<uint32_t>();
-                c.kvcm_meta_channel_call_timeout       = value(35).cast<uint32_t>();
-                c.kvcm_storage_thread_num              = value(36).cast<uint32_t>();
-                c.kvcm_storage_queue_size              = value(37).cast<uint32_t>();
-                c.kvcm_put_timeout_ms                  = value(38).cast<int>();
-                c.kvcm_get_timeout_ms                  = value(39).cast<int>();
-                c.kvcm_model_sdk_config                = value(40).cast<std::string>();
-                c.kvcm_model_user_data                 = value(41).cast<std::string>();
-                c.kvcm_model_extra_info                = value(42).cast<std::string>();
-                c.kvcm_instance_id_salt                = value(43).cast<std::string>();
-                c.kvcm_asyncwrapper_thread_num         = value(44).cast<size_t>();
-                c.kvcm_asyncwrapper_queue_size         = value(45).cast<size_t>();
-                c.kvcm_get_broadcast_timeout           = value(46).cast<int>();
-                c.kvcm_put_broadcast_timeout           = value(47).cast<int>();
-                c.kvcm_client_config                   = value(48).cast<std::string>();
+                c.fp8_kv_cache                                    = value(9).cast<int>();
+                c.ssm_state_dtype                                 = value(10).cast<std::string>();
+                c.kv_cache_mem_mb                                 = value(11).cast<int64_t>();
+                c.seq_size_per_block                              = value(12).cast<int>();
+                c.kernel_seq_size_per_block                       = value(13).cast<int>();
+                c.test_block_num                                  = value(14).cast<int>();
+                c.enable_device_cache                             = value(16).cast<bool>();
+                c.enable_memory_cache                             = value(17).cast<bool>();
+                c.enable_disk_cache                               = value(19).cast<bool>();
+                c.enable_remote_cache                             = value(20).cast<bool>();
+                c.disk_cache_paths                                = value(21).cast<std::string>();
+                c.disk_cache_size_mb                              = value(22).cast<int64_t>();
+                c.disk_cache_buffered_io                          = value(23).cast<bool>();
+                c.disk_cache_sync_timeout_ms                      = value(24).cast<int64_t>();
+                c.disk_cache_staging_block_count                  = value(25).cast<int64_t>();
+                c.device_eviction_policy                          = value(26).cast<std::string>();
+                c.memory_eviction_policy                          = value(27).cast<std::string>();
+                c.disk_eviction_policy                            = value(28).cast<std::string>();
+                c.kvcm_enable_vipserver                           = value(29).cast<bool>();
+                c.kvcm_vipserver_domain                           = value(30).cast<std::string>();
+                c.kvcm_server_address                             = value(31).cast<std::string>();
+                c.kvcm_instance_group                             = value(32).cast<std::string>();
+                c.kvcm_meta_channel_retry_time                    = value(33).cast<uint32_t>();
+                c.kvcm_meta_channel_connection_timeout            = value(34).cast<uint32_t>();
+                c.kvcm_meta_channel_call_timeout                  = value(35).cast<uint32_t>();
+                c.kvcm_storage_thread_num                         = value(36).cast<uint32_t>();
+                c.kvcm_storage_queue_size                         = value(37).cast<uint32_t>();
+                c.kvcm_put_timeout_ms                             = value(38).cast<int>();
+                c.kvcm_get_timeout_ms                             = value(39).cast<int>();
+                c.kvcm_model_sdk_config                           = value(40).cast<std::string>();
+                c.kvcm_model_user_data                            = value(41).cast<std::string>();
+                c.kvcm_model_extra_info                           = value(42).cast<std::string>();
+                c.kvcm_instance_id_salt                           = value(43).cast<std::string>();
+                c.kvcm_asyncwrapper_thread_num                    = value(44).cast<size_t>();
+                c.kvcm_asyncwrapper_queue_size                    = value(45).cast<size_t>();
+                c.kvcm_get_broadcast_timeout                      = value(46).cast<int>();
+                c.kvcm_put_broadcast_timeout                      = value(47).cast<int>();
+                c.kvcm_client_config                              = value(48).cast<std::string>();
                 c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
                 c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();
                 c.dsv4_hca_state_pool_blocks                      = value(52).cast<uint32_t>();
@@ -828,8 +828,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     (void)t[0].cast<bool>();
                     (void)t[1].cast<bool>();
                     (void)t[2].cast<bool>();
-                    c.ft_alog_conf_path         = t[3].cast<std::string>();
-                    c.gen_timeline_sync         = t[4].cast<bool>();
+                    c.ft_alog_conf_path = t[3].cast<std::string>();
+                    c.gen_timeline_sync = t[4].cast<bool>();
                     if (t.size() == 12 || t.size() == 13) {
                         c.torch_cuda_profiler_dir  = t[5].cast<std::string>();
                         c.log_file_backup_count    = t[6].cast<int>();
@@ -1054,12 +1054,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
-                    c.model_type                    = t[0].cast<std::string>();
-                    c.type                          = SpeculativeExecutionConfig::from_string(t[1].cast<std::string>());
-                    c.tree_decode_config            = t[2].cast<std::string>();
-                    c.gen_num_per_cycle             = t[3].cast<int64_t>();
-                    c.quantization                  = t[4].cast<std::string>();
-                    c.checkpoint_path               = t[5].cast<std::string>();
+                    c.model_type         = t[0].cast<std::string>();
+                    c.type               = SpeculativeExecutionConfig::from_string(t[1].cast<std::string>());
+                    c.tree_decode_config = t[2].cast<std::string>();
+                    c.gen_num_per_cycle  = t[3].cast<int64_t>();
+                    c.quantization       = t[4].cast<std::string>();
+                    c.checkpoint_path    = t[5].cast<std::string>();
                     if (t.size() == 7) {
                         c.sp_dspark_mask_token_id = t[6].cast<int64_t>();
                     }
@@ -1310,22 +1310,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
-                    c.tp_size                 = t[0].cast<int64_t>();
-                    c.ep_size                 = t[1].cast<int64_t>();
-                    c.dp_size                 = t[2].cast<int64_t>();
-                    c.pp_size                 = t[3].cast<int64_t>();
-                    c.world_size              = t[4].cast<int64_t>();
-                    c.world_rank              = t[5].cast<int64_t>();
-                    c.local_world_size        = t[6].cast<int64_t>();
+                    c.tp_size          = t[0].cast<int64_t>();
+                    c.ep_size          = t[1].cast<int64_t>();
+                    c.dp_size          = t[2].cast<int64_t>();
+                    c.pp_size          = t[3].cast<int64_t>();
+                    c.world_size       = t[4].cast<int64_t>();
+                    c.world_rank       = t[5].cast<int64_t>();
+                    c.local_world_size = t[6].cast<int64_t>();
                     (void)t[7].cast<int64_t>();  // reserved: removed ffn_sp_size
-                    c.tp_rank                 = t[8].cast<int64_t>();
-                    c.ep_rank                 = t[9].cast<int64_t>();
-                    c.dp_rank                 = t[10].cast<int64_t>();
-                    c.ffn_tp_size             = t[11].cast<int64_t>();
-                    c.ffn_tp_rank             = t[12].cast<int64_t>();
+                    c.tp_rank     = t[8].cast<int64_t>();
+                    c.ep_rank     = t[9].cast<int64_t>();
+                    c.dp_rank     = t[10].cast<int64_t>();
+                    c.ffn_tp_size = t[11].cast<int64_t>();
+                    c.ffn_tp_rank = t[12].cast<int64_t>();
                     (void)t[13].cast<int64_t>();  // reserved slot: removed ffn_disaggregate_config
-                    c.prefill_cp_config       = t[14].cast<PrefillCPConfig>();
-                    c.use_ub_comm             = t[15].cast<bool>();
+                    c.prefill_cp_config = t[14].cast<PrefillCPConfig>();
+                    c.use_ub_comm       = t[15].cast<bool>();
                     if (t.size() >= 17) {
                         c.role_type = t[16].cast<RoleType>();
                     }
@@ -1512,6 +1512,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
         .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
+        .def_readwrite("enable_linear_replay", &RuntimeConfig::enable_linear_replay)
         .def_readwrite("output_dispatcher_worker_count", &RuntimeConfig::output_dispatcher_worker_count)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
@@ -1543,10 +1544,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
                                       self.model_warm_up,
-                                      self.output_dispatcher_worker_count);
+                                      self.output_dispatcher_worker_count,
+                                      self.enable_linear_replay);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1567,6 +1569,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 14) {
                         c.output_dispatcher_worker_count = t[13].cast<int>();
+                    }
+                    if (t.size() >= 15) {
+                        c.enable_linear_replay = t[14].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
@@ -1616,7 +1621,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
         .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim)
         .def_readwrite("ssm_state_dtype", &LinearAttentionConfig::ssm_state_dtype)
-        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype);
+        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype)
+        .def_readwrite("replay_vector_gate", &LinearAttentionConfig::replay_vector_gate);
 
     // Register KvCacheDataType enum
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")
@@ -1729,6 +1735,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
+        .def_readwrite("mla_fp8_compute", &AttentionConfigs::mla_fp8_compute)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("use_sparse_gqa_fmha", &AttentionConfigs::use_sparse_gqa_fmha)
@@ -1997,6 +2004,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
         .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
+        .def_readwrite("local_kv_cache_sharded", &ModelConfig::local_kv_cache_sharded)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
