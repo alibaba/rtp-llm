@@ -277,3 +277,71 @@ def test_master_ports_avoid_ephemeral_range_and_retry_busy_pair(monkeypatch):
         choices = iter([first - 10000, second - 10000])
         monkeypatch.setattr(master_runtime.secrets, 'randbelow', lambda bound: next(choices))
         assert master_runtime.master_port(1) == second
+
+
+def test_runner_constructs_arguments_once_per_step(case_data, compile_data, tmp_path):
+    constructions = []
+
+    @dataclass(frozen=True)
+    class Counted:
+        value: int
+
+        def __post_init__(self):
+            constructions.append(self.value)
+
+    @case_interface('probe/counted', effect='read')
+    async def counted(ctx, args: Counted) -> int:
+        return args.value
+
+    registry = Registry((counted,))
+    case_data['environment'] = {}
+    case_data.pop('view', None)
+    case_data['phases'][0]['steps'] = [
+        {'id': 'counted', 'describe': 'construct once', 'interface': 'probe/counted',
+         'args': {'value': 3}, 'expect': {'eq': 3}}]
+    case = compile_data(case_data, interfaces=registry)
+    constructions.clear()
+    launch = prepare_launch({'components': {}}, case, tmp_path)
+    result = asyncio.run(run_case(case, registry, launch, tmp_path / 'out'))
+    assert result['status'] == 'PASS'
+    assert constructions == [3]
+
+
+def test_constructor_failure_after_reference_resolution_is_not_an_unknown_write(
+        case_data, compile_data, tmp_path):
+    mutations = []
+
+    @dataclass(frozen=True)
+    class Positive:
+        value: int
+
+        def __post_init__(self):
+            if self.value <= 0:
+                raise ValueError('value must be positive')
+
+    @case_interface('probe/zero', effect='read')
+    async def zero(ctx, args: Args) -> int:
+        return 0
+
+    @case_interface('probe/positive', effect='write')
+    async def positive(ctx, args: Positive) -> int:
+        mutations.append(args.value)
+        return args.value
+
+    registry = Registry((zero, positive))
+    case_data['environment'] = {}
+    case_data.pop('view', None)
+    case_data['phases'][0]['steps'] = [
+        {'id': 'zero', 'describe': 'source', 'interface': 'probe/zero'},
+        {'id': 'positive', 'describe': 'reject before write', 'interface': 'probe/positive',
+         'args': {'value': {'ref': 'steps.zero'}}}]
+    case = compile_data(case_data, interfaces=registry)
+    launch = prepare_launch({'components': {}}, case, tmp_path)
+    output = tmp_path / 'out'
+    result = asyncio.run(run_case(case, registry, launch, output))
+    assert result['status'] == 'ERROR'
+    failed = [event for event in events(output) if event['event'] == 'step_finished'][-1]
+    assert failed['error_stage'] == 'arguments'
+    assert failed['outcome_unknown'] is False
+    assert 'value must be positive' in failed['error']
+    assert mutations == []

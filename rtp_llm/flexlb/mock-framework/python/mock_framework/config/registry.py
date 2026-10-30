@@ -1,10 +1,13 @@
-"""Case contracts come from Python functions. Importing them performs no I/O."""
-from dataclasses import dataclass, fields as data_fields, is_dataclass, MISSING, asdict
+"""Register typed Python Case functions and validate their arguments and results."""
+from dataclasses import MISSING, asdict, dataclass, fields as data_fields, is_dataclass
 from inspect import iscoroutinefunction, signature
 from types import UnionType
 from typing import Annotated, Literal, Union, get_args, get_origin, get_type_hints
 
 from .errors import ConfigError
+from .validation import validate
+
+_PRIMITIVES = {str: 'string', int: 'integer', float: 'number', bool: 'boolean', type(None): 'null'}
 
 
 @dataclass(frozen=True)
@@ -14,58 +17,78 @@ class Bounds:
 
 
 def schema(kind):
-    origin, variants = get_origin(kind), get_args(kind)
+    origin = get_origin(kind)
+    arguments = get_args(kind)
     if origin is Annotated:
-        result = schema(variants[0])
-        for rule in variants[1:]:
+        base, *rules = arguments
+        result = schema(base)
+        for rule in rules:
             if rule in ('duration', 'range'):
                 result = {'type': rule}
-                if rule == 'range' and get_origin(variants[0]) is list:
+                if rule == 'range' and get_origin(base) is list:
                     result['allow_latest'] = False
             elif isinstance(rule, Bounds):
-                result.update({k: v for k, v in asdict(rule).items() if v is not None})
+                if rule.minimum is not None:
+                    result['minimum'] = rule.minimum
+                if rule.maximum is not None:
+                    result['maximum'] = rule.maximum
             else:
                 raise ConfigError(f'Unsupported type annotation: {rule!r}')
         return result
     if origin in (Union, UnionType):
-        return {'type': 'union', 'variants': [schema(t) for t in variants]}
+        return {'type': 'union', 'variants': [schema(item) for item in arguments]}
     if origin is Literal:
-        if not variants or any(type(v) is not str for v in variants):
+        if not arguments or any(type(item) is not str for item in arguments):
             raise ConfigError('Only string Literal types are supported')
-        return {'type': 'string', 'enum': list(variants)}
-    if kind in (str, int, float, bool, type(None)):
-        return {'type': {str: 'string', int: 'integer', float: 'number', bool: 'boolean', type(None): 'null'}[kind]}
-    if origin is list:
-        return {'type': 'array', 'items': schema(variants[0])}
-    if origin is dict and variants[0] is str:
-        return {'type': 'object', 'values': schema(variants[1])}
+        return {'type': 'string', 'enum': list(arguments)}
+    if kind in _PRIMITIVES:
+        return {'type': _PRIMITIVES[kind]}
+    if origin is list and len(arguments) == 1:
+        return {'type': 'array', 'items': schema(arguments[0])}
+    if origin is dict and len(arguments) == 2 and arguments[0] is str:
+        return {'type': 'object', 'values': schema(arguments[1])}
     if is_dataclass(kind):
         hints = get_type_hints(kind, include_extras=True)
-        return {'type': 'object', 'properties': {f.name: schema(hints[f.name]) for f in data_fields(kind)},
-                'required': [f.name for f in data_fields(kind) if f.default is MISSING and f.default_factory is MISSING]}
+        properties = {}
+        required = []
+        for field in data_fields(kind):
+            properties[field.name] = schema(hints[field.name])
+            if field.default is MISSING and field.default_factory is MISSING:
+                required.append(field.name)
+        return {'type': 'object', 'properties': properties, 'required': required}
     raise ConfigError(f'Unsupported interface type: {kind!r}')
 
 
-def construct(kind, value):
-    origin, variants = get_origin(kind), get_args(kind)
+def construct(kind, value, where='argument'):
+    """Build typed arguments after schema validation, retaining constructor error paths."""
+    origin = get_origin(kind)
+    arguments = get_args(kind)
     if origin is Annotated:
-        return construct(variants[0], value)
+        return construct(arguments[0], value, where)
     if origin in (Union, UnionType):
-        from .validation import validate
-        for variant in variants:
+        errors = []
+        for variant in arguments:
             try:
-                validate(value, schema(variant), 'argument')
-                return construct(variant, value)
-            except (ConfigError, ValueError, TypeError):
-                continue
-        raise ConfigError('No matching argument type')
+                validate(value, schema(variant), where)
+                return construct(variant, value, where)
+            except ConfigError as error:
+                errors.append(str(error))
+        detail = '; '.join(dict.fromkeys(errors))
+        raise ConfigError(f'{where}: no matching argument type: {detail}')
     if is_dataclass(kind):
         hints = get_type_hints(kind, include_extras=True)
-        return kind(**{k: construct(hints[k], v) for k, v in value.items()})
+        values = {}
+        for key, item in value.items():
+            values[key] = construct(hints[key], item, f'{where}.{key}')
+        try:
+            return kind(**values)
+        except (ValueError, TypeError) as error:
+            raise ConfigError(f'{where}: {error}') from error
     if origin is list:
-        return [construct(variants[0], v) for v in value]
+        return [construct(arguments[0], item, f'{where}[{index}]')
+                for index, item in enumerate(value)]
     if origin is dict:
-        return {k: construct(variants[1], v) for k, v in value.items()}
+        return {key: construct(arguments[1], item, f'{where}.{key}') for key, item in value.items()}
     return value
 
 
@@ -73,9 +96,9 @@ def result_value(value):
     if is_dataclass(value):
         return asdict(value)
     if isinstance(value, list):
-        return [result_value(v) for v in value]
+        return [result_value(item) for item in value]
     if isinstance(value, dict):
-        return {k: result_value(v) for k, v in value.items()}
+        return {key: result_value(item) for key, item in value.items()}
     return value
 
 
@@ -94,34 +117,36 @@ class Interface:
                 'description': self.function.__doc__ or ''}
 
     def arguments(self, value):
-        from .validation import validate
-        validate(value, self.args, self.name + '.args')
-        try:
-            return construct(self.argument_type, value)
-        except (ValueError, TypeError) as error:
-            raise ConfigError(f'{self.name}: {error}') from error
+        where = self.name + '.args'
+        validate(value, self.args, where)
+        return construct(self.argument_type, value, where)
 
-    async def invoke(self, context, value):
-        from .validation import validate
-        result = await self.function(context, self.arguments(value))
+    async def call(self, context, arguments):
+        """Execute arguments already prepared by the Runner; validate the returned value."""
+        result = await self.function(context, arguments)
         result = result_value(result)
         validate(result, self.returns, self.name + '.result')
         return result
+
+    async def invoke(self, context, value):
+        """Validate raw arguments and execute a standalone interface call."""
+        return await self.call(context, self.arguments(value))
 
 
 def case_interface(name, *, effect, unit=''):
     def decorate(function):
         if effect not in ('read', 'write') or not name or not iscoroutinefunction(function):
             raise ConfigError('Case interfaces need a name, read/write effect and async function')
-        params = list(signature(function).parameters.values())
+        parameters = list(signature(function).parameters.values())
         hints = get_type_hints(function, include_extras=True)
-        if len(params) != 2 or params[1].name not in hints or 'return' not in hints:
+        if len(parameters) != 2 or parameters[1].name not in hints or 'return' not in hints:
             raise ConfigError('Interface signature must be (context, typed_args) -> typed_result')
-        args_type = hints[params[1].name]
-        if not is_dataclass(args_type):
+        argument_type = hints[parameters[1].name]
+        if not is_dataclass(argument_type):
             raise ConfigError('Interface arguments must be a dataclass')
-        function.case_interface = Interface(name, effect, unit, function, args_type,
-                                             schema(args_type), schema(hints['return']))
+        function.case_interface = Interface(
+            name=name, effect=effect, unit=unit, function=function, argument_type=argument_type,
+            args=schema(argument_type), returns=schema(hints['return']))
         return function
     return decorate
 
@@ -134,8 +159,10 @@ class Registry:
 
     def register(self, function):
         definition = getattr(function, 'case_interface', None)
-        if definition is None or definition.name in self._interfaces:
-            raise ConfigError('Missing interface decorator or duplicate interface name')
+        if definition is None:
+            raise ConfigError('Missing interface decorator')
+        if definition.name in self._interfaces:
+            raise ConfigError(f'duplicate interface name: {definition.name}')
         self._interfaces[definition.name] = definition
 
     @classmethod
