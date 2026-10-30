@@ -6,6 +6,7 @@ _MODULES = {
     "CausalAttention": "causal_attention",
     "DenseMLP": "dense_mlp",
     "MlaAttention": "mla_attention",
+    "KdaAttention": "kda_attention",
 }
 __all__ = list(_MODULES)
 

@@ -8,11 +8,12 @@ mysql-connector-python
 flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
-# Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
-deep-gemm==2.8.1+057ca59
-flash-mla==1.0.0+2e5429f
-# Preserve existing model KV formats through a separate namespace.
-flash-mla-legacy==1.0.0+92fd68b.rtp1
+# Self-built wheels against torch 2.11+cu130; source SHAs encoded in filenames.
+deep-gemm==2.8.2+a5165ad.cu132
+# Current and legacy model KV formats share one versioned FlashMLA wheel.
+flash-mla==1.0.0+bdd41db.cu132
+cuda-linear-attention==0.1.dev88+dcce4719.cu132
+flash-linear-attention==0.5.0+rtp.3a9ce1c.6
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
 

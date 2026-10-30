@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <torch/torch.h>
 
@@ -169,24 +170,46 @@ RequestBlockBufferStore::makeValidBlocks(const std::vector<std::shared_ptr<Block
     struct StagingBlock {
         const BlockBuffer* block;
         size_t             stride;
+        size_t             offset{0};
     };
     std::vector<StagingBlock> layout;
     layout.reserve(blocks.size());
-    size_t total_len = 0;
     for (const auto& block : blocks) {
         const size_t bytes  = std::max<size_t>(block->len, min_registration_size);
         const size_t stride = (bytes + alignment - 1) / alignment * alignment;
-        if (stride > max_tensor_size - total_len) {
-            RTP_LLM_LOG_WARNING("staging allocation is too large, block count %zu", blocks.size());
-            return {};
-        }
         layout.push_back({block.get(), stride});
-        total_len += stride;
     }
     if (rdma) {
         std::sort(layout.begin(), layout.end(), [](const StagingBlock& a, const StagingBlock& b) {
             return a.stride < b.stride;
         });
+    } else {
+        // Stage a packed block before its segment aliases in the TCP path.
+        std::sort(layout.begin(), layout.end(), [](const StagingBlock& a, const StagingBlock& b) {
+            const auto lhs = reinterpret_cast<uintptr_t>(a.block->addr.get());
+            const auto rhs = reinterpret_cast<uintptr_t>(b.block->addr.get());
+            return lhs == rhs ? a.block->len > b.block->len : lhs < rhs;
+        });
+    }
+    size_t              total_len = 0;
+    const StagingBlock* copied    = nullptr;
+    for (auto& entry : layout) {
+        if (!rdma && copied) {
+            const size_t delta = reinterpret_cast<uintptr_t>(entry.block->addr.get())
+                                 - reinterpret_cast<uintptr_t>(copied->block->addr.get());
+            if (delta <= copied->block->len && entry.block->len <= copied->block->len - delta) {
+                entry.offset = copied->offset + delta;
+                entry.stride = 0;
+                continue;
+            }
+        }
+        if (entry.stride > max_tensor_size - total_len) {
+            RTP_LLM_LOG_WARNING("staging allocation is too large, block count %zu", blocks.size());
+            return {};
+        }
+        entry.offset = total_len;
+        total_len += entry.stride;
+        copied = &entry;
     }
 
     auto tensor =
@@ -202,9 +225,10 @@ RequestBlockBufferStore::makeValidBlocks(const std::vector<std::shared_ptr<Block
     copy_params.multi_dst.reserve(blocks.size());
     copy_params.multi_src.reserve(blocks.size());
     const auto options = torch::TensorOptions().dtype(torch::kUInt8);
-    auto*      cursor  = static_cast<char*>(tensor.data_ptr());
+    auto*      base    = static_cast<char*>(tensor.data_ptr());
     for (auto slot = layout.begin(); slot != layout.end();) {
         const size_t stride = slot->stride;
+        auto*        cursor = base + slot->offset;
         // RDMA can split a registration at multiples of its alignment. Equal
         // strides ensure each split falls between blocks.
         auto end = layout.end();
@@ -228,15 +252,18 @@ RequestBlockBufferStore::makeValidBlocks(const std::vector<std::shared_ptr<Block
             });
         for (; slot != end; ++slot) {
             const auto* block = slot->block;
-            auto        addr  = std::shared_ptr<void>(region, cursor);
+            auto*       dest  = base + slot->offset;
+            auto        addr  = std::shared_ptr<void>(region, dest);
             staged_blocks.push_back(std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true));
+            if (slot->stride == 0) {
+                continue;
+            }
             copy_params.multi_dst.push_back(
-                torch::from_blob(cursor, {static_cast<int64_t>(block->len)}, options.device(torch::kCPU)));
+                torch::from_blob(dest, {static_cast<int64_t>(block->len)}, options.device(torch::kCPU)));
             copy_params.multi_src.push_back(
                 torch::from_blob(block->addr.get(),
                                  {static_cast<int64_t>(block->len)},
                                  options.device(block->gpu_mem ? torch::kCUDA : torch::kCPU)));
-            cursor += slot->stride;
         }
     }
 

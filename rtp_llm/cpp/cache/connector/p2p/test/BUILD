@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 
 load("//bazel:device_defs.bzl", "device_impl_target")
 
@@ -31,6 +31,16 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:stream",
     ],
     copts = test_copts,
+)
+
+cc_test_wrapper(
+    name = "asymmetric_tp_util_test",
+    srcs = ["AsymmetricTpUtilTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p:asymmetric_tp_util",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
 
 cc_test(

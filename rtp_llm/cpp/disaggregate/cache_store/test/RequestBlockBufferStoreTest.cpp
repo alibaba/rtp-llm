@@ -148,6 +148,29 @@ TEST_F(RequestBlockBufferStoreTest, testRdmaStagingReleasesRegionsIfLaterRegistr
     EXPECT_NE(store.getBlockBuffer(request->getRequestId(), "large"), nullptr);
 }
 
+TEST_F(RequestBlockBufferStoreTest, TcpStagingSharesPackedBlockWithSegmentAliases) {
+    RequestBlockBufferStore store(std::make_shared<NoRdmaMemoryUtilImpl>());
+    auto                    request = std::make_shared<RequestBlockBuffer>("packed");
+    auto                    packed  = block_buffer_util_->makeBlockBuffer("kv", 1024, 'a', true);
+    auto*                   device  = static_cast<char*>(packed->addr.get());
+    request->addBlock("first", std::shared_ptr<void>(packed->addr, device), 300, true, true);
+    request->addBlock("second", std::shared_ptr<void>(packed->addr, device + 300), 724, true, true);
+    request->addBlock(packed);
+
+    ASSERT_TRUE(store.setRequestBlockBuffer(request));
+    const auto block  = store.getBlockBuffer("packed", "kv");
+    const auto first  = store.getBlockBuffer("packed", "first");
+    const auto second = store.getBlockBuffer("packed", "second");
+    ASSERT_NE(block, nullptr);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(first->addr.get(), block->addr.get());
+    EXPECT_EQ(second->addr.get(), static_cast<char*>(block->addr.get()) + 300);
+    EXPECT_EQ(first->len, 300);
+    EXPECT_EQ(second->len, 724);
+    EXPECT_EQ(static_cast<const char*>(second->addr.get())[723], 'a');
+}
+
 TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
     auto block1        = block_buffer_util_->makeBlockBuffer("b1", 1024, '0', true);

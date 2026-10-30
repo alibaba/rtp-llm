@@ -26,7 +26,13 @@ class MoEConfigAdapter:
         layer_id: int = -1,
         max_generate_batch_size: int = 0,
         mega_moe_policy=None,
+        activation_type: Optional[str] = None,
+        activation_beta: Optional[float] = None,
+        activation_linear_beta: Optional[float] = None,
     ):
+        self._activation_type = activation_type
+        self.activation_beta = activation_beta
+        self.activation_linear_beta = activation_linear_beta
         self.model_config = model_config
         self.parallelism_config = parallelism_config
         self.moe_config = moe_config or MoeConfig()
@@ -129,5 +135,7 @@ class MoEConfigAdapter:
 
     @property
     def activation_type(self):
-        """Access activation_type from model_config when needed."""
+        """Use a layer override or the model's activation type."""
+        if self._activation_type is not None:
+            return self._activation_type
         return self.model_config.activation_type

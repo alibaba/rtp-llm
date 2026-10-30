@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include <exception>
 #include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/StagePeerGroups.h"
@@ -24,6 +25,9 @@
 #include <unistd.h>
 #include <limits.h>
 #include <c10/core/InferenceMode.h>
+#if USING_CUDA
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 using namespace std;
 using namespace autil::legacy;
@@ -150,6 +154,25 @@ private:
 };
 
 constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
+
+torch::Tensor copyToCpuForRpc(const torch::Tensor& tensor) {
+    if (!tensor.is_cuda()) {
+        return tensor;
+    }
+#if USING_CUDA
+    const auto memory_format =
+        tensor.is_non_overlapping_and_dense() ? torch::MemoryFormat::Preserve : torch::MemoryFormat::Contiguous;
+    // Keep the wait outside the copy API so other threads can issue CUDA work.
+    auto cpu = tensor.to(torch::TensorOptions().device(torch::kCPU),
+                         /*non_blocking=*/true,
+                         /*copy=*/false,
+                         memory_format);
+    c10::cuda::getCurrentCUDAStream(tensor.get_device()).synchronize();
+    return cpu;
+#else
+    return tensor.cpu();
+#endif
+}
 
 }  // namespace
 
@@ -300,7 +323,7 @@ void PrefillRpcServer::prepareGenerateInput(PrefillGenerateContext& prefill_cont
     if (!prefill_context.generate_input) {
         RTP_LLM_CHECK_WITH_INFO(engine_ != nullptr, "prefill rpc server engine is not initialized");
         auto input                                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
-        input->generate_config->pd_separation        = true;
+        input->generate_config->pd_separation        = !input->generate_config->isPrefillOnly();
         input->generate_config->force_disable_sp_run = !engine_->isMTPEagle();
         prefill_context.generate_input               = std::move(input);
     }
@@ -313,6 +336,9 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     prefill_context.trace_server_port = 0;
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     prepareGenerateInput(prefill_context);
+    if (prefill_context.generate_input->generate_config->isPrefillOnly()) {
+        return;
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
 
@@ -450,6 +476,24 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
         alloc_request.add_peer_addrs(address);
     }
     fillStagePeerGroups(alloc_request, prefill_context.prefill_worker_cache_store_addrs);
+    alloc_request.set_prefill_tp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
+    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+        return alloc_request;
+    }
+    // Advertise the resolved physical layout, which may be independent of Query CP.
+    // A raw sharding flag alone does not mean that this cache owns PageRR shards.
+    const auto cp_mapper = engine_->resourceContext().cache_manager->cpSlotMapper();
+    if (cp_mapper && cp_mapper->isSharded()) {
+        const auto shard_count = cp_mapper->cpSize();
+        const auto stage_count = std::max<int64_t>(1, maga_init_params_.parallelism_config.pp_size);
+        RTP_LLM_CHECK_WITH_INFO(alloc_request.peer_addrs_size() == shard_count * stage_count,
+                                "sharded Prefill KV requires one cache-store peer per shard in each PP stage, "
+                                "got peers=%d shards=%d stages=%ld",
+                                alloc_request.peer_addrs_size(),
+                                shard_count,
+                                stage_count);
+        alloc_request.set_prefill_cp_size(static_cast<int32_t>(shard_count));
+    }
     return alloc_request;
 }
 
@@ -472,6 +516,9 @@ void PrefillRpcServer::fillStagePeerGroups(GenerateRequestPB& alloc_request, con
 
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (prefill_context.generate_input && prefill_context.generate_input->generate_config->isPrefillOnly()) {
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
     if (prefill_context.isRequestCancelled()) {
         setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, "request is cancelled"));
@@ -563,9 +610,13 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    const auto& stream = prefill_context.getStream();
+    if (stream->generateConfig()->isPrefillOnly()) {
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     auto start_time_us = currentTimeUs();
-    auto wait_result   = waitStreamBeforeRun(prefill_context.getStream());
+    auto wait_result   = waitStreamBeforeRun(stream);
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (wait_result.hasError()) {
         setContextError(prefill_context, wait_result);
@@ -619,6 +670,9 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
         prefill_context.finished = true;
         auto error_info          = stream->statusInfo();
         setContextError(prefill_context, error_info);
+    } else if (stream->generateConfig()->isPrefillOnly()) {
+        prefill_context.dequeueStreamFromRuntimeMeta();
+        prefill_context.finished = true;
     }
 }
 
@@ -688,15 +742,13 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     /** P and D configure PP independently. Include MTP/EAGLE proposal probabilities and draft hidden
      * in the PD handoff so a non-PP D can verify the candidate and continue multi-step drafting. */
     if (sp_output_buffer && !engine_->isDSpark()) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        auto          all_probs_cpu = copyToCpuForRpc(sp_output_buffer->all_probs);
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
             hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
         } else {
-            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
-                                                                            sp_output_buffer->hidden_states;
+            hidden_states_cpu = copyToCpuForRpc(sp_output_buffer->hidden_states);
         }
         QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);

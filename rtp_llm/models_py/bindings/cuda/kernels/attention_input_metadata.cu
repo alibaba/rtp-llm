@@ -14,7 +14,13 @@ __global__ void buildAttentionInputMetadataKernel(const int32_t* __restrict__ in
                                                   int32_t* __restrict__ cu_kv_seqlens,
                                                   int32_t* __restrict__ padding_offset,
                                                   int32_t batch_size,
-                                                  int32_t total_tokens) {
+                                                  int32_t total_tokens,
+                                                  bool*   valid_token_mask,
+                                                  int64_t mask_tokens,
+                                                  int64_t valid_tokens) {
+    for (int64_t i = threadIdx.x; valid_token_mask && i < mask_tokens; i += blockDim.x) {
+        valid_token_mask[i] = i < valid_tokens;
+    }
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
     }
@@ -57,7 +63,9 @@ void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
                                        at::Tensor&       cu_seqlens,
                                        at::Tensor&       cu_kv_seqlens,
                                        at::Tensor&       padding_offset,
-                                       cudaStream_t      stream) {
+                                       cudaStream_t      stream,
+                                       const at::Tensor& valid_token_mask,
+                                       int64_t           valid_tokens) {
     TORCH_CHECK(input_lengths.defined(), "input_lengths must be defined");
     TORCH_CHECK(input_lengths.is_cuda(), "input_lengths must be a CUDA tensor");
     TORCH_CHECK(input_lengths.scalar_type() == at::kInt, "input_lengths must be int32");
@@ -92,14 +100,21 @@ void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
         prefix_ptr = prefix_lengths.data_ptr<int32_t>();
     }
 
-    buildAttentionInputMetadataKernel<<<1, 1, 0, stream>>>(
+    TORCH_CHECK(!valid_token_mask.defined()
+                    || (valid_token_mask.is_cuda() && valid_token_mask.scalar_type() == at::kBool
+                        && valid_token_mask.is_contiguous()),
+                "valid token mask must be contiguous CUDA bool");
+    buildAttentionInputMetadataKernel<<<1, 128, 0, stream>>>(
         input_lengths.data_ptr<int32_t>(),
         prefix_ptr,
         cu_seqlens.data_ptr<int32_t>(),
         cu_kv_seqlens.data_ptr<int32_t>(),
         padding_offset.defined() && padding_offset.numel() > 0 ? padding_offset.data_ptr<int32_t>() : nullptr,
         batch_size,
-        total_tokens);
+        total_tokens,
+        valid_token_mask.defined() ? valid_token_mask.data_ptr<bool>() : nullptr,
+        valid_token_mask.defined() ? valid_token_mask.numel() : 0,
+        valid_tokens);
     const auto result = cudaGetLastError();
     TORCH_CHECK(result == cudaSuccess, "build attention input metadata kernel failed: ", cudaGetErrorString(result));
 }

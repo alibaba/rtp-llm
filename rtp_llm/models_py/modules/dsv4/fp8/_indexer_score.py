@@ -34,6 +34,15 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_HEAD_DIM,
 )
 
+
+def get_fp8_paged_mqa_logits_metadata(backend, *args, **kwargs):
+    """Pair legacy FP8 logits with its 256-token schedule when available."""
+    metadata = getattr(backend, "get_legacy_paged_mqa_logits_metadata", None)
+    if not callable(metadata):
+        metadata = backend.get_paged_mqa_logits_metadata
+    return metadata(*args, **kwargs)
+
+
 try:
     import deep_gemm as _deep_gemm
 
@@ -43,17 +52,16 @@ try:
         _deep_gemm, "get_paged_mqa_logits_metadata"
     )
     _HAS_DEEP_GEMM_MQA = hasattr(_deep_gemm, "fp8_mqa_logits")
-    # DeepGEMM 2.8.1 tightens the SM100 logits contracts: paged MQA requires
-    # varlen indices and non-paged MQA requires per-element MX q scale
-    # factors, so the group-128 legacy calls (q without SF) are rejected on
-    # SM100 there and must fall back to the Triton kernel. 2.8.0 still
-    # accepts them, and the legacy entry points exist in both versions.
+    # Newer wheels restore the group-128 FP32-weight/output APIs alongside
+    # the MX APIs, with an explicit legacy metadata entry point. Older
+    # 2.8.0 wheels use the shared metadata name; 2.8.1 rejects these calls
+    # on SM100 and keeps the existing Triton fallback.
     import re as _re
 
     _match = _re.match(r"(\d+)\.(\d+)\.(\d+)", getattr(_deep_gemm, "__version__", ""))
-    _DEEP_GEMM_SM100_LEGACY_OK = bool(_match) and tuple(
-        int(x) for x in _match.groups()
-    ) < (2, 8, 1)
+    _DEEP_GEMM_SM100_LEGACY_OK = callable(
+        getattr(_deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)
+    ) or (bool(_match) and tuple(int(x) for x in _match.groups()) < (2, 8, 1))
 except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False
@@ -72,15 +80,16 @@ def _sm100_needs_triton_fallback(device) -> bool:
 def deepgemm_supports_block_kv(device, block_kv: int) -> bool:
     """DeepGEMM's paged-MQA metadata contract per device generation.
 
-    ``get_paged_mqa_logits_metadata`` accepts ``block_kv == 64`` on SM90/SM100
-    and ``block_kv == 32`` on SM100 only (a pre-SM90 device such as L20/SM89
-    rejects either); sizes outside that list are unconstrained here.
+    The restored legacy API accepts 64-token pages on SM90 and
+    32/64/128-token pages on SM100. Preserve older vendor-wheel gates.
     """
     major = torch.cuda.get_device_capability(device)[0]
     if block_kv == 32:
         return major == 10
     if block_kv == 64:
         return major in (9, 10)
+    if callable(getattr(_deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)):
+        return block_kv == 128 and major == 10
     return True
 
 
@@ -94,11 +103,17 @@ def supports_paged_mqa_logits(device, block_kv: Optional[int] = None) -> bool:
     """
     if not _HAS_DEEP_GEMM or _sm100_needs_triton_fallback(device):
         return False
+    if callable(getattr(_deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)):
+        if torch.cuda.get_device_capability(device)[0] not in (9, 10):
+            return False
     return block_kv is None or deepgemm_supports_block_kv(device, block_kv)
 
 
 def supports_mqa_logits(device) -> bool:
     """Whether :func:`fp8_mqa_indexer_score` takes the DeepGEMM path."""
+    if callable(getattr(_deep_gemm, "get_legacy_paged_mqa_logits_metadata", None)):
+        if torch.cuda.get_device_capability(device)[0] not in (9, 10):
+            return False
     return _HAS_DEEP_GEMM_MQA and not _sm100_needs_triton_fallback(device)
 
 
@@ -171,8 +186,8 @@ def fp8_paged_indexer_score(
             q_fp8, kv_4d, w_fold, context_lens, block_table, max_ctx_len
         )
     num_sms = _get_num_sms(q_fp8.device)
-    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
-        context_lens, block_size, num_sms
+    schedule = get_fp8_paged_mqa_logits_metadata(
+        _deep_gemm, context_lens, block_size, num_sms
     )
     return _deep_gemm.fp8_paged_mqa_logits(
         q_fp8.contiguous(),

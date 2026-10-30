@@ -49,6 +49,8 @@ class Indexer(nn.Module):
         parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
         stable_topk: bool = False,
+        dsa_config: Optional[Any] = None,
+        indexer_op: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -57,14 +59,21 @@ class Indexer(nn.Module):
         # Resolve the fusion policy once so forward does not read the config.
         self._fuse_kernels_enabled = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_logits_head_gate = (
-            self._fuse_kernels_enabled and fused_logits_head_gate is not None
+            dsa_config is None
+            and self._fuse_kernels_enabled
+            and fused_logits_head_gate is not None
         )
 
         self.index_n_heads = attn_config.indexer_head_num
         self.index_head_dim = attn_config.indexer_head_dim
         self.index_topk = attn_config.indexer_topk
 
-        self.rope_head_dim = attn_config.rope_head_dim
+        self.dsa_config = dsa_config
+        self.rope_head_dim = (
+            attn_config.rope_head_dim
+            if dsa_config is None
+            else dsa_config.index_rope_dim
+        )
         self.block_size = 128  # quantization block size (128)
         self.head_kv = 1
         self.scale_fmt = scale_fmt  # FP8 quantization format
@@ -115,52 +124,72 @@ class Indexer(nn.Module):
             W.mla_indexer_weights_proj_w,
             None,
             None,
-            quant_config=quant_config,
+            quant_config=quant_config if dsa_config is None else None,
             hw_kernel_config=hw_kernel_config,
         )
-        # Pre-contiguify weight for the fused Triton kernel (one-time init
-        # copy). Production weight is often a transposed view [N, K] of
-        # underlying [K, N] storage; the small-T per-(t,n) kernel needs
-        # contiguous weight for coalesced 1D loads. Use plain attribute
-        # reassignment (not `.data = ...`) — the latter does an in-place
-        # `set_` of the underlying storage that leaves the tensor in a
-        # state where `F.linear` under cuda-graph capture + inference_mode
-        # trips PyTorch's version-counter check.
         if (
             self._fuse_logits_head_gate
             and hasattr(self.weights_proj, "weight")
             and not self.weights_proj.weight.is_contiguous()
         ):
             self.weights_proj.weight = self.weights_proj.weight.contiguous()
-        self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
-
-        # Fused RoPE kernels use equal rotary/non-rotary halves and power-of-2
-        # tiles. Other supported indexer geometries retain the unfused path.
+        head_weight = getattr(self.weights_proj, "weight", None)
+        self._fp32_head_weight = (
+            head_weight
+            if dsa_config is not None
+            and head_weight is not None
+            and head_weight.is_cuda
+            and head_weight.dtype == torch.float32
+            and head_weight.ndim == 2
+            and head_weight.shape[0] == self.index_n_heads
+            and head_weight.shape[1] <= 8192
+            else None
+        )
+        self.cos_sin_cache = (
+            global_weights[W.rope_cos_sin_cache]
+            if dsa_config is None or self.rope_head_dim
+            else None
+        )
         self._fuse_kernels_enabled = self._fuse_kernels_enabled and (
-            self.index_head_dim == 128
+            dsa_config is None
+            and self.index_head_dim == 128
             and self.rope_head_dim == 64
             and self.index_n_heads > 0
             and self.index_n_heads & (self.index_n_heads - 1) == 0
             and self.cos_sin_cache.shape[-1] == self.rope_head_dim
         )
 
-        self.indexer_op = IndexerOp(
-            index_n_heads=self.index_n_heads,
-            index_head_dim=self.index_head_dim,
-            index_topk=self.index_topk,
-            rope_head_dim=self.rope_head_dim,
-            cos_sin_cache=self.cos_sin_cache,
-            blocksize=self.blocksize,
-            block_size=self.block_size,
-            scale_fmt=self.scale_fmt,
-            is_neox_style=self.is_neox_style,
-            stable_topk=stable_topk,
-            enable_fuse_kernels=self._fuse_kernels_enabled,
+        self.indexer_op = (
+            indexer_op
+            if indexer_op is not None
+            else IndexerOp(
+                index_n_heads=self.index_n_heads,
+                index_head_dim=self.index_head_dim,
+                index_topk=self.index_topk,
+                rope_head_dim=self.rope_head_dim,
+                cos_sin_cache=self.cos_sin_cache,
+                blocksize=self.blocksize,
+                block_size=self.block_size,
+                scale_fmt=self.scale_fmt,
+                is_neox_style=self.is_neox_style,
+                stable_topk=stable_topk,
+                enable_fuse_kernels=self._fuse_kernels_enabled,
+            )
         )
+        if dsa_config is not None:
+            if indexer_op is None:
+                raise ValueError(
+                    "model-specific DSA requires an explicit Indexer execution backend"
+                )
+            self._quantize_q_k = indexer_op.encode_q_k
+            self._compute_topk = indexer_op.compute_topk
 
     def _prefill_cp_enabled(self) -> bool:
         if self.parallelism_config is None:
             return False
+        if self.dsa_config is not None:
+            # Effective DSA CP is layer-local; KDA and outer TP/SP are unchanged.
+            return self.parallelism_config.tp_size > 1
         return self.parallelism_config.prefill_cp_config.is_enabled()
 
     def _prefill_cp_fused_quant_enabled(self) -> bool:
@@ -169,13 +198,84 @@ class Indexer(nn.Module):
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return not _is_decode_phase(attention_inputs) and self._prefill_cp_enabled()
 
+    # TODO: fuse kernel here
+    def project_key(self, hidden):
+        if self.rope_head_dim or self.dsa_config is None:
+            raise ValueError("independent Indexer key projection requires NoRoPE DSA")
+        return self.k_norm(self.wk(hidden))
+
+    def project_query(self, q_lora, *, original_rows=None):
+        if self.rope_head_dim or self.dsa_config is None:
+            raise ValueError("independent Indexer query projection requires NoRoPE DSA")
+        if original_rows is not None:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+                CudaFp8GEMMLinear,
+            )
+
+            if original_rows < q_lora.shape[0]:
+                raise ValueError(
+                    "original Indexer row extent cannot be smaller than the chunk"
+                )
+            if (
+                isinstance(self.wq_b, CudaFp8GEMMLinear)
+                and original_rows >= self.wq_b.FLASHINFER_M_THRESHOLD
+            ):
+                # An out buffer selects the wrapper's existing DeepGEMM path.
+                # A short receive tail must not select FlashInfer when the
+                # original complete projection would have used DeepGEMM.
+                output = q_lora.new_empty(
+                    (q_lora.shape[0], self.index_n_heads * self.index_head_dim)
+                )
+                self.wq_b(q_lora, out=output)
+                return output.view(-1, self.index_n_heads, self.index_head_dim)
+        return self.wq_b(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
+
+    def project_head_weights(
+        self,
+        hidden,
+        q_scale,
+        *,
+        is_prefill=False,
+        original_rows=None,
+        tile_decode_output=False,
+    ):
+        return self._get_logits_head_gate(
+            hidden,
+            q_scale,
+            is_prefill=is_prefill,
+            original_rows=original_rows,
+            tile_decode_output=tile_decode_output,
+        )
+
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor
+        self,
+        x: torch.Tensor,
+        q_scale: torch.Tensor,
+        *,
+        is_prefill: bool = False,
+        original_rows=None,
+        tile_decode_output=False,
     ) -> torch.Tensor:
-        # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
-        # ``self._fuse_logits_head_gate`` is resolved at __init__ from
-        # ``HWKernelConfig.enable_fuse_kernels``.
         scale = self.softmax_scale * self.weights_scale
+        if is_prefill and self._fp32_head_weight is not None:
+            from rtp_llm.models_py.kernels.cuda.dsa_head_weights_fp32 import (
+                fused_logits_head_gate as fused_k3_logits_head_gate,
+            )
+
+            return fused_k3_logits_head_gate(
+                x,
+                q_scale,
+                self._fp32_head_weight,
+                self.softmax_scale * self.weights_scale,
+                fallback_proj=self.weights_proj,
+                original_rows=original_rows,
+                tile_decode_output=tile_decode_output,
+                bf16_dot=(
+                    self.dsa_config.indexer_use_fp8
+                    and x.dtype == torch.bfloat16
+                    and not tile_decode_output
+                ),
+            )
         if self._fuse_logits_head_gate and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
@@ -290,6 +390,8 @@ class Indexer(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.rope_head_dim == 0 and self.dsa_config is not None:
+            return self.project_query(q_lora), self.project_key(x)
         q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         if cp_params is not None:
@@ -397,6 +499,9 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
+        *,
+        encoded_q_lora: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        prepared_key: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
@@ -408,7 +513,19 @@ class Indexer(nn.Module):
 
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
-        if (
+        if encoded_q_lora is not None or prepared_key is not None:
+            query = (
+                self.project_query(q_lora)
+                if encoded_q_lora is None
+                else self.wq_b.forward_quantized(*encoded_q_lora).view(
+                    -1, self.index_n_heads, self.index_head_dim
+                )
+            )
+            key = self.project_key(hidden_states) if prepared_key is None else prepared_key
+            q_fp8, q_scale = self._quantize_q_k(
+                query, key, kv_cache, fmha_params, attention_inputs, cp_params
+            )
+        elif (
             self._is_sparse_prefill_cp(attention_inputs)
             and self._prefill_cp_fused_quant_enabled()
             and cp_params.full_rope_pos_ids is not None
@@ -455,7 +572,12 @@ class Indexer(nn.Module):
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
             )
 
-        weights = self._get_logits_head_gate(hidden_states, q_scale)
+        weights = self._get_logits_head_gate(
+            hidden_states,
+            q_scale,
+            is_prefill=attention_inputs.is_prefill,
+            tile_decode_output=bool(getattr(attention_inputs, "is_target_verify", False)),
+        )
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
         )

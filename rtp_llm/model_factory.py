@@ -100,6 +100,7 @@ class ModelFactory:
 
         model = model_cls.from_config(
             model_config=model_config,
+            runtime_config=engine_config.runtime_config,
             parallelism_config=engine_config.parallelism_config,
             hw_kernel_config=engine_config.hw_kernel_config,
             kv_cache_config=engine_config.kv_cache_config,
@@ -157,7 +158,12 @@ class ModelFactory:
             or sp_type == SpeculativeType.DSPARK
         ):
             model_type = propose_model_config.model_type
-            if model_type == "deepseek-v3-mtp" or model_type == "mixtbstars-mtp":
+            if model_type in (
+                "deepseek-v3-mtp",
+                "mixtbstars-mtp",
+                "kimi_k3_mtp",
+                "kimi_k31_mtp",
+            ):
                 logging.warning(
                     f"create sp model type is {model_type}, so change the sp type to mtp"
                 )
@@ -224,9 +230,15 @@ class ModelFactory:
                     "disable ROCm swizzleA for BF16 qwen_3_dspark propose model"
                 )
 
+            propose_parallelism_config = engine_config.parallelism_config
+            if hasattr(model_cls, "speculative_parallelism_config"):
+                propose_parallelism_config = model_cls.speculative_parallelism_config(
+                    propose_parallelism_config
+                )
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
-                parallelism_config=engine_config.parallelism_config,
+                runtime_config=engine_config.runtime_config,
+                parallelism_config=propose_parallelism_config,
                 hw_kernel_config=propose_hw_kernel_config,
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
@@ -437,6 +449,9 @@ class ModelFactory:
             model_config: ModelConfig containing model information
         """
         finalize_pp_partition(engine_config.parallelism_config, model_config.num_layers)
+        configure_parallelism = getattr(model_config, "configure_parallelism", None)
+        if configure_parallelism is not None:
+            configure_parallelism(engine_config.parallelism_config)
 
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(
@@ -445,6 +460,7 @@ class ModelFactory:
             role_type=engine_config.pd_sep_config.role_type,
             use_batch_decode_scheduler=engine_config.runtime_config.use_batch_decode_scheduler,
             seq_size_per_block=model_config.attn_config.tokens_per_block,
+            is_causal=model_config.attn_config.is_causal,
         )
         scheduler_config = engine_config.runtime_config.fifo_scheduler_config
         # Generic MoE executors allocate their fixed-capacity communication
@@ -535,6 +551,12 @@ class ModelFactory:
             propose_model_config, engine_config.kv_cache_config
         )
         propose_model_cls._post_build_model_config(propose_model_config)
+        # Draft models share the target scheduler bounds. Proposal width sizes
+        # their workspaces independently of the number of draft modules.
+        propose_model_config.gen_num_per_cycle = sp_config.gen_num_per_cycle
+        propose_model_config.moe_prefill_max_tokens_per_rank = (
+            model_config.moe_prefill_max_tokens_per_rank
+        )
 
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(

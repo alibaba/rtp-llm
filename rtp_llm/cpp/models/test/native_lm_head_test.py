@@ -219,11 +219,8 @@ def _tp_worker(rank, rendezvous):
         raise AssertionError("LM head requested an unexpected collective")
 
     def gather(recv, mode, send, inplace):
-        assert mode == 0 and len(recv) == 1 and not send
-        dest = recv[0].view(-1)
-        size = dest.numel() // 2
-        local = dest[rank * size : (rank + 1) * size].clone()
-        dist.all_gather_into_tensor(dest, local)
+        assert mode == 0 and len(recv) == 1 and len(send) == 1 and not inplace
+        dist.all_gather_into_tensor(recv[0], send[0])
 
     _extension.register_comm_ops(unexpected, unexpected, gather, unexpected, unexpected)
     try:

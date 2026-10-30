@@ -1,13 +1,19 @@
+import sys
 import unittest
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, ModelOptFp4Config
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-    CudaFp8GEMMLinear,
-)
+
+with patch.dict(sys.modules, {"deep_gemm": None}):
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+        CudaF16Linear,
+    )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
 
 
 class LinearRegistrationTest(unittest.TestCase):

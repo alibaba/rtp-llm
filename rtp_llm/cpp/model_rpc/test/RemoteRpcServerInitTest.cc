@@ -91,6 +91,20 @@ private:
 
 std::unique_ptr<py::scoped_interpreter> RemoteRpcServerInitTest::interpreter_;
 
+TEST_F(RemoteRpcServerInitTest, RdmaInitializesBeforeEngineAndReusesPreparedMemoryUtil) {
+    auto params = initParams(true);
+    {
+        ScopedRemoteRpcServer server;
+        ASSERT_TRUE(server.init(params, nullptr, py::none()).ok());
+        EXPECT_EQ(init_trace.events, (std::vector<std::string>{"memory", "model"}));
+        EXPECT_EQ(init_trace.rdma_modes, (std::vector<bool>{true}));
+        EXPECT_EQ(server.memoryUtil(), init_trace.memory_util.lock());
+        EXPECT_EQ(init_trace.released, 0);
+    }
+    EXPECT_TRUE(init_trace.memory_util.expired());
+    EXPECT_EQ(init_trace.released, 1);
+}
+
 TEST_F(RemoteRpcServerInitTest, StopClosesBackgroundWorkWhileCacheOwnersRetainMemory) {
     for (bool rdma_mode : {false, true}) {
         ScopedRemoteRpcServer server;
@@ -110,6 +124,43 @@ TEST_F(RemoteRpcServerInitTest, StopClosesBackgroundWorkWhileCacheOwnersRetainMe
         service.stop();
         EXPECT_EQ(retained_store->getMemoryUtil(), memory);
     }
+}
+
+TEST_F(RemoteRpcServerInitTest, LocalInitFailureReleasesPreparedMemoryUtil) {
+    auto params = initParams(true);
+    // This invalid local-MM configuration returns before engine construction.
+    params.model_config_.mm_model_config.is_multimodal = true;
+    params.vit_config.vit_separation                   = VitSeparation::VIT_SEPARATION_LOCAL;
+    ScopedRemoteRpcServer server;
+    EXPECT_EQ(server.init(params, nullptr, py::none()).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_EQ(init_trace.events, (std::vector<std::string>{"memory"}));
+    EXPECT_EQ(init_trace.rdma_modes, (std::vector<bool>{true}));
+    EXPECT_EQ(server.getEngine(), nullptr);
+    EXPECT_TRUE(init_trace.memory_util.expired());
+    EXPECT_EQ(init_trace.released, 1);
+}
+
+TEST_F(RemoteRpcServerInitTest, EngineConstructionFailureReleasesPreparedMemoryUtil) {
+    auto params                        = initParams(true);
+    NormalExecutor::test_model_factory = [](const GptModelInitParams&) -> std::unique_ptr<ModelBase> {
+        init_trace.events.emplace_back("model");
+        throw std::runtime_error("injected model construction failure");
+    };
+    ScopedRemoteRpcServer server;
+    EXPECT_THROW(server.init(params, nullptr, py::none()), std::runtime_error);
+    EXPECT_EQ(init_trace.events, (std::vector<std::string>{"memory", "model"}));
+    EXPECT_EQ(init_trace.rdma_modes, (std::vector<bool>{true}));
+    EXPECT_TRUE(init_trace.memory_util.expired());
+    EXPECT_EQ(init_trace.released, 1);
+}
+
+TEST_F(RemoteRpcServerInitTest, TcpKeepsMemoryInitializationAfterEngine) {
+    auto                  params = initParams(false);
+    ScopedRemoteRpcServer server;
+    ASSERT_TRUE(server.init(params, nullptr, py::none()).ok());
+    EXPECT_EQ(init_trace.events, (std::vector<std::string>{"model", "memory"}));
+    EXPECT_EQ(init_trace.rdma_modes, (std::vector<bool>{false}));
+    EXPECT_EQ(server.memoryUtil(), init_trace.memory_util.lock());
 }
 
 }  // namespace

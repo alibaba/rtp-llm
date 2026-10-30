@@ -285,7 +285,20 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         for delta in deltas[1:]:
             self._merge_output_str(merged, delta)
             if delta.logprobs is not None:
-                merged.logprobs = delta.logprobs
+                if merged.logprobs is None:
+                    merged.logprobs = delta.logprobs
+                else:
+                    previous = (
+                        merged.logprobs
+                        if isinstance(merged.logprobs, list)
+                        else [merged.logprobs]
+                    )
+                    current = (
+                        delta.logprobs
+                        if isinstance(delta.logprobs, list)
+                        else [delta.logprobs]
+                    )
+                    merged.logprobs = previous + current
 
         return merged
 
@@ -479,6 +492,53 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             the normalizer emitted any text (used to decide state advancement).
         """
         normalizer_yielded = False
+
+        if status.request.logprobs and any(stop_words_str):
+            # One backend frame becomes one public delta. Resolve its stop/UTF-8
+            # boundary before draining any of its original probability rows.
+            previous = self.tokenizer.decode(status.prev_token_id)
+            decoded = self.tokenizer.decode(status.prev_token_id + new_token_ids)
+            terminal = status.finish_reason is not None or bool(output.finished)
+            incomplete = decoded.endswith("\ufffd")
+            if incomplete:
+                if is_streaming and not terminal:
+                    return [], False
+                decoded = decoded.rstrip("\ufffd")
+            pending = status.delta_output_string
+            raw_text = pending + decoded[len(previous) :]
+            text, should_buffer = self._process_stop_words(
+                raw_text,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming and not terminal,
+                status,
+            )
+            if should_buffer:
+                status.delta_output_string = text
+                return [], bool(new_token_ids)
+            if len(text) < len(raw_text) or incomplete:
+                # A stop may start in an earlier buffered frame or inside a
+                # token. Never publish that token's probability as visible text.
+                visible_length = (
+                    len(self.tokenizer.decode(status.last_output_ids))
+                    - len(pending)
+                    + len(text)
+                )
+                end = len(status.output_ids)
+                while (
+                    end
+                    and len(self.tokenizer.decode(status.output_ids[:end]))
+                    > visible_length
+                ):
+                    end -= 1
+                status.output_ids = status.output_ids[:end]
+            status.delta_output_string = ""
+            if not text:
+                return [], False
+            delta = await self._process_single_token_delta(
+                status, text, output, [], [], is_streaming=is_streaming
+            )
+            return ([delta] if delta is not None else []), True
 
         if is_streaming:
             collected_deltas = []

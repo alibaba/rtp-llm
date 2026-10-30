@@ -14,7 +14,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Dict
 
 import torch
@@ -25,6 +25,10 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     prepare_fp4_weight_scale_for_deepgemm,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.activation import (
+    mega_moe_functions,
+    situ_kwargs,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
@@ -51,7 +55,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync impo
 )
 from rtp_llm.utils.model_weight import W
 
-from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
+from .fp8_fp4_base import (
+    Fp8Fp4ExecutorBase,
+    _normalize_activation,
+    normalize_moe_w13_gate_up,
+)
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
 _MEGA_MOE_NVCC_TMPDIR_ENV = "MEGA_MOE_NVCC_TMPDIR"
@@ -61,17 +69,28 @@ _MMA_TYPE = "fp8xfp4"
 
 @lru_cache(maxsize=None)
 def _native_mega_intermediate_supported(
-    group_size: int, num_experts: int, num_topk: int, hidden: int, intermediate: int
+    group_size: int,
+    num_experts: int,
+    num_topk: int,
+    hidden: int,
+    intermediate: int,
+    activation: str,
 ) -> bool:
     return (
         estimate_mega_moe_symm_buffer_bytes(
-            group_size, num_experts, 384, num_topk, hidden, intermediate
+            group_size,
+            num_experts,
+            384,
+            num_topk,
+            hidden,
+            intermediate,
+            activation=activation,
         )
         is not None
     )
 
 
-def _mega_intermediate_size(cfg) -> int:
+def _mega_intermediate_size(cfg, activation: str = "swiglu") -> int:
     """Intermediate width the Mega kernel and its resident weights use.
 
     DeepGEMM bounds the symmetric buffer by a 384-token staging capacity. When
@@ -88,6 +107,7 @@ def _mega_intermediate_size(cfg) -> int:
             cfg.n_activated_experts,
             cfg.dim,
             intermediate,
+            activation,
         )
     ):
         return intermediate
@@ -141,6 +161,8 @@ def _restore_tmpdir(previous_tmpdir: str | None) -> None:
 
 
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
+    supported_activations = ("swiglu", "situ")
+
     execute_empty_inputs = True
     _fp4_transform_name = "transform_weights_for_mega_moe"
 
@@ -149,6 +171,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
     @staticmethod
     def _kernel_spec(config):
+        if _normalize_activation(getattr(config, "activation_type", "swiglu")) == "situ":
+            return "fp8_fp4_mega_moe_k3", "get_symm_buffer_for_mega_moe_k3"
         strategy = getattr(config, "moe_strategy", "mega_moe")
         if strategy in FP8_MEGA_MOE_STRATEGIES:
             return "fp8_fp8_mega_moe", "get_symm_buffer_for_mega_moe_fp8"
@@ -177,6 +201,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._mega_buf = self._mega_y = self._mega_group = None
         self._input_packer = None
         self._num_shared_experts = 0
+        self._activation_kwargs = {}
         super().__init__(config, quant_config, weights)
 
     @property
@@ -231,6 +256,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
         prepared = getattr(config, "mega_moe_policy", None) is not None
+        if _normalize_activation(getattr(config, "activation_type", "swiglu")) == "situ":
+            checker.check(not prepared)
+            checker.check(getattr(config, "moe_strategy", "mega_moe") == "mega_moe")
         if prepared:
             checker.check(config.ep_size >= 1)
             checker.check(not config.has_redundant_experts)
@@ -249,7 +277,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
                 )
             )
         else:
-            checker.check(_mega_moe_available())
+            kernel, allocator = cls._kernel_spec(config)
+            checker.check(_mega_moe_available(kernel_name=kernel, allocator_name=allocator))
 
     def setup_weights(self, layer_weights: Dict) -> None:
         if self._prepared_policy is not None:
@@ -260,12 +289,22 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         """Keep the MegaMoE-resident weights and register the symm-mem buffer."""
         import deep_gemm
-        import torch.distributed as dist
 
         cfg = self.cfg
-        D = cfg.dim
-        inter = _mega_intermediate_size(cfg)
-        device = self._transform_routed_weights(layer_weights, deep_gemm, inter)
+        self._mega_kernel, transform_weights, _ = mega_moe_functions(self.activation)
+        self._activation_kwargs = {}
+        if self.activation == "situ":
+            self._activation_kwargs = situ_kwargs(
+                self._mega_kernel,
+                cfg.activation_beta,
+                cfg.activation_linear_beta,
+            )
+        inter = _mega_intermediate_size(cfg, self.activation)
+        if self.activation == "situ":
+            transform_weights = partial(transform_weights, activation=self.activation)
+        else:
+            transform_weights = getattr(deep_gemm, self._fp4_transform_name)
+        self._transform_routed_weights(layer_weights, transform_weights, inter)
 
         self._setup_buffer_and_warmup()
 
@@ -283,9 +322,13 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         inter = (
             self.cfg.moe_inter_dim
             if self._prepared_policy
-            else _mega_intermediate_size(self.cfg)
+            else _mega_intermediate_size(self.cfg, self.activation)
         )
-        self._transform_routed_weights(layer_weights, deep_gemm, inter, w1_layout)
+        transform_weights = getattr(deep_gemm, self._fp4_transform_name)
+        if self.activation == "situ":
+            _, transform_weights, _ = mega_moe_functions(self.activation)
+            transform_weights = partial(transform_weights, activation=self.activation)
+        self._transform_routed_weights(layer_weights, transform_weights, inter, w1_layout)
         self._setup_buffer_and_warmup()
 
     def setup_shared_expert_from_fp8(self, w1_w, w1_s, w2_w, w2_s):
@@ -335,12 +378,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_topk=cfg.n_activated_experts,
             hidden=cfg.dim,
             intermediate_hidden=(
-                _mega_intermediate_size(cfg)
+                _mega_intermediate_size(cfg, self.activation)
                 if self._prepared_policy is None
                 else cfg.moe_inter_dim
             ),
             use_fp8_dispatch=True,
-            activation="swiglu",
+            activation=self.activation,
         )
 
     def _allocate_mega_buffer(self):
@@ -392,7 +435,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._setup_buffer_and_warmup()
 
     def _transform_routed_weights(
-        self, layer_weights: Dict, deep_gemm, inter: int, w1_layout=None
+        self, layer_weights: Dict, transform_weights, inter: int, w1_layout=None
     ) -> torch.device:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
         layout ``fp8_fp4_mega_moe`` expects.
@@ -472,7 +515,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
         # both SFs UTCCP-transposed. Drop inputs immediately after.
-        (l1_w, l1_sf), (l2_w, l2_sf) = getattr(deep_gemm, self._fp4_transform_name)(
+        (l1_w, l1_sf), (l2_w, l2_sf) = transform_weights(
             (w13, s13_int),
             (w2, s2_int),
         )
@@ -520,7 +563,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             num_experts=cfg.n_routed_experts,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=_mega_intermediate_size(cfg),
+            intermediate_hidden=_mega_intermediate_size(cfg, self.activation),
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=(
@@ -568,6 +611,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.dim,
             cfg.moe_inter_dim,
             max_tokens_per_rank,
+            cfg.swiglu_limit,
+            self.activation,
+            tuple(self._activation_kwargs.items()),
             getattr(cfg, "route_scale", 1.0),
             num_sms,
             tuple(token_counts),
@@ -694,8 +740,6 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             )
 
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
-        import deep_gemm
-
         sync_cuda_graph_warmup_ranks(
             f"moe.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
             device,
@@ -706,13 +750,15 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         import deep_gemm
 
         kwargs = {"assume_all_topk_valid": True} if self._fp8_routed else {}
+        if self.activation == "situ":
+            kwargs.update(self._activation_kwargs)
         getattr(deep_gemm, self._kernel_name)(
             y,
             (self._mega_l1_w, self._mega_l1_sf),
             (self._mega_l2_w, self._mega_l2_sf),
             self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
+            activation=self.activation,
             activation_clamp=self._activation_clamp,
             fast_math=self._fast_math,
             **kwargs,
@@ -768,8 +814,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         return self._forward_impl(x, None, None, inputs_prepacked=True)
 
     def _clone_mega_buffer(self):
+        kwargs = self._buffer_kwargs()
+        if self.activation == "situ":
+            kwargs.pop("use_fp8_dispatch", None)
+            kwargs["mma_type"] = _MMA_TYPE
         return get_or_create_mega_clone_buffer(
-            self._mega_buf, self._buffer_factory, **self._buffer_kwargs()
+            self._mega_buf, self._buffer_factory, **kwargs
         )
 
     def clone_for_cuda_graph(self, *, share_mega_buf: bool = False):

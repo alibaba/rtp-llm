@@ -594,6 +594,9 @@ cuda-core==1.0.1 \
     --hash=sha256:e0f1324486bb90be6bde28bd0afbaf78a38827948d37f93f90318a01da8a3f8c \
     --hash=sha256:e9b0f115a68f2f84c0f6d9b7e863a29517f6dfe5f7b7d07d1d9da8904754e9a2
     # via cuda-python
+cuda-linear-attention==0.1.dev88+dcce4719.cu132 \
+    --hash=sha256:007154cc956e143d8a2ff0fac2c6a9fbbc7dffd5fbe2f7adaba89696d7fd0ab1
+    # via -r deps/requirements_cuda13_arm.txt
 cuda-pathfinder==1.6.0 \
     --hash=sha256:1503af579d8379c24bdd65528379bc57039b0455be9f5f9686cf8e473a1fce51
     # via
@@ -644,9 +647,9 @@ decorator==5.3.1 \
 deep-ep==2.1.0+a56d615 \
     --hash=sha256:4e7509a2ad6fd84d6f195fcac0aedc33f2a7c7b3965e777da821cb9d1cfc4787
     # via -r internal_source/deps/requirements_cuda13_arm.txt
-deep-gemm==2.8.1+057ca59 \
-    --hash=sha256:e6474ca387758f11da7aff2851215cfe5230ed6b54cce0fabf5a880b5b56827c
-    # via -r internal_source/deps/requirements_cuda13_arm.txt
+deep-gemm==2.8.2+a5165ad.cu132 \
+    --hash=sha256:3031fe7aa79ffacfdb0fd4ffba88b1c7d24bde1738d8f04cb67a3e4c533f6dc3
+    # via -r deps/requirements_cuda13_arm.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
@@ -679,12 +682,14 @@ filelock==3.32.0 \
     #   blobfile
     #   huggingface-hub
     #   torch
-flash-mla==1.0.0+2e5429f \
-    --hash=sha256:4e729f23823e02ef95e5c94a1d41b9031e8e4b00682f0c44392f480fed15899e
-    # via -r internal_source/deps/requirements_cuda13_arm.txt
-flash-mla-legacy==1.0.0+92fd68b.rtp1 \
-    --hash=sha256:9a0d330ee0875d7bbca8772f7467a561c31627583373c1d5c06c7e183810ec7a
-    # via -r internal_source/deps/requirements_cuda13_arm.txt
+flash-linear-attention==0.5.0+rtp.3a9ce1c.6 \
+    --hash=sha256:20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   cuda-linear-attention
+flash-mla==1.0.0+bdd41db.cu132 \
+    --hash=sha256:dc9876a2df6ed59f34d08a01488da5e43c7bc593be7c317505d5040b29b617c1
+    # via -r deps/requirements_cuda13_arm.txt
 flashinfer-cubin==0.6.9+8c4f4dcf \
     --hash=sha256:6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f
     # via -r internal_source/deps/requirements_cuda13_arm.txt
@@ -2226,7 +2231,9 @@ nvidia-cusparselt-cu13==0.8.0 \
     # via torch
 nvidia-cutlass-dsl==4.5.0 \
     --hash=sha256:3b051fe02ca69422ab840e64d9865667aba288a3984a7ca4ccd038a82aef1344
-    # via flashinfer-python
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   flashinfer-python
 nvidia-cutlass-dsl-libs-base==4.5.0 \
     --hash=sha256:0a60dfce3349984315306ef719ed1edf0e225527158f26019a5cf266e06cc45d \
     --hash=sha256:2e121b20f0a48122c9b48227d00a7d681189e1de2fd4d211f9661a4e1658f066 \

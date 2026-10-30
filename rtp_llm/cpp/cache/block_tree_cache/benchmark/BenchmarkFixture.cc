@@ -91,6 +91,8 @@ DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_s
     config->total_size_bytes          = physical_block_count * block_stride_bytes;
 
     MemoryLayoutConfig layout;
+    layout.cache_type = KVCacheSpecType::OpaqueKV;
+
     layout.layer_num                  = static_cast<uint32_t>(layer_num);
     layout.block_num                  = static_cast<uint32_t>(physical_block_count);
     layout.dtype                      = TYPE_INT8;
