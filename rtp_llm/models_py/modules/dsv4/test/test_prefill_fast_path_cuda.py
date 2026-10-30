@@ -204,6 +204,7 @@ class PrefillFastPathCudaTest(_PrefillForwardTestBase):
             {
                 "flash_mla": SimpleNamespace(flash_mla_sparse_fwd=sparse_fwd),
                 "flash_mla_legacy": SimpleNamespace(flash_mla_sparse_fwd=sparse_fwd),
+                "flash_mla.legacy": SimpleNamespace(flash_mla_sparse_fwd=sparse_fwd),
             },
         ):
             out = attn._attn_fp8_swa_via_concat(qkv, common)

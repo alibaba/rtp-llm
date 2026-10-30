@@ -397,6 +397,142 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, LinearReplayLeaseFollowsExecutorConfigAcrossRequestFlags) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    stream_->generate_input_->generate_config->force_disable_sp_run = true;
+
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    ASSERT_NE(resource.linearReplayLease(), nullptr);
+    EXPECT_TRUE(stream_->prepareLinearReplayRound().ok());
+}
+
+TEST_F(StreamCacheResourceTest, CancelledReplayRoundRetainsLeaseUntilBookkeepingFinishes) {
+    auto config                      = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_FALSE(stream_->prepareLinearReplayRound().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+
+    stream_->incPendingAsyncBookkeeping();
+    auto pending_guard = std::shared_ptr<void>(
+        nullptr, [stream = stream_](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    // Reproduce an RPC cancellation after scheduling but before replay gather.
+    std::thread cancel([stream = stream_] { stream->reportError(ErrorCode::CANCELLED, "cancel after admission"); });
+    cancel.join();
+    ASSERT_FALSE(stream_->isActive());
+    auto round = stream_->prepareLinearReplayRound();
+    ASSERT_TRUE(round.ok()) << round.status();
+    ASSERT_NE(round->state_block_hold, nullptr);
+    const auto generation = round->lease->generation;
+
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    EXPECT_FALSE(resource.isResourceReleased());
+    EXPECT_TRUE(stream_->isDeferredReleasePending());
+    pending_guard.reset();
+    EXPECT_TRUE(resource.isResourceReleased());
+    EXPECT_FALSE(stream_->prepareLinearReplayRound().ok());
+    EXPECT_EQ(cache_manager_->acquireLinearReplaySlot(), nullptr);
+
+    round            = absl::FailedPreconditionError("round ownership released");
+    auto replacement = cache_manager_->acquireLinearReplaySlot();
+    ASSERT_NE(replacement, nullptr);
+    EXPECT_GT(replacement->generation, generation);
+}
+
+TEST_F(StreamCacheResourceTest, PendingReplayBookkeepingRetainsFutureDestinationPages) {
+    auto config                      = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock(/*seq_len_override=*/9).ok());
+    const auto&  group            = cache_manager_->cacheConfig().groups().at(0);
+    const auto&  blocks           = resource.kvCache().blocks(0, group.tag);
+    const size_t host_destination = 6 / group.seqSizePerBlock();
+    ASSERT_GT(blocks.size(), host_destination + 1);
+    const auto& pool = cache_manager_->coordinator_manager_->groupBlockPools().at(0);
+
+    auto exact = resource.holdLinearReplayBlocks();
+    EXPECT_TRUE(exact->contains(pool.get(), blocks[host_destination]));
+    EXPECT_FALSE(exact->contains(pool.get(), blocks[host_destination + 1]));
+    stream_->incPendingAsyncBookkeeping();
+    auto pending = resource.holdLinearReplayBlocks();
+    stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(pending->contains(pool.get(), blocks[host_destination]));
+    EXPECT_TRUE(pending->contains(pool.get(), blocks[host_destination + 1]));
+}
+
+TEST_F(StreamCacheResourceTest, InflightReplayReservationPreservesPagesAndPrunesOnlyCompletedPrefix) {
+    auto              config   = test::makeSimpleHybridMhaCacheConfig(4, 32, 2, DataType::TYPE_FP16, 2);
+    const std::string tag      = "linear";
+    const int         group_id = static_cast<int>(config.topology().groupIdForTag(tag));
+    ASSERT_EQ(config.topology().group(tag).policy.group_type, CacheGroupType::LINEAR);
+    config.linear_replay = LinearReplayPlan::create({group_id}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto lease    = resource.linearReplayLease();
+    const auto original = resource.kvCache().blocks(0, tag);
+    ASSERT_EQ(original.size(), 4u);
+
+    // Keep the old destination alive as an in-flight consumer would. Growing
+    // capacity must neither COW nor prune any previously published page.
+    auto hold = resource.holdLinearReplayBlocks();
+    ASSERT_NE(hold, nullptr);
+    ASSERT_TRUE(resource.incrKVBlock(/*seq_len_override=*/15, /*preserve_inflight=*/true).ok());
+    EXPECT_EQ(resource.linearReplayLease(), lease);
+    const auto reserved = resource.kvCache().blocks(0, tag);
+    ASSERT_EQ(reserved.size(), 8u);
+    for (size_t position = 0; position < original.size(); ++position) {
+        EXPECT_EQ(reserved[position], original[position]);
+    }
+    for (size_t position = original.size(); position < reserved.size(); ++position) {
+        EXPECT_FALSE(isNullBlockIdx(reserved[position]));
+    }
+
+    // Only the round ending at token 9 has completed; token 10..15 capacity
+    // remains allocated even though the table has already grown to 8 slots.
+    resource.pruneKVCache(/*completed_seq_len=*/9);
+    const auto partial = resource.kvCache().blocks(0, tag);
+    for (size_t position = 0; position < 3; ++position) {
+        EXPECT_TRUE(isNullBlockIdx(partial[position]));
+    }
+    for (size_t position = 3; position < reserved.size(); ++position) {
+        EXPECT_EQ(partial[position], reserved[position]);
+    }
+    EXPECT_EQ(resource.kvCache().cacheResource().linearReplayActiveBegin(tag, partial.size()), 3u);
+
+    resource.pruneKVCache(/*completed_seq_len=*/15);
+    EXPECT_EQ(resource.kvCache().blocks(0, tag), partial) << "cleanup only follows a reservation";
+    ASSERT_TRUE(resource.incrKVBlock(/*seq_len_override=*/23, /*preserve_inflight=*/true).ok());
+    resource.pruneKVCache(/*completed_seq_len=*/15);
+    const auto& finished = resource.kvCache().blocks(0, tag);
+    for (size_t position = 0; position < 6; ++position) {
+        EXPECT_TRUE(isNullBlockIdx(finished[position]));
+    }
+    EXPECT_EQ(finished[6], reserved[6]);
+    EXPECT_EQ(finished[7], reserved[7]);
+}
+
 TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
     for (const bool reversed : {false, true}) {
         auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
@@ -421,6 +557,37 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
                       group.policy.group_type == CacheGroupType::LINEAR ? (BlockIndicesType{5, 2}) :
                                                                           (BlockIndicesType{2, 5}));
         }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, SpeculativeLinearSwapSkipsReplayGroupsAcrossCheckpointBoundary) {
+    auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+    auto groups = config.topology().groups();
+    const auto layers = config.topology().layers();
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        auto& group = groups[group_id];
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            auto spec = group.spec->clone();
+            spec->seq_size_per_block = 32768;
+            group.spec = std::move(spec);
+            config.linear_replay.group_ids.push_back(static_cast<int>(group_id));
+        }
+    }
+    ASSERT_EQ(config.linear_replay.group_ids.size(), 1);
+    config.setTopology(std::move(groups), layers);
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(config);
+    StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+    resource.init(1);
+    auto& batch = resource.kvCacheMutable();
+    for (const auto& group : config.topology().groups()) {
+        batch.mutableBlockIds(0, group.tag).assign({0, 1, 2, 3, 4});
+    }
+
+    // Replay groups publish accepted state separately and skip legacy swaps.
+    resource.swapLinearBlocks(0, 2, 3);
+    for (const auto& group : config.topology().groups()) {
+        EXPECT_EQ(batch.blocks(0, group.tag), (BlockIndicesType{0, 1, 2, 3, 4}));
     }
 }
 
@@ -598,50 +765,76 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
 
 TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuseForAllocation) {
     for (const bool ignore_request_switches : {false, true}) {
-        SCOPED_TRACE(ignore_request_switches);
-        prepareResource(/*reuse_cache=*/true);
-        auto& resource = stream_->streamCacheResource();
+        for (const int chunk_size : {0, 4}) {
+            SCOPED_TRACE(testing::Message() << "ignore_request_switches=" << ignore_request_switches
+                                           << ", chunk_size=" << chunk_size);
+            prepareResource(/*reuse_cache=*/true);
+            auto& resource = stream_->streamCacheResource();
+            stream_->setChunkSize(chunk_size);
 
-        stream_->generateConfig()->max_new_tokens                = 0;
-        stream_->generateConfig()->num_return_sequences          = 1;
-        stream_->generateConfig()->reuse_cache                   = true;
-        resource.resource_context_.ignore_request_cache_switches = ignore_request_switches;
-        resource.resource_context_.enable_device_cache           = true;
-        resource.resource_context_.enable_memory_cache           = true;
-        resource.resource_context_.enable_disk_cache             = true;
-        resource.resource_context_.enable_remote_cache           = true;
+            stream_->generateConfig()->max_new_tokens                = 0;
+            stream_->generateConfig()->num_return_sequences          = 1;
+            stream_->generateConfig()->reuse_cache                   = true;
+            resource.resource_context_.ignore_request_cache_switches = ignore_request_switches;
+            resource.resource_context_.enable_device_cache           = true;
+            resource.resource_context_.enable_memory_cache           = true;
+            resource.resource_context_.enable_disk_cache             = true;
+            resource.resource_context_.enable_remote_cache           = true;
 
-        const auto real_allocator = cache_manager_->coordinator_manager_;
-        auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
-        cache_manager_->coordinator_manager_ = allocator;
-        EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
-            .WillOnce(testing::Invoke([real_allocator](const MallocInfo& info) {
-                EXPECT_FALSE(info.reuse_cache);
-                EXPECT_FALSE(info.enable_cache_lookup);
-                return real_allocator->initMallocForCommonLen(info);
-            }));
-        EXPECT_CALL(*allocator, incrMalloc(testing::_))
-            .Times(2)
-            .WillRepeatedly(testing::Invoke([real_allocator](const MallocInfo& info) {
-                EXPECT_FALSE(info.reuse_cache);
-                EXPECT_FALSE(info.enable_cache_lookup);
-                return real_allocator->incrMalloc(info);
-            }));
+            const auto real_allocator = cache_manager_->coordinator_manager_;
+            auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+            cache_manager_->coordinator_manager_ = allocator;
+            EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+                .WillOnce(testing::Invoke([real_allocator](const MallocInfo& info) {
+                    EXPECT_FALSE(info.reuse_cache);
+                    EXPECT_FALSE(info.enable_cache_lookup);
+                    return real_allocator->initMallocForCommonLen(info);
+                }));
+            EXPECT_CALL(*allocator, incrMalloc(testing::_))
+                .Times(2)
+                .WillRepeatedly(testing::Invoke([real_allocator](const MallocInfo& info) {
+                    EXPECT_FALSE(info.reuse_cache);
+                    EXPECT_FALSE(info.enable_cache_lookup);
+                    return real_allocator->incrMalloc(info);
+                }));
 
-        const auto init_status = resource.initKVBlock();
-        EXPECT_TRUE(init_status.ok()) << init_status;
-        EXPECT_GT(resource.curBlocksNum(), 0);
-        EXPECT_TRUE(resource.incrKVBlock().ok());
-        EXPECT_FALSE(resource.asyncLoadCache());
-        EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
-        EXPECT_EQ(resource.allocator_load_context_, nullptr);
-        EXPECT_EQ(stream_->reuseLength(), 0);
-        EXPECT_EQ(resource.storeTarget(), Tier::NONE);
-        EXPECT_TRUE(stream_->generateConfig()->reuse_cache);
-        cache_manager_->coordinator_manager_ = real_allocator;
-        stream_->releaseResource();
-        EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+            const auto init_status = resource.initKVBlock();
+            EXPECT_TRUE(init_status.ok()) << init_status;
+            EXPECT_GT(resource.curBlocksNum(), 0);
+            EXPECT_TRUE(resource.incrKVBlock().ok());
+            EXPECT_FALSE(resource.asyncLoadCache());
+            EXPECT_TRUE(resource.waitForAllocatorLoad().ok());
+            EXPECT_EQ(resource.allocator_load_context_, nullptr);
+            EXPECT_EQ(stream_->reuseLength(), 0);
+            EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+            EXPECT_TRUE(stream_->generateConfig()->reuse_cache);
+            cache_manager_->coordinator_manager_ = real_allocator;
+            stream_->releaseResource();
+            EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+        }
     }
+}
+
+TEST_F(StreamCacheResourceTest, testLateChunkEnableKeepsFullPromptLinearMapping) {
+    prepareHybridResource(/*reuse_cache=*/false);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_FALSE(stream_->chunkedPrefillEnabled());
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto ordinary = resource.kvCache().kernelBlocks(0, "linear");
+    ASSERT_EQ(ordinary.size(), 3u);
+    EXPECT_EQ(ordinary[0], NULL_BLOCK_IDX);
+    EXPECT_EQ(ordinary[1], NULL_BLOCK_IDX);
+    ASSERT_GT(ordinary[2], 0);
+
+    // Scheduling can enable chunking after allocation for a prompt that fits in one round.
+    stream_->setChunkSize(stream_->seqLength());
+    ASSERT_TRUE(stream_->useChunkWindow());
+    ASSERT_EQ(stream_->prefixLength(), 0);
+    ASSERT_FALSE(stream_->isMiddleChunk());
+    auto table = ordinary;
+    EXPECT_FALSE(resource.copyChunkKernelBlocks(0, "linear", table.data()));
+    EXPECT_EQ(table, ordinary);
+    EXPECT_EQ(resource.kvCache().kernelBlocks(0, "linear"), ordinary);
 }
 
 TEST_F(StreamCacheResourceTest, testReuseCacheIgnoresPerRequestSwitchWhenConfigured) {

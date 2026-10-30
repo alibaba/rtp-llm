@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,10 +44,8 @@ constexpr uint32_t             kDsv4Fp8KvEntryBytes        = 584;
 constexpr uint32_t             kDsv4IndexerStateEntryBytes = 512 * 4;
 constexpr uint32_t             kDsv4CsaStateEntryBytes     = 2048 * 4;
 constexpr uint32_t             kDsv4HcaStateEntryBytes     = 1024 * 4;
-const std::vector<std::string> kDsv4FlashFirstSeenTags     = {
-    "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
-const std::vector<std::string> kDsv4ProFirstSeenTags = {
-    "hca_kv", "hca_state", "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state"};
+const std::vector<std::string> kDsv4Tags                   = {
+    "csa_kv", "csa_state", "hca_kv", "hca_state", "indexer_kv", "indexer_state", "swa_kv"};
 
 bool containsReusableGroup(const BlockTreeCache& cache, std::string_view tag) {
     return std::any_of(cache.groupSets().begin(), cache.groupSets().end(), [tag](const GroupSetPtr& group_set) {
@@ -316,7 +316,7 @@ TEST(CacheConfigCreatorTest, ProLayerClassification) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(makeProModelConfig(), pc, 0);
     EXPECT_EQ(config.layer_num, 61u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4ProFirstSeenTags);
+    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
     EXPECT_EQ(config.layerIdsForGroup("csa_kv").size(), 30u);
     EXPECT_EQ(config.layerIdsForGroup("hca_kv").size(), 31u);
     EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 61u);
@@ -326,7 +326,7 @@ TEST(CacheConfigCreatorTest, FlashLayerClassification) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(makeFlashModelConfig(), pc, 0);
     EXPECT_EQ(config.layer_num, 43u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4FlashFirstSeenTags);
+    EXPECT_EQ(publishedGroupTags(config.topology()), kDsv4Tags);
     EXPECT_EQ(config.layerIdsForGroup("csa_kv").size(), 21u);
     EXPECT_EQ(config.layerIdsForGroup("hca_kv").size(), 20u);
     EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 43u);
@@ -364,7 +364,7 @@ TEST(CacheConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     EXPECT_EQ(config.groupForLayer(0, "swa_kv").tag, "swa_kv");
 }
 
-TEST(CacheConfigCreatorTest, Dsv4SpecOrderControlsFirstSeenGroupOrder) {
+TEST(CacheConfigCreatorTest, Dsv4SpecOrderDoesNotChangeCanonicalGroupOrder) {
     auto mc = makeFlashModelConfig();
     for (auto& layer_descs : mc.kv_cache_spec_descs) {
         std::reverse(layer_descs.begin(), layer_descs.end());
@@ -373,8 +373,7 @@ TEST(CacheConfigCreatorTest, Dsv4SpecOrderControlsFirstSeenGroupOrder) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
 
-    const std::vector<std::string> expected_tags = {
-        "swa_kv", "csa_state", "indexer_state", "indexer_kv", "csa_kv", "hca_state", "hca_kv"};
+    const auto& expected_tags = kDsv4Tags;
     EXPECT_EQ(publishedGroupTags(config.topology()), expected_tags);
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), expected_tags.size());
@@ -454,6 +453,141 @@ static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, 
     return group;
 }
 
+TEST(LinearReplayPlanTest, InvalidGeometryAndOverflowAreRejected) {
+    EXPECT_THROW(LinearReplayPlan::create({0}, 0, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1),
+                 std::invalid_argument);
+    EXPECT_THROW(LinearReplayPlan::create({0}, 1, 0, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1),
+                 std::invalid_argument);
+    EXPECT_THROW(LinearReplayPlan::create({0}, 1, 4, {0, 2}, {1, 2}, false, DataType::TYPE_BF16, 1),
+                 std::invalid_argument);
+    EXPECT_THROW(LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_INVALID, 1),
+                 std::invalid_argument);
+    EXPECT_THROW(LinearReplayPlan::create(
+                     {0}, std::numeric_limits<int64_t>::max(), 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1),
+                 std::overflow_error);
+    EXPECT_THROW(LinearReplayPlan::create(
+                     {0}, 1, 4, {std::numeric_limits<int64_t>::max(), 4}, {1, 2}, false, DataType::TYPE_BF16, 1),
+                 std::overflow_error);
+}
+
+TEST(CacheConfigCreatorTest, LinearReplayAndDecodePoolAreDisabledByDefault) {
+    auto linear = makeTestGroup(std::make_shared<LinearKVCacheSpec>("linear", 16, 16, 1), CacheGroupType::LINEAR, {0});
+    const auto  original_policy = linear.policy;
+    CacheConfig config;
+    config.layer_num = 1;
+    config.setTopology({linear}, {{0, {"linear"}}});
+    ModelConfig       model;
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 7;
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 3;
+
+    EXPECT_FALSE(runtime.enable_linear_replay);
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true);
+
+    EXPECT_EQ(config.group("linear").policy.explicit_block_num, original_policy.explicit_block_num);
+    EXPECT_EQ(config.group("linear").policy.charge_to_paged_budget, original_policy.charge_to_paged_budget);
+    EXPECT_TRUE(config.linear_replay.group_ids.empty());
+    EXPECT_EQ(config.linear_replay.slotCount(), 0);
+    EXPECT_EQ(config.linear_replay.maxSteps(), 0);
+    EXPECT_EQ(config.linear_replay.reserve_bytes, 0u);
+}
+
+TEST(CacheConfigCreatorTest, DecodeLinearPoolUsesConcurrencyForEveryDeviceLinearGroup) {
+    auto linear = makeTestGroup(std::make_shared<LinearKVCacheSpec>("linear_a", 16, 16, 1),
+                                CacheGroupType::LINEAR,
+                                {0});
+    auto other = makeTestGroup(std::make_shared<LinearKVCacheSpec>("linear_b", 16, 16, 1),
+                               CacheGroupType::LINEAR,
+                               {1});
+    other.policy.explicit_block_num = 19;
+    auto full = makeTestGroup(test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 16, "full"),
+                              CacheGroupType::FULL,
+                              {0});
+    CacheConfig config;
+    config.layer_num = 2;
+    config.setTopology({linear, other, full}, {{0, {"linear_a", "full"}}, {1, {"linear_b"}}});
+
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.enable_linear_replay    = true;
+    runtime.max_generate_batch_size = 7;
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);  // 2 * (7 + 4)
+    EXPECT_TRUE(config.group("linear_a").policy.charge_to_paged_budget);
+    EXPECT_EQ(config.group("linear_b").policy.explicit_block_num, 19u);
+    EXPECT_EQ(config.group("full").policy.explicit_block_num, 0u);
+
+    parallelism.role_type = RoleType::PREFILL;
+    runtime.max_generate_batch_size = 15;
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism, runtime);
+    EXPECT_EQ(config.group("linear_a").policy.explicit_block_num, 22u);
+}
+
+TEST(CacheConfigCreatorTest, ReplaySelectsTargetLinearGroupsAndReservesLogMemory) {
+    auto target = makeTestGroup(std::make_shared<LinearKVCacheSpec>("target_linear", 16, 16, 1),
+                                CacheGroupType::LINEAR,
+                                {0});
+    auto draft = makeTestGroup(std::make_shared<LinearKVCacheSpec>("draft_linear", 16, 16, 1),
+                               CacheGroupType::LINEAR,
+                               {2});
+    auto full = makeTestGroup(test::makeResolvedMhaSpec(DataType::TYPE_BF16, 1, 4, 16, "full"),
+                              CacheGroupType::FULL,
+                              {1});
+    ModelConfig model;
+    auto& linear = model.linear_attention_config;
+    linear.linear_num_key_heads   = 8;
+    linear.linear_num_value_heads = 16;
+    linear.linear_key_head_dim    = 128;
+    linear.linear_value_head_dim  = 128;
+    linear.linear_conv_kernel_dim = 4;
+    linear.conv_state_dtype = DataType::TYPE_BF16;
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::DECODE;
+    RuntimeConfig runtime;
+    runtime.enable_linear_replay    = true;
+    runtime.max_generate_batch_size = 5;
+    SpeculativeExecutionConfig speculative;
+    speculative.type = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 3;
+    for (const int64_t tp_size : {2, 4}) {
+        parallelism.tp_size = tp_size;
+        for (const bool vector_gate : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "tp_size=" << tp_size << ", vector_gate=" << vector_gate);
+            linear.replay_vector_gate = vector_gate;
+            CacheConfig config;
+            config.layer_num = 2;
+            config.setTopology({target, draft, full}, {{0, {"target_linear"}}, {1, {"full"}}, {2, {"draft_linear"}}});
+            CacheConfigCreator::configureLinearReplay(config, model, parallelism, runtime, speculative, true);
+            const auto&   plan        = config.linear_replay;
+            const int64_t key_heads   = 8 / tp_size;
+            const int64_t value_heads = 16 / tp_size;
+            const int64_t gate_dim    = vector_gate ? 128 : 1;
+            const int64_t channels    = 2 * key_heads * 128 + value_heads * 128;
+            EXPECT_EQ(plan.group_ids,
+                      (std::vector<int>{static_cast<int>(config.topology().groupIdForTag("target_linear"))}));
+            EXPECT_EQ(plan.slotCount(), 5);
+            EXPECT_EQ(plan.maxSteps(), 4);
+            EXPECT_EQ(plan.k_shape, (std::array<int64_t, 4>{5, 4, key_heads, 128}));
+            EXPECT_EQ(plan.u_shape, (std::array<int64_t, 4>{5, 4, value_heads, 128}));
+            EXPECT_EQ(plan.g_shape, (std::array<int64_t, 4>{5, 4, value_heads, gate_dim}));
+            EXPECT_EQ(plan.conv_input_shape, (std::array<int64_t, 3>{5, 4, channels}));
+            EXPECT_EQ(plan.conv_dtype, DataType::TYPE_BF16);
+            // One target layer of 4-step logs per slot; draft layers must not contribute.
+            const size_t values_per_step = key_heads * 128 + value_heads * 128 + value_heads * gate_dim;
+            EXPECT_EQ(plan.reserve_bytes,
+                      5u
+                          * (2u * sizeof(int64_t) + 2u * sizeof(int32_t)
+                             + 4u * (values_per_step * sizeof(float) + channels * sizeof(uint16_t))));
+        }
+    }
+}
+
 TEST(CacheConfigTest, GroupIdentityQueriesPreserveGeometryAcrossTopologyOrders) {
     auto                         full_spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 4, 16, "full");
     auto                         swa_spec  = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 8, "swa");
@@ -489,7 +623,7 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
         {makeTestGroup(swa_spec, CacheGroupType::SWA, {0, 1, 2}), makeTestGroup(csa_spec, CacheGroupType::FULL, {1})},
         std::move(layers));
 
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"swa", "csa"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"csa", "swa"}));
     EXPECT_EQ(config.groupForLayer(1, "swa").tag, "swa");
     EXPECT_EQ(config.groupForLayer(1, "csa").tag, "csa");
     EXPECT_THROW((void)config.soleGroupForLayer(1), std::exception);
@@ -1007,7 +1141,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
     EXPECT_GT(config.group("linear").spec->block_size_bytes(), 0u);
     EXPECT_NE(config.group("full").spec->block_size_bytes(), config.group("linear").spec->block_size_bytes());
     EXPECT_EQ(config.topology().groups().size(), 2u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear"}));
 
     EXPECT_EQ(config.totalGroupBlockSizeBytes(),
               config.blockSizeBytesForGroup("linear") + config.blockSizeBytesForGroup("full"));
@@ -1034,7 +1168,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs
     EXPECT_EQ(config.group("full").policy.group_type, CacheGroupType::FULL);
     EXPECT_EQ(config.group("swa").policy.group_type, CacheGroupType::SWA);
     EXPECT_EQ(config.group("linear").policy.group_type, CacheGroupType::LINEAR);
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "swa", "linear"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear", "swa"}));
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 3u);
     EXPECT_NE(config.group("full").spec.get(), config.group("swa").spec.get());
     EXPECT_EQ(config.layerIdsForGroup("full"), std::vector<int>({0}));
@@ -1119,7 +1253,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionUsesIndependentPerGroupBlockCounts) 
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_EQ(config.group("linear").block_num, 2u);
     EXPECT_EQ(config.group("full").block_num, 2u);
-    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"linear", "full"}));
+    EXPECT_EQ(publishedGroupTags(config.topology()), std::vector<std::string>({"full", "linear"}));
     EXPECT_EQ(config.groupForLayer(0, "linear").tag, "linear");
     EXPECT_EQ(config.groupForLayer(1, "full").tag, "full");
 }
@@ -2244,35 +2378,26 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto           config = rtp_llm::test::finalizeCacheConfig(created_config, config_candidate_block_num);
 
     ASSERT_EQ(config.layer_num, 43u);
-    ASSERT_EQ(config.layer_all_num(), 45u);
+    ASSERT_EQ(config.layer_all_num(), 44u);
     ASSERT_EQ(config.topology().layers().size(), static_cast<size_t>(config.layer_all_num()));
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     ASSERT_NE(config.mtp_sub_configs[0], nullptr);
-    ASSERT_NE(config.mtp_sub_configs[1], nullptr);
 
     EXPECT_EQ(config.groupForLayer(43, "swa_kv").tag, "swa_kv");
     EXPECT_EQ(config.topology().layer(43).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.topology().layer(44).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.groupForLayer(44, "swa_kv").tag, "swa_kv");
-
-    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 45u);
+    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 44u);
 
     // Merge preserves target publication order and placeholder identities;
     // only layer IDs are draft-local. Runtime block tables carry their own tags.
     EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[0]->topology()), publishedGroupTags(config.topology()));
-    EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[1]->topology()), publishedGroupTags(config.topology()));
     EXPECT_EQ(config.mtp_sub_configs[0]->groupForLayer(0, "swa_kv").tag, "swa_kv");
-    EXPECT_EQ(config.mtp_sub_configs[1]->groupForLayer(0, "swa_kv").tag, "swa_kv");
     EXPECT_EQ(config.mtp_sub_configs[0]->layerIdsForGroup(config.mtp_sub_configs[0]->group("swa_kv").tag),
-              std::vector<int>({0}));
-    EXPECT_EQ(config.mtp_sub_configs[1]->layerIdsForGroup(config.mtp_sub_configs[1]->group("swa_kv").tag),
               std::vector<int>({0}));
     for (const auto& group : config.groups()) {
         if (group.tag == "swa_kv") {
             continue;
         }
         EXPECT_TRUE(config.mtp_sub_configs[0]->layerIdsForGroup(group.tag).empty()) << group.tag;
-        EXPECT_TRUE(config.mtp_sub_configs[1]->layerIdsForGroup(group.tag).empty()) << group.tag;
     }
     EXPECT_EQ(config.seq_size_per_block, 16384u);
 
@@ -2284,9 +2409,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 
     EXPECT_EQ(config.group("swa_kv").block_num, 25u);
     EXPECT_EQ(config.mtp_sub_configs[0]->linear_step, 4);
-    EXPECT_EQ(config.mtp_sub_configs[1]->linear_step, 4);
     EXPECT_EQ(config.mtp_sub_configs[0]->group("swa_kv").block_num, 25u);
-    EXPECT_EQ(config.mtp_sub_configs[1]->group("swa_kv").block_num, 25u);
 
     EXPECT_EQ(test::explicitPoolReserveBytes(config), 256u * config.blockSizeBytesForGroup("hca_state"));
 }
@@ -2348,7 +2471,7 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     EXPECT_LE(backing_bytes(block_num), budget_bytes);
     EXPECT_GT(backing_bytes(block_num + 1u), budget_bytes);
 
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
         EXPECT_EQ(sub_config->linear_step, 4);
@@ -2702,10 +2825,10 @@ TEST_F(DSV4AllocatorTest, ChunkMallocSharesCommonSparseBanksAndKeepsPrivateTail)
         }
         config.setTopology(std::move(groups), config.topology().layers());
         setGroupBlockNumsForTest(
-            config, config.groupTags(), {static_cast<uint32_t>(test_case.physical_blocks + 1), 10});
+            config, {"linear", "full1"}, {static_cast<uint32_t>(test_case.physical_blocks + 1), 10});
         auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
         ASSERT_TRUE(allocator->init());
-        const auto sparse_group = allocator->cacheGroups().front();
+        const auto sparse_group = allocator->cacheGroups().at(config.topology().groupIdForTag("linear"));
         ASSERT_EQ(sparse_group->tag(), "linear");
         const auto pool        = sparse_group->blockPool();
         const auto free_before = pool->availableBlocksNum();
@@ -3847,10 +3970,10 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             const uint32_t config_candidate_block_num =
                 CacheConfigCreator::computeLocalBlockNum(created_config, target, {}, options, {}, std::nullopt, sp);
             auto config = finalizeCacheConfig(created_config, config_candidate_block_num);
-            ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
 
             const auto pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("full"));
-            ASSERT_EQ(pool.memory_layouts.size(), 3u);
+            ASSERT_EQ(pool.memory_layouts.size(), 2u);
             EXPECT_EQ(pool.memory_layouts[1].kv_block_stride_bytes, 2 * pool.memory_layouts[0].kv_block_stride_bytes);
             for (const auto& sub : config.mtp_sub_configs) {
                 EXPECT_TRUE(sub->layerIdsForGroup("state").empty());
@@ -3887,10 +4010,16 @@ TEST(CacheConfigCreatorTest, MtpModuleCountsPreserveEagleAndDsparkRules) {
     sp.type              = SP_TYPE_MTP;
     sp.gen_num_per_cycle = 3;
 
-    auto mtp = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    EXPECT_EQ(mtp.mtp_sub_configs.size(), 3u);
-    EXPECT_EQ(mtp.layer_all_num(), 7u);
+    for (int prediction_depth : {1, 2, 3, 5}) {
+        sp.gen_num_per_cycle = prediction_depth;
+        auto mtp = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+        ASSERT_EQ(mtp.mtp_sub_configs.size(), 1u) << "prediction_depth=" << prediction_depth;
+        EXPECT_EQ(mtp.mtp_sub_configs[0]->layer_num, 2u);
+        EXPECT_EQ(mtp.layer_all_num(), 3u);
+    }
 
+    sp.type = SP_TYPE_EAGLE;
+    sp.gen_num_per_cycle = 3;
     auto eagle = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true, true);
     EXPECT_EQ(eagle.mtp_sub_configs.size(), 1u);
     EXPECT_EQ(eagle.layer_all_num(), 3u);

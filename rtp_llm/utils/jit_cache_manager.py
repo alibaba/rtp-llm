@@ -139,6 +139,30 @@ def _distribution_version(name: str) -> str:
     return importlib.metadata.version(name)
 
 
+def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str, ...]:
+    parts = tuple(
+        _distribution_version(part[1:]) if part.startswith("@") else scopes[part]
+        for part in item.scopes
+    )
+    if item.name in ("flashinfer", "tilelang"):
+        # Their native extensions link TVM FFI even when its own cache is an
+        # explicit opt-out. Older FlashInfer releases need no FFI package.
+        try:
+            ffi = _distribution_version("apache-tvm-ffi")
+        except importlib.metadata.PackageNotFoundError:
+            ffi = "absent"
+        parts += (f"ffi-{ffi}",)
+    if item.name == "flashinfer":
+        # FMHA ninja rules include headers supplied by flashinfer-cubin. Keep
+        # snapshots generated before that provider had a stable path isolated.
+        try:
+            cubin = _distribution_version("flashinfer-cubin")
+        except importlib.metadata.PackageNotFoundError:
+            cubin = "absent"
+        parts += (f"cubin-{cubin}",)
+    return parts
+
+
 def resolve_scope(
     local_root: Path, cache_env_config: CacheEnvConfig | None = None
 ) -> Scope | None:
@@ -171,11 +195,8 @@ def resolve_scope(
             or item.env_name in cache_env_config.explicit_envs
         ):
             continue
-        with suppress(importlib.metadata.PackageNotFoundError):
-            parts = tuple(
-                _distribution_version(p[1:]) if p.startswith("@") else scopes[p]
-                for p in item.scopes
-            )
+        try:
+            parts = _component_scope_parts(item, scopes)
             if item.name == "deep_gemm":
                 try:
                     identity = deep_gemm_build_scope(torch_scope)
@@ -190,6 +211,8 @@ def resolve_scope(
             if parts and all(parts):
                 selected.append(item)
                 keys.append("-".join((item.name, *parts)))
+        except importlib.metadata.PackageNotFoundError:
+            pass
     if not selected:
         logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
         return None
@@ -255,20 +278,22 @@ class JitCacheManager(FileSystemEventHandler):
         self._dirty, self._stop = Event(), Event()
 
     def on_any_event(self, event) -> None:
-        if event.is_directory or self._stop.is_set():
+        # Entry validation opens metadata and emits its own read-only events.
+        if event.is_directory or event.event_type not in CREATED or self._stop.is_set():
             return
         path = Path(event.dest_path if event.event_type == "moved" else event.src_path)
         for item in self.scope.components:
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
+                    if not item.should_sync(rel, event.event_type, path.stat().st_size):
+                        return
                     if item.name == "deep_gemm":
                         if not rel.startswith("cache/"):
                             return
                         entry = item.local_dir / "cache" / rel.split("/")[1]
                         deepjit_entry_files(entry)
-                    if item.should_sync(rel, event.event_type, path.stat().st_size):
-                        self._dirty.set()
+                    self._dirty.set()
                 return
 
     def _lock_path(self, kind: str) -> Path:

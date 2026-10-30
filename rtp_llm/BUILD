@@ -289,6 +289,7 @@ py_library(
         "models/**/*.py",
     ], exclude=["models/test/*.py"]),
     deps = [
+        ":xgrammar",
         ":sentencepiece",
         ":sentence-transformers",
         ":transformers",
@@ -613,6 +614,27 @@ py_library(
     ]
 )
 
+py_binary(
+    name = "rtp_llm_server",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    data = [
+        ":alog_config",
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        ":sdk",
+    ] + select({
+        # database.py imports these lazily for LOAD_METHOD=fastsafetensors.
+        "@//:using_cuda13_x86": [":fastsafetensors", ":fast-safetensors"],
+        "@//:using_cuda12_9_x86": [":fastsafetensors", ":fast-safetensors"],
+        "//conditions:default": [],
+    }),
+)
+
 py_library(
     name = "rtp_llm_package_libs",
     deps = [
@@ -769,7 +791,7 @@ whl_reqs_frontend = [
     # The PPU vendor lock pins the transformers 4.57.1 family and carries no
     # xgrammar; mirror it so the frontend wheel metadata matches its lock.
     "@//:using_ppu": ["transformers==4.57.1"],
-    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.5"],
+    "//conditions:default": ["transformers==5.2.0", "xgrammar==0.2.8"],
 })
 
 py_wheel(
@@ -812,7 +834,7 @@ whl_reqs_dash_sc_grpc = [
     "grpcio>=1.57.0",
     "jsonschema==4.26.0",
     "protobuf>=4.25",
-    "xgrammar==0.2.5",
+    "xgrammar==0.2.8",
 ]
 
 py_wheel(

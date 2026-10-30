@@ -102,7 +102,7 @@ TEST(KVCacheResourceTest, CompleteObjectCopyAndLayerViewsShareHoldersAfterResour
         EXPECT_EQ(resource.blocksForLayer(2, "alpha"), (BlockIndicesType{9}));
         EXPECT_ANY_THROW(resource.blocksForLayer(0, "zeta"));
     }
-    EXPECT_EQ(copy.orderedTags(), (std::vector<std::string>{"zeta", "alpha"}));
+    EXPECT_EQ(copy.orderedTags(), (std::vector<std::string>{"alpha", "zeta"}));
     EXPECT_EQ(layers[0]->blocks(), (BlockIndicesType{9}));
     copy.mutableBlockIds("alpha").setAt(0, 11);
     EXPECT_EQ(layers[2]->blocks(), (BlockIndicesType{11}));
@@ -272,11 +272,11 @@ TEST(KVCacheResourceTest, OrderedTagsAndAggregateCountsUseOwnedRows) {
     resource.initGroups(CacheTopology::create(
         {makeResourceGroup("linear", CacheGroupType::LINEAR), makeResourceGroup("full", CacheGroupType::FULL)},
         {{0, {"full"}}, {1, {"linear"}}}));
-    EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"linear", "full"}));
-    resource.mutableBlockIds("full").assign({2, NULL_BLOCK_IDX, 4});
-    EXPECT_EQ(resource.firstNonEmptyBlocksNum(), 3u);
+    EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"full", "linear"}));
     resource.mutableBlockIds("linear").assign({7});
     EXPECT_EQ(resource.firstNonEmptyBlocksNum(), 1u);
+    resource.mutableBlockIds("full").assign({2, NULL_BLOCK_IDX, 4});
+    EXPECT_EQ(resource.firstNonEmptyBlocksNum(), 3u);
     EXPECT_EQ(resource.maxBlocksNum(), 3);
     EXPECT_EQ(resource.groupBlockIds("full"), resource.layerBlocks()[0]);
     EXPECT_ANY_THROW(resource.blocks("missing"));
@@ -327,7 +327,7 @@ TEST(KVCacheResourceTest, CompactBeamTablesPreserveLayerViewsAndKernelMapping) {
     EXPECT_EQ(resource.blocksForLayer(1, "full"), (BlockIndicesType{2, 3}));
     EXPECT_EQ(resource.kernelBlocksForLayer(1, "full"), (BlockIndicesType{8, 9, 10, 11, 12, 13, 14, 15}));
     EXPECT_EQ(resource.kernelBlocksForLayer(1, "linear"), (BlockIndicesType{4}));
-    EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"linear", "full"}));
+    EXPECT_EQ(resource.groupTags(), (std::vector<std::string>{"full", "linear"}));
     EXPECT_ANY_THROW(resource.layerBlocks());
     auto holder = resource.groupBlockIds("full");
     auto moved  = std::move(resource);

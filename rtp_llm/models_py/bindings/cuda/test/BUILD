@@ -272,3 +272,18 @@ py_test(
     ],
     main = "tile_copy_thread_profile_stats_test.py",
 )
+
+cc_test(
+    name = "mtp_greedy_sampling_test",
+    srcs = ["MtpGreedySamplingTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:mtp_greedy_sampling",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

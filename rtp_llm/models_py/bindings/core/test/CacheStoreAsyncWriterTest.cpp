@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -343,6 +344,9 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
 
 TEST_F(CacheStoreAsyncWriterTest, UsesPhysicalCpTopologyFromAllocatorMapper) {
     auto              config = makeWriterTestCacheConfig("default", /*kv_stride=*/16);
+    // Physical KV ownership is resolved by the model/cache config, independently
+    // of forward-only CP execution settings.
+    config.local_kv_cache_sharded = true;
     ParallelismConfig parallelism;
     parallelism.tp_rank                            = 1;
     parallelism.tp_size                            = 2;
@@ -350,6 +354,9 @@ TEST_F(CacheStoreAsyncWriterTest, UsesPhysicalCpTopologyFromAllocatorMapper) {
     parallelism.prefill_cp_config.kv_cache_sharded = true;
     auto cache_manager                             = std::make_shared<KVCacheManager>(
         config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
+    ASSERT_NE(cache_manager->cpSlotMapper(), nullptr);
+    ASSERT_EQ(cache_manager->cpSlotMapper()->cpRank(), 1);
+    ASSERT_EQ(cache_manager->cpSlotMapper()->cpSize(), 2);
     CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager);
 
     EXPECT_EQ(writer.cp_rank_, 1);
@@ -517,8 +524,10 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     ASSERT_TRUE(cache_manager->init());
     const auto initial_free_blocks = cache_manager->freeBlocksNum();
     ASSERT_EQ(cache_manager->coordinator_manager_->groupBlockPools().size(), 2u);
-    auto       other_pool        = cache_manager->coordinator_manager_->groupBlockPools().front();
-    auto       pool              = cache_manager->coordinator_manager_->groupBlockPools().back();
+    const auto& pools = cache_manager->coordinator_manager_->groupBlockPools();
+    auto other_pool = pools.at(config.topology().groupIdForTag("unrelated"));
+    auto pool       = pools.at(config.topology().groupIdForTag("stored"));
+    ASSERT_NE(pool, other_pool);
     const auto other_free_before = other_pool->freeBlocksNum();
     auto       allocated         = pool->malloc(1);
     ASSERT_TRUE(allocated.has_value());

@@ -786,12 +786,6 @@ class BackendRPCServerVisitor:
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
             )
-        # speculative decoding does not support return_all_probs
-        if input.generate_config.return_all_probs:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "speculative decoding does not support return_all_probs",
-            )
 
     def check_prefill_cp_supported(self, input: GenerateInput) -> None:
         if not self._prefill_cp_active:

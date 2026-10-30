@@ -5,6 +5,7 @@ cc_library(
     name = "op_defs",
     hdrs = [
         "CacheStoreWriter.h",
+        "LinearReplay.h",
         "OpDefs.h",
         "OpDefsUtils.h",
         "ParamsBase.h",

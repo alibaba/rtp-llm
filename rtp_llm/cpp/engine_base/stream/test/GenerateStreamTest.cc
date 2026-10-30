@@ -3,6 +3,8 @@
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -205,6 +207,51 @@ protected:
         EXPECT_EQ(stream->seqLength(), original_seq_length);
         EXPECT_TRUE(stream->isContextStream());
     }
+
+    static GenerateStreamPtr createMtpCacheStream(CacheConfig config, int seq_len, int reserve_step, int cp_size = 1) {
+        auto manager = std::make_shared<KVCacheManager>(config);
+        EXPECT_TRUE(manager->init());
+        if (cp_size > 1) {
+            auto mapper              = std::make_shared<CPSlotMapper>(0, cp_size, config.seq_size_per_block);
+            manager->cp_slot_mapper_ = mapper;
+            manager->coordinator_manager_->setCPSlotMapper(mapper);
+        }
+        ResourceContext resource;
+        resource.cache_manager = manager;
+        resource.role_type     = RoleType::DECODE;
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::tensor(makeInputIds(seq_len), torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+        ModelConfig model;
+        model.max_seq_len                  = 256;
+        model.vocab_size                   = 1024;
+        model.attn_config.tokens_per_block = config.seq_size_per_block;
+        auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resource, nullptr);
+        stream->setReserveStep(reserve_step);
+        EXPECT_TRUE(stream->initKVBlock().ok());
+        stream->setIsContextStream(false);
+        markRunning(stream);
+        return stream;
+    }
+
+    static torch::Tensor cacheTable(const GenerateStreamPtr& stream, bool kernel = false) {
+        const auto& resource = stream->kvCache();
+        const auto  tag      = resource.cacheResource().groupTags().front();
+        const auto& ids      = kernel ? resource.kernelBlocks(0, tag) : resource.blocks(0, tag);
+        return torch::tensor(ids, torch::kInt32).reshape({1, 1, static_cast<int64_t>(ids.size())});
+    }
+
+    static std::shared_ptr<void> pendingMtpCacheSnapshot(const GenerateStreamPtr& stream, int next_bound) {
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_kv_cache_block_id_gpu        = cacheTable(stream).to(torch::kCUDA);
+        state.next_kv_cache_kernel_block_id_gpu = cacheTable(stream, true).to(torch::kCUDA);
+        state.previous_seq_len_upper_bound      = stream->seqLength();
+        state.next_seq_len_upper_bound          = next_bound;
+        stream->setMtpAsyncDeviceState(std::move(state));
+        stream->incPendingAsyncBookkeeping();
+        return std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    }
 };
 
 template<typename T>
@@ -285,6 +332,98 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
               "replayed");
+}
+
+TEST_F(GenerateStreamTest, speculativeProbabilitiesStopAtCommittedTokenBoundary) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createComplexContextStream({1});
+    stream->generateConfig()->num_return_sequences = 1;
+    stream->generateConfig()->max_new_tokens   = 1;
+    stream->generateConfig()->is_streaming     = true;
+    stream->generateConfig()->aux_info         = true;
+    stream->generateConfig()->return_all_probs = ReturnAllProbsMode::DEFAULT;
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+    // The target verified two tokens, but the request may commit only one.
+    auto tokens = torch::tensor({{7, 8}}, torch::kInt32);
+    auto probs  = torch::tensor({0.1f, 0.7f, 0.1f, 0.1f, 0.1f, 0.1f, 0.7f, 0.1f}).reshape({1, 2, 4});
+    stream->update({tokens,
+                    2,
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    probs,
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor()});
+
+    auto output_result = stream->nextOutput(100);
+    ASSERT_TRUE(output_result.ok());
+    const auto& output = output_result.value().generate_outputs[0];
+    ASSERT_EQ(output.output_ids.sizes().vec(), (std::vector<int64_t>{1, 1}));
+    ASSERT_TRUE(output.aux_info.all_probs.has_value());
+    EXPECT_EQ(output.aux_info.all_probs->sizes().vec(), (std::vector<int64_t>{1, 1, 4}));
+    EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, probs.narrow(1, 0, 1)));
+}
+
+TEST_F(GenerateStreamTest, speculativeProbabilitiesFollowOutputTokenWindows) {
+    for (auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        for (int output_mode = 0; output_mode < 3; ++output_mode) {
+            for (int final_count : {3, 4}) {
+                SCOPED_TRACE(::testing::Message() << "mode=" << static_cast<int>(mode) << " output_mode=" << output_mode
+                                                  << " final_count=" << final_count);
+                GenerateStreamBuilder builder;
+                auto                  stream = builder.createContextStream({1});
+                auto                  config = stream->generateConfig();
+                config->max_new_tokens       = 8;
+                config->min_new_tokens       = 8;
+                config->ignore_eos           = true;
+                config->is_streaming         = output_mode == 1;
+                config->pd_separation        = output_mode == 2;
+                config->aux_info             = false;
+                config->return_all_probs     = mode;
+                markRunning(stream);
+
+                auto expected_tokens = torch::arange(10, 19, torch::kInt32).reshape({1, 9});
+                auto expected_probs  = torch::arange(1, 37, torch::kFloat32).reshape({1, 9, 4});
+                expected_probs       = expected_probs / expected_probs.sum(-1, true);
+                // MTP may reuse its CPU probability staging buffer in the next round.
+                auto staging_probs = torch::empty({1, 4, 4}, torch::kFloat32);
+                int  generated     = 0;
+                int  emitted       = 0;
+                for (int count : {1, 4, final_count}) {
+                    auto probs = staging_probs.narrow(1, 0, count);
+                    probs.copy_(expected_probs.narrow(1, generated, count));
+                    ASSERT_NO_THROW(stream->update(
+                        {.new_tokens             = expected_tokens.narrow(1, generated, count),
+                         .num_new_tokens         = count,
+                         .all_probs              = probs,
+                         .update_remote_generate = false}));
+                    staging_probs.fill_(-1);
+                    generated = std::min(generated + count, 8);
+                    if (output_mode == 0 && generated < 8) {
+                        EXPECT_FALSE(stream->hasOutput());
+                        continue;
+                    }
+
+                    auto result = stream->nextOutput(100);
+                    ASSERT_TRUE(result.ok()) << result.status().ToString();
+                    ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                    const auto& output = result.value().generate_outputs[0];
+                    EXPECT_TRUE(torch::equal(output.output_ids,
+                                             expected_tokens.narrow(1, emitted, generated - emitted)));
+                    ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                    EXPECT_TRUE(torch::equal(*output.aux_info.all_probs,
+                                             expected_probs.narrow(1, emitted, generated - emitted)));
+                    EXPECT_EQ(output.finished, generated == 8);
+                    emitted = generated;
+                }
+                EXPECT_EQ(emitted, 8);
+            }
+        }
+    }
 }
 
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
@@ -1002,6 +1141,161 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen)
     ASSERT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, stream->seqLength() + 2);
 }
 
+TEST_F(GenerateStreamTest, MtpCacheReservationExtendsFullAndPageRRTablesWithoutJoiningWorker) {
+    for (const int cp_size : {1, 4}) {
+        SCOPED_TRACE(cp_size);
+        auto spec                       = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 4);
+        spec->kernel_seq_size_per_block = 2;
+        auto config                     = test::makeSingleGroupCacheConfig(spec, CacheGroupType::FULL, 1, 32);
+        if (cp_size > 1) {
+            auto groups                      = config.groups();
+            groups.front().policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+            config.setTopology(std::move(groups), config.topology().layers());
+            config.local_kv_cache_sharded = true;
+        }
+        auto       stream            = createMtpCacheStream(config, 5, 2, cp_size);
+        auto       pending           = pendingMtpCacheSnapshot(stream, 33);
+        const auto original          = stream->getMtpAsyncDeviceState();
+        const auto original_physical = original.next_kv_cache_block_id_gpu.cpu();
+        const auto original_kernel   = original.next_kv_cache_kernel_block_id_gpu.cpu();
+
+        ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+        EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+        const auto next = stream->getMtpAsyncDeviceState();
+        EXPECT_EQ(next.epoch, original.epoch);
+        EXPECT_EQ(next.next_seq_len_upper_bound, 33);
+        EXPECT_EQ(stream->seqLength(), 5);
+        EXPECT_GT(next.next_kv_cache_block_id_gpu.size(2), original_physical.size(2));
+        EXPECT_EQ(next.next_kv_cache_kernel_block_id_gpu.size(2), 2 * next.next_kv_cache_block_id_gpu.size(2));
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_block_id_gpu.cpu(), cacheTable(stream)));
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_kernel_block_id_gpu.cpu(), cacheTable(stream, true)));
+        EXPECT_TRUE(torch::equal(original.next_kv_cache_block_id_gpu.cpu(), original_physical));
+        EXPECT_TRUE(torch::equal(original.next_kv_cache_kernel_block_id_gpu.cpu(), original_kernel));
+        ASSERT_EQ(next.cache_snapshot_host_buffers.size(), 2u);
+        EXPECT_TRUE(next.cache_snapshot_host_buffers[0].is_pinned());
+        EXPECT_TRUE(next.cache_snapshot_host_buffers[1].is_pinned());
+        EXPECT_TRUE(torch::equal(next.cache_snapshot_host_buffers[0], cacheTable(stream)));
+        EXPECT_TRUE(torch::equal(next.cache_snapshot_host_buffers[1], cacheTable(stream, true)));
+
+        // The same pending round already has capacity; avoid another allocation
+        // or snapshot replacement, including when Page-RR has fewer local pages.
+        ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+        EXPECT_EQ(stream->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.data_ptr(),
+                  next.next_kv_cache_block_id_gpu.data_ptr());
+    }
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationPreservesLegacyLinearDevicePermutation) {
+    for (const bool host_commit_complete : {false, true}) {
+        SCOPED_TRACE(host_commit_complete);
+        auto       config   = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
+        auto       stream   = createMtpCacheStream(config, 5, 4);
+        auto&      resource = stream->kvCacheMutable();
+        const auto tag      = config.groupTags().front();
+        ASSERT_GE(resource.blocks(0, tag).size(), 3u);
+        ASSERT_GT(resource.blocks(0, tag)[1], 0);
+        ASSERT_GT(resource.blocks(0, tag)[2], 0);
+
+        // The device snapshot already represents accepted-slot permutation.
+        // Host bookkeeping can be either before or after the equivalent swap
+        // while its pending counter is still nonzero.
+        resource.swapBlocks(0, tag, 1, 2);
+        auto       pending  = pendingMtpCacheSnapshot(stream, 9);
+        const auto original = stream->getMtpAsyncDeviceState();
+        if (!host_commit_complete) {
+            resource.swapBlocks(0, tag, 1, 2);
+        }
+        ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+        EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+        const auto next = stream->getMtpAsyncDeviceState();
+        EXPECT_EQ(next.epoch, original.epoch);
+        EXPECT_GT(next.next_kv_cache_block_id_gpu.size(2), original.next_kv_cache_block_id_gpu.size(2));
+        EXPECT_TRUE(
+            torch::equal(next.next_kv_cache_block_id_gpu.narrow(2, 0, original.next_kv_cache_block_id_gpu.size(2)),
+                         original.next_kv_cache_block_id_gpu));
+        EXPECT_TRUE(torch::equal(
+            next.next_kv_cache_kernel_block_id_gpu.narrow(2, 0, original.next_kv_cache_kernel_block_id_gpu.size(2)),
+            original.next_kv_cache_kernel_block_id_gpu));
+        if (!host_commit_complete) {
+            resource.swapBlocks(0, tag, 1, 2);
+        }
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_block_id_gpu.cpu(), cacheTable(stream)));
+        EXPECT_TRUE(torch::equal(next.next_kv_cache_kernel_block_id_gpu.cpu(), cacheTable(stream, true)));
+    }
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationExtendsLinearReplayWithoutInvalidatingItsAnchor) {
+    auto config          = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 2}, {1, 2}, false, DataType::TYPE_BF16, 1);
+    auto stream          = createMtpCacheStream(config, 4, 4);
+    ASSERT_TRUE(stream->stream_cache_resource_->prepareLinearReplayResources().ok());
+    const auto round = stream->prepareLinearReplayRound();
+    ASSERT_TRUE(round.ok());
+    ASSERT_NE(round->initial_state_hold, nullptr);
+    const auto anchor  = cacheTable(stream);
+    auto       pending = pendingMtpCacheSnapshot(stream, 9);
+    const auto epoch   = stream->getMtpAsyncDeviceState().epoch;
+
+    ASSERT_TRUE(stream->prepareMtpCacheForNextStep());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    const auto next = stream->getMtpAsyncDeviceState();
+    EXPECT_EQ(next.epoch, epoch);
+    EXPECT_GT(next.next_kv_cache_block_id_gpu.size(2), anchor.size(2));
+    EXPECT_TRUE(torch::equal(next.next_kv_cache_block_id_gpu.cpu(), cacheTable(stream)));
+    EXPECT_TRUE(torch::equal(next.next_kv_cache_kernel_block_id_gpu.cpu(), cacheTable(stream, true)));
+    EXPECT_EQ(stream->stream_cache_resource_->linearReplayLease(), round->lease);
+    EXPECT_EQ(cacheTable(stream)[0][0][0].item<int32_t>(), anchor[0][0][0].item<int32_t>());
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationJoinsBeforePublishingBackfilledLegacySlots) {
+    auto       config   = test::makeSimpleLinearCacheConfig(1, 32, 4, DataType::TYPE_BF16, 1, 2);
+    auto       stream   = createMtpCacheStream(config, 5, 4);
+    auto&      resource = stream->kvCacheMutable();
+    const auto tag      = config.groupTags().front();
+    const auto pool     = stream->stream_cache_resource_->resourceContext()
+                          .cache_manager->coordinator_manager_->groupBlockPools()
+                          .front();
+    // Make an old sparse slot that the larger accepted-length bound requires.
+    // Its device location differs because an accepted-slot swap is pending.
+    pool->decRef(resource.blocks(0, tag)[2]);
+    resource.mutableBlockIds(0, tag).remove({2});
+    resource.swapBlocks(0, tag, 1, 2);
+    auto pending = pendingMtpCacheSnapshot(stream, 9);
+    resource.swapBlocks(0, tag, 1, 2);
+    const auto original = stream->getMtpAsyncDeviceState();
+
+    EXPECT_FALSE(stream->prepareMtpCacheForNextStep());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_GT(resource.blocks(0, tag)[2], 0);
+    const auto unchanged = stream->getMtpAsyncDeviceState();
+    EXPECT_EQ(unchanged.epoch, original.epoch);
+    EXPECT_EQ(unchanged.next_kv_cache_block_id_gpu.data_ptr(), original.next_kv_cache_block_id_gpu.data_ptr());
+    EXPECT_EQ(unchanged.next_kv_cache_kernel_block_id_gpu.data_ptr(),
+              original.next_kv_cache_kernel_block_id_gpu.data_ptr());
+
+    // The existing joined path invalidates both snapshots and regathers the
+    // authoritative host table, rather than applying a second GPU permutation.
+    resource.swapBlocks(0, tag, 1, 2);
+    pending.reset();
+    EXPECT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_FALSE(stream->hasMtpCacheSnapshot());
+}
+
+TEST_F(GenerateStreamTest, MtpCacheReservationDoesNotJoinNormalDecodeButRequiresCompleteMtpSnapshot) {
+    GenerateStreamBuilder builder;
+    auto                  stream = builder.createDecoderStream({1, 2, 3}, {4});
+    markRunning(stream);
+    stream->incPendingAsyncBookkeeping();
+    auto pending =
+        std::shared_ptr<void>(nullptr, [stream](void*) { stream->decPendingAsyncBookkeepingAndMaybeRelease(); });
+    EXPECT_TRUE(stream->prepareMtpCacheForNextStep());
+    stream->setMtpAsyncDeviceState({});
+    EXPECT_FALSE(stream->prepareMtpCacheForNextStep());
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    pending.reset();
+    EXPECT_TRUE(stream->prepareMtpCacheForNextStep());
+}
+
 TEST_F(GenerateStreamTest, testMtpAsyncDeviceStatePublishesCoherentConcurrentSnapshots) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
@@ -1451,6 +1745,139 @@ TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
     expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
 }
 
+TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
+    GenerateStreamBuilder builder;
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int input_length : {7, 8, 9}) {
+            SCOPED_TRACE(static_cast<int>(role));
+            SCOPED_TRACE(input_length);
+            auto stream = builder.createChunkedContextStream(
+                makeInputIds(input_length), role, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig&) {
+                    input.multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+                });
+            EXPECT_EQ(stream->chunkedPrefillEnabled(), input_length > 8);
+            ASSERT_FALSE(stream->hasError());
+            markRunning(stream);
+            if (input_length > 8) {
+                expectChunkWindow(stream, /*prefix=*/0, /*length=*/8, /*is_last=*/false);
+                updateOneToken(stream, 101);
+                EXPECT_EQ(stream->seqLength(), input_length);
+                expectChunkWindow(stream, /*prefix=*/8, /*length=*/1, /*is_last=*/true);
+            } else {
+                EXPECT_FALSE(stream->useChunkWindow());
+                EXPECT_EQ(stream->contextLength(), input_length);
+            }
+            updateOneToken(stream, 101);
+            EXPECT_FALSE(stream->isContextStream());
+            EXPECT_EQ(stream->seqLength(), input_length + 1);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testBidirectionalMultimodalContextRequiresUnchunkedPrefill) {
+    for (const int input_length : {7, 9}) {
+        auto input                 = std::make_shared<GenerateInput>();
+        input->input_ids           = torch::arange(input_length, torch::kInt32);
+        input->generate_config     = std::make_shared<GenerateConfig>();
+        input->multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+        ModelConfig model;
+        model.max_seq_len           = 64;
+        model.vocab_size            = 64;
+        model.attn_config.is_causal = false;
+        RuntimeConfig runtime;
+        runtime.fifo_scheduler_config.prefill_chunk_size = 8;
+        ResourceContext resource;
+        resource.role_type = RoleType::PDFUSION;
+        auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+        EXPECT_FALSE(stream->chunkedPrefillEnabled());
+        EXPECT_EQ(stream->hasError(), input_length > 8);
+        if (input_length > 8) {
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testBidirectionalTextContextRequiresUnchunkedPrefill) {
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int chunk_size : {0, 8}) {
+            SCOPED_TRACE(static_cast<int>(role));
+            SCOPED_TRACE(chunk_size);
+            auto input             = std::make_shared<GenerateInput>();
+            input->input_ids       = torch::arange(9, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            ModelConfig model;
+            model.max_seq_len           = 64;
+            model.vocab_size            = 64;
+            model.attn_config.is_causal = false;
+            RuntimeConfig runtime;
+            runtime.fifo_scheduler_config.prefill_chunk_size = chunk_size;
+            ResourceContext resource;
+            resource.role_type = role;
+            auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+            EXPECT_FALSE(stream->chunkedPrefillEnabled());
+            EXPECT_EQ(stream->hasError(), chunk_size > 0);
+            if (chunk_size > 0) {
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
+            }
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillReturnsOnlyCommittedTokenProbabilities) {
+    GenerateStreamBuilder builder;
+    const ChunkedInputConfigurer modes[] = {
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; },
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::ORIGINAL; },
+    };
+    for (const auto configure : modes) {
+        for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+            auto stream = builder.createChunkedContextStream(makeInputIds(18), role, 8, configure);
+            ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+            ASSERT_TRUE(stream->chunkedPrefillEnabled());
+            stream->generateConfig()->is_streaming = true;
+            stream->generateConfig()->max_new_tokens = 2;
+            markRunning(stream);
+
+            // Neither intermediate chunk may publish a token or its probabilities.
+            for (int chunk = 0; chunk < 2; ++chunk) {
+                ASSERT_TRUE(stream->isMiddleChunk());
+                updateOneToken(stream, 100);
+                EXPECT_EQ(stream->seqLength(), 18);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+            ASSERT_TRUE(stream->isLastChunk());
+            for (int step = 0; step < 2; ++step) {
+                auto probs = torch::zeros({1, 1024}, torch::kFloat32);
+                probs[0][101 + step] = 0.75f;
+                probs[0][99] = 0.25f;
+                StreamUpdateInfo update{torch::full({1, 1}, 101 + step, torch::kInt32),
+                                        1,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        probs,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor()};
+                stream->update(update);
+                ASSERT_TRUE(stream->hasOutput());
+                auto result = stream->nextOutput(100);
+                ASSERT_TRUE(result.ok()) << result.status().ToString();
+                ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                const auto& output = result.value().generate_outputs[0];
+                EXPECT_EQ(output.output_ids.item<int32_t>(), 101 + step);
+                ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, update.all_probs));
+                EXPECT_EQ(output.finished, step == 1);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     GenerateStreamBuilder builder;
     const auto            input_ids = makeInputIds(9);
@@ -1521,14 +1948,8 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
         {"return_hidden_states", [](GenerateInput&, GenerateConfig& config) { config.return_hidden_states = true; }},
         {"return_all_hidden_states",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
-        {"return_all_probs",
-         [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
         {"custom_output",
          [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
-        {"multimodal",
-         [](GenerateInput& input, GenerateConfig&) {
-             input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};
-         }},
     };
     for (const auto& test_case : rejection_cases) {
         SCOPED_TRACE(test_case.name);
@@ -1548,6 +1969,37 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
         });
     ASSERT_FALSE(non_chunked_force_batch_stream->chunkedPrefillEnabled());
     ASSERT_FALSE(non_chunked_force_batch_stream->hasError());
+}
+
+TEST_F(GenerateStreamTest, testShortGroupsKeepChunkedPrefillValidation) {
+    GenerateStreamBuilder builder;
+    const auto configure_group = [](GenerateInput& input, GenerateConfig&) {
+        input.group_id   = 1;
+        input.group_size = 2;
+    };
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const auto length : {7, 8, 9}) {
+            SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << ", length=" << length);
+            auto stream = builder.createChunkedContextStream(makeInputIds(length), role, 8, configure_group);
+            if (length <= 8) {
+                EXPECT_FALSE(stream->hasError());
+                EXPECT_TRUE(stream->chunkedPrefillEnabled());
+                EXPECT_EQ(stream->maxChunkSize(), 8);
+                EXPECT_EQ(stream->groupId(), 1);
+            } else {
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: force_batch");
+            }
+        }
+        auto incompatible = builder.createChunkedContextStream(
+            makeInputIds(8), role, 8, [](GenerateInput& input, GenerateConfig& config) {
+                input.group_id       = 1;
+                input.group_size     = 2;
+                config.return_logits = true;
+            });
+        EXPECT_TRUE(incompatible->hasError());
+        EXPECT_EQ(incompatible->stopReason(), "chunked prefill incompatible: return_logits");
+    }
 }
 
 }  // namespace rtp_llm

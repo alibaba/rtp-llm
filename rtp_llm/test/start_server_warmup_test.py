@@ -44,8 +44,17 @@ class StartupRealWarmupTest(unittest.TestCase):
                 max_len=1048576,
                 reserve_step=8,
             ),
-            1048568,
+            1048567,
         )
+        self.assertEqual(
+            start_server._get_startup_real_warmup_request_token_len(
+                token_len=1048576,
+                max_len=1048576,
+                reserve_step=4,
+            ),
+            1048571,
+        )
+
 
 
 if __name__ == "__main__":

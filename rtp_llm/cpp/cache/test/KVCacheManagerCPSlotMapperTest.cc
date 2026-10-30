@@ -90,6 +90,26 @@ TEST(CacheConfigLocalShardingTest, ExplicitPageRrRequiresTransportMetadata) {
     EXPECT_ANY_THROW(CacheConfigCreator::createConfig(model, par, {}));
 }
 
+TEST(CacheConfigLocalShardingTest, TargetAndDraftShareOneLocalLayout) {
+    auto target = makePageRrModelConfig();
+    target.local_kv_cache_sharded = true;
+    auto draft = target;
+    ParallelismConfig par;
+    par.role_type                         = RoleType::DECODE;
+    par.tp_size                           = 4;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    par.prefill_cp_config.prefill_cp_size  = 8;
+    SpeculativeExecutionConfig sp;
+    sp.gen_num_per_cycle = 3;
+    const auto config = CacheConfigCreator::createConfig(target, par, {}, sp, &draft);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_TRUE(config.local_kv_cache_sharded);
+    EXPECT_TRUE(config.mtp_sub_configs[0]->local_kv_cache_sharded);
+
+    draft.local_kv_cache_sharded = false;
+    EXPECT_ANY_THROW(CacheConfigCreator::createConfig(target, par, {}, sp, &draft));
+}
+
 static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_size) {
     auto  ids       = std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_len + 100, block_size);
     auto  input_ids = torch::empty({(int64_t)seq_len}, torch::kInt32);

@@ -21,6 +21,9 @@
 #include <unistd.h>
 #include <limits.h>
 #include <c10/core/InferenceMode.h>
+#if USING_CUDA
+#include <c10/cuda/CUDAStream.h>
+#endif
 
 using namespace std;
 using namespace autil::legacy;
@@ -33,6 +36,25 @@ namespace rtp_llm {
 namespace {
 
 constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
+
+torch::Tensor copyToCpuForRpc(const torch::Tensor& tensor) {
+    if (!tensor.is_cuda()) {
+        return tensor;
+    }
+#if USING_CUDA
+    const auto memory_format = tensor.is_non_overlapping_and_dense() ? torch::MemoryFormat::Preserve :
+                                                                      torch::MemoryFormat::Contiguous;
+    // Keep the wait outside the copy API so other threads can issue CUDA work.
+    auto cpu = tensor.to(torch::TensorOptions().device(torch::kCPU),
+                         /*non_blocking=*/true,
+                         /*copy=*/false,
+                         memory_format);
+    c10::cuda::getCurrentCUDAStream(tensor.get_device()).synchronize();
+    return cpu;
+#else
+    return tensor.cpu();
+#endif
+}
 
 bool envValueIsTrue(const char* value) {
     return value != nullptr
@@ -625,15 +647,13 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer && !engine_->isDSpark()) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        auto all_probs_cpu = copyToCpuForRpc(sp_output_buffer->all_probs);
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
             hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
         } else {
-            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
-                                                                            sp_output_buffer->hidden_states;
+            hidden_states_cpu = copyToCpuForRpc(sp_output_buffer->hidden_states);
         }
         QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);

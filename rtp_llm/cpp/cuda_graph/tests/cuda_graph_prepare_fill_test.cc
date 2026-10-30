@@ -1,16 +1,126 @@
 #include <algorithm>
+#include <cstring>
 #include <gtest/gtest.h>
-#include <hip/hip_runtime.h>
 #include <vector>
 
-#if !USING_ROCM
-#error "cuda_graph_prepare_fill_rocm_test must be built with --config=rocm"
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#else
+#include <cuda_runtime.h>
+#define hipSuccess cudaSuccess
+#define hipMalloc cudaMalloc
+#define hipFree cudaFree
+#define hipMemcpy cudaMemcpy
+#define hipMemcpyHostToDevice cudaMemcpyHostToDevice
+#define hipMemcpyDeviceToHost cudaMemcpyDeviceToHost
+#define hipDeviceSynchronize cudaDeviceSynchronize
 #endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 
 namespace rtp_llm {
 namespace {
+
+TEST(CudaGraphPrepareFillTest, FusedSpPaddingPreservesGroupsInt64AndPartialWords) {
+    SequenceParallelPadParams         params;
+    std::vector<uint8_t*>             allocations;
+    std::vector<std::vector<uint8_t>> expected;
+    const auto                        add = [&](const void* source,
+                         const void* result,
+                         int64_t     old_group_bytes,
+                         int64_t     new_group_bytes,
+                         int64_t     groups,
+                         int         element_bytes,
+                         uint64_t    fill_bits) {
+        uint8_t* src = nullptr;
+        uint8_t* dst = nullptr;
+        ASSERT_EQ(hipSuccess, hipMalloc(&src, old_group_bytes * groups));
+        ASSERT_EQ(hipSuccess, hipMalloc(&dst, new_group_bytes * groups));
+        ASSERT_EQ(hipSuccess, hipMemcpy(src, source, old_group_bytes * groups, hipMemcpyHostToDevice));
+        allocations.push_back(src);
+        allocations.push_back(dst);
+        auto& region                   = params.regions[params.region_count++];
+        region.source                  = src;
+        region.destination             = dst;
+        region.source_group_bytes      = old_group_bytes;
+        region.destination_group_bytes = new_group_bytes;
+        region.groups                  = groups;
+        region.element_bytes           = element_bytes;
+        region.fill_bits               = fill_bits;
+        expected.emplace_back(new_group_bytes * groups);
+        std::memcpy(expected.back().data(), result, expected.back().size());
+    };
+    const int32_t ids[]        = {8, 9, 10, 11, 12, 13};
+    const int32_t ids_padded[] = {8, 9, 10, -1, -1, 11, 12, 13, -1, -1};
+    add(ids, ids_padded, 12, 20, 2, 4, uint64_t(-1));
+    const int64_t epochs[]        = {(int64_t(1) << 35) + 3, (int64_t(1) << 36) + 7};
+    const int64_t epochs_padded[] = {epochs[0], epochs[1], -1, -1};
+    add(epochs, epochs_padded, 16, 32, 1, 8, uint64_t(-1));
+    const uint8_t mask[]        = {1, 0, 1, 0, 1, 0};
+    const uint8_t mask_padded[] = {1, 0, 1, 1, 1, 0, 1, 0, 1, 1};
+    add(mask, mask_padded, 3, 5, 2, 1, 1);
+    const uint16_t hidden[]        = {0x3f80, 0x4000, 0x4040, 0x4080, 0x40a0, 0x40c0};
+    const uint16_t hidden_padded[] = {0x3f80, 0x4000, 0x4040, 0, 0, 0x4080, 0x40a0, 0x40c0, 0, 0};
+    add(hidden, hidden_padded, 6, 10, 2, 2, 0);
+    invokeSequenceParallelPad(params, nullptr);
+    ASSERT_EQ(hipSuccess, hipDeviceSynchronize());
+    for (int i = 0; i < params.region_count; ++i) {
+        auto actual = expected[i];
+        ASSERT_EQ(hipSuccess,
+                  hipMemcpy(actual.data(), params.regions[i].destination, actual.size(), hipMemcpyDeviceToHost));
+        EXPECT_EQ(actual, expected[i]);
+    }
+    for (auto* pointer : allocations)
+        EXPECT_EQ(hipSuccess, hipFree(pointer));
+}
+
+TEST(CudaGraphPrepareFillTest, FusesMaskHiddenTailAndBatchScalarWithoutTouchingLiveRows) {
+    uint8_t*             hidden      = nullptr;
+    bool*                source_mask = nullptr;
+    bool*                mask        = nullptr;
+    int32_t*             batch       = nullptr;
+    const bool           source[]    = {true, false, true, true};
+    std::vector<uint8_t> bytes(23, 91);
+    ASSERT_EQ(hipSuccess, hipMalloc(&hidden, bytes.size()));
+    ASSERT_EQ(hipSuccess, hipMalloc(&source_mask, sizeof(source)));
+    ASSERT_EQ(hipSuccess, hipMalloc(&mask, 8 * sizeof(bool)));
+    ASSERT_EQ(hipSuccess, hipMalloc(&batch, sizeof(int32_t)));
+    ASSERT_EQ(hipSuccess, hipMemcpy(hidden, bytes.data(), bytes.size(), hipMemcpyHostToDevice));
+    ASSERT_EQ(hipSuccess, hipMemcpy(source_mask, source, sizeof(source), hipMemcpyHostToDevice));
+    CudaGraphPrepareFillParams params;
+    params.region_count            = 1;
+    params.regions[0].ptr          = batch;
+    params.regions[0].count        = 1;
+    params.regions[0].value        = 14;
+    params.zero_bytes              = hidden + 8;
+    params.zero_byte_count         = 15;
+    params.valid_token_mask        = mask;
+    params.source_valid_token_mask = source_mask;
+    params.mask_count              = 8;
+    params.source_mask_count       = 4;
+    for (const int first : {8, 9}) {
+        std::fill(bytes.begin(), bytes.end(), 91);
+        ASSERT_EQ(hipSuccess, hipMemcpy(hidden, bytes.data(), bytes.size(), hipMemcpyHostToDevice));
+        params.zero_bytes      = hidden + first;
+        params.zero_byte_count = bytes.size() - first;
+        invokeCudaGraphPrepareFill(params, nullptr);
+        ASSERT_EQ(hipSuccess, hipDeviceSynchronize());
+        bool    actual_mask[8];
+        int32_t actual_batch = -1;
+        ASSERT_EQ(hipSuccess, hipMemcpy(bytes.data(), hidden, bytes.size(), hipMemcpyDeviceToHost));
+        ASSERT_EQ(hipSuccess, hipMemcpy(actual_mask, mask, sizeof(actual_mask), hipMemcpyDeviceToHost));
+        ASSERT_EQ(hipSuccess, hipMemcpy(&actual_batch, batch, sizeof(actual_batch), hipMemcpyDeviceToHost));
+        EXPECT_EQ(actual_batch, 14);
+        for (int i = 0; i < 8; ++i)
+            EXPECT_EQ(actual_mask[i], i < 4 && source[i]);
+        for (int i = 0; i < 23; ++i)
+            EXPECT_EQ(bytes[i], i < first ? 91 : 0);
+    }
+    EXPECT_EQ(hipSuccess, hipFree(batch));
+    EXPECT_EQ(hipSuccess, hipFree(mask));
+    EXPECT_EQ(hipSuccess, hipFree(source_mask));
+    EXPECT_EQ(hipSuccess, hipFree(hidden));
+}
 
 TEST(CudaGraphPrepareFillTest, FillsLiteralAndDeviceBasedIotaRegions) {
     std::vector<int32_t> initial(10, -1);

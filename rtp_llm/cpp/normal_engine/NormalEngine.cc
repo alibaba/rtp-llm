@@ -646,15 +646,15 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         const int64_t block_size       = model_config_.attn_config.tokens_per_block;
         const int64_t row_count =
             std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        const int64_t row_heavy_tokens = std::min(token_budget, token_heavy_seq_len);
+        RTP_LLM_CHECK_WITH_INFO(row_count > 0, "chunked prefill warmup requires max_context_batch_size > 0");
+        const int64_t row_heavy_tokens = std::min(token_budget / row_count, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));
         row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
 
-        // Conservatively combine multiple rows with a full chunk per row and a long prefix.
-        // Run once without splitting by the scheduler's global token budget.
+        // Warm up multiple rows with a long prefix while sharing the scheduler's token budget.
         auto row_heavy_result = runPrefillWarmupShape(
-            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), 0);
+            row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), token_budget);
         THROW_IF_STATUSOR_ERROR(row_heavy_result);
         max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
         row_heavy_result.value().reset();
@@ -789,6 +789,9 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+    CacheConfigCreator::configureDecodeLinearPool(config, parallelism_config, runtime_config);
+    CacheConfigCreator::configureLinearReplay(
+        config, model_config_, parallelism_config, runtime_config, sp_config, isMTPEagle());
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
     const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
@@ -1082,14 +1085,14 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
         return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
-               || propose_params_->sp_type == SP_TYPE_DSPARK;
+               || propose_params_->sp_type == SP_TYPE_EAGLE3 || propose_params_->sp_type == SP_TYPE_DSPARK;
     }
     return false;
 }
 
 bool NormalEngine::isEagle() {
     if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_EAGLE;
+        return propose_params_->sp_type == SP_TYPE_EAGLE || propose_params_->sp_type == SP_TYPE_EAGLE3;
     }
     return false;
 }

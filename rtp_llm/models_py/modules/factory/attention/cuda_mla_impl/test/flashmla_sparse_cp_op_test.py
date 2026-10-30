@@ -23,7 +23,9 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
+from rtp_llm.models_py.distributed import symm_mem
 from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
     destroy_distributed_environment,
     init_distributed_environment,
 )
@@ -147,10 +149,10 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
                 dist.barrier()
 
         with patch.object(dist, "init_process_group", _init_pg):
-            with patch(
-                "rtp_llm.models_py.distributed.collective_torch.init_symm_mem_communicator",
-                lambda *_a, **_kw: None,
-            ):
+            # Initialize real NCCL groups while isolating symmetric-memory setup.
+            with patch.object(
+                symm_mem, "init_symm_mem_communicator", return_value=None
+            ) as init_symm_mem:
                 init_distributed_environment(
                     pc,
                     NcclCommConfig(
