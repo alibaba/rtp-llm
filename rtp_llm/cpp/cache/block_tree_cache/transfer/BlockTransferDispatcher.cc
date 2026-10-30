@@ -61,14 +61,17 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
     return per_rank_engine_->execute(std::move(task));
 }
 
-std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executeMultiRank(TransferTask task) const {
+std::shared_ptr<TransferAsyncContext>
+BlockTransferDispatcher::executeMultiRank(TransferTask task, const char* completion_operation) const {
     if (multi_rank_engine_ != nullptr) {
-        return multi_rank_engine_->execute(std::move(task));
+        return multi_rank_engine_->execute(std::move(task), completion_operation);
     }
     return executePerRank(std::move(task));
 }
 
-void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallback callback) const {
+void BlockTransferDispatcher::runTransfer(TransferTask         task,
+                                          TransferDoneCallback callback,
+                                          const char*          completion_operation) const {
     auto completion = std::make_shared<std::promise<void>>();
     {
         std::lock_guard<std::mutex> lock(completion_mutex_);
@@ -138,7 +141,7 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
             std::vector<size_t>             indices(group.indices.begin() + begin, group.indices.begin() + end);
             stage_state->addBatch();
             try {
-                auto context = executeMultiRank(task.rpcSubtask(std::move(batch)));
+                auto context = executeMultiRank(task.rpcSubtask(std::move(batch)), completion_operation);
                 if (context == nullptr) {
                     stage_state->completeBatch(
                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"), indices);

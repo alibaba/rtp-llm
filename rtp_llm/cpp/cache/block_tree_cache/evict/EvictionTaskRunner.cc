@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 
 namespace rtp_llm {
 
@@ -44,20 +45,27 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
         task->transfer_task,
         [this, task, &metrics_reporter, transfer_begin, on_done = std::move(on_done)](TransferResult result) mutable {
             const bool success = result.ok();
-            metrics_reporter.reportTransferFinished(CacheTransferOperation::EVICT,
-                                                    task->descriptors().front().source_tier,
-                                                    task->descriptors().front().target_tier,
-                                                    task->descriptors().size(),
-                                                    transfer_begin,
-                                                    success,
-                                                    success ? task->descriptors() : std::vector<TransferDescriptor>{},
-                                                    group_sets_);
-            metrics_reporter.maybeReportCopyError(
-                task->descriptors().front().source_tier, task->descriptors().front().target_tier, result);
+            auto observation = CompletionStageContext::forTask(metrics_reporter, task->transfer_task, "evict", success);
+            CompletionStageScope total(observation, "callback_total", "workflow_callback");
+            {
+                CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");
+                metrics_reporter.reportTransferFinished(CacheTransferOperation::EVICT,
+                                                        task->descriptors().front().source_tier,
+                                                        task->descriptors().front().target_tier,
+                                                        task->descriptors().size(),
+                                                        transfer_begin,
+                                                        success,
+                                                        success ? task->descriptors() :
+                                                                  std::vector<TransferDescriptor>{},
+                                                        group_sets_);
+                metrics_reporter.maybeReportCopyError(
+                    task->descriptors().front().source_tier, task->descriptors().front().target_tier, result);
+            }
             if (on_done) {
                 on_done(std::move(result.status));
             }
-        });
+        },
+        "evict");
 }
 
 }  // namespace rtp_llm
