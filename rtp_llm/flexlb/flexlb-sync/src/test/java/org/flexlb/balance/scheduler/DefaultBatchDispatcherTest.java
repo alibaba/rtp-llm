@@ -1062,6 +1062,35 @@ class DefaultBatchDispatcherTest {
         assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(addr));
     }
 
+    @Test
+    void dispatchPreservesSelectedVitAlongsidePrefillAndDecode() throws Exception {
+        PrefillEndpoint endpoint = createPrefillEndpoint();
+        ScheduledRequest base = createScheduledRequest(1L, 500, 200, endpoint);
+        ServerStatus vit = new ServerStatus();
+        vit.setRole(RoleType.VIT);
+        vit.setServerIp("127.0.0.2");
+        vit.setHttpPort(9000);
+        vit.setGrpcPort(9001);
+        var route = new org.flexlb.dao.loadbalance.Response();
+        route.setServerStatus(List.of(base.prefill(), vit));
+        ScheduledRequest item = new ScheduledRequest(base.ctx(), new CompletableFuture<>(), route,
+                base.prefill(), null, endpoint, null, null, System.currentTimeMillis());
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+        submit(List.of(item), 1L, 100, "vit", callback);
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        var addresses = sentInput(sent.getFirst()).getGenerateConfig().getRoleAddrsList();
+        assertEquals(2, addresses.size());
+        assertEquals("VIT", addresses.get(1).getRoleStr());
+        assertEquals(EngineRpcService.RoleAddrPB.RoleType.VIT, addresses.get(1).getRole());
+        assertEquals("127.0.0.2", addresses.get(1).getIp());
+        assertEquals(9001, addresses.get(1).getGrpcPort());
+    }
+
     private static EngineRpcService.GenerateInputPB sentInput(
             EngineRpcService.EnqueueBatchRequestPB request) {
         return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
