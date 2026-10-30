@@ -45,6 +45,8 @@ final class RtpSettings {
             int value = RtpConfig.nativeInt(config, key, null, 0, Integer.MAX_VALUE);
             if (value != 0) result.put(key, value);
         }
+        if (config.has("load_cache_timeout_ms"))
+            result.put("load_cache_timeout_ms", RtpConfig.nativeInt(config, "load_cache_timeout_ms", null, Integer.MIN_VALUE, Integer.MAX_VALUE));
         int retries = RtpConfig.nativeInt(config, "prefill_retry_times", 0, 0, Integer.MAX_VALUE);
         if (retries != 0) result.put("prefill_retry_times", retries);
         return result;

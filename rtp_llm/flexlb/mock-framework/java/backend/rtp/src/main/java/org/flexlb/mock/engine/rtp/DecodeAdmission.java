@@ -2,19 +2,18 @@ package org.flexlb.mock.engine.rtp;
 
 import io.grpc.*;
 import io.grpc.stub.*;
-import java.util.List;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
-import org.flexlb.mock.engine.rtp.transfer.*;
 
 /** Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind Scheduler. */
 final class DecodeAdmission implements AutoCloseable {
     private final RtpConfig config;
     private final EngineLoop engine;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
-    private final RpcChannels channels = new RpcChannels();
+    private final KvTransfer transfer = new KvTransfer();
+    private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
     DecodeAdmission(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
@@ -28,30 +27,23 @@ final class DecodeAdmission implements AutoCloseable {
 
     private final class Call implements StreamObserver<GenerateRequestPB>, Scheduler.Listener {
         final ServerCallStreamObserver<GenerateOutputsPB> response;
-        final Object wire = new Object();
+        final BufferedOutput delivery;
         final long started = System.nanoTime();
         final long rpcDeadline;
         GenerateInputPB input;
         String client;
         Scheduler.Request request;
         volatile boolean terminal;
-        boolean acknowledged, loading, loaded, generating;
-        List<String> peers;
-        Context.CancellableContext source;
-        RequestState.Use transferUse;
+        Stage stage = Stage.ALLOCATING;
+        KvTransfer.Execution transfer;
         int token;
-        boolean prefillFinished;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
                 : RtpTasks.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
-            response.setOnReadyHandler(() -> {
-                synchronized (DecodeAdmission.this) {
-                    if (!terminal && request != null) engine.control(request, RtpControl.OUTPUT_WRITABLE);
-                }
-            });
-            response.setOnCancelHandler(() -> {
+            delivery = new BufferedOutput(transport, TimeUnit.MINUTES.toMillis(10));
+            delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
                 stop(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
                     : Status.CANCELLED.withDescription("Decode RPC cancelled"), expired ? 603 : 8100);
@@ -61,10 +53,9 @@ final class DecodeAdmission implements AutoCloseable {
         @Override public void onError(Throwable error) { stop(this, Status.CANCELLED.withDescription("Decode stream closed"), 8100); }
         @Override public void onCompleted() {
             synchronized (DecodeAdmission.this) {
-                if (!generating) stop(this, Status.CANCELLED.withDescription("P closed before generation"), 8100);
+                if (stage != Stage.GENERATING && stage != Stage.FINISHING) stop(this, Status.CANCELLED.withDescription("P closed before generation"), 8100);
             }
         }
-        @Override public boolean writable() { return response.isReady(); }
         @Override public boolean cancelled() { return response.isCancelled(); }
         @Override public void allocated(Scheduler.Request request) { acknowledge(this); }
         @Override public void output(Scheduler.Request request, Scheduler.Output progress) {
@@ -86,7 +77,6 @@ final class DecodeAdmission implements AutoCloseable {
                 validate(frame);
                 call.input = frame.getInput();
                 call.client = frame.getClientId();
-                call.peers = List.copyOf(frame.getPeerAddrsList());
                 call.request = engine.input(RtpTasks.input(call.input, call.client + "/" + call.input.getRequestId(),
                     call.started, call.rpcDeadline, false, config.blockSize()), call);
                 return;
@@ -94,16 +84,20 @@ final class DecodeAdmission implements AutoCloseable {
             if (frame.getRequestId() != call.input.getRequestId()
                     || !frame.getClientId().isEmpty() && !frame.getClientId().equals(call.client))
                 throw Status.INVALID_ARGUMENT.withDescription("RemoteGenerate identity changed").asRuntimeException();
-            if (frame.getStage() == RemoteStage.LOAD && call.acknowledged && !call.loading && !call.loaded) {
+            if (frame.getStage() == RemoteStage.LOAD && call.stage == Stage.ALLOCATED) {
                 startLoad(call);
-            } else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE && call.loaded && !call.generating) {
-                if (!call.prefillFinished || !frame.getClientId().equals(call.client))
+            } else if (frame.getStage() == RemoteStage.PREFILL_COMPLETE && call.stage == Stage.LOADED) {
+                if (!frame.getClientId().equals(call.client) || call.input.getGenerateConfig().getMinNewTokens() > 1
+                        || call.input.getGenerateConfig().getIgnoreEos() && call.input.getGenerateConfig().getMaxNewTokens() != 1)
                     throw Status.FAILED_PRECONDITION.withDescription("Invalid Prefill-only completion").asRuntimeException();
+                call.stage = Stage.FINISHING;
                 engine.control(call.request, RtpControl.PREFILL_COMPLETE);
-            } else if (frame.getStage() == RemoteStage.GENERATE && call.loaded && !call.generating) {
+            } else if (frame.getStage() == RemoteStage.GENERATE && call.stage == Stage.LOADED) {
                 if (frame.getProposeTokenIdsCount() > 0 || frame.getPositionIdsCount() > 0 || frame.hasProposeProbs() || frame.hasProposeHidden())
                     throw Status.UNIMPLEMENTED.withDescription("Speculative/position handoff is not supported").asRuntimeException();
-                call.generating = true;
+                if (call.input.getGenerateConfig().getMaxNewTokens() == 1)
+                    throw Status.FAILED_PRECONDITION.withDescription("Single-token request is already complete at Prefill").asRuntimeException();
+                call.stage = Stage.GENERATING;
                 call.token = frame.getFirstGenerateTokenId();
                 engine.control(call.request, RtpControl.GENERATE);
             } else {
@@ -133,82 +127,34 @@ final class DecodeAdmission implements AutoCloseable {
     private void acknowledge(Call call) {
         synchronized (this) {
             if (!live(call)) return;
-            call.acknowledged = true;
+            call.stage = Stage.ALLOCATED;
         }
         try { send(call, GenerateOutputsPB.newBuilder().setSupportsPrefillCompletion(true).build()); }
         catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("ALLOCATE acknowledgement failed"), 8100); }
     }
 
     private void startLoad(Call call) {
-        if (call.peers.size() != 1 || call.peers.getFirst().isBlank())
-            throw Status.FAILED_PRECONDITION.withDescription("Mock LOAD requires one P transfer address").asRuntimeException();
-        call.transferUse = engine.beginTransfer(call.request);
-        call.loading = true;
-        var source = Context.current().withCancellation();
-        call.source = source;
-        long budget = Math.min(TimeUnit.MILLISECONDS.toNanos(config.loadTimeoutMs()), call.request.input().deadline() == Long.MAX_VALUE
-            ? Long.MAX_VALUE : Math.max(1, call.request.input().deadline() - System.nanoTime()));
+        var use = engine.beginTransfer(call.request);
+        call.stage = Stage.LOADING;
         try {
-            transport.execute(() -> {
-                try {
-                    source.run(() -> PrefillTransferGrpc.newStub(channels.get(call.peers.getFirst())).withDeadlineAfter(budget, TimeUnit.NANOSECONDS)
-                        .read(TransferRequest.newBuilder().setClientId(call.client).setInput(call.input).build(),
-                            new StreamObserver<>() {
-                                private TransferMetadata metadata;
-                                @Override public void onNext(TransferMetadata value) { metadata = value; }
-                                @Override public void onError(Throwable error) {
-                                    var status = Status.fromThrowable(error);
-                                    loadFailed(call, status.augmentDescription("P-to-D LOAD failed"), status.getCode() == Status.Code.DEADLINE_EXCEEDED ? 603 : 8212);
-                                }
-                                @Override public void onCompleted() { loaded(call, metadata); }
-                            }));
-                } catch (RuntimeException error) { loadFailed(call, Status.INTERNAL.withDescription("Cannot start KV load"), 8212); }
-            });
-        } catch (RuntimeException error) {
-            loadFailed(call, Status.UNAVAILABLE.withDescription("KV load executor closed"), 8212);
-        }
+            call.transfer = transfer.submit(use);
+            call.transfer.completion().thenAccept(outcome -> loaded(call, outcome));
+        } catch (RuntimeException error) { use.close(); throw error; }
     }
 
-    private void loaded(Call call, TransferMetadata metadata) {
-        try { loadedResult(call, metadata); }
-        finally { releaseTransfer(call); }
-    }
-    private void loadFailed(Call call, Status status, long code) {
+    private synchronized void loaded(Call call, KvTransfer.Outcome outcome) {
+        if (!live(call)) return;
+        var failure = outcome.state() == KvTransfer.State.COMPLETED ? null : new RequestFailure(
+            outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
+            "KV transfer " + outcome.state(), outcome.error());
         try {
-            synchronized (this) {
-                if (call.request != null)
-                    engine.transferCompleted(call.request, new RtpTransferResult(false, RtpErrors.scheduling(status, code)));
-            }
-        } finally { releaseTransfer(call); }
-    }
-    private synchronized void releaseTransfer(Call call) {
-        var use = call.transferUse;
-        call.transferUse = null;
-        if (use != null) use.close();
-    }
-    private void loadedResult(Call call, TransferMetadata metadata) {
-        synchronized (this) {
-            if (!live(call)) return;
-            if (metadata == null
-                    || metadata.getPrefillFinished() && (call.input.getGenerateConfig().getIgnoreEos()
-                        ? call.input.getGenerateConfig().getMaxNewTokens() != 1 : call.input.getGenerateConfig().getMinNewTokens() > 1)
-                    || !metadata.getPrefillFinished() && call.input.getGenerateConfig().getMaxNewTokens() == 1
-                    || metadata.getInputTokens() != call.input.getTokenIdsCount()) {
-                stop(call, Status.FAILED_PRECONDITION.withDescription("P-to-D token coverage or generation length differs"), 8212);
-                return;
-            }
-            try { engine.transferCompleted(call.request, new RtpTransferResult(metadata.getPrefillFinished(), null)); }
-            catch (RequestFailure failure) { stop(call, RtpErrors.status(failure), RtpErrors.code(failure)); return; }
-            call.loading = false;
-            call.loaded = true;
-            call.prefillFinished = metadata.getPrefillFinished();
-            call.source.cancel(null);
-            call.source = null;
-        }
-        try {
+            engine.transferCompleted(call.request, new RtpTransferResult(false, failure));
+            if (failure != null) return;
+            call.stage = Stage.LOADED;
             send(call, GenerateOutputsPB.newBuilder().setRequestId(call.input.getRequestId())
                 .setErrorInfo(RpcErrorPB.newBuilder().setErrorCodeValue(0)).build());
-        } catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
+        } catch (RequestFailure error) { stop(call, RtpErrors.status(error), RtpErrors.code(error)); }
+        catch (RuntimeException error) { stop(call, Status.CANCELLED.withDescription("LOAD acknowledgement failed"), 8100); }
     }
 
     private boolean live(Call call) {
@@ -224,11 +170,9 @@ final class DecodeAdmission implements AutoCloseable {
         return true;
     }
 
-    private void send(Call call, GenerateOutputsPB output) {
-        synchronized (call.wire) {
-            if (call.terminal || call.response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
-            call.response.onNext(output);
-        }
+    private synchronized void send(Call call, GenerateOutputsPB output) {
+        if (call.terminal || call.response.isCancelled()) throw Status.CANCELLED.asRuntimeException();
+        call.delivery.add(output);
     }
 
     private synchronized void stop(Call call, Status status, long code) {
@@ -236,22 +180,11 @@ final class DecodeAdmission implements AutoCloseable {
         if (call.request == null) ended(call, status, code);
         else engine.finish(call.request, RtpErrors.scheduling(status, code));
     }
-    private void ended(Call call, Status status, long code) {
-        synchronized (this) {
-            if (call.terminal) return;
-            call.terminal = true;
-            if (call.source != null) { call.source.cancel(null); call.source = null; }
-        }
-        Runnable reply = () -> {
-            synchronized (call.wire) {
-                if (!call.response.isCancelled()) {
-                    if (status.isOk()) call.response.onCompleted();
-                    else call.response.onError(RtpErrors.failure(status, code));
-                }
-            }
-        };
-        try { transport.execute(reply); }
-        catch (RejectedExecutionException closing) { reply.run(); }
+    private synchronized void ended(Call call, Status status, long code) {
+        if (call.terminal) return;
+        call.terminal = true;
+        if (call.transfer != null) call.transfer.cancel();
+        call.delivery.finish(status.isOk() ? null : RtpErrors.failure(status, code));
     }
 
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
@@ -262,7 +195,7 @@ final class DecodeAdmission implements AutoCloseable {
             closed = true;
             engine.close();
         }
-        channels.close();
+        transfer.close();
         transport.shutdown();
     }
 }

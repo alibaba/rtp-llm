@@ -57,6 +57,7 @@ final class BufferedOutput {
         if (draining || response == null || delivered || cancelled) return;
         draining = true;
         try { executor.execute(this::drain); }
+        catch (java.util.concurrent.RejectedExecutionException closing) { drain(); }
         catch (RuntimeException error) { draining = false; throw error; }
     }
     private void drain() {

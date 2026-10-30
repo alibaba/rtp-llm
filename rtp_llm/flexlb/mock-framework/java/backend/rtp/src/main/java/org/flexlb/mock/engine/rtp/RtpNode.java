@@ -45,10 +45,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         var node = new RtpNode(config, schedulers);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
-            var transfer = node.service.transfer();
-            if (transfer != null) builder.addService(transfer);
             node.rpc = builder.build().start();
-            node.service.rpcAddress(node.rpcAddress());
             node.api = new ApiServer(node.address.listener(controlPort)).metrics(node.service::scrapeMetrics);
             node.api.start();
             return node;
@@ -71,7 +68,6 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "multimodal", true) : Map.of());
         result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "multimodal", true) : Map.of());
         result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "multimodal", true, "load", true));
-        result.put("mock_transfer", prefill ? Map.of("address", rpcAddress(), "service", "mock.rtp.PrefillTransfer", "metadata_only", true) : Map.of());
         return Map.copyOf(result);
     }
 
@@ -81,8 +77,11 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         try { service.close(); } catch (RuntimeException error) { failure = error; }
         try {
             if (rpc != null) {
-                rpc.shutdownNow();
-                if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("Engine RPC did not terminate");
+                rpc.shutdown();
+                if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) {
+                    rpc.shutdownNow();
+                    if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("Engine RPC did not terminate");
+                }
             }
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();

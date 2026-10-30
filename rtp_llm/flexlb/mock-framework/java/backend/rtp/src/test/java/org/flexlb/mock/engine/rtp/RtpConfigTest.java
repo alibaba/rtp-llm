@@ -135,6 +135,14 @@ class RtpConfigTest {
         assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
+    @Test void zeroTimeHandoffDoesNotReportAnIndependentLoadTimeoutAsEffective() throws Exception {
+        var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration("decode"));
+        ((ObjectNode) root.path("component").path("config")).put("load_cache_timeout_ms", 5000);
+        var effective = load(root).effective();
+        assertFalse(effective.has("load_cache_timeout_ms"));
+        assertEquals(5000, effective.path("pending_config").path("load_cache_timeout_ms").intValue());
+    }
+
     @Test void rejectsTyposRemovedKnobsAndSettingsCopiedToTheWrongRole() throws Exception {
         for (String key : java.util.List.of("max_context_batch_size", "max_generate_batch_szie", "decode_retry_times", "load_cache_timeout_ms")) {
             var root = root(); ((ObjectNode) root.path("component").path("config")).put(key, 10);

@@ -17,7 +17,6 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final LocalPrefill requests;
     private final org.flexlb.mock.multimodal.MediaClient vision;
     private final DecodeAdmission decode;
-    private final PrefillTransfer transfer;
     private final PrefillGeneration generation;
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
@@ -27,15 +26,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
         vision = requests == null ? null : new org.flexlb.mock.multimodal.MediaClient();
         decode = requests == null ? new DecodeAdmission(config, cache, schedulers) : null;
-        transfer = requests == null ? null : new PrefillTransfer(requests);
-        generation = transfer == null ? null : new PrefillGeneration(config, transfer);
+        generation = requests == null ? null : new PrefillGeneration(config, requests);
     }
-    io.grpc.BindableService transfer() { return transfer; }
-    void rpcAddress(String address) { if (generation != null) generation.address(address); }
     public void close() {
         closed = true;
         RuntimeException failure = null;
-        for (AutoCloseable component : new AutoCloseable[]{generation, vision, transfer, requests, decode}) {
+        for (AutoCloseable component : new AutoCloseable[]{generation, vision, requests, decode}) {
             if (component == null) continue;
             try { component.close(); }
             catch (Exception error) {

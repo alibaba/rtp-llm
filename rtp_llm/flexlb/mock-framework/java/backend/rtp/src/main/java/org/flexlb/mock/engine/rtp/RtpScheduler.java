@@ -42,7 +42,7 @@ final class RtpScheduler implements Scheduler {
         long admittedAt = Long.MIN_VALUE, attemptedGeneration = Long.MIN_VALUE;
         Phase phase = QUEUED;
         ReportedPhase finalPhase;
-        boolean loaded, generating, outputPending, delivering, readStarted;
+        boolean loaded, generating, outputPending, delivering, transferBegun;
         ComputeModel.Plan nextStep;
 
         Entry(Input input, Listener listener) {
@@ -124,17 +124,17 @@ final class RtpScheduler implements Scheduler {
                 entry.phase = QUEUED; entry.queuedAt = System.nanoTime(); waiting.addLast(entry);
             }
             case PREFILL_COMPLETE -> {
-                if (prefill() || !entry.loaded || entry.generating || !entry.prefillFinished)
+                if (prefill() || !entry.loaded || entry.generating)
                     throw new RequestFailure(INVALID, "Unexpected Prefill-only completion");
+                entry.prefillFinished = true;
                 entry.state.transferred(1);
                 finish(entry, null);
             }
             case TRANSFER_ACKNOWLEDGED -> {
-                if (!prefill() || !entry.input.retained() || !entry.readStarted || entry.phase != TRANSFERRED)
+                if (!prefill() || !entry.input.retained() || !entry.transferBegun || entry.phase != TRANSFERRED)
                     throw new RequestFailure(INVALID, "Transfer acknowledgement without a readable Prefill source");
                 finish(entry, null);
             }
-            case OUTPUT_WRITABLE -> { /* The next scheduling pass reads the consumer's readiness. */ }
         }
     }
 
@@ -332,9 +332,9 @@ final class RtpScheduler implements Scheduler {
 
     @Override public RequestState.Use beginTransfer(Request request) {
         var entry = entry(request);
-        if (!live(entry) || entry.readStarted || (prefill() ? entry.phase != READY : entry.phase != LOADING))
+        if (!live(entry) || entry.transferBegun || (prefill() ? entry.phase != READY : entry.phase != LOADING))
             throw new RequestFailure(INVALID, "Request is not ready for a new KV transfer");
-        entry.readStarted = true; entry.transferStarted = System.nanoTime();
+        entry.transferBegun = true; entry.transferStarted = System.nanoTime();
         entry.phase = TRANSFERRING;
         return entry.state.pin();
     }
@@ -343,7 +343,7 @@ final class RtpScheduler implements Scheduler {
         if (!live(entry)) return;
         if (!(result instanceof RtpTransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
         if (transferred.failure() != null) { finish(entry, transferred.failure()); return; }
-        if (!entry.readStarted || entry.phase != TRANSFERRING)
+        if (!entry.transferBegun || entry.phase != TRANSFERRING)
             throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");
         if (!prefill()) {
             if (entry.lease == null || entry.loaded || entry.generating)

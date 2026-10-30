@@ -123,7 +123,7 @@ EnqueueBatch/EnqueueGroup 先并行准备各成员 D 资源，收齐准备结果
 
 PD 通过“数据就绪”和“传输完成”衔接。Scheduler 判断阶段是否完成、发布就绪通知并管理依赖；协议/传输组件负责 ALLOCATE、LOAD、GENERATE、网络读写和 ACK；公共引用机制保证资源不会提前释放。Compute 不在每轮完成后自动传输，分块 Prefill、加载命中和提前发起 LOAD 都不能依赖这一假设。
 
-P 完成 Forward 后退出计算集合，保留 KV 和请求期限。Read 期间额外取得读取引用，Read 返回仅表示本地交付结束；P 收到 D 的 LOAD ACK 后才提交传输完成并释放阶段资源。没有确认、传输失败或超时仍走失败清理，不发布成功缓存。释放 P KV 后，端到端 P RPC 仍可继续转发 D 输出。
+P 完成 Forward 后退出计算集合，保留 KV 和请求期限。交接期间额外持有资源引用；P 收到 D 的 LOAD ACK 后才提交传输完成并释放阶段资源。没有确认、传输失败或超时仍走失败清理，不发布成功缓存。释放 P KV 后，端到端 P RPC 仍可继续转发 D 输出。
 
 D 只有 KV 加载成功和生成许可均满足后才进入 Decode；Prefill-only 完成走独立通知，不伪造 D Forward。加载或输出失败通过同一请求句柄返回调度域。所有通知在没有计算工作的情况下也能推进；过期请求的晚到通知不能复活请求。
 
@@ -659,7 +659,7 @@ environment:
 
 原生字段支持 server_args 小写或 Whale 大写 env 名，同一字段同时提供两种写法报错；整数/布尔接受对应原生文本，其余原生内容保留，但不能据此宣称功能已模拟。当前要求显式 block size、max sequence length 和 test_block_num，只支持 `dp_size=1`、`dp_rank=0`；P/D 批量上限取 1–1024，默认 1。Mock 一个 Engine 表示完整计算体，不拆 CP/TP/DP rank 或模拟 rank 间通信；内部并行的影响由整 Engine 的性能公式、容量和调度配置表达。block size 是本 Engine 的逻辑分配粒度，PD 不根据 CP 数乘除。配置导入时应先统一容量口径。不加载模型层/head 或 GPU 布局，不从部署内存推导 KV 块数。
 
-RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：多模态、adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
+RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
 
 ### 执行和 P/D 交接
 
@@ -667,15 +667,13 @@ RTP 请求公共支持范围集中在 `RtpRequestValidation`，本地单 token�
 - 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillGeneration 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
 - D 的 DecodeAdmission 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
 
-P 的内部 `PrefillTransfer.start()` 注册活跃来源并复用 LocalPrefill 计算。Forward 完成后 KV 仍由请求持有；网络 `Read` 交付结束后仍保留来源，P 收到 D 的 LOAD ACK 后才完成计算阶段并释放。正式服务**只保留 Read RPC，没有外部 Prepare RPC**；测试从包内 start 建立来源或调用正式生成链路，不为探针注册额外协议。
+PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 Scheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D Scheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 Scheduler 管理。
 
-D 的 LOAD 从 peer_addrs 对应 P 发起真实网络 Read，校验 client/request 身份、完整 prompt 和单 Reader 所有权；不能用缓存中存在的 key 冒充活跃来源。PD 按完整输入的 token 覆盖范围交接，返回元数据只有 input_tokens 和 prefill_finished（首 token 是否已经使请求结束），不传 block size、块编号或 cache keys。P/D 各自按本地 block size 分配和生成前缀 keys，两端块大小不要求相同或成倍数；最后不足一块的 token 也纳入交接。D 验证 token 数、min/max/ignore_eos 一致性、首 token 结束事实及预算后才能确认 LOAD，传入 KV 不算 D 历史命中，也不提前提交为缓存。不复制 KV 张量，不模拟 RDMA/TCP cache-store 或带宽。
-
-Read 等待计算就绪；D 取消/超时会取消 P 来源，P 取消/关闭也使 LOAD 失败。`load_cache_timeout_ms` 默认 5s，非正值按原生回退 5s，同时受总 deadline 限制。没有 Reader 或 Read 入口校验失败时，来源仍由正式 P 请求所有者管理，受请求取消、timeout/deadline 和节点关闭约束。
+接入层信任正常 P 生产者发送的 LOAD 和首 Token 完成事实，不模拟损坏的 KV 数据、假冒来源、迟到的跨请求交接或生产传输恢复。请求取消、总 deadline、节点关闭和下游 RPC 失败仍必须终止在途任务并回收资源。零耗时传输没有独立加载计时器；显式传入的 load_cache_timeout_ms 记入 pending_config，不宣称生效。
 
 原生 EnqueueBatch/EnqueueGroup 当前只支持 DP rank 0，支持文本及经 ViT 准备的输入。Batch 接入已选择 PD 协议，不套用普通 GenerateStreamCall 的分流条件：max_new_tokens=1 也正常接纳，can_use_pd_separation 不改变 Batch 协议。首 Token 达到长度上限时，通过 PREFILL_COMPLETE 结束 D，不重复输出 Token，也不执行 Decode Forward。普通单 Token RPC 仍走本地 Prefill；非 PD 的多 Token 本地生成和 prefill_only 尚未模拟，明确返回 UNIMPLEMENTED。
 
-入队 ACK 前必须取得 D 分配确认；计算、LOAD 和 Decode 独立于 Fetch 推进。Fetch 仅从保留的输出容器单次接入，不持有调度器或 KV 资源。重复 ID 的整批项拒绝，其他非法项各自返回错误；成功项不因其他项失败而回滚。
+入队 ACK 前必须取得 D 分配确认；Prefill 完成后推进 LOAD 和 Decode，整个流程不等待 Fetch。Fetch 仅从保留的输出容器单次接入，不持有调度器或 KV 资源。重复 ID 的整批项拒绝，其他非法项各自返回错误；成功项不因其他项失败而回滚。
 
 已接受的批量请求不随入队 RPC 结束而取消；请求 timeout 覆盖全程，Fetch 接入期限默认 10min，接入后撤销。Fetch 重复为 ALREADY_EXISTS，过期/缺失为 NOT_FOUND。Cancel 只面向批量请求；活动项 ACCEPTED，未登记项 TOMBSTONED，已完成项 NOT_FOUND；抢占锁定原生 8429，墓碑和完成记录保留 10min。ACK 不承诺远端已经释放，直接 Generate 通过 RPC 取消。
 
@@ -827,7 +825,7 @@ CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明�
 | prefill_retry_times | 0 | 不配置 | 当前不重试；非零值列为待实现。 |
 | prefill_max_wait_timeout_ms | 600000 | 不配置 | P 待实现独立等待期限。 |
 | max_rpc_timeout_ms | 7200000 | 7200000 | 待实现独立 RPC 上限；已有请求总期限不因此失效。 |
-| load_cache_timeout_ms | 不配置 | 5000 | D 生效；删除 P 无效项。 |
+| load_cache_timeout_ms | 不配置 | 可记录原配置 | 零耗时交接不使用独立加载超时，D 显式配置记入 pending_config。 |
 | compute | 1.23 * (原公式)，不配噪声 | 19.5+0.175*batchSize | 保留，不按 CP/TP 二次缩放。 |
 | compute.eos | probability=0.0025，seed=20260922 | 同 P | 参数保留；固定长度回放通过 ignore_eos 屏蔽 EOS。 |
 | compute.decode.tokens_per_step | 不配置 | 2.6 | D 平均进度模型，不等于真实投机参数。 |
@@ -952,3 +950,5 @@ RECEIVED、KV_ALLOCATED、RUNNING、KV 资源和按版本查询的 finished 记�
 Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通过 `master/get` 加 `is_leader: true` 记录唯一主节点 A，再以 `is_leader: false` 记录备用节点 B；后续按保存的地址执行故障与恢复，不依赖启动编号，也不通过动态新增节点获得备用身份。
 
 原生 Master 的正常停止和最终清理使用每进程 60 秒退出预算，覆盖选举交接、gRPC 静默期和资源回收。最终清理按启动尝试的逆序逐个等待退出，期间保持其他 Master、Engine 和 ZooKeeper 存活；超时仍强杀并记录清理错误，不把退出失败当作成功。
+
+接入层只处理原生 RPC 的解析、响应关联和异步输出；Scheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 Scheduler 的调度状态。

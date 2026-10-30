@@ -155,12 +155,17 @@ class DecodeAdmissionTest {
         }
     }
 
-    @Test void loadWithoutSourceFailsAndReleasesReservationInsteadOfInventingKv() throws Exception {
+    @Test void loadUsesTheExistingConnectionAndNeedsNoCallbackAddress() throws Exception {
         try (var node = node(false); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0)); call.ack();
             call.request.onNext(GenerateRequestPB.newBuilder().setRequestId(1).setStage(RemoteStage.LOAD).build());
-            call.error(Status.Code.FAILED_PRECONDITION);
-            assertEquals(16, node.status().getAvailableKvCache()); assertEquals(1, node.status().getFinishedTaskListCount());
+            var loaded = call.replies.poll(3, TimeUnit.SECONDS);
+            assertInstanceOf(GenerateOutputsPB.class, loaded);
+            assertEquals(0, ((GenerateOutputsPB) loaded).getErrorInfo().getErrorCodeValue());
+            assertEquals(10, node.status().getAvailableKvCache());
+            call.close();
+            await(() -> node.status().getAvailableKvCache() == 16);
+            assertEquals(1, node.status().getFinishedTaskListCount());
         }
     }
 
