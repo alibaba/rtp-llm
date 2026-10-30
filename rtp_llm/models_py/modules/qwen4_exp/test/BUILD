@@ -15,7 +15,7 @@ VENDORED_UPSTREAM_FIXTURE = [
 py_test(
     name = "upstream_fixture_test",
     srcs = ["upstream_fixture_test.py", "upstream_fixture.py"],
-    deps = ["//rtp_llm:testlib", "//rtp_llm/test/utils:hf_checkpoint"],
+    deps = ["//rtp_llm:testlib"],
     data = VENDORED_UPSTREAM_FIXTURE,
 )
 
@@ -63,7 +63,7 @@ py_test(
 py_test(
     name = "upstream_parity_test",
     srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
-    deps = ["//rtp_llm:testlib", ":math_references", "//rtp_llm/test/utils:hf_checkpoint"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     data = VENDORED_UPSTREAM_FIXTURE,
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13"},
@@ -73,7 +73,7 @@ py_test(
 py_test(
     name = "gdn_upstream_parity_test",
     srcs = ["gdn_upstream_parity_test.py", "upstream_fixture.py"],
-    deps = ["//rtp_llm:testlib", ":math_references", "//rtp_llm/test/utils:hf_checkpoint"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     data = VENDORED_UPSTREAM_FIXTURE,
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13"},
@@ -309,7 +309,7 @@ py_test(
     name = "upstream_parity_qualification",
     srcs = ["upstream_parity_test.py", "upstream_fixture.py"],
     main = "upstream_parity_test.py",
-    deps = ["//rtp_llm:testlib", ":math_references", "//rtp_llm/test/utils:hf_checkpoint"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     data = VENDORED_UPSTREAM_FIXTURE,
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
     tags = ["manual"],
@@ -320,7 +320,7 @@ py_test(
     name = "gdn_upstream_parity_qualification",
     srcs = ["gdn_upstream_parity_test.py", "upstream_fixture.py"],
     main = "gdn_upstream_parity_test.py",
-    deps = ["//rtp_llm:testlib", ":math_references", "//rtp_llm/test/utils:hf_checkpoint"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
     data = VENDORED_UPSTREAM_FIXTURE,
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
     tags = ["manual"],

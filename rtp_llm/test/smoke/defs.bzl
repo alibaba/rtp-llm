@@ -101,7 +101,6 @@ def get_aiter_envs(name, envs):
     return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_amd_aiter/site-packages/aiter_meta/hsa/"]
 
 SMOKE_FRAMEWORK_DEPS = [
-    "//rtp_llm/test/utils:hf_checkpoint",
     "//rtp_llm/test/utils:maga_server_manager",
     "//rtp_llm/test/utils:test_util",  # smoke srcs import port_util/coredump_util
     "//rtp_llm:uvicorn",
