@@ -112,6 +112,26 @@ class ModelFactory:
         return model
 
     @staticmethod
+    def _validate_propose_model_config(
+        propose_model_config: Optional[ModelConfig], engine_config: EngineConfig
+    ) -> None:
+        if (
+            engine_config.sp_config.type
+            in (
+                SpeculativeType.VANILLA,
+                SpeculativeType.MTP,
+                SpeculativeType.EAGLE3,
+                SpeculativeType.EAGLE,
+                SpeculativeType.DSPARK,
+            )
+            and propose_model_config is None
+        ):
+            raise ValueError(
+                "Learned speculative decoding requires a propose model config; "
+                "configure SP_MODEL_TYPE and SP_CHECKPOINT_PATH before loading models"
+            )
+
+    @staticmethod
     def get_sp_model(
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig],
@@ -132,6 +152,7 @@ class ModelFactory:
         Returns:
             ProposeModel instance or None if no propose model needed
         """
+        ModelFactory._validate_propose_model_config(propose_model_config, engine_config)
         configure_warmup(
             engine_config.runtime_config.warm_up,
             engine_config.runtime_config.model_warm_up,
@@ -275,6 +296,8 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
+        ModelFactory._validate_propose_model_config(propose_model_config, engine_config)
+
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
         # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
@@ -454,7 +477,10 @@ class ModelFactory:
         if not sp_config.type or sp_config.type == SpeculativeType.NONE:
             return None
 
-        if not sp_config.checkpoint_path:
+        if (
+            sp_config.type == SpeculativeType.DETERMINISTIC
+            and not sp_config.checkpoint_path
+        ):
             return None
 
         # Current learned-draft SP engine supports MTP, EAGLE and DSpARK.
@@ -472,9 +498,30 @@ class ModelFactory:
                 % sp_config.type.name
             )
 
+        if not sp_config.model_type:
+            raise ValueError(
+                "SP_MODEL_TYPE is required for learned speculative decoding"
+            )
+
+        checkpoint_path = sp_config.checkpoint_path
+        if (
+            not checkpoint_path
+            and sp_config.type == SpeculativeType.MTP
+            and sp_config.model_type == "qwen4_exp_mtp"
+            and model_config.model_type in ("qwen4_exp", "qwen_exp")
+        ):
+            # The native draft lives in the target checkpoint's mtp.* namespace.
+            # Use the resolved path, but still build the separate draft config.
+            checkpoint_path = model_config.ckpt_path
+        if not checkpoint_path:
+            raise ValueError(
+                "SP_CHECKPOINT_PATH is required for learned speculative decoding; "
+                "Qwen4 native MTP also requires a resolved target CHECKPOINT_PATH"
+            )
+
         # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
         propose_model_args = ModelArgs()
-        propose_model_args.ckpt_path = sp_config.checkpoint_path
+        propose_model_args.ckpt_path = checkpoint_path
         propose_model_args.tokenizer_path = model_args.tokenizer_path
         propose_model_args.model_type = sp_config.model_type
         propose_model_args.act_type = model_args.act_type
@@ -483,9 +530,7 @@ class ModelFactory:
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
-        propose_model_config = propose_model_cls._create_config(
-            sp_config.checkpoint_path
-        )
+        propose_model_config = propose_model_cls._create_config(checkpoint_path)
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
         propose_model_config.quantization = sp_config.quantization

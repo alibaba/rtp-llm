@@ -242,3 +242,4 @@ class Qwen4Exp(Qwen35Moe):
 
 
 register_model("qwen4_exp", Qwen4Exp, ["Qwen4ExpForConditionalGeneration"])
+register_model("qwen_exp", Qwen4Exp)
