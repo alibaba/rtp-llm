@@ -456,8 +456,13 @@ def _stage_errors(result: dict[str, Any], rows: dict[str, dict[str, Any]]) -> li
     successful_mixed_cache = False
     for stage in stages:
         if stage.get("skipped"):
+            errors.append(f"{stage['name']}: required smoke stage was skipped")
             continue
         name, cases = stage["name"], stage["case_names"]
+        if (
+            stage.get("concurrent") or stage.get("transport") == "pd_group_rpc"
+        ) and len(cases) > 16:
+            errors.append(f"{name}: Prefill concurrency exceeds 16")
         if (
             stage.get("passed") is not True
             or not cases
@@ -582,7 +587,7 @@ def _stage_errors(result: dict[str, Any], rows: dict[str, dict[str, Any]]) -> li
     if "decode" in phases:
         required.update(
             f"orthogonal_decode_{index:02d}_batch_{size}"
-            for index, size in enumerate((1, 4, 8, 63, 64))
+            for index, size in enumerate((1, 4, 8, 15, 16, 1, 16, 15, 1))
         )
     if result["suite"] == "main-text-64k-capped":
         if set(phases) != all_phases:
@@ -602,7 +607,7 @@ def _stage_errors(result: dict[str, Any], rows: dict[str, dict[str, Any]]) -> li
                 "prefix_B_partial",
                 "prefix_A_return",
                 "prefix_AB_mixed",
-                "orthogonal_decode_graph_long_output_batch_64",
+                "orthogonal_decode_graph_long_output_batch_16",
             )
         )
         required.update(
@@ -681,6 +686,8 @@ def check_result(accuracy_path: pathlib.Path | str) -> dict[str, Any]:
         ):
             errors.append("unsupported smoke suite or case profile")
         records = result["cases"]
+        if result.get("skipped_cases"):
+            errors.append("application smoke contains skipped requests")
         rows = {row["name"]: row for row in records}
         if (
             not rows
@@ -690,9 +697,32 @@ def check_result(accuracy_path: pathlib.Path | str) -> dict[str, Any]:
             errors.append("empty or duplicate case names")
         if result["summary"]["case_count"] != len(records):
             errors.append("case count differs from summary")
+        prewarm = {name for name, row in rows.items() if row.get("phase") == "prewarm"}
+        prewarm_config = result.get("rdma_prewarm", {})
+        attempts = prewarm_config.get("attempts", [])
+        successful = [attempt for attempt in attempts if attempt.get("passed") is True]
+        declared = [name for attempt in successful for name in attempt["case_names"]]
+        if (
+            (prewarm_config.get("enabled") is True and len(successful) != 1)
+            or (prewarm_config.get("enabled") is not True and bool(attempts))
+            or prewarm != set(declared)
+            or len(declared) != len(set(declared))
+            or any(
+                type(attempt.get("attempt")) is not int
+                or attempt["attempt"] < 1
+                or not attempt["case_names"]
+                for attempt in successful
+            )
+            or any(
+                not re.fullmatch(rf"rdma_prewarm_{attempt['attempt']}_\d+", name)
+                for attempt in successful
+                for name in attempt["case_names"]
+            )
+        ):
+            errors.append("invalid RDMA prewarm membership")
         answer_errors = []
         for row in records:
-            if row.get("phase") not in ("formal", "preparation"):
+            if row.get("phase") not in ("formal", "preparation", "prewarm"):
                 errors.append(f"{row['name']}: invalid request phase")
             answer_errors.extend(independent_answer_check(row))
             errors.extend(_cache_errors(row, int(result["block_size"])))
@@ -716,7 +746,11 @@ def check_result(accuracy_path: pathlib.Path | str) -> dict[str, Any]:
             errors.extend(_raw_consistency(request_dir, rows))
             errors.extend(_group_artifact_errors(result["stages"], request_dir))
         errors.extend(answer_errors)
-        errors.extend(_stage_errors(result, rows))
+        errors.extend(
+            _stage_errors(
+                result, {name: row for name, row in rows.items() if name not in prewarm}
+            )
+        )
         protocol = result.get("protocol_requests", [])
         errors.extend(_check_protocol(protocol, path.parent / "protocol"))
         skipped = result.get("skipped_cases", [])
@@ -734,6 +768,7 @@ def check_result(accuracy_path: pathlib.Path | str) -> dict[str, Any]:
             preparation_case_count=sum(
                 row["phase"] == "preparation" for row in records
             ),
+            prewarm_case_count=len(prewarm),
             protocol_request_count=len(protocol),
             skipped_cases=skipped,
             selected_phases=result.get("orthogonal_phases", []),

@@ -166,7 +166,7 @@ class CappedDecodePageTest(unittest.TestCase):
             smoke.validate(case, response, 0.1, 32)["finish_reason"], "length"
         )
 
-    def test_skipped_long_cases_have_short_exact_answer_replacements(self):
+    def test_decode_page_crossings_use_short_exact_answers_without_skips(self):
         args = types.SimpleNamespace(
             base_url="http://127.0.0.1:1",
             decode_health_url="http://127.0.0.1:2/health",
@@ -192,7 +192,8 @@ class CappedDecodePageTest(unittest.TestCase):
 
         short = [case for _, cases in stages for case in cases]
         self.assertEqual(len(short), 6)
-        self.assertEqual(len(smoke.skipped_cases), 6)
+        self.assertEqual(smoke.skipped_cases, [])
+        self.assertFalse(any(stage.get("skipped") for stage in smoke.stages))
         self.assertEqual(
             [
                 (

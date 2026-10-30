@@ -224,13 +224,13 @@ def launch_config(args):
         # MTP update capture uses this request capacity independently of the
         # Decode runner. It must cover every configured proposal/Verify bucket.
         "max_context_batch_size": (
-            64
+            16
             if orthogonal_smoke and args.role == "PREFILL"
             else max(decode_capture_batches)
         ),
         "max_batch_tokens_size": 262144 if orthogonal_smoke else 65536,
         **({"max_batch_tokens_without_cache": 65536} if orthogonal_smoke else {}),
-        "concurrency_limit": 64 if orthogonal_smoke else 16,
+        "concurrency_limit": 64 if orthogonal_smoke and args.role == "DECODE" else 16,
         "seq_size_per_block": 4096,
         "kernel_seq_size_per_block": 128 if fp8_kv_cache else 64,
         "linear_step": 1,
@@ -254,6 +254,12 @@ def launch_config(args):
         "warm_up": int(warm_up),
         "model_warm_up": int(model_warm_up),
         "reserver_runtime_mem_mb": reserve_runtime_mem_mb,
+        # This isolated pair has no load balancer whose routes need to expire.
+        # Keep parent-managed shutdown within the worker's 60-second stop budget.
+        "shutdown_timeout": 45,
+        "frontend_pre_stop_drain_seconds": 0,
+        "dash_sc_grpc_pre_stop_drain_seconds": 0,
+        "backend_post_frontend_drain_seconds": 0,
     }
     if orthogonal_smoke and args.role == "PREFILL":
         options["memory_cache_size_mb"] = getattr(args, "memory_cache_size_mb", 32768)

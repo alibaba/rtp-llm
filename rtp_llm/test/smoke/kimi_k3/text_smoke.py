@@ -23,6 +23,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
+MAX_PREFILL_CONCURRENCY = 16
+
 
 @dataclass(frozen=True)
 class Case:
@@ -245,9 +247,9 @@ def parse_args() -> argparse.Namespace:
         parser.error("orthogonal smoke needs the local --prefill-rpc-runfiles")
     if args.prefill_grpc_port is None or not 1 <= args.prefill_grpc_port <= 65535:
         parser.error("orthogonal smoke needs --prefill-grpc-port")
-    if args.batch_size < 4:
+    if not 4 <= args.batch_size <= MAX_PREFILL_CONCURRENCY:
         parser.error(
-            "--batch-size must be at least 4 to cover hit/partial-hit/miss mixing"
+            "--batch-size must be between 4 and 16 for bounded Prefill cache-mixing coverage"
         )
     for key in (
         "block_size",
@@ -1007,6 +1009,8 @@ class Runner:
         admission_gap_s: float = 0,
     ) -> list[dict[str, Any]]:
         if concurrent:
+            if len(cases) > MAX_PREFILL_CONCURRENCY:
+                raise SmokeFailure("Prefill concurrent requests must not exceed 16")
             # Decode boundary tests keep the requests active together while
             # limiting the number of new PD/RDMA connections opened at once.
             # The request group records its intended Decode batch size.
@@ -1048,6 +1052,8 @@ class Runner:
         the normal P-to-D handoff. Its request IDs are saved with the raw RPC
         records so the result checker can verify the exact four members.
         """
+        if len(cases) > MAX_PREFILL_CONCURRENCY:
+            raise SmokeFailure("Prefill grouped requests must not exceed 16")
         runfiles = self.args.prefill_rpc_runfiles
         roots = [runfiles / "rtp_llm", *sorted(runfiles.glob("pip*/site-packages"))]
         sys.path[:0] = [str(root) for root in roots]
@@ -1818,41 +1824,8 @@ class Runner:
             )
         )
         if self.args.suite == "main-text-64k-capped":
-            # The historical long-output deferral covers exactly these three
-            # boundaries. Larger cache stripes add short-answer coverage only.
-            deferred_boundaries = (page, 2 * page, self.args.chunk_tokens)
-            for boundary in deferred_boundaries:
-                for suffix, reason in (
-                    (
-                        "cold",
-                        "long Decode crossing is outside the bounded text profile",
-                    ),
-                    (
-                        "repeat",
-                        "long Decode crossing is outside the bounded text profile",
-                    ),
-                ):
-                    self.skipped_cases.append(
-                        {
-                            "name": f"decode-page-cross-{boundary}-{suffix}",
-                            "reason": reason,
-                            "sent": False,
-                        }
-                    )
-            for suffix in ("cold", "repeat"):
-                self.stages.append(
-                    {
-                        "name": f"decode_page_cross_0_{suffix}",
-                        "passed": False,
-                        "skipped": True,
-                        "case_names": [
-                            f"decode-page-cross-{b}-{suffix}"
-                            for b in deferred_boundaries
-                        ],
-                    }
-                )
             # Cross one committed Decode page start with a short exact answer.
-            # The original multi-page long-output cases remain explicitly skipped.
+            # Long outputs are checked separately in the bounded batch matrix.
             for boundary in decode_boundaries:
                 tag = f"BND-{boundary}"
                 prompt, ids = self.fit_prompt(
@@ -2406,7 +2379,8 @@ class Runner:
 
     def _orthogonal_decode_batches(self) -> None:
         owner_count = max(1, len(self.decode_role_addrs))
-        sizes = (1, 4, 8, 63, 64)
+        # Revisit the boundary after shrinking the batch to exercise refill.
+        sizes = (1, 4, 8, 15, 16, 1, 16, 15, 1)
         for stage_index, size in enumerate(sizes):
             name = f"orthogonal_decode_{stage_index:02d}_batch_{size}"
             cases = []
@@ -2414,11 +2388,11 @@ class Runner:
                 case = self.record_case(
                     f"{name}_{index:02d}",
                     index % owner_count,
-                    words=112 if size == 63 else 56 if size >= 64 else 12,
+                    words=112 if size == 15 else 56 if size == 16 else 12,
                 )
                 case = replace(
                     case,
-                    max_tokens=2560 if size == 63 else 1280 if size >= 64 else 256,
+                    max_tokens=2560 if size == 15 else 1280 if size == 16 else 256,
                     require_mtp_draft=True,
                     thinking_disabled=True,
                 )
@@ -2430,9 +2404,8 @@ class Runner:
         self._orthogonal_decode_graph_long_output()
 
     def _orthogonal_decode_graph_long_output(self) -> None:
-        # Keep the original batch-64 answer regression unchanged. This separate
-        # workload exercises both DP owners with long generated outputs.
-        name = "orthogonal_decode_graph_long_output_batch_64"
+        # Exercise both DP owners with long outputs within Prefill's limit.
+        name = "orthogonal_decode_graph_long_output_batch_16"
         owner_count = max(1, len(self.decode_role_addrs))
         cases = [
             replace(
@@ -2441,7 +2414,7 @@ class Runner:
                 require_mtp_draft=True,
                 thinking_disabled=True,
             )
-            for index in range(64)
+            for index in range(MAX_PREFILL_CONCURRENCY)
         ]
         self._required_stage(name, cases, concurrent=True, grouped_pd=True)
 

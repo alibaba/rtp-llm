@@ -98,12 +98,13 @@ def checkpoint_identity(path):
     }
 
 
-def stop_process(process, timeout=30):
+def stop_process(process, timeout=60):
     if process is None:
         return
-    # The group was created by this worker, never discovered by a name pattern.
+    # Let the supervisor drain frontends before terminating ranked backends.
+    # Group-wide TERM bypasses that ordering and breaks live TP connections.
     with contextlib.suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGTERM)
+        process.send_signal(signal.SIGTERM)
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:

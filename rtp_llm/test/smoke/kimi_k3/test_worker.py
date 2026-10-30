@@ -611,10 +611,42 @@ class NativePdSmokeTest(unittest.TestCase):
             role._cleanup_socket_directory()
 
     def test_cleanup_kills_only_the_owned_process_group(self):
-        process = SimpleNamespace(pid=123456, wait=lambda timeout: 0)
-        with patch.object(worker.os, "killpg") as kill:
-            worker.stop_process(process)
-        self.assertEqual({call.args[0] for call in kill.call_args_list}, {123456})
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                events = []
+
+                def wait(timeout):
+                    events.append(("wait", timeout))
+                    if timed_out and timeout == 60:
+                        raise subprocess.TimeoutExpired("owned-supervisor", timeout)
+
+                process = SimpleNamespace(
+                    pid=123456,
+                    send_signal=lambda sig: events.append(("parent", sig)),
+                    wait=wait,
+                )
+                with patch.object(
+                    worker.os,
+                    "killpg",
+                    side_effect=lambda pid, sig: events.append(("group", pid, sig)),
+                ):
+                    worker.stop_process(process)
+                self.assertEqual(
+                    events[:2], [("parent", worker.signal.SIGTERM), ("wait", 60)]
+                )
+                self.assertEqual(events[-1], ("group", 123456, worker.signal.SIGKILL))
+                self.assertTrue(
+                    all(
+                        event[2] == worker.signal.SIGKILL
+                        for event in events
+                        if event[0] == "group"
+                    )
+                )
+                if timed_out:
+                    self.assertEqual(
+                        events[2:4],
+                        [("group", 123456, worker.signal.SIGKILL), ("wait", 10)],
+                    )
 
     def test_cleanup_attempts_both_processes_and_preserves_each_failure(self):
         for failures in (

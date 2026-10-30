@@ -215,6 +215,34 @@ class ResultCheckTest(unittest.TestCase):
         self.assertFalse(verdict["host_load_timing_verified"])
         self.assertFalse(verdict["full_original_suite_passed"])
 
+    def test_declared_prewarm_is_separate_from_formal_stage_membership(self):
+        result = self.fixture()
+        warmup = dict(result["cases"][0], name="rdma_prewarm_1_0", phase="prewarm")
+        result["cases"].append(warmup)
+        result["summary"]["case_count"] += 1
+        result["rdma_prewarm"] = {
+            "enabled": True,
+            "attempts": [{"attempt": 1, "passed": True, "case_names": [warmup["name"]]}],
+        }
+        verdict = self.checked(result)
+        self.assertCountEqual(verdict["errors"], self.checked(self.fixture())["errors"])
+        self.assertEqual(verdict["formal_case_count"], 6)
+        self.assertEqual(verdict["prewarm_case_count"], 1)
+        del result["rdma_prewarm"]
+        self.assertIn("invalid RDMA prewarm membership", self.checked(result)["errors"])
+
+    def test_formal_case_cannot_be_hidden_as_prewarm(self):
+        result = self.fixture()
+        row = result["cases"][0]
+        row["phase"] = "prewarm"
+        result["rdma_prewarm"] = {
+            "enabled": True,
+            "attempts": [{"attempt": 1, "passed": True, "case_names": [row["name"]]}],
+        }
+        errors = self.checked(result)["errors"]
+        self.assertIn("invalid RDMA prewarm membership", errors)
+        self.assertIn("stage case membership is incomplete or duplicated", errors)
+
     def test_legacy_flow_suites_are_rejected(self):
         for suite in ("orthogonal-flow", "flow"):
             result = self.fixture()
@@ -361,7 +389,7 @@ class ResultCheckTest(unittest.TestCase):
                     verdict["errors"],
                 )
 
-    def test_skips_are_reported_and_not_counted_as_executed(self):
+    def test_application_profile_rejects_skipped_requests_or_stages(self):
         result = self.fixture()
         skipped = {
             "name": "deferred",
@@ -371,14 +399,39 @@ class ResultCheckTest(unittest.TestCase):
         result["skipped_cases"] = [skipped]
         result["summary"]["skipped_case_count"] = 1
         verdict = self.checked(result)
-        self.assert_only_missing_full_suite_evidence(verdict)
+        self.assertIn("application smoke contains skipped requests", verdict["errors"])
         self.assertEqual(verdict["case_count"], 6)
         self.assertEqual(verdict["skipped_cases"], [skipped])
         result["stages"][0]["skipped"] = True
+        self.assertTrue(
+            any(
+                "required smoke stage was skipped" in error
+                for error in self.checked(result)["errors"]
+            )
+        )
         self.assertIn(
             "stage case membership is incomplete or duplicated",
             self.checked(result)["errors"],
         )
+
+    def test_result_checker_rejects_prefill_admission_above_16(self):
+        for count in (16, 17):
+            for transport in ("http", "pd_group_rpc"):
+                with self.subTest(count=count, transport=transport):
+                    result = self.fixture()
+                    stage = result["stages"][0]
+                    stage["concurrent"] = transport == "http"
+                    stage["transport"] = transport
+                    stage["case_names"] = [f"case-{i}" for i in range(count)]
+                    if transport == "pd_group_rpc":
+                        stage["request_ids"] = dict(
+                            zip(stage["case_names"], range(count))
+                        )
+                    errors = self.checked(result)["errors"]
+                    self.assertEqual(
+                        any("Prefill concurrency exceeds 16" in error for error in errors),
+                        count > 16,
+                    )
 
     def test_full_suite_without_protocol_matrix_fails(self):
         result = self.fixture()
