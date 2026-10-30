@@ -19,6 +19,7 @@ namespace rtp_llm {
 
 class BlockTransferDispatcher;
 class BlockTreeTaskPool;
+struct CompletionStageContext;
 
 struct BlockTreeMatchResult {
     size_t                                              matched_device_blocks{0};
@@ -83,9 +84,10 @@ private:
     void                 scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
                                                    const std::shared_ptr<LoadAsyncContext>& context);
     bool                 validateLoadTaskLocked(const LoadTaskRunner::Task& task) const;
-    bool                 settleLoadLocked(LoadTaskRunner::Task&                           task,
-                                          bool                                            aggregate_success,
-                                          std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
+    bool                  settleLoadLocked(LoadTaskRunner::Task&                           task,
+                                           bool                                            aggregate_success,
+                                           std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts,
+                                           CompletionStageContext                          observation);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,

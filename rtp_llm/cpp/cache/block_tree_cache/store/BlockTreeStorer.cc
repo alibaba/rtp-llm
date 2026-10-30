@@ -115,7 +115,11 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
         request_id);
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() {
+        settleLocked(*task,
+                     /*publish=*/false,
+                     CompletionStageContext::forTransfer(metrics_reporter_, task->transfer_task, "store", false));
+    });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
@@ -175,20 +179,19 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
 }
 
 void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
-    auto observation = CompletionStageContext::forTask(metrics_reporter_, task->transfer_task, "store", error.ok());
-    auto total       = observation.start("completion_total", "business_completion");
-    auto queue       = observation.start("completion_queue_wait", "business_completion");
+    auto observation = CompletionStageContext::forTransfer(metrics_reporter_, task->transfer_task, "store", error.ok());
+    auto timers      = CompletionStageTimers::create(observation);
     const int64_t queue_begin = currentTimeUs();
-    auto          settle      = [this, task, observation, queue, total, queue_begin](bool queued) {
-        queue.finish(observation.success);
+    auto          settle      = [this, task, observation, timers, queue_begin](bool queued) {
+        timers.finishQueue(observation.success);
         bool                                   success = false;
-        block_tree_cache_detail::ScopeRollback finish([&] { total.finish(success); });
+        block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
         CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
         if (queued) {
             metrics_reporter_.reportQueueWaitMetric(
                 true, "business", "store", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
         }
-        success = settleTask(*task, observation.success);
+        success = settleTask(*task, observation);
         execute.setSuccess(success);
     };
     if (!task_pool_->submitCompletion([settle] { settle(true); })) {
@@ -197,8 +200,8 @@ void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInf
     }
 }
 
-bool BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
-    auto   observation = CompletionStageContext::forTask(metrics_reporter_, task.transfer_task, "store", copy_success);
+bool BlockTreeStorer::settleTask(const StoreTask& task, const CompletionStageContext& observation) {
+    const bool copy_success = observation.success;
     bool   stopping = false;
     size_t accepted = 0;
     {
@@ -209,7 +212,7 @@ bool BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
         }
         CompletionStageScope tree(observation, "completion_settle", "business_completion");
         stopping = stopping_.load();
-        accepted = settleLocked(task, copy_success && !stopping);
+        accepted = settleLocked(task, copy_success && !stopping, observation);
         tree.setSuccess(copy_success && !stopping);
     }
 
@@ -231,8 +234,8 @@ bool BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
     return copy_success && !stopping;
 }
 
-size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
-    auto observation = CompletionStageContext::forTask(metrics_reporter_, task.transfer_task, "store", publish);
+size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish, CompletionStageContext observation) {
+    observation.success = publish;
     BlockTreeInsertResult insert_result;
     if (publish) {
         CompletionStageScope                       tree(observation, "completion_publish_tree", "business_completion");
