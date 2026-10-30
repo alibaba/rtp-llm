@@ -43,7 +43,6 @@ py_test(
     srcs = ["ple_real_tp8_loading_test.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "8"},
-    timeout = "eternal",
     tags = [
         "H20_CU13",
         "open_skip",
