@@ -7,12 +7,12 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.engine.rtp.transfer.TransferRequest;
+import org.flexlb.mock.engine.RequestState;
 
 /** P owns one end-to-end native request; the local Forward owner retains KV only through LOAD. */
 final class PrefillGeneration implements AutoCloseable {
     private final RtpConfig config;
-    private final PrefillTransfer transfer;
+    private final LocalPrefill requests;
     private final org.flexlb.mock.multimodal.MediaClient vision = new org.flexlb.mock.multimodal.MediaClient();
     private final RpcChannels channels = new RpcChannels();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
@@ -24,13 +24,11 @@ final class PrefillGeneration implements AutoCloseable {
     private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
     private long nextOutputSweep;
-    private String address;
     private boolean closed;
 
-    PrefillGeneration(RtpConfig config, PrefillTransfer transfer) {
-        this.config = config; this.transfer = transfer; deadlines.setRemoveOnCancelPolicy(true);
+    PrefillGeneration(RtpConfig config, LocalPrefill requests) {
+        this.config = config; this.requests = requests; deadlines.setRemoveOnCancelPolicy(true);
     }
-    synchronized void address(String address) { this.address = address; }
 
     void generate(GenerateInputPB input, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
@@ -42,7 +40,7 @@ final class PrefillGeneration implements AutoCloseable {
         return start(input, response, attachMillis, false);
     }
     private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis, boolean grouped) {
-        transfer.validate(input);
+        requests.validate(input, true);
         // Batch admission already selects the PD protocol, even for a single output token.
         if (!grouped && !input.getGenerateConfig().getCanUsePdSeparation())
             throw Status.UNIMPLEMENTED.withDescription("Non-separated multi-token generation is not supported").asRuntimeException();
@@ -108,14 +106,14 @@ final class PrefillGeneration implements AutoCloseable {
             }
         }
         if (live.isEmpty()) return;
-        var results = transfer.start(config.id(), inputs);
+        var results = requests.submit(inputs);
         for (int i = 0; i < live.size(); i++) {
             var call = live.get(i); var result = results.get(i);
             synchronized (call) {
                 if (result.failure() != null) call.finish(result.failure());
-                else if (call.terminal) result.source().close();
+                else if (call.terminal) result.session().cancel();
                 else {
-                    call.source = result.source(); call.batchSource.complete(result.source());
+                    call.source = result.session(); call.batchSource.complete(result.session());
                 }
             }
         }
@@ -180,11 +178,12 @@ final class PrefillGeneration implements AutoCloseable {
         final BufferedOutput output;
         final boolean deferred;
         final CompletableFuture<Void> admitted = new CompletableFuture<>(), prepared = new CompletableFuture<>();
-        final CompletableFuture<PrefillTransfer.Source> batchSource;
+        final CompletableFuture<LocalPrefill.Session> batchSource;
         final String target;
         final long started = System.nanoTime(), deadline;
         final Context.CancellableContext context;
-        PrefillTransfer.Source source;
+        LocalPrefill.Session source;
+        RequestState.Use transferUse;
         Future<?> worker;
         ScheduledFuture<?> timeout;
         boolean terminal, priorityPreempted;
@@ -193,7 +192,7 @@ final class PrefillGeneration implements AutoCloseable {
             batchSource = grouped ? new CompletableFuture<>() : null;
             output = new BufferedOutput(workers, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10));
             context = (deferred ? Context.ROOT : Context.current()).withCancellation();
-            deadline = Math.min(deferred ? Long.MAX_VALUE : PrefillTransfer.deadline(Context.current()), input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
+            deadline = Math.min(deferred ? Long.MAX_VALUE : rpcDeadline(), input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
                 : started + TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
         }
         void attach(ServerCallStreamObserver<GenerateOutputsPB> response) {
@@ -203,7 +202,9 @@ final class PrefillGeneration implements AutoCloseable {
         void exchange() {
             try {
                 input = vision.prepare(input, deadline);
-                var inbox = new Inbox();
+                var inbox = new Inbox(error -> {
+                    synchronized (this) { if (source != null && !source.result.isDone()) finish(error); }
+                });
                 var stub = RpcServiceGrpc.newStub(channels.get(target));
                 if (deadline != Long.MAX_VALUE) stub = stub.withDeadlineAfter(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 var stream = stub.remoteGenerate(inbox);
@@ -212,7 +213,7 @@ final class PrefillGeneration implements AutoCloseable {
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
                 stream.onNext(GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(input.getRequestId()).setClientId(config.id())
-                    .setInput(allocationInput).addPeerAddrs(address).build());
+                    .setInput(allocationInput).build());
                 var allocated = inbox.next();
                 if (allocated == null || allocated.hasFlattenOutput() || allocated.hasErrorInfo() && allocated.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid ALLOCATE acknowledgement").asRuntimeException();
@@ -223,12 +224,18 @@ final class PrefillGeneration implements AutoCloseable {
                 synchronized (this) {
                     if (terminal) return;
                     if (batchSource == null)
-                        source = transfer.start(TransferRequest.newBuilder().setClientId(config.id()).setInput(input).build(), deadline);
+                        source = requests.submit(input, deadline, true);
                     admitted.complete(null);
                 }
-                stream.onNext(frame(RemoteStage.LOAD));
-                var first = source.ready().toCompletableFuture().get();
+                if (inbox.failure != null) throw Status.fromThrowable(inbox.failure)
+                    .asRuntimeException(Status.trailersFromThrowable(inbox.failure));
+                var first = source.completion().toCompletableFuture().get();
                 if (!first.status().isOk()) throw RtpErrors.failure(first.status(), first.engineCode());
+                synchronized (this) {
+                    if (terminal) return;
+                    transferUse = requests.beginTransfer(source);
+                }
+                stream.onNext(frame(RemoteStage.LOAD));
                 long ttft = System.nanoTime() - started;
                 boolean prefillFinished = first.output().getFlattenOutput().getFinished(0);
                 int prefillReuse = first.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen();
@@ -236,7 +243,12 @@ final class PrefillGeneration implements AutoCloseable {
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
-                source.acknowledged();
+                synchronized (this) {
+                    if (terminal) return;
+                    requests.transferCompleted(source, new RtpTransferResult(prefillFinished, null));
+                    requests.transferred(source);
+                    transferUse.close(); transferUse = null;
+                }
                 if (prefillFinished) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
                 else stream.onNext(frame(RemoteStage.GENERATE).toBuilder().setFirstGenerateTokenId(input.getTokenIds(input.getTokenIdsCount() - 1)).build());
                 stream.onCompleted();
@@ -272,8 +284,9 @@ final class PrefillGeneration implements AutoCloseable {
             context.cancel(null);
             if (source != null) {
                 if (error != null && Status.fromThrowable(error).getCode() == Status.Code.DEADLINE_EXCEEDED) source.expire();
-                else source.close();
+                else source.cancel();
             }
+            if (transferUse != null) { transferUse.close(); transferUse = null; }
             if (worker != null) worker.cancel(true);
             synchronized (PrefillGeneration.this) {
                 active.remove(input.getRequestId(), this);
@@ -285,12 +298,19 @@ final class PrefillGeneration implements AutoCloseable {
             output.finish(error);
         }
     }
+    private static long rpcDeadline() {
+        var deadline = Context.current().getDeadline();
+        return deadline == null ? Long.MAX_VALUE : RtpTasks.after(System.nanoTime(), deadline.timeRemaining(TimeUnit.NANOSECONDS));
+    }
     private static final class Inbox implements ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB> {
         final BlockingQueue<Object> values = new LinkedBlockingQueue<>(2);
+        volatile Throwable failure;
+        final java.util.function.Consumer<Throwable> failed;
+        Inbox(java.util.function.Consumer<Throwable> failed) { this.failed = failed; }
         final AtomicReference<ClientCallStreamObserver<GenerateRequestPB>> stream = new AtomicReference<>();
         @Override public void beforeStart(ClientCallStreamObserver<GenerateRequestPB> request) { stream.set(request); request.disableAutoRequestWithInitial(1); }
         @Override public void onNext(GenerateOutputsPB value) { values.add(value); }
-        @Override public void onError(Throwable error) { values.add(error); }
+        @Override public void onError(Throwable error) { failure = error; values.add(error); failed.accept(error); }
         @Override public void onCompleted() { values.add(Boolean.TRUE); }
         GenerateOutputsPB next() throws InterruptedException {
             var value = values.take();
