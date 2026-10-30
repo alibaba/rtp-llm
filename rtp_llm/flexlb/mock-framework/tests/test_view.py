@@ -84,6 +84,14 @@ def test_running_output_is_rejected(completed):
         experiment(completed)
 
 
+def test_case_without_view_saves_framework_default_dashboard(tmp_path):
+    case = compile_case(ROOT / 'cases/master_ha_failover/case.yaml', Registry.standard())
+    assert case.view == ROOT / 'views/default.json'
+    records = Records(tmp_path / 'result', case, {})
+    records.close({'status': 'PASS'})
+    assert json.loads((records.directory / 'view.json').read_text()) == json.loads(case.view.read_text())
+
+
 def test_case_saves_its_view_without_retaining_a_dependency_on_source(tmp_path):
     case = compile_case(ROOT / 'cases/basic/case.yaml', Registry.standard())
     view = tmp_path / 'view.json'

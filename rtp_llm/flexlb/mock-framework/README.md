@@ -399,7 +399,7 @@ uv run --locked mock-case run cases/basic/case.yaml \
 
 默认大盘的分区、聚合、地址筛选、标签来源和未实现观测见 [views/README.md](views/README.md)。
 
-基础 Case 在末尾用 `view: ../../views/default.json` 引用通用的原生 Grafana 大盘 JSON，独立于 environment。执行时把这份 view 保存为结果目录下的 view.json，避免以后修改源文件改变已完成实验的展示。配置仍由配置加载器负责，view 不参与发压、调度或门禁判定。
+Case 省略 `view` 时默认使用框架自带的 `views/default.json`，与 Case 所在目录无关；需要自定义大盘时，显式配置 `view: <路径>` 覆盖默认值。执行时把这份原生 Grafana JSON 保存为结果目录下的 view.json，避免以后修改源文件改变已完成实验的展示。View 用于实验结束后的复盘，不参与发压、调度、Prometheus 采集或门禁判定，也不会自动启动查看服务。运行准备阶段会读取并校验大盘文件，文件缺失或格式错误会使启动报错；未保存 view.json 的旧结果不会被自动补写。
 
 ```sh
 uv run --locked mock-view /tmp/basic-result \
