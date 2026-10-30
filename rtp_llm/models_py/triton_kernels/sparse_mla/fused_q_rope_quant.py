@@ -16,6 +16,7 @@ import math
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
 @triton.jit
@@ -179,23 +180,27 @@ def fused_q_rope_quant(
 
     if num_tokens > 0:
         grid = (num_tokens, index_n_heads)
-        _fused_q_rope_hadamard_quant_kernel[grid](
-            positions,
-            q,
-            q.stride(0),
-            q.stride(1),
-            cos_sin_cache,
-            cos_sin_cache.stride(0),
-            half_rot_dim,
-            q_fp8,
-            q_fp8.stride(0),
-            q_fp8.stride(1),
-            q_scale,
-            q_scale.stride(0),
-            scratch,
-            index_head_dim,
-            is_neox_style,
-            log2_head_dim,
+        _cpu_launch.launch(
+            _fused_q_rope_hadamard_quant_kernel,
+            grid,
+            (
+                positions,
+                q,
+                q.stride(0),
+                q.stride(1),
+                cos_sin_cache,
+                cos_sin_cache.stride(0),
+                half_rot_dim,
+                q_fp8,
+                q_fp8.stride(0),
+                q_fp8.stride(1),
+                q_scale,
+                q_scale.stride(0),
+                scratch,
+                index_head_dim,
+                is_neox_style,
+                log2_head_dim,
+            ),
             num_warps=1,
         )
 
@@ -409,27 +414,31 @@ def fused_qk_rope_quant(
 
     if num_tokens > 0:
         grid = (num_tokens, index_n_heads)
-        _fused_qk_rope_hadamard_quant_kernel[grid](
-            positions,
-            q,
-            q.stride(0),
-            q.stride(1),
-            k,
-            k.stride(0),
-            cos_sin_cache,
-            cos_sin_cache.stride(0),
-            half_rot_dim,
-            q_fp8,
-            q_fp8.stride(0),
-            q_fp8.stride(1),
-            q_scale,
-            q_scale.stride(0),
-            k_out,
-            k_out.stride(0),
-            scratch,
-            index_head_dim,
-            is_neox_style,
-            log2_head_dim,
+        _cpu_launch.launch(
+            _fused_qk_rope_hadamard_quant_kernel,
+            grid,
+            (
+                positions,
+                q,
+                q.stride(0),
+                q.stride(1),
+                k,
+                k.stride(0),
+                cos_sin_cache,
+                cos_sin_cache.stride(0),
+                half_rot_dim,
+                q_fp8,
+                q_fp8.stride(0),
+                q_fp8.stride(1),
+                q_scale,
+                q_scale.stride(0),
+                k_out,
+                k_out.stride(0),
+                scratch,
+                index_head_dim,
+                is_neox_style,
+                log2_head_dim,
+            ),
             num_warps=1,
         )
 

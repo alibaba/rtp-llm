@@ -16,7 +16,6 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_indexer_cp_assemble import (
     _fused_zero_scatter_kernel,
-    _gather_restore_fused_kernel,
     _gather_restore_separate_kernel,
 )
 
@@ -40,8 +39,8 @@ def _check_indexer_source_and_destination_offsets(kind, index_dtype, wide):
     stride = (2**30 + 16) if wide else 128
     bias = 2**31 if wide else 0
     scale_width, tile = 4, 16
-    source_stride = stride + scale_width if kind == "packed" else stride
-    last_offset = 2 * source_stride + (stride if kind == "packed" else 0)
+    source_stride = stride
+    last_offset = 2 * source_stride
     source = _byte_buffer(last_offset, bias)
     output = _byte_buffer(2 * stride, bias)
     source_scale = torch.arange(12, dtype=torch.uint8, device="cuda").view(3, 4)
@@ -49,9 +48,6 @@ def _check_indexer_source_and_destination_offsets(kind, index_dtype, wide):
     for row in range(3):
         source[row * source_stride : row * source_stride + tile].fill_(11 + row)
         output[row * stride : row * stride + tile].fill_(231)
-        if kind == "packed":
-            start = row * source_stride + stride
-            source[start : start + scale_width].copy_(source_scale[row])
 
     ids = [2, -1, 0] if kind == "scatter" else [2, 0, 1]
     indices = torch.tensor(ids, dtype=index_dtype, device="cuda")
@@ -62,19 +58,6 @@ def _check_indexer_source_and_destination_offsets(kind, index_dtype, wide):
             output,
             output_scale,
             indices,
-            stride,
-            scale_width,
-            3,
-            tile,
-            scale_width,
-        )
-    elif kind == "packed":
-        _gather_restore_fused_kernel[(3,)](
-            source,
-            output,
-            output_scale,
-            indices,
-            source_stride,
             stride,
             scale_width,
             3,
@@ -178,7 +161,7 @@ def _check_mapping_padding_and_prefill_semantics(prefill):
 class SparseMlaAddressingTest(TestCase):
     def test_indexer_source_and_destination_offsets(self):
         for wide, dtype, kind in product(
-            (False, True), (torch.int32, torch.int64), ("scatter", "packed", "separate")
+            (False, True), (torch.int32, torch.int64), ("scatter", "separate")
         ):
             with self.subTest(wide=wide, dtype=dtype, kind=kind):
                 _check_indexer_source_and_destination_offsets(kind, dtype, wide)

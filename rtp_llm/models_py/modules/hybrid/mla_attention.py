@@ -2,10 +2,9 @@ from contextlib import ExitStack, nullcontext
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -15,6 +14,7 @@ from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 # CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
 # q_b_proj is fp8, we additionally emit fp8+scale to skip a separate
@@ -419,6 +419,7 @@ class MlaAttention(nn.Module):
         q_c = None
         q_c_fp8 = None
         q_c_scale = None
+        paired_kv = None
         if self.q_lora_rank > 0:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
@@ -433,10 +434,32 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). The
-            # FP8 variants emit the exact FP8+scale pair consumed by q_b_proj;
-            # HY4's all-MXFP8 Indexer path does not need a BF16 q_c copy.
-            if self._fuse_q_a_norm_mode == "mxfp8_indexer":
+            # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
+            # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
+            # so q_b_proj can use input_scales= and skip its internal quant.
+            paired = None
+            if (
+                _prefill_optimization.ENABLED
+                and self._fuse_q_a_norm_mode in ("fp8_dual", "bf16")
+                and self._fuse_kv_a_norm
+            ):
+                from rtp_llm.models_py.triton_kernels.common.mla_norm_pair import (
+                    try_mla_norm_pair,
+                )
+
+                paired = try_mla_norm_pair(
+                    q,
+                    compressed_kv[:, : self.kv_lora_rank],
+                    self.q_a_layernorm.weight.data,
+                    self.kv_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                    self.kv_a_layernorm.variance_epsilon,
+                    fp8=self._fuse_q_a_norm_mode == "fp8_dual",
+                    scale_ue8m0=getattr(self.q_b_proj, "scale_ue8m0", False),
+                )
+            if paired is not None:
+                q_c, q_c_fp8, q_c_scale, paired_kv = paired
+            elif self._fuse_q_a_norm_mode == "mxfp8_indexer":
                 q_c_fp8, q_c_scale = fused_strided_rmsnorm_per_token_fp8_quant(
                     q,
                     self.q_a_layernorm.weight.data,
@@ -526,7 +549,9 @@ class MlaAttention(nn.Module):
         )
 
         # F2: fused strided RMSNorm on compressed_kv (skip .contiguous() copy)
-        if self._fuse_kv_a_norm:
+        if paired_kv is not None:
+            compressed_kv = paired_kv
+        elif self._fuse_kv_a_norm:
             compressed_kv = fused_strided_rmsnorm(
                 compressed_kv,
                 self.kv_a_layernorm.weight.data,

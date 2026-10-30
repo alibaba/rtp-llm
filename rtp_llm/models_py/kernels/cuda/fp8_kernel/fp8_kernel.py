@@ -6,7 +6,8 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
+from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops as _cpu_ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
     get_cutlass_groupgemm_best_config,
 )
@@ -15,7 +16,6 @@ from rtp_llm.models_py.utils.math import align
 
 if is_cuda():
     from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
-
     from rtp_llm.ops.compute_ops import (
         per_tensor_quant_fp8,
         per_token_group_quant_fp8,
@@ -32,6 +32,7 @@ fp8_dtype = torch.float8_e4m3fn
 finfo = torch.finfo(fp8_dtype)
 fp8_max = finfo.max
 fp8_min = -fp8_max
+_CPU_PATH = _prefill_optimization.ENABLED
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -80,6 +81,12 @@ def create_per_token_group_quant_fp8_output_scale(
         x_s_mn, x_s_k = x_q_mn, x_q_k // 128
         aligned_mn = ceil_align(x_s_mn, 4)
         aligned_k = ceil_align(x_s_k, 4)
+        if _CPU_PATH and not x_batch:
+            # Keep the full padded allocation: TMA may access padded rows.
+            # One view replaces transpose plus the two-dimensional slice.
+            return torch.empty(
+                (aligned_k // 4, aligned_mn), device=device, dtype=torch.int
+            ).as_strided((x_s_mn, aligned_k // 4), (1, max(1, aligned_mn)))
         # TODO(FIXME): Fix cuda kernel and recover here to empty.
         return torch.empty(
             (*x_batch, aligned_k // 4, aligned_mn),
@@ -126,15 +133,31 @@ def sgl_per_token_group_quant_fp8(
     assert x.is_contiguous(), "`x` is not contiguous"
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
-    x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
-    x_s = create_per_token_group_quant_fp8_output_scale(
-        x_shape=out_shape,
-        device=x.device,
-        group_size=group_size,
-        column_major_scales=column_major_scales,
-        scale_tma_aligned=scale_tma_aligned,
-        scale_ue8m0=scale_ue8m0,
+    allocator = (
+        _cpu_ops.native()
+        if _cpu_ops.NATIVE_ALLOC
+        and x.is_cuda
+        and len(out_shape) == 2
+        and group_size == 128
+        and column_major_scales
+        and scale_tma_aligned
+        and (not scale_ue8m0 or out_shape[1] % 512 == 0)
+        else None
     )
+    if allocator is not None:
+        _, x_q, x_s, _ = allocator.norm_outputs(
+            out_shape[0], out_shape[1], 0, x.device.index, scale_ue8m0, False
+        )
+    else:
+        x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
+        x_s = create_per_token_group_quant_fp8_output_scale(
+            x_shape=out_shape,
+            device=x.device,
+            group_size=group_size,
+            column_major_scales=column_major_scales,
+            scale_tma_aligned=scale_tma_aligned,
+            scale_ue8m0=scale_ue8m0,
+        )
     if x.shape[0] > 0:
         quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
 
@@ -445,9 +468,7 @@ def requant_weight_ue8m0(
     )
     *batch_dims, n, k = weight_dequant.shape
     weight_dequant_flat = weight_dequant.view((-1, k))
-    out_w_flat, out_s_flat = per_block_cast_to_fp8(
-        weight_dequant_flat, use_ue8m0=True
-    )
+    out_w_flat, out_s_flat = per_block_cast_to_fp8(weight_dequant_flat, use_ue8m0=True)
 
     out_w = out_w_flat.view((*batch_dims, n, k))
     out_s = out_s_flat.view(

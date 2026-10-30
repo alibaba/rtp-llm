@@ -1,8 +1,8 @@
-import torch
-from torch import nn
-
 import rtp_llm.ops.compute_ops as compute_ops
+import torch
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
+from torch import nn
 
 
 class SelectTopk(nn.Module):
@@ -37,7 +37,24 @@ class GroupTopK(nn.Module):
         renormalize: bool,
         routed_scaling_factor: float,
     ):
-        scores = scores.sigmoid()
+        if _prefill_optimization.ENABLED:
+            from rtp_llm.models_py.triton_kernels.moe.router_single_group import (
+                try_single_group_router,
+            )
+
+            if try_single_group_router(
+                scores,
+                correction_bias,
+                topk_weights,
+                topk_ids,
+                n_group,
+                topk_group,
+                topk,
+                renormalize,
+                routed_scaling_factor,
+            ):
+                return
+        scores = scores.float().sigmoid()
         scores_with_bias = scores + correction_bias.unsqueeze(0)
         self.group_topk_op.forward(
             topk_weights,

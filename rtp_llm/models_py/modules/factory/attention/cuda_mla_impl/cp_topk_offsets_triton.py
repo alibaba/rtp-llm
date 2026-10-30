@@ -5,6 +5,7 @@ import os
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
 @triton.jit
@@ -87,19 +88,23 @@ def offset_cp_topk(
         device=indices.device,
     )
     if indices.numel():
-        _offset_topk_kernel[(triton.cdiv(indices.numel(), 256),)](
-            indices,
-            offsets,
-            result,
-            indices.shape[0],
-            indices.shape[1],
-            indices.stride(0),
-            indices.stride(1),
-            offsets.stride(0),
-            restore_indices if restore_indices is not None else indices,
-            restore_indices.numel() if restore_indices is not None else 0,
-            physical_rows,
-            REMAP=restore_indices is not None,
-            BLOCK=256,
+        _cpu_launch.launch(
+            _offset_topk_kernel,
+            (triton.cdiv(indices.numel(), 256),),
+            (
+                indices,
+                offsets,
+                result,
+                indices.shape[0],
+                indices.shape[1],
+                indices.stride(0),
+                indices.stride(1),
+                offsets.stride(0),
+                restore_indices if restore_indices is not None else indices,
+                restore_indices.numel() if restore_indices is not None else 0,
+                physical_rows,
+                restore_indices is not None,
+                256,
+            ),
         )
     return result

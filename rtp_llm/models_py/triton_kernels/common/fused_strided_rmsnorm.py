@@ -40,7 +40,6 @@ contention noise, not a real loss zone.
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
@@ -51,6 +50,7 @@ from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
     create_mxfp8_packed_scale,
     mxfp8_quant_act_packed,
 )
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 MAX_INREG_H = 8192
 
@@ -246,7 +246,6 @@ def _baseline_strided_rmsnorm_fp8_quant(
     normed = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
     if mxfp8_semantics:
         return mxfp8_quant_act_packed(normed)
-
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     return sgl_per_token_group_quant_fp8(
@@ -268,6 +267,7 @@ def _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
     mxfp8_semantics: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import flashinfer.norm
+
 
     bf16_out = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
     if mxfp8_semantics:
@@ -327,27 +327,31 @@ def fused_strided_rmsnorm(
     fp8_min = -fp8_max
     grid = (T,)
 
-    _fused_strided_rmsnorm_singlepass_kernel[grid](
-        x,
-        weight,
-        bf16_out,
-        bf16_out,  # fp8_out_ptr unused
-        bf16_out,  # scale_out_ptr unused
-        H,
-        eps,
-        fp8_max,
-        fp8_min,
-        x.stride(0),
-        bf16_out.stride(0),
-        bf16_out.stride(0),  # stride_o_t unused
-        0,
-        0,
-        BLOCK_N=block_n,
-        GROUP_SIZE=128,
-        HAS_BF16_OUT=True,
-        HAS_FP8_OUT=False,
-        SCALE_UE8M0=False,
-        MXFP8_SEMANTICS=False,
+    _cpu_launch.launch(
+        _fused_strided_rmsnorm_singlepass_kernel,
+        grid,
+        (
+            x,
+            weight,
+            bf16_out,
+            bf16_out,
+            bf16_out,
+            H,
+            eps,
+            fp8_max,
+            fp8_min,
+            x.stride(0),
+            bf16_out.stride(0),
+            bf16_out.stride(0),
+            0,
+            0,
+            block_n,
+            128,
+            True,
+            False,
+            False,
+            False,
+        ),
         num_warps=_select_num_warps(H),
     )
     return bf16_out
@@ -406,27 +410,31 @@ def fused_strided_rmsnorm_per_token_fp8_quant(
     fp8_min = -fp8_max
     grid = (T,)
 
-    _fused_strided_rmsnorm_singlepass_kernel[grid](
-        x,
-        weight,
-        fp8_out,  # bf16_out_ptr unused
-        fp8_out,
-        scale_out,
-        H,
-        eps,
-        fp8_max,
-        fp8_min,
-        x.stride(0),
-        fp8_out.stride(0),  # stride_b_t unused
-        fp8_out.stride(0),
-        scale_out.stride(0),
-        scale_out.stride(1),
-        BLOCK_N=block_n,
-        GROUP_SIZE=group_size,
-        HAS_BF16_OUT=False,
-        HAS_FP8_OUT=True,
-        SCALE_UE8M0=scale_ue8m0,
-        MXFP8_SEMANTICS=mxfp8_semantics,
+    _cpu_launch.launch(
+        _fused_strided_rmsnorm_singlepass_kernel,
+        grid,
+        (
+            x,
+            weight,
+            fp8_out,
+            fp8_out,
+            scale_out,
+            H,
+            eps,
+            fp8_max,
+            fp8_min,
+            x.stride(0),
+            fp8_out.stride(0),
+            fp8_out.stride(0),
+            scale_out.stride(0),
+            scale_out.stride(1),
+            block_n,
+            group_size,
+            False,
+            True,
+            scale_ue8m0,
+            mxfp8_semantics,
+        ),
         num_warps=_select_num_warps(H),
     )
     return fp8_out, scale_out
@@ -483,27 +491,31 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
     fp8_min = -fp8_max
     grid = (T,)
 
-    _fused_strided_rmsnorm_singlepass_kernel[grid](
-        x,
-        weight,
-        bf16_out,
-        fp8_out,
-        scale_out,
-        H,
-        eps,
-        fp8_max,
-        fp8_min,
-        x.stride(0),
-        bf16_out.stride(0),
-        fp8_out.stride(0),
-        scale_out.stride(0),
-        scale_out.stride(1),
-        BLOCK_N=block_n,
-        GROUP_SIZE=group_size,
-        HAS_BF16_OUT=True,
-        HAS_FP8_OUT=True,
-        SCALE_UE8M0=scale_ue8m0,
-        MXFP8_SEMANTICS=mxfp8_semantics,
+    _cpu_launch.launch(
+        _fused_strided_rmsnorm_singlepass_kernel,
+        grid,
+        (
+            x,
+            weight,
+            bf16_out,
+            fp8_out,
+            scale_out,
+            H,
+            eps,
+            fp8_max,
+            fp8_min,
+            x.stride(0),
+            bf16_out.stride(0),
+            fp8_out.stride(0),
+            scale_out.stride(0),
+            scale_out.stride(1),
+            block_n,
+            group_size,
+            True,
+            True,
+            scale_ue8m0,
+            mxfp8_semantics,
+        ),
         num_warps=_select_num_warps(H),
     )
     return bf16_out, fp8_out, scale_out

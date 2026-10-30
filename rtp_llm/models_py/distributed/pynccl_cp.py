@@ -4,9 +4,9 @@ The regular ``torch.distributed`` path creates a ProcessGroupNCCL ``Work``
 object and manages internal CUDA events for every collective. GLM5 prefill
 issues several small CP AllGathers per sparse-MLA layer, so that host-side
 control cost is measurable. ``GLM5_CP_OPT=1`` enables the complete optimization
-stack: direct ``ctypes`` submission of ``ncclAllGather``, registered symmetric
-output windows, and packed Indexer K gather. With the switch unset or set to
-zero, callers use the original torch/c10d and separate-gather paths.
+stack: direct ``ctypes`` submission of ``ncclAllGather`` and registered
+symmetric output windows. With the switch unset or set to zero, callers use
+the original torch/c10d paths.
 
 The direct path owns a second NCCL communicator containing exactly the ranks
 from the supplied torch process group.  Callers in the GLM5 hot path consume
@@ -25,6 +25,7 @@ from typing import Any, Dict, Tuple
 
 import torch
 import torch.distributed as dist
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 
 _ncclComm_t = ctypes.c_void_p
 _cudaStream_t = ctypes.c_void_p
@@ -69,7 +70,21 @@ def _env_enabled(name: str) -> bool:
 # Resolve once at import. Production sets the flag before the worker starts;
 # avoiding an os.environ lookup in every layer keeps the dispatcher negligible.
 _OPT_ENABLED = _env_enabled("GLM5_CP_OPT")
+_CPU_PATH = _prefill_optimization.ENABLED
+_GET_RAW_STREAM = getattr(torch._C, "_cuda_getCurrentRawStream", None)
 _PYNCCL_VALIDATE = _env_enabled("GLM5_CP_PYNCCL_VALIDATE")
+
+
+def _current_stream_ptr(device: torch.device) -> int:
+    # Query the caller's current stream every time, including inside overlap
+    # stream contexts. Avoid constructing a Python Stream for pointer-only IO.
+    if _CPU_PATH and _GET_RAW_STREAM is not None and device.index is not None:
+        return _GET_RAW_STREAM(device.index)
+    return torch.cuda.current_stream(device).cuda_stream
+
+
+def _stream_ptr(stream) -> int:
+    return stream if isinstance(stream, int) else stream.cuda_stream
 
 
 class _NCCLLib:
@@ -210,8 +225,7 @@ _INDEXER_BUFFERS: Dict[Tuple[Any, ...], Tuple[Any, Any]] = {}
 
 # Legacy output-window state is process-persistent. MLA cKV and kPE need
 # distinct buffers until their common restore has consumed both outputs.
-# Packed Indexer FP8 K+scale is excluded here; its opt-in registration uses
-# both endpoints in _INDEXER_BUFFERS instead.
+# Indexer FP8 K uses separate registered endpoints in _INDEXER_BUFFERS.
 _SYMM_INIT_BUDGET_NBYTES = 1024 * 1024 * 1024
 _SYMM_POOLS: Dict[Tuple[Any, int], Any] = {}
 _SYMM_POOL_FAILED: set[Tuple[Any, int]] = set()
@@ -394,7 +408,7 @@ def _registered_indexer_all_gather(input, group, role):
     """
     if (
         os.environ.get("RTP_LLM_CP_INDEXER_REGISTERED", "0") != "1"
-        or role not in ("indexer_k_quant", "indexer_k_packed")
+        or role != "indexer_k_quant"
         or input.numel() == 0
         or torch.cuda.is_current_stream_capturing()
     ):
@@ -470,7 +484,7 @@ def all_gather_kv_overlap(
         input.numel(),
         input.dtype,
         comm,
-        torch.cuda.current_stream(input.device).cuda_stream,
+        _current_stream_ptr(input.device),
     )
     return output
 
@@ -676,7 +690,7 @@ def _symm_output(
 def _pynccl_symm_all_gather(
     output: torch.Tensor,
     input: torch.Tensor,
-    stream: torch.cuda.Stream,
+    stream: torch.cuda.Stream | int,
     process_group,
 ) -> None:
     lib, comm = _require_comm(process_group, input.device)
@@ -689,19 +703,19 @@ def _pynccl_symm_all_gather(
         input.numel(),
         input.dtype,
         comm,
-        stream.cuda_stream,
+        _stream_ptr(stream),
     )
 
 
 def _symm_stream_allowed(
     role: str,
-    stream: torch.cuda.Stream,
+    stream: torch.cuda.Stream | int,
     process_group,
     device: torch.device,
 ) -> bool:
     """Persistent role buffers are safe only on one stream's ordered timeline."""
     key = (*_comm_key(process_group, device), role)
-    stream_ptr = int(stream.cuda_stream)
+    stream_ptr = int(_stream_ptr(stream))
     previous = _SYMM_ROLE_STREAMS.get(key)
     if previous is None:
         _SYMM_ROLE_STREAMS[key] = stream_ptr
@@ -796,7 +810,9 @@ def all_gather_into_tensor(
     # on the fixed GLM5 call-site contracts; opt in when diagnosing a new path.
     if _PYNCCL_VALIDATE:
         _validate_all_gather(output, input, process_group)
-    gather_stream = stream or torch.cuda.current_stream(input.device)
+    stream_ptr = (
+        stream.cuda_stream if stream is not None else _current_stream_ptr(input.device)
+    )
     lib, comm = _require_comm(process_group, input.device)
     lib.all_gather(
         input.data_ptr(),
@@ -804,7 +820,7 @@ def all_gather_into_tensor(
         input.numel(),
         input.dtype,
         comm,
-        gather_stream.cuda_stream,
+        stream_ptr,
     )
 
 
@@ -837,7 +853,11 @@ def all_gather(
     )
     gather_stream = None
     if output is not None:
-        gather_stream = torch.cuda.current_stream(input.device)
+        gather_stream = (
+            _current_stream_ptr(input.device)
+            if _CPU_PATH
+            else torch.cuda.current_stream(input.device)
+        )
         if not _symm_stream_allowed(role, gather_stream, process_group, input.device):
             # A separate stream could still be reading the persistent role
             # buffer. Use an ordinary output instead of adding hot-path events.

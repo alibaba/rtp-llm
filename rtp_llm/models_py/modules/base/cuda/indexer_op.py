@@ -5,17 +5,19 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-from torch import nn
-
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
+    paged_mqa_context_lens,
+)
 from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
     physical_block_table as _physical_block_table,
 )
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+from torch import nn
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
@@ -62,6 +64,8 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
 
 
 def _fp8_prefill_topk_canonicalize() -> bool:
+    if _prefill_optimization.ENABLED:
+        return True
     return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
         "1",
         "true",

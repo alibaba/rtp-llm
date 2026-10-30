@@ -15,6 +15,7 @@ Layout:
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
 @triton.jit
@@ -122,15 +123,19 @@ def strided_slice_copy_(
     BLOCK_R = triton.next_power_of_2(R)
 
     grid = (triton.cdiv(n_rows, BLOCK_ROWS),)
-    _strided_slice_copy_kernel[grid](
-        src,
-        dst,
-        n_rows,
-        R,
-        dst_col_offset,
-        src_stride_row,
-        dst_stride_row,
-        BLOCK_ROWS=BLOCK_ROWS,
-        BLOCK_R=BLOCK_R,
+    _cpu_launch.launch(
+        _strided_slice_copy_kernel,
+        grid,
+        (
+            src,
+            dst,
+            n_rows,
+            R,
+            dst_col_offset,
+            src_stride_row,
+            dst_stride_row,
+            BLOCK_ROWS,
+            BLOCK_R,
+        ),
         num_warps=4,
     )

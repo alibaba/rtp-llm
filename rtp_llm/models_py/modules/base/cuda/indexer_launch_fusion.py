@@ -1,10 +1,10 @@
 """Optional integer postprocessing for the FP8 indexer."""
 
-import os
-
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
 @triton.jit
@@ -106,7 +106,7 @@ def try_write_topk(
     canonicalize: bool,
 ) -> bool:
     """Write the original Torch canonicalization/offset result into a disjoint view."""
-    if os.environ.get("RTP_INDEXER_FUSED_TOPK", "0") != "1" or not topk_is_supported(
+    if not _prefill_optimization.ENABLED or not topk_is_supported(
         indices, offsets, out
     ):
         return False
@@ -114,19 +114,22 @@ def try_write_topk(
         return True
     sentinel = torch.iinfo(indices.dtype).max
     if canonicalize and indices.shape[1] <= 2048:
-        _sort_and_write_topk_kernel[(indices.shape[0],)](
-            indices,
-            offsets,
-            out,
-            indices.shape[1],
-            indices.stride(0),
-            indices.stride(1),
-            offsets.stride(0),
-            out.stride(0),
-            sentinel,
-            indices.dtype == torch.int64 or offsets.dtype == torch.int64,
-            BLOCK=triton.next_power_of_2(indices.shape[1]),
-            # Wide sorting networks need more lanes to limit per-thread work.
+        _cpu_launch.launch(
+            _sort_and_write_topk_kernel,
+            (indices.shape[0],),
+            (
+                indices,
+                offsets,
+                out,
+                indices.shape[1],
+                indices.stride(0),
+                indices.stride(1),
+                offsets.stride(0),
+                out.stride(0),
+                sentinel,
+                indices.dtype == torch.int64 or offsets.dtype == torch.int64,
+                triton.next_power_of_2(indices.shape[1]),
+            ),
             num_warps=16 if indices.shape[1] >= 1024 else 4,
         )
         return True
@@ -134,31 +137,39 @@ def try_write_topk(
         sortable = torch.empty(
             indices.shape, device=indices.device, dtype=indices.dtype
         )
-        _sentinel_kernel[(triton.cdiv(indices.numel(), 256),)](
+        _cpu_launch.launch(
+            _sentinel_kernel,
+            (triton.cdiv(indices.numel(), 256),),
+            (
+                indices,
+                sortable,
+                indices.numel(),
+                indices.shape[1],
+                indices.stride(0),
+                indices.stride(1),
+                sentinel,
+                256,
+            ),
+        )
+        indices = torch.sort(sortable, dim=-1).values
+    _cpu_launch.launch(
+        _finish_topk_kernel,
+        (triton.cdiv(indices.numel(), 256),),
+        (
             indices,
-            sortable,
+            offsets,
+            out,
             indices.numel(),
             indices.shape[1],
             indices.stride(0),
             indices.stride(1),
+            offsets.stride(0),
+            out.stride(0),
+            out.stride(1),
+            canonicalize,
             sentinel,
-            BLOCK=256,
-        )
-        indices = torch.sort(sortable, dim=-1).values
-    _finish_topk_kernel[(triton.cdiv(indices.numel(), 256),)](
-        indices,
-        offsets,
-        out,
-        indices.numel(),
-        indices.shape[1],
-        indices.stride(0),
-        indices.stride(1),
-        offsets.stride(0),
-        out.stride(0),
-        out.stride(1),
-        canonicalize,
-        sentinel,
-        indices.dtype == torch.int64 or offsets.dtype == torch.int64,
-        BLOCK=256,
+            indices.dtype == torch.int64 or offsets.dtype == torch.int64,
+            256,
+        ),
     )
     return True

@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
 @triton.jit
@@ -29,7 +30,15 @@ def try_pad_rows(source: torch.Tensor, rows: int) -> torch.Tensor | None:
     output = torch.empty(
         (rows, source.shape[1]), dtype=source.dtype, device=source.device
     )
-    _pad_rows_kernel[(triton.cdiv(output.numel(), 1024),)](
-        source, output, source.numel(), output.numel(), BLOCK=1024
+    _cpu_launch.launch(
+        _pad_rows_kernel,
+        (triton.cdiv(output.numel(), 1024),),
+        (
+            source,
+            output,
+            source.numel(),
+            output.numel(),
+            1024,
+        ),
     )
     return output

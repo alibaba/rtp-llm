@@ -3,7 +3,7 @@
 import os
 
 import torch
-
+from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.pynccl_cp import (
     all_gather,
@@ -24,6 +24,14 @@ def prefix_plan(prefixes, lengths, size, rank, owner):
         raise ValueError("invalid CP prefix plan")
     if owner < 1 or any(p < 0 or q < 0 for p, q in zip(prefixes, lengths)):
         raise ValueError("prefix/new lengths must be nonnegative")
+    from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops
+
+    if prefill_cpu_ops.NATIVE_PLAN and all(
+        isinstance(v, int) for v in (*prefixes, *lengths)
+    ):
+        library = prefill_cpu_ops.native()
+        if library is not None:
+            return library.prefix_plan(prefixes, lengths, size, rank, owner)
     options = dict(dtype=torch.int64, device="cpu")
     padded = [((p + size * owner - 1) // (size * owner)) * owner for p in prefixes]
     actual = [
@@ -94,6 +102,20 @@ class CrossLayerKvPrefetch:
         self.buffers = [self.op._allocate_fused_kv() for _ in range(2)]
         width = self.buffers[0].size(1)
         options = dict(dtype=torch.bfloat16, device=self.device)
+        self.reuse_events = _prefill_optimization.ENABLED
+        self.reuse_workspace = _prefill_optimization.ENABLED
+        self.fuse_new_restore = _prefill_optimization.ENABLED
+        self.compute_ready = torch.cuda.Event() if self.reuse_events else None
+        self.new_local = (
+            torch.empty((plan["new_max"], width), **options)
+            if self.reuse_workspace
+            else None
+        )
+        self.new_restored = (
+            torch.empty((sum(lengths), width), **options)
+            if self.reuse_workspace and not self.fuse_new_restore
+            else None
+        )
         pair = registered_kv_overlap_buffers(
             plan["history_padded"], width, torch.bfloat16, self.device, Group.TP
         )
@@ -162,26 +184,50 @@ class CrossLayerKvPrefetch:
             source = kv_cache.kv_cache_base.view(torch.uint8)
             source = source.reshape(-1, 1, source.size(-1))
             count = self.new_slots["hbm"].size(1)
-            local = torch.zeros(
-                (self.plan["new_max"], self.buffers[0].size(1)),
-                dtype=torch.bfloat16,
-                device=self.device,
-            )
-            if count:
-                location = "host" if layer in self.cache.host_layers else "hbm"
-                rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
-                    source,
-                    local,
-                    self.new_slots[location],
-                    self.new_lengths,
-                    self.new_starts,
-                    1,
-                    count,
+            location = "host" if layer in self.cache.host_layers else "hbm"
+            local = None
+            if _prefill_optimization.ENABLED:
+                from rtp_llm.models_py.triton_kernels.sparse_mla.cp_cache_fusion import (
+                    try_read_new_kv,
                 )
+
+                local = try_read_new_kv(
+                    source, self.new_slots[location], self.plan["new_max"]
+                )
+            if local is None:
+                if self.new_local is not None:
+                    local = self.new_local.zero_()
+                else:
+                    local = torch.zeros(
+                        (self.plan["new_max"], self.buffers[0].size(1)),
+                        dtype=torch.bfloat16,
+                        device=self.device,
+                    )
+                if count:
+                    rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+                        source,
+                        local,
+                        self.new_slots[location],
+                        self.new_lengths,
+                        self.new_starts,
+                        1,
+                        count,
+                    )
             # This uses the ordinary communicator, independent of the history
             # producer. Every rank participates, including zero-owned-Q ranks.
             gathered = all_gather(local, group=Group.TP, role="mla_new_rows")
-            self.pending_new = gathered.index_select(0, self.plan["new_restore"])
+            # Retain this role's gathered buffer until consume. No other
+            # mla_new_rows gather is submitted before then. Indexer uses a
+            # different role, so its work cannot overwrite this storage.
+            if self.fuse_new_restore:
+                self.pending_new = gathered
+            elif self.new_restored is not None:
+                torch.index_select(
+                    gathered, 0, self.plan["new_restore"], out=self.new_restored
+                )
+                self.pending_new = self.new_restored
+            else:
+                self.pending_new = gathered.index_select(0, self.plan["new_restore"])
         # Submit while current Indexer/Q work is still ahead. Waiting until
         # consume lets Attention occupy the SMs before the prefix pack starts,
         # leaving NCCL queued behind it despite independent CUDA streams.
@@ -190,7 +236,8 @@ class CrossLayerKvPrefetch:
 
     def _record_ready(self, layer):
         slot = layer % 2
-        self.ready[slot] = torch.cuda.Event()
+        if not self.reuse_events or self.ready[slot] is None:
+            self.ready[slot] = torch.cuda.Event()
         self.ready[slot].record(self.stream)
         self.owners[slot] = layer
         self.latest_ready = self.ready[slot]
@@ -200,9 +247,23 @@ class CrossLayerKvPrefetch:
         if self.owners[layer % 2] != layer:
             raise RuntimeError("history buffer owner mismatch")
         if layer:
-            self.buffers[layer % 2].index_copy_(
-                0, self.plan["new_dest"], self.pending_new
-            )
+            copied = False
+            pending = self.pending_new
+            if self.fuse_new_restore:
+                from rtp_llm.models_py.triton_kernels.sparse_mla.cp_indexed_copy import (
+                    try_indexed_copy,
+                )
+
+                copied = try_indexed_copy(
+                    pending,
+                    self.plan["new_restore"],
+                    self.plan["new_dest"],
+                    self.buffers[layer % 2],
+                )
+                if not copied:
+                    pending = pending.index_select(0, self.plan["new_restore"])
+            if not copied:
+                self.buffers[layer % 2].index_copy_(0, self.plan["new_dest"], pending)
             self.pending_new = None
         else:
             # The current-layer event has been joined; these main-stream
@@ -217,7 +278,11 @@ class CrossLayerKvPrefetch:
         # The CPU can enqueue several layers ahead of the GPU. Open this
         # window only after current KV is ready (and preceding MoE is done),
         # otherwise the producer could race ahead into that preceding MoE.
-        self.stream.wait_stream(self.compute)
+        if self.compute_ready is not None:
+            self.compute_ready.record(self.compute)
+            self.stream.wait_event(self.compute_ready)
+        else:
+            self.stream.wait_stream(self.compute)
         with torch.cuda.stream(self.stream):
             if self.free[slot] is not None:
                 self.stream.wait_event(self.free[slot])
@@ -249,7 +314,8 @@ class CrossLayerKvPrefetch:
             self._record_ready(layer)
 
     def release(self, layer):
-        self.free[layer % 2] = torch.cuda.Event()
+        if not self.reuse_events or self.free[layer % 2] is None:
+            self.free[layer % 2] = torch.cuda.Event()
         self.free[layer % 2].record(self.compute)
 
     def wait_before_moe(self):
