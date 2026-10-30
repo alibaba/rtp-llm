@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -19,6 +20,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 
 using namespace std;
 
@@ -138,8 +140,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
     if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
+        // Non-causal attention needs future tokens unavailable in earlier chunks.
         const auto& config = *generateConfig();
-        const char* reason = isGroup()                                       ? "force_batch" :
+        const char* reason = (isGroup() && seqLength() > chunk_size)  ? "force_batch" :
                              hasNumBeams()                                   ? "num_beams" :
                              returnLogits()                                  ? "return_logits" :
                              returnPromptLogits()                            ? "return_prompt_logits" :
@@ -149,6 +152,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
                              input->custom_output_token_position >= 0        ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
+                             !model_config.attn_config.is_causal              ? "non_causal_attention" :
                                                                                nullptr;
         if (reason != nullptr) {
             reportEvent(
@@ -556,6 +560,9 @@ bool GenerateStream::hasPendingChunk() const {
 void GenerateStream::advanceChunk() {
     reuse_length_ += currentChunkLen();
     chunk_advanced_ = true;
+    if (warmup_chunk_window_) {
+        ++warmup_chunk_index_;
+    }
 }
 
 int GenerateStream::nextChunkBoundaryToken() const {
@@ -714,10 +721,20 @@ vector<int> GenerateStream::textTokensMask() const {
     if (!generate_input_->text_tokens_mask) {
         return {};
     }
-    auto& mask  = generate_input_->text_tokens_mask.value();
-    auto* data  = mask.data_ptr<int>();
-    int   start = reuseLength() > 0 ? reuseLength() : 0;
-    return vector<int>(data + start, data + mask.numel());
+    const auto&   mask  = generate_input_->text_tokens_mask.value();
+    const auto*   data  = mask.data_ptr<int>();
+    const int64_t start = std::max(reuseLength(), 0);
+    const int64_t end   = isContextStream() ? start + contextLength() : std::max(start, mask.numel());
+    RTP_LLM_CHECK_WITH_INFO(end >= start, "invalid text mask window [%ld, %ld)", start, end);
+    // Recompute may include generated text beyond the original prompt mask.
+    // Those rows are text; never read past the stored prompt mask.
+    vector<int> result;
+    result.reserve(end - start);
+    if (start < mask.numel()) {
+        result.insert(result.end(), data + start, data + std::min(end, mask.numel()));
+    }
+    result.resize(end - start, 1);
+    return result;
 }
 
 torch::Tensor GenerateStream::generateContextPositionIds() {
@@ -921,6 +938,9 @@ bool GenerateStream::prepareUpdateWithoutLock(const std::optional<ErrorInfo>& er
         advanceChunk();
         return false;
     }
+    if (isContextStream()) {
+        stream_cache_resource_->publishPrefillCache(seqLength());
+    }
     is_context_stream_->store(false, std::memory_order_release);
     return true;
 }
@@ -1007,12 +1027,9 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 }
 
 StreamState GenerateStream::moveToNext() {
-    // Most MTP rounds can execute from the immutable device page-table
-    // snapshot while the previous host commit is in flight.  A page-capacity
-    // boundary is different: the allocator must append blocks to the mutable
-    // host table, so join the worker before acquiring mutex_.  Waiting after
-    // taking mutex_ would deadlock with specUpdate().
-    if (needsAsyncBookkeepingJoinForKvReservation()) {
+    // Grow capacity from the published bound without waiting for accepted
+    // tokens. Any required join must remain outside mutex_: specUpdate uses it.
+    if (!prepareMtpCacheForNextStep()) {
         waitPendingAsyncBookkeeping();
     }
 
@@ -1059,11 +1076,17 @@ StreamState GenerateStream::moveToNext() {
     return state;
 }
 
-bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
+bool GenerateStream::prepareMtpCacheForNextStep() {
     if (getStatus() != StreamState::RUNNING || !hasPendingAsyncBookkeeping()) {
-        return false;
+        return true;
     }
 
+    std::lock_guard<std::mutex> lock(*mutex_);
+    // Terminal streams need no next-step allocation. Let the state machine
+    // defer resource release to the last worker instead of joining it here.
+    if (!hasPendingAsyncBookkeeping() || generate_status_->checkFinished()) {
+        return true;
+    }
     const auto state = getMtpAsyncDeviceState();
     // Normal decode can reserve from its published next length while the host
     // commit is pending. Without device input there is no published length:
@@ -1072,18 +1095,89 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     // MTP publishes its state before claiming the worker, so a nonzero epoch
     // distinguishes its page-table snapshot from normal decode.
     if (state.epoch == 0) {
-        return getNormalAsyncDeviceState().next_real_seq_len <= 0;
+        return getNormalAsyncDeviceState().next_real_seq_len > 0;
     }
-    if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
+    if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || !stream_cache_resource_
+        || maxBatchSize() != 1 || hasNumBeams()) {
+        return false;
+    }
+    if (stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound, static_cast<int>(reserve_step_))
+        == 0) {
         return true;
     }
 
-    // Reading group vector sizes is safe while specUpdate only swaps existing
-    // elements.  No allocator mutation can run concurrently: scheduler calls
-    // moveToNext serially on this engine thread.
-    return stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound,
-                                                         static_cast<int>(reserve_step_))
-           > 0;
+    RTP_LLM_PROFILE_SCOPE("stream.reserve_mtp_cache_from_upper_bound");
+    const auto& config = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
+    if (config.linear_replay.enabled() && !stream_cache_resource_->linearReplayLease()) {
+        return false;
+    }
+    const auto& tags     = config.groupTags();
+    const auto& resource = stream_cache_resource_->kvCache();
+    RTP_LLM_CHECK_WITH_INFO(state.next_kv_cache_block_id_gpu.size(0) == static_cast<int64_t>(tags.size()),
+                            "MTP cache snapshot must match the allocator topology");
+    // Only legacy LINEAR groups permute proposal slots. Preserve their device
+    // prefix whether the worker has already committed its host swaps or not.
+    std::vector<BlockIndicesType> previous_linear_blocks(tags.size());
+    std::vector<size_t>           previous_kernel_sizes(tags.size(), 0);
+    for (size_t row = 0; row < tags.size(); ++row) {
+        if (config.isLegacyLinearGroup(static_cast<int>(row))) {
+            previous_linear_blocks[row] = resource.blocks(0, tags[row]);
+            previous_kernel_sizes[row]  = resource.kernelBlocks(0, tags[row]).size();
+        }
+    }
+    if (!stream_cache_resource_->incrKVBlock(state.next_seq_len_upper_bound, /*preserve_inflight=*/true).ok()) {
+        // The allocator rolls back partial additions. Let the ordinary path
+        // retry/report the allocation failure after the worker has finished.
+        return false;
+    }
+    for (size_t row = 0; row < tags.size(); ++row) {
+        const auto& previous = previous_linear_blocks[row];
+        const auto& current  = resource.blocks(0, tags[row]);
+        if (current.size() < previous.size()
+            || !std::equal(
+                previous.begin(), previous.end(), current.begin(), [](BlockIdxType before, BlockIdxType after) {
+                    // GC can clear slots behind the committed tail. Rebinding a
+                    // live slot still requires authoritative host tables below.
+                    return isNullBlockIdx(after) || before == after;
+                })) {
+            // Filling an old sparse slot must follow the same pending
+            // permutation. Join and regather authoritative host tables rather
+            // than replacing an already-advanced device prefix with host data.
+            return false;
+        }
+    }
+
+    const auto pinned_i32 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+    auto       rebuild    = [&](bool kernel) {
+        int64_t width = 0;
+        for (const auto& tag : tags) {
+            const auto& blocks = kernel ? resource.kernelBlocks(0, tag) : resource.blocks(0, tag);
+            width              = std::max(width, static_cast<int64_t>(blocks.size()));
+        }
+        auto host = torch::zeros({static_cast<int64_t>(tags.size()), 1, width}, pinned_i32);
+        for (size_t row = 0; row < tags.size(); ++row) {
+            const auto& blocks = kernel ? resource.kernelBlocks(0, tags[row]) : resource.blocks(0, tags[row]);
+            std::copy(blocks.begin(), blocks.end(), host.data_ptr<int32_t>() + row * width);
+        }
+        const auto& previous = kernel ? state.next_kv_cache_kernel_block_id_gpu : state.next_kv_cache_block_id_gpu;
+        auto        device = host.to(previous.options(), /*non_blocking=*/true);
+        for (size_t row = 0; row < tags.size(); ++row) {
+            const int64_t prefix = kernel ? previous_kernel_sizes[row] : previous_linear_blocks[row].size();
+            if (prefix > 0) {
+                device.select(0, row).narrow(1, 0, prefix).copy_(previous.select(0, row).narrow(1, 0, prefix));
+            }
+        }
+        return std::make_pair(std::move(device), std::move(host));
+    };
+    auto                        physical = rebuild(false);
+    auto                        kernel   = rebuild(true);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    RTP_LLM_CHECK_WITH_INFO(mtp_async_state_.epoch == state.epoch,
+                            "MTP cache reservation raced another state publication");
+    mtp_async_state_.next_kv_cache_block_id_gpu        = std::move(physical.first);
+    mtp_async_state_.next_kv_cache_kernel_block_id_gpu = std::move(kernel.first);
+    mtp_async_state_.cache_snapshot_host_buffers       = {std::move(physical.second), std::move(kernel.second)};
+    return true;
 }
 
 void GenerateStream::setPPInflight() {
@@ -1268,6 +1362,30 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
+int GenerateStream::speculativeTokenCount(const torch::Tensor& new_tokens, int num_new_tokens) const {
+    const int token_begin   = seqLength();
+    num_new_tokens          = std::min(num_new_tokens, static_cast<int>(maxTokenNum()) - token_begin);
+    const auto& config      = *generateConfig();
+    const int   first_count = std::max(1, inputLength() + config.min_new_tokens - token_begin);
+    for (int count = first_count; count <= num_new_tokens; ++count) {
+        for (int batch = 0; batch < new_tokens.size(0); ++batch) {
+            const auto* tokens = new_tokens[batch].data_ptr<int>();
+            if (!config.ignore_eos && tokens[count - 1] == special_tokens_.eos_token_id) {
+                return count;
+            }
+            for (const auto& stop : config.stop_words_list) {
+                if (config.ignore_eos && stop.size() == 1 && stop[0] == special_tokens_.eos_token_id) {
+                    continue;
+                }
+                if (complete_token_ids_->matchesStopWordsAt(batch, stop, token_begin + count, tokens)) {
+                    return count;
+                }
+            }
+        }
+    }
+    return num_new_tokens;
+}
+
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
                                 bool                        update_processor,
                                 RecordedTokenTiming*        timings,
@@ -1282,14 +1400,28 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
         return;
     }
 
-    const auto& new_tokens = update_info.new_tokens;
+    auto new_tokens = update_info.new_tokens;
 
     if (isPerfTest()) {
         const_cast<torch::Tensor&>(new_tokens).zero_();
     }
 
     auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_cached_len = seqLength() - 1;
+    const int  token_begin     = seqLength();
+    const bool per_token_probs = generateConfig()->return_all_probs != ReturnAllProbsMode::NONE
+                                 && update_info.all_probs.defined() && update_info.all_probs.dim() == 3;
+    if (per_token_probs) {
+        num_new_tokens = speculativeTokenCount(new_tokens, num_new_tokens);
+        if (num_new_tokens <= 0) {
+            if (needFinish()) {
+                fillSubGenerateStatus(StreamState::FINISHED);
+                reportEventWithoutLock(StreamEvents::GenerateDone);
+            }
+            return;
+        }
+        new_tokens = new_tokens.narrow(1, 0, num_new_tokens).contiguous();
+    }
+    int cur_cached_len = token_begin - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -1306,6 +1438,12 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
                                "output token id:" + std::to_string(error_token_id)
                                    + " out of vocab size: " + std::to_string(vocab_size_));
         return;
+    }
+
+    if (per_token_probs) {
+        // The prefix was checked above; final finish checks must not rescan an
+        // EOS that occurred before min_new_tokens became effective.
+        complete_token_ids_->setSeqLength(seqLength());
     }
 
     int nxt_cached_len   = seqLength() - 1;
@@ -1372,26 +1510,59 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
 
     // for spec-decode linear attention, we need to adjust cache blocks
     if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
+        const auto& config   = stream_cache_resource_->resourceContext().cache_manager->cacheConfig();
+        const auto& topology = config.topology();
+        for (const auto& group : topology.groups()) {
+            const int group_id = static_cast<int>(topology.groupIdForTag(group.tag));
+            // Replay commits accepted state through its log, without proposal-slot swaps.
+            if (!config.isLegacyLinearGroup(group_id)) {
+                continue;
+            }
+            // Calculate the two swaps in this LINEAR group's block-table coordinates.
+            const auto span = group.seqSizePerBlock();
+            RTP_LLM_CHECK_WITH_INFO(span > 0 && span <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                    "invalid LINEAR group %s token span %zu",
+                                    group.tag.c_str(),
+                                    span);
+            const auto [cached_src, cached_dst] =
+                getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, static_cast<int>(span));
+            const auto [final_src, final_dst] =
+                getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, static_cast<int>(span));
+            const auto block_num  = stream_cache_resource_->kvCacheMutable().blocks(0, group.tag).size();
+            const auto valid_swap = [block_num](int src, int dst) {
+                return src == dst
+                       || (src >= 0 && dst >= 0 && static_cast<size_t>(src) < block_num
+                           && static_cast<size_t>(dst) < block_num);
+            };
+            RTP_LLM_CHECK_WITH_INFO(valid_swap(cached_src, cached_dst) && valid_swap(final_src, final_dst),
+                                    "LINEAR group %s span %zu table size %zu cannot commit %d -> %d: "
+                                    "swaps (%d,%d), (%d,%d)",
+                                    group.tag.c_str(),
+                                    span,
+                                    block_num,
+                                    cur_cached_len,
+                                    nxt_cached_len,
+                                    cached_src,
+                                    cached_dst,
+                                    final_src,
+                                    final_dst);
+            if (cached_src != cached_dst) {
+                stream_cache_resource_->kvCacheMutable().swapBlocks(0, group.tag, cached_src, cached_dst);
+            }
+            if (final_src != final_dst) {
+                stream_cache_resource_->kvCacheMutable().swapBlocks(0, group.tag, final_src, final_dst);
+            }
 
-        // 1. swap cache blocks of accept tokens to corresponding blocks
-        auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
-
-        // 2. swap final block of accept tokens to the next sequence block
-        auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
-
-        RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamLogTag().c_str(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1,
-                          cached_src_block_idx,
-                          cached_des_block_idx,
-                          src_block_idx,
-                          des_block_idx);
+            RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] group %s swap cache blocks: %d -> %d, %d -> %d",
+                              streamLogTag().c_str(),
+                              cur_cached_len + 1,
+                              nxt_cached_len + 1,
+                              group.tag.c_str(),
+                              cached_src,
+                              cached_dst,
+                              final_src,
+                              final_dst);
+        }
     } else {
         RTP_LLM_LOG_DEBUG("[stream %s (%d -> %d)] no swap cache blocks",
                           streamLogTag().c_str(),
@@ -1400,18 +1571,20 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
     }
 
     // update normal output buffer
-    updateOutput({new_tokens,
-                  num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  update_info.update_remote_generate,
-                  update_info.force_update_info});
+    StreamUpdateInfo output_info{new_tokens,
+                                 num_new_tokens,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 update_info.all_probs,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 update_info.update_remote_generate,
+                                 update_info.force_update_info};
+    output_info.speculative_token_begin = per_token_probs ? token_begin : -1;
+    updateOutput(output_info);
 
     // Freeze TTFT after output update while holding the stream lock; mirrors
     // update(). Later speculative steps re-freeze the same first-token value.
@@ -1420,6 +1593,53 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
             timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
         }
     }
+}
+
+absl::StatusOr<GenerateStream::LinearReplayRound> GenerateStream::prepareLinearReplayRound() {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    auto&                       replay = stream_cache_resource_->linear_replay_;
+    const auto&                 lease  = replay.lease;
+    // Cancellation after batch admission does not invalidate this round's resources.
+    // Keep its row and ownership until GPU use completes; output publication drops
+    // errored streams, and the scheduler releases them after bookkeeping drains.
+    if (!lease || stream_cache_resource_->isResourceReleased()) {
+        return absl::FailedPreconditionError("target LINEAR replay requires a live log lease");
+    }
+    LinearReplayRound round;
+    round.lease = lease;
+    if (replay.window && replay.window->lease == lease) {
+        round.previous_window = replay.window;
+    }
+    round.state_block_hold   = stream_cache_resource_->holdLinearReplayBlocks();
+    round.initial_block_ids  = replay.initial_block_ids;
+    round.initial_state_hold = replay.initial_state_hold;
+    return round;
+}
+
+void GenerateStream::publishLinearReplayWindow(std::shared_ptr<const LinearReplayWindow> window) {
+    std::lock_guard<std::mutex> stream_lock(*mutex_);
+    std::lock_guard<std::mutex> state_lock(*mtp_async_state_mutex_);
+    if (stream_cache_resource_->isResourceReleased() || isFinished() || hasErrorWithoutLock()) {
+        return;
+    }
+    auto& replay = stream_cache_resource_->linear_replay_;
+    // The executor publishes in step order, before launching async bookkeeping.
+    if (window && window->lease == replay.lease) {
+        replay.window = std::move(window);
+        replay.clearInitialState();
+    }
+}
+
+std::shared_ptr<LinearReplayBlockHold> GenerateStream::linearReplayStateBlockHold() const {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    const auto&                 window = stream_cache_resource_->linear_replay_.window;
+    return window ? window->state_block_hold : nullptr;
+}
+
+void GenerateStream::clearLinearReplayWindow() {
+    std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+    stream_cache_resource_->linear_replay_.window.reset();
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info,

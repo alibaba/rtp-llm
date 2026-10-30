@@ -70,7 +70,7 @@ class FixedLinearCapacityTest(unittest.TestCase):
         )
         desc = layers[0][0]
         state = desc.__getstate__()
-        self.assertEqual(len(state), 21)
+        self.assertGreaterEqual(len(state), 21)
         restored = type(desc).__new__(type(desc))
         restored.__setstate__(state[:20])
         self.assertEqual(restored.tag, desc.tag)

@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,126 @@ from rtp_llm.utils import jit_cache_env as cache_env
 
 
 class CacheEnvTest(unittest.TestCase):
+    def _package_source(self, root):
+        source = (
+            root
+            / "action.runfiles/pip_gpu_cuda13_torch_deep_gemm/site-packages/deep_gemm"
+        )
+        source.mkdir(parents=True)
+        (source / "__init__.py").write_text("original package\n")
+        (root / "packages").mkdir()
+        return source
+
+    def _package_metadata(self, source, names):
+        metadata = source.parent / "deep_gemm-2.8.2.dist-info"
+        metadata.mkdir(exist_ok=True)
+        (metadata / "METADATA").write_text("Name: deep_gemm\nVersion: 2.8.2\n")
+        (metadata / "top_level.txt").write_text("\n".join(names) + "\n")
+
+    def test_staging_keeps_wheel_sibling_headers_after_runfiles_removal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._package_source(root)
+            self._package_metadata(source, ["deep_gemm", "deep_gemm_sm120"])
+            header = "vendor/deep_gemm/include/deep_gemm/impls/sm120_gemm.cuh"
+            sibling = source.parent / "deep_gemm_sm120"
+            (sibling / header).parent.mkdir(parents=True)
+            (sibling / header).write_text("SM120 kernel header\n")
+            host = root / "host-site-packages"
+            metadata = host / "deep_gemm-99.0.dist-info"
+            metadata.mkdir(parents=True)
+            (metadata / "METADATA").write_text("Name: deep_gemm\nVersion: 99.0\n")
+            (metadata / "top_level.txt").write_text("deep_gemm\nforeign_package\n")
+            (source.parent / "foreign_package").mkdir()
+            with mock.patch.object(
+                wrapper_cache, "get_package_info", return_value=("2.8.2", str(source))
+            ), mock.patch.object(sys, "path", [str(host), *sys.path]):
+                cached = Path(
+                    wrapper_cache.copy_package_with_lock("deep_gemm", root / "packages")
+                )
+            shutil.rmtree(root / "action.runfiles")
+            self.assertEqual(
+                (cached / "deep_gemm_sm120" / header).read_text(),
+                "SM120 kernel header\n",
+            )
+            self.assertEqual(
+                (cached / "deep_gemm/__init__.py").read_text(), "original package\n"
+            )
+            self.assertFalse((cached / "foreign_package").exists())
+
+    def test_completed_cache_backfills_siblings_without_replacing_main_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._package_source(root)
+            with mock.patch.object(
+                wrapper_cache, "get_package_info", return_value=("2.8.2", str(source))
+            ):
+                cached = Path(
+                    wrapper_cache.copy_package_with_lock("deep_gemm", root / "packages")
+                )
+                main = cached / "deep_gemm/__init__.py"
+                main.write_text("already loaded package\n")
+                inode = main.stat().st_ino
+                self._package_metadata(source, ["deep_gemm", "deep_gemm_sm120"])
+                sibling = source.parent / "deep_gemm_sm120"
+                sibling.mkdir()
+                (sibling / "header.cuh").write_text("new header\n")
+                with mock.patch.object(
+                    wrapper_cache.shutil, "copytree", side_effect=OSError("copy failed")
+                ):
+                    self.assertIsNone(
+                        wrapper_cache.copy_package_with_lock(
+                            "deep_gemm", root / "packages"
+                        )
+                    )
+                self.assertEqual(main.read_text(), "already loaded package\n")
+                self.assertEqual(main.stat().st_ino, inode)
+                self.assertFalse((cached / "deep_gemm_sm120").exists())
+
+                copytree = shutil.copytree
+
+                def observe_copy(src, dst, **kwargs):
+                    self.assertFalse((cached / "deep_gemm_sm120").exists())
+                    self.assertEqual(main.stat().st_ino, inode)
+                    return copytree(src, dst, **kwargs)
+
+                with mock.patch.object(
+                    wrapper_cache.shutil, "copytree", side_effect=observe_copy
+                ):
+                    self.assertEqual(
+                        wrapper_cache.copy_package_with_lock(
+                            "deep_gemm", root / "packages"
+                        ),
+                        str(cached),
+                    )
+                self.assertEqual(main.read_text(), "already loaded package\n")
+                self.assertEqual(main.stat().st_ino, inode)
+                self.assertEqual(
+                    (cached / "deep_gemm_sm120/header.cuh").read_text(), "new header\n"
+                )
+
+    def test_single_module_without_metadata_keeps_logical_library_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self._package_source(root)
+            shutil.rmtree(source)
+            source = source.with_suffix(".py")
+            source.write_text("original module\n")
+            for name in ("deep_gemm.libs", "deep_gemm_libs"):
+                directory = source.parent / name
+                directory.mkdir()
+                (directory / "library.so").write_text(name)
+            with mock.patch.object(
+                wrapper_cache, "get_package_info", return_value=("2.8.2", str(source))
+            ):
+                cached = Path(
+                    wrapper_cache.copy_package_with_lock("deep_gemm", root / "packages")
+                )
+            shutil.rmtree(root / "action.runfiles")
+            for name in ("deep_gemm.libs", "deep_gemm_libs"):
+                self.assertEqual((cached / name / "library.so").read_text(), name)
+            self.assertEqual((cached / "deep_gemm.py").read_text(), "original module\n")
+
     def test_default_staging_keeps_cubin_headers_after_runfiles_removal(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ):
             root = Path(temporary)

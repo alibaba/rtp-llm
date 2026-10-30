@@ -18,6 +18,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
+    ResponseFormatPlan,
     restore_final_constraint,
     validate_engine_ready,
 )
@@ -292,7 +293,7 @@ class GenerateConfigTest(TestCase):
 
         self.assertEqual(generate_config.end_think_token_ids, [123])
 
-    def test_tool_choice_dict_is_validated_at_request_parse(self):
+    def test_tool_choice_shape_is_validated_at_request_parse(self):
         tools = [
             {
                 "type": "function",
@@ -312,6 +313,17 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(request.tool_choice["function"]["name"], "get_weather")
 
         cases = [
+            ("required", None, "requires non-empty tools"),
+            (
+                {"type": "function", "function": {"name": "get_weather"}},
+                None,
+                "tool_choice function requires non-empty tools",
+            ),
+            (
+                {"type": "function", "function": {"name": "missing"}},
+                tools,
+                "is not in tools",
+            ),
             (
                 {"type": "bad"},
                 tools,
@@ -326,21 +338,6 @@ class GenerateConfigTest(TestCase):
                 {"type": "function", "function": {}},
                 tools,
                 "tool_choice.function.name must be a non-empty string",
-            ),
-            (
-                {"type": "function", "function": {"name": "missing"}},
-                tools,
-                "tool_choice function .* is not in tools",
-            ),
-            (
-                {"type": "function", "function": {"name": "get_weather"}},
-                None,
-                "tool_choice function requires non-empty tools",
-            ),
-            (
-                "required",
-                None,
-                "tool_choice='required' requires non-empty tools",
             ),
         ]
         for tool_choice, case_tools, message in cases:
@@ -742,6 +739,32 @@ class OpenaiGenerateConfigTest(TestCase):
                 ),
                 GenerateConfig(),
             )
+
+    def test_default_renderer_does_not_accept_forced_message_tools(self):
+        for choice in (
+            "required",
+            {"type": "function", "function": {"name": "lookup"}},
+        ):
+            with self.subTest(choice=choice):
+                with self.assertRaisesRegex(ValueError, "requires non-empty tools"):
+                    ChatCompletionRequest(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "lookup",
+                                            "parameters": {},
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                        tool_choice=choice,
+                    )
 
     def test_text_response_format_is_finalized_before_generation(self):
         config = self._generate_config_with_stop_word(response_format={"type": "text"})
@@ -1312,6 +1335,96 @@ class GrammarMultiSequenceConfigTest(TestCase):
 
 class ResponseFormatProjectionTest(TestCase):
     """response_format is compiled to one engine grammar constraint."""
+
+    def test_prepared_plan_keeps_json_until_common_finalization(self):
+        from unittest.mock import patch
+
+        env = GenerateEnvConfig()
+        env.think_end_token_id = 7
+        for mode in (ThinkingMode.ENABLED, ThinkingMode.DISABLED):
+            with self.subTest(mode=mode):
+                cfg = GenerateConfig(
+                    thinking_mode=mode,
+                    response_format={"type": "json_object"},
+                    max_thinking_tokens=8,
+                )
+                cfg.prepare_thinking_params(env, None)
+                with patch.object(
+                    GenerateConfig,
+                    "validate",
+                    autospec=True,
+                    side_effect=GenerateConfig.validate,
+                ) as validate:
+                    reasoning_format = cfg.prepare_thinking_boundaries(None, env, None)
+                    plan = ResponseFormatPlan.compile(
+                        cfg, reasoning_format=reasoning_format
+                    )
+                    self.assertIsNotNone(cfg.response_format)
+                    self.assertIsNone(cfg.structural_tag)
+                    self.assertIsNone(cfg.json_schema)
+
+                    plan.apply_to_config(cfg)
+                    final = plan.final_constraint
+                    self.assertEqual(validate.call_count, 1)
+                    self.assertEqual(final, plan.final_constraint)
+                    self.assertIsNone(cfg.response_format)
+                    validate_engine_ready(cfg)
+                    installed = cfg.model_dump()
+                    self.assertEqual(cfg.add_thinking_params(None, env), final)
+                    self.assertEqual(validate.call_count, 2)
+                    self.assertEqual(cfg.model_dump(), installed)
+
+    def test_prepared_plan_restores_answer_constraint_when_thinking_is_disabled(self):
+        env = GenerateEnvConfig()
+        env.think_end_token_id = 7
+        cfg = GenerateConfig(
+            thinking_mode=ThinkingMode.ENABLED,
+            response_format={"type": "json_object"},
+        )
+        final = cfg.add_thinking_params(None, env)
+        self.assertEqual(cfg.add_thinking_params(None, env, False), final)
+        self.assertEqual(cfg.json_schema, final.value)
+        self.assertIsNone(cfg.structural_tag)
+        self.assertFalse(cfg._reasoning_envelope_applied)
+        self.assertIsNone(cfg._reasoning_final_constraint)
+
+    def test_generic_thinking_keeps_ordinary_boundary_prefix_text(self):
+        import xgrammar as xgr
+
+        class CharacterTokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return list(text.encode("ascii"))
+
+            def decode(self, token_ids, skip_special_tokens=False):
+                return bytes(token_ids).decode("ascii")
+
+        compiler = xgr.GrammarCompiler(
+            xgr.TokenizerInfo([chr(i) for i in range(128)], stop_token_ids=[0]),
+            max_threads=1,
+        )
+        for mode in ("enabled", "adaptive"):
+            with self.subTest(mode=mode):
+                env = GenerateEnvConfig()
+                env.think_mode = mode
+                env.think_start_tag = "<think>"
+                env.think_end_tag = "</think>"
+                config = GenerateConfig(max_thinking_tokens=32, regex="a")
+                config.add_thinking_params(CharacterTokenizer(), env)
+                matcher = xgr.GrammarMatcher(
+                    compiler.compile_structural_tag(config.structural_tag)
+                )
+                if mode == "adaptive":
+                    self.assertTrue(matcher.accept_string("<think>"))
+                self.assertTrue(matcher.accept_string("x < y"))
+                self.assertTrue(matcher.accept_string("</think>a"))
+                self.assertTrue(matcher.accept_token(0))
+
+    def test_generic_negative_thinking_budget_is_rejected(self):
+        env = GenerateEnvConfig()
+        env.think_mode = "enabled"
+        config = GenerateConfig(max_thinking_tokens=-1)
+        with self.assertRaisesRegex(FtRuntimeException, "max_thinking_tokens"):
+            config.add_thinking_params(None, env)
 
     def test_json_schema_wire_alias_round_trip(self):
         payload = {

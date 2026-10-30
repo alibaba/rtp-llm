@@ -3,10 +3,47 @@ import os
 import tempfile
 import unittest
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    KIMI_K31_NVFP4_RECIPE,
+    ModelOptFp4Config,
+    QuantizationConfig,
+    init_quant_config,
+)
 
 
 class QuantConfigTest(unittest.TestCase):
+    def test_k31_nvfp4_preset_is_dynamic_and_model_scoped(self):
+        for name in ("KIMI_K31_NVFP4", "kimi_k31_nvfp4"):
+            with self.subTest(name=name):
+                config = init_quant_config(name)
+                self.assertIsInstance(config, ModelOptFp4Config)
+                self.assertEqual(config.model_recipe, KIMI_K31_NVFP4_RECIPE)
+                self.assertEqual(config.supported_model_types, ("kimi_k31",))
+                self.assertEqual(config.activation_scheme, "dynamic")
+                self.assertEqual(config.bits, 4)
+                self.assertEqual(config.group_size(), 16)
+                self.assertFalse(config.is_quanted())
+
+    def test_k31_preset_does_not_change_common_or_qwen4_presets(self):
+        init_quant_config("KIMI_K31_NVFP4")
+        common = init_quant_config("MODELOPT_FP4")
+        self.assertIsNone(common.model_recipe)
+        self.assertIsNone(common.supported_model_types)
+        self.assertEqual(common.activation_scheme, "static")
+        qwen4 = init_quant_config("QWEN4_FP8_NVFP4")
+        self.assertEqual(qwen4.supported_model_types, ("qwen4_exp", "qwen4_exp_mtp"))
+        self.assertEqual(qwen4.activation_scheme, "static")
+
+    def test_k31_recipe_rejects_static_activation_scales(self):
+        with self.assertRaisesRegex(ValueError, "require dynamic activation scales"):
+            ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                model_recipe=KIMI_K31_NVFP4_RECIPE,
+                activation_scheme="static",
+            )
+
     def _load_config(self, config_json):
         with tempfile.TemporaryDirectory() as checkpoint_path:
             with open(

@@ -50,9 +50,10 @@ def cuda13_cutlass_is_intact() -> bool:
     """
     try:
         distribution = metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
+        frontend_version = metadata.version("nvidia-cutlass-dsl")
     except metadata.PackageNotFoundError:
         return False
-    if distribution.version != "4.4.2" or not distribution.files:
+    if distribution.version != frontend_version or not distribution.files:
         return False
     loaded = sys.modules.get("cutlass")
     if loaded is not None and getattr(loaded, "__file__", None):

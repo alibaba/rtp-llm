@@ -790,10 +790,16 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_cum_log_probs = (
         input_py.generate_config.return_cum_log_probs
     )
-    # dual-write: legacy bool (true if any probs requested) + new int32 mode (offset 1)
-    _rapm = input_py.generate_config.return_all_probs
-    generate_config_pb.return_all_probs = _rapm != ReturnAllProbsMode.NONE
-    generate_config_pb.return_all_probs_mode = _rapm + 1
+    mode = input_py.generate_config.return_all_probs
+    if input_py.speculative_return_all_probs and mode != ReturnAllProbsMode.NONE:
+        # Old SP backends must see NONE: their executors cannot return scores.
+        # Only backends that know the dedicated field enable SP probabilities.
+        generate_config_pb.return_all_probs = False
+        generate_config_pb.return_all_probs_mode = ReturnAllProbsMode.NONE + 1
+        generate_config_pb.speculative_return_all_probs_mode = mode + 1
+    else:
+        generate_config_pb.return_all_probs = mode != ReturnAllProbsMode.NONE
+        generate_config_pb.return_all_probs_mode = mode + 1
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
@@ -1112,6 +1118,17 @@ def trans_output(
         and output_pb.all_probs.shape[0] > 0
         else None
     )
+    if (
+        input_py.speculative_return_all_probs
+        and config.return_all_probs != ReturnAllProbsMode.NONE
+        and all_output_ids is not None
+        and all_output_ids.numel() > 0
+        and (all_all_probs is None or all_all_probs.numel() == 0)
+    ):
+        raise FtRuntimeException(
+            ExceptionType.UNSUPPORTED_OPERATION,
+            "selected backend does not support speculative probability output",
+        )
     all_custom_output = (
         trans_tensor(output_pb.custom_output)
         if output_pb.HasField("custom_output")

@@ -4,9 +4,11 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import org.flexlb.discovery.ServiceDiscoveryType;
 
 /**
- * Describes a discovery endpoint, protocol and per-worker status addressing configuration.
+ * Describes endpoint discovery and worker status addressing. Legacy VipServer types are
+ * accepted during deserialization; an explicit discovery configuration takes precedence.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -43,4 +45,12 @@ public class Endpoint {
     private DiscoveryConfig discovery;
 
     @JsonIgnore private String group = "";
+
+    @JsonProperty(value = "type", access = JsonProperty.Access.WRITE_ONLY)
+    public void setLegacyType(String type) {
+        if (discovery == null && "VipServer".equalsIgnoreCase(type)) {
+            discovery = new DiscoveryConfig();
+            discovery.setType(ServiceDiscoveryType.VIPSERVER);
+        }
+    }
 }

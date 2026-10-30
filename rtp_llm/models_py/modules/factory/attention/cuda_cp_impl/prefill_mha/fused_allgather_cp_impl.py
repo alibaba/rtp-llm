@@ -392,7 +392,9 @@ class PCPFusedPagedAttnOp:
         self.kv_local.copy_(
             qkv[:, q_width:].view(-1, 2, self.num_kv_heads, self.head_dim)
         )
-        gathered_kv = all_gather_into(self.kv_gather, self.kv_local, Group.TP)
+        gathered_kv = all_gather_into(
+            tensor=self.kv_local, output=self.kv_gather, group=Group.TP
+        )
 
         kv_cache_tensor = kv_cache.kv_cache_base.view(
             -1,
