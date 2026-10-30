@@ -754,6 +754,9 @@ class DashScApp:
                     grammar_validator=grammar_validator,
                     v41_processor_config=v41_processor_config,
                     max_seq_len=model_config.max_seq_len,
+                    request_adapter=ModelFactory.get_model_cls(
+                        model_config.model_type
+                    ).create_dash_sc_request_adapter(),
                 )
 
             loop = self._start_enqueue_loop()
