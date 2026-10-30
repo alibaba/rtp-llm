@@ -542,6 +542,14 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     parsed_args = parser.parse_args(args)
     py_env_configs.ft_disable_custom_ar_override = parsed_args.ft_disable_custom_ar
     py_env_configs.server_config.validate_allocator_dump_config()
+    kv_cache_config = py_env_configs.kv_cache_config
+    if (
+        kv_cache_config.kv_cache_event_snapshot_interval_ms <= 0
+        and not kv_cache_config.enable_remote_cache
+    ):
+        parser.error(
+            "kv_cache_event_snapshot_interval_ms must be positive when remote cache is disabled"
+        )
 
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup

@@ -624,7 +624,10 @@ def configure_kv_cache_event_host_ip_port(py_env_configs: PyEnvConfigs) -> None:
     kv_cache_config = py_env_configs.kv_cache_config
     parallelism_config = py_env_configs.parallelism_config
     if (
-        kv_cache_config.kv_cache_event_publisher_type != "kvcm"
+        (
+            kv_cache_config.kv_cache_event_publisher_type != "kvcm"
+            and not kv_cache_config.enable_remote_cache
+        )
         or parallelism_config.tp_rank != 0
     ):
         return

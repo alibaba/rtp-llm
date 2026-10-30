@@ -12,6 +12,8 @@ struct KVCacheEventPublisherConfig {
     bool        enable_vipserver = false;
     std::string vipserver_domain;
     std::string server_address;
+    std::vector<std::string> server_addresses;
+    bool                     publish_cache_events = true;
 
     size_t queue_capacity        = 100000;
     size_t report_batch_size     = 1000;
@@ -45,6 +47,8 @@ struct KVCacheEventPublisherContext {
     int32_t pp_size           = 1;
     int32_t dp_rank           = 0;
     bool    use_mla           = false;
+    // Control-only mode replays the backend's exact registration schema.
+    std::string register_instance_request;
 };
 
 }  // namespace rtp_llm
