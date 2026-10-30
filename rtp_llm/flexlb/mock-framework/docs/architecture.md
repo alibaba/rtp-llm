@@ -2,6 +2,8 @@
 
 [返回使用说明](../README.md)
 
+Python/Java 模块、主要类与调用关系的逐项说明见[钉钉架构文档](https://alidocs.dingtalk.com/i/nodes/6LeBq413JA9BOdm2iqd79zQ4JDOnGvpb)。Client 请求查询位于 `interfaces/client/`，运行管理位于 `execution/client_group.py`；输入生成代码只供测试使用，不提供独立请求查询 CLI。
+
 本文说明组件职责、调度与协议边界，以及接口扩展方式。运行步骤见 README，Case 与启动配方用法见 [Case 指南](case-guide.md)。设计目标中尚未实现的能力仍按原文标明。文中路径和命令均以框架目录为基准。
 
 ## Scheduler 输入、执行完成、传输完成与状态查询
