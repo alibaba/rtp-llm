@@ -15,6 +15,37 @@ from rtp_llm.models_py.modules.qwen4_exp.test.sparse_prefill_sm90_test_utils imp
 )
 
 
+class SparsePrefillLaunchConfigTest(unittest.TestCase):
+    def test_bounded_launch_selection(self):
+        cases = [
+            (1, 128, "NVIDIA H100", (64, 4)),
+            (1, 129, "NVIDIA H100", (32, 4)),
+            (1, 512, "NVIDIA H100", (32, 4)),
+            (1, 513, "NVIDIA H100", (16, 1)),
+            (1, 5119, "NVIDIA H100", (16, 1)),
+            (1, 5120, "NVIDIA H100", (64, 2)),
+            (1, 10240, "NVIDIA H100", (64, 2)),
+            (1, 15360, "NVIDIA H100", (64, 2)),
+            (1, 20480, "NVIDIA H100", (64, 2)),
+            (1, 20481, "NVIDIA H100", (16, 1)),
+            (2, 128, "NVIDIA H100", (32, 4)),
+            (2, 5120, "NVIDIA H100", (16, 1)),
+            (2, 20480, "NVIDIA H100", (16, 1)),
+            (1, 1024, "NVIDIA H20", (32, 4)),
+            (1, 1025, "NVIDIA H20", (16, 1)),
+            (1, 5120, "NVIDIA H20", (16, 1)),
+            (1, 20480, "NVIDIA H20", (16, 1)),
+        ]
+        for batch, length, device_name, expected in cases:
+            with self.subTest(batch=batch, length=length, device_name=device_name):
+                self.assertEqual(
+                    sparse_prefill_sm90._prefill_launch_config(
+                        batch, length, device_name
+                    ),
+                    expected,
+                )
+
+
 class SparsePrefillSm90Test(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
