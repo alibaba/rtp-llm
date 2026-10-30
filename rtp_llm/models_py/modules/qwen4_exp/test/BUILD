@@ -590,7 +590,6 @@ py_test(
     main = "head_ipc_gather_test.py",
     args = ["HeadIpcGatherIntegrationTest"],
     deps = ["//rtp_llm:testlib"],
-    timeout = "long",
     env = {"GPU_COUNT": "2"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
