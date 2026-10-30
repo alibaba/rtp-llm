@@ -31,6 +31,7 @@ struct P2PConnectorSchedulerConfig {
     std::shared_ptr<const CacheTopology> topology;
     bool                                 use_group_cache_transfer_policy = false;
     bool                                 use_mla                         = false;
+    bool                                 local_full_page_rr              = false;
     int                                  decode_transfer_layer_end       = std::numeric_limits<int>::max();
     std::map<std::string, size_t>        physical_block_bytes_by_group;
     size_t                               cache_key_tokens_per_block = 1;
@@ -76,6 +77,14 @@ struct P2PConnectorWorkerConfig {
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;
     int                                  cp_size = 1;
+
+    // Only LINEAR_QKV needs the physical spec to build byte ranges. A tag may
+    // be shared by the main model and a draft with different local geometry.
+    std::vector<std::map<std::string, std::shared_ptr<const KVCacheSpec>>> linear_specs_by_layer;
+
+    const KVCacheSpec* linearSpecForLayer(size_t layer_id, const std::string& tag) const {
+        return linear_specs_by_layer[layer_id].at(tag).get();
+    }
 
     static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
                                            const PDSepConfig&       pd_sep_config,

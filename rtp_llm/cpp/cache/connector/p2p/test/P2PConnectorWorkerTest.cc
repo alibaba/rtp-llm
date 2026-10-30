@@ -13,6 +13,7 @@
 #include <vector>
 #include <chrono>
 #include <map>
+#include <set>
 #include <tuple>
 
 #include "autil/LockFreeThreadPool.h"
@@ -94,6 +95,8 @@ TEST(P2PKeyUtilTest, BufferConversionCarriesLayerTagAndBlockIdentity) {
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
+    explicit MockLayerBlockConverter(size_t block_bytes = 1024): block_bytes_(block_bytes) {}
+
     std::vector<BlockInfo>
     convertIndexToBuffer(int                /*layer_id*/,
                          const std::string& /*cache_tag*/,
@@ -104,13 +107,16 @@ public:
         BlockInfo info;
         info.is_cuda    = true;
         info.addr       = mock_block;
-        info.size_bytes = 1024;
+        info.size_bytes = block_bytes_;
         return {info};
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }
+
+private:
+    size_t block_bytes_;
 };
 
 // Mock IKVCacheSender for testing (replaces old TransferClient mock)
@@ -123,6 +129,7 @@ public:
         int         layer_id;  // parsed from layer_key
         int64_t     deadline_ms = 0;
         int64_t     timeout_ms = 0;
+        transfer::KeyBlockInfoMap block_info;
     };
 
     bool regMem(const BlockInfo& /*block_info*/, uint64_t /*aligned_size*/ = 0) override {
@@ -138,6 +145,7 @@ public:
         info.layer_id    = parseLayerId(request.unique_key);
         info.deadline_ms = request.deadline_ms;
         info.timeout_ms = request.timeout_ms;
+        info.block_info  = request.block_info;
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -871,6 +879,111 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_DrainsOnlyAfterLocalPublicationEnds) 
     EXPECT_EQ(calls[2].layer_id, 0);
     const auto& first_batch = calls[calls[0].layer_id == 0 ? 0 : 1];
     EXPECT_EQ(first_batch.layer_key, calls[2].layer_key);
+}
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_FiltersPageRRKeysBeforeSubmittingEachChunk) {
+    const int64_t request_id = 2103;
+    const auto    deadline   = currentTimeMs() + 5000;
+    computed_buffers_->registerRequestHorizon(request_id, deadline, deadline);
+    auto first = std::make_shared<LayerCacheBuffer>(0, "group0", 0);
+    first->addBlockId(101, 0);
+    first->addBlockId(102, 1);
+    first->addBlockId(103, 2);  // Already cached by Decode.
+    computed_buffers_->addBuffer(request_id, first, deadline);
+    auto second = std::make_shared<LayerCacheBuffer>(0, "group0", 1);
+    second->addBlockId(104, 3);
+    computed_buffers_->addBuffer(request_id, second, deadline);
+    prefill_->finishPublication(request_id, deadline);
+
+    P2PWorkerRoutePlan plan;
+    auto&              first_route  = plan.routes.emplace_back();
+    first_route.route_id            = 0;
+    first_route.cache_tag           = "group0";
+    first_route.dst_ip              = "127.0.0.1";
+    first_route.dst_port            = 12345;
+    first_route.prefill_cache_keys  = {101, 104};
+    auto second_route               = first_route;
+    second_route.route_id           = 4;
+    second_route.dst_port           = 12346;
+    second_route.prefill_cache_keys = {102};
+    plan.routes.push_back(std::move(second_route));
+
+    const auto result = prefill_->sendKVCache(request_id, "page-rr-fan-out", deadline, plan, deadline);
+    ASSERT_TRUE(result.ok()) << result.ToString();
+    const auto calls = mock_sender_->getTransferCalls();
+    ASSERT_EQ(calls.size(), 3u);
+    std::map<uint32_t, std::multiset<int64_t>> keys_by_port;
+    size_t                                     sent_bytes = 0;
+    for (const auto& call : calls) {
+        ASSERT_EQ(call.block_info.size(), 1u);
+        const auto& [key, info] = *call.block_info.begin();
+        keys_by_port[call.port].insert(key);
+        sent_bytes += info->blocks.front().size_bytes;
+    }
+    EXPECT_EQ(keys_by_port.at(12345), (std::multiset<int64_t>{101, 104}));
+    EXPECT_EQ(keys_by_port.at(12346), (std::multiset<int64_t>{102}));
+    EXPECT_EQ(sent_bytes, 3u * 1024u);
+}
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_UsesDraftLinearSpecForSharedTag) {
+    const auto make_spec = [](int heads) {
+        LinearAttentionConfig linear;
+        linear.linear_num_key_heads = linear.linear_num_value_heads = heads;
+        linear.linear_key_head_dim = linear.linear_value_head_dim = 8;
+        linear.linear_conv_kernel_dim                             = 4;
+        linear.ssm_state_dtype                                    = DataType::TYPE_FP32;
+        linear.conv_state_dtype                                   = DataType::TYPE_BF16;
+        ParallelismConfig parallelism;
+        SpecBuildContext  context;
+        context.dtype                   = DataType::TYPE_BF16;
+        context.seq_size_per_block      = 1;
+        context.parallelism_config      = &parallelism;
+        context.linear_attention_config = &linear;
+        KVCacheSpecDesc desc;
+        desc.tag              = "group0";
+        desc.cache_type       = KVCacheSpecType::LinearAttention;
+        desc.tp_transfer_mode = TpCacheTransferMode::LINEAR_QKV;
+        return SpecBuilder::build(desc, context);
+    };
+
+    GroupBase main_group;
+    main_group.spec                = make_spec(2);
+    main_group.policy              = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    main_group.block_num           = 8;
+    const auto draft_spec          = make_spec(1);
+    auto       config              = worker_config_;
+    config.topology                = test::makeIndexedTestTopology({main_group}, {{0, 1}});
+    config.linear_specs_by_layer   = {{{"group0", main_group.spec}}, {{"group0", draft_spec}}};
+    auto                 converter = std::make_shared<MockLayerBlockConverter>(draft_spec->block_size_bytes());
+    P2PWorkerPrefillRead prefill(config, converter, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill.init());
+
+    const int64_t request_id = 2104;
+    const auto    deadline   = currentTimeMs() + 5000;
+    auto          buffers    = prefill.getComputedBuffersStore();
+    buffers->registerRequestHorizon(request_id, deadline, deadline);
+    auto buffer = std::make_shared<LayerCacheBuffer>(1, "group0");
+    buffer->addBlockId(101, 0);
+    buffers->addBuffer(request_id, buffer, deadline);
+    prefill.finishPublication(request_id, deadline);
+
+    P2PWorkerRoutePlan plan;
+    auto&              route  = plan.routes.emplace_back();
+    route.cache_tag           = "group0";
+    route.prefill_layer_ids   = {1};
+    route.dst_ip              = "127.0.0.1";
+    route.dst_port            = 12345;
+    route.linear_qkv_segments = true;
+    const auto result         = prefill.sendKVCache(request_id, "linear-draft-layout", deadline, plan, deadline);
+    ASSERT_TRUE(result.ok()) << result.ToString();
+    const auto calls = mock_sender_->getTransferCalls();
+    ASSERT_EQ(calls.size(), 1u);
+    const auto& parts = calls.front().block_info.at(101)->blocks;
+    ASSERT_EQ(parts.size(), 10u);
+    EXPECT_EQ(parts.front().size_bytes, 256u);
+    EXPECT_EQ(parts[1].size_bytes, 16u);
+    EXPECT_EQ(static_cast<char*>(parts[1].addr) - static_cast<char*>(parts.front().addr), 256);
+    EXPECT_EQ(static_cast<char*>(parts.back().addr) - static_cast<char*>(parts.front().addr), 384);
 }
 
 TEST_F(P2PConnectorWorkerTest, SendKVCache_RejectsDuplicateChunkAfterDispatch) {

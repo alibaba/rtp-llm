@@ -171,6 +171,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         worker_route.partition = local.partition;
         worker_route.slice     = local.slice;
         worker_route.slice_payload_bytes = route_pb.slice_payload_bytes();
+        worker_route.linear_qkv_segments = local.linear_qkv_segments;
 
         for (const auto& layer_block_pb : route_pb.layer_blocks()) {
             auto layer_id           = layer_block_pb.layer_id();

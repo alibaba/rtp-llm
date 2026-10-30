@@ -254,12 +254,9 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         }
     }
 
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    // Decode retains every received FULL page on each TP rank. Its sharding
-    // flag describes the upstream prefill layout for transport/state sizing,
-    // not local allocation: applying the CP mapper here would underallocate by the CP factor.
-    if (cp_cfg.kv_cache_sharded && (cp_cfg.is_enabled() || cp_cfg.is_prefill_enabled())
-        && parallelism_config_.role_type != RoleType::DECODE && parallelism_config_.tp_size > 1) {
+    // Allocation, cache-store projection and PD loading share this local mapper.
+    // The upstream Prefill shard count does not determine Decode's local layout.
+    if (config_.local_kv_cache_sharded && parallelism_config_.tp_size > 1) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));
@@ -1580,8 +1577,8 @@ bool KVCacheManager::initP2PConnector() {
         local_stage.add_worker_indices(pc.pp_rank * pc.tp_size + lane);
     }
     const auto append_layout = [&](const CacheConfig& cfg, uint32_t layers, P2PShardLayoutPB* out) {
-        auto shards =
-            ShardLayoutFactory::fromTopology(cfg.topology(), pc, pd_sep_config_.role_type, cfg.seq_size_per_block);
+        auto shards = ShardLayoutFactory::fromTopology(
+            cfg.topology(), pc, pd_sep_config_.role_type, cfg.seq_size_per_block, cfg.local_kv_cache_sharded);
         shards.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
         shards.use_mla                         = cfg.use_mla;
         encodeP2PShardLayout(shards, out);
@@ -1648,8 +1645,19 @@ bool KVCacheManager::initP2PConnector() {
     p2p_config.scheduler_config.pipeline_layout                 = p2p_pipeline_layout_;
     p2p_config.scheduler_config.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
     p2p_config.scheduler_config.use_mla                         = config_.use_mla;
+    p2p_config.scheduler_config.local_full_page_rr              = config_.local_kv_cache_sharded;
     p2p_config.worker_config.topology                           = config_.topologyPtr();
     p2p_config.worker_config.global_layer_begin                 = config_.global_layer_begin;
+    auto& linear_specs                                          = p2p_config.worker_config.linear_specs_by_layer;
+    linear_specs.resize(config_.topology().layers().size());
+    for (const auto& layer : config_.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            const auto& spec = config_.physicalGroupForLayer(layer.layer_id, tag).spec;
+            if (spec->tp_transfer.mode == TpCacheTransferMode::LINEAR_QKV) {
+                linear_specs[layer.layer_id].emplace(tag, spec);
+            }
+        }
+    }
     if (decode) {
         if (config_.mtp_sub_configs.size() > 1) {
             // Both MTP executors reuse module 0 for all proposal steps. The

@@ -57,9 +57,10 @@ void GenerateStateMachine::handleWaiting() {
     if (!events_.has(StreamEvents::CanRun)) {
         return;
     }
+    const auto role_type = stream_cache_resource_->resourceContext().role_type;
+    auto*      stream    = stream_cache_resource_->stream();
     // LoadInitiated 未设置时，必须先执行 initKVBlock 和 asyncLoadCache
     if (!events_.has(StreamEvents::LoadInitiated)) {
-        auto stream = stream_cache_resource_->stream();
         if (stream != nullptr) {
             stream->recordWaitLatency();
         }
@@ -67,7 +68,6 @@ void GenerateStateMachine::handleWaiting() {
         auto result = stream_cache_resource_->initKVBlock();
         initial_kv_allocation_rt_us = currentTimeUs() - allocation_start_us;
         if (!result.ok()) {
-            const auto role_type              = stream_cache_resource_->resourceContext().role_type;
             const bool retryable_context_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
                                                 && stream_cache_resource_->isContextStream();
             const bool retryable_handoff_init = role_type == RoleType::DECODE && stream && stream->queryPdSep();
@@ -94,11 +94,19 @@ void GenerateStateMachine::handleWaiting() {
                 stream->recordLoadingCacheStartTime();
             }
             status.store(StreamState::LOADING_CACHE, std::memory_order_release);
-        } else if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
-            // Loading cache 失败或不需要loading，直接触发重计算
-            // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
+        } else if (role_type != RoleType::DECODE) {
+            // Prefill can compute locally when there is no asynchronous load.
             transitionToRunning();
         }
+        return;
+    }
+
+    if (role_type == RoleType::DECODE && stream && stream->queryPdSep() && stream->isContextStream()) {
+        reportEvent(StreamEvents::Error,
+                    ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                    "Decode handoff did not provide a first token");
+        status.store(StreamState::FINISHED, std::memory_order_release);
+        releaseResource();
         return;
     }
 
@@ -107,8 +115,7 @@ void GenerateStateMachine::handleWaiting() {
     // the same role can continue into decode after GenerateStream::update()
     // flips isContextStream() to false; from that point block tables must grow
     // exactly like a decode stream.
-    if (stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
-        && stream_cache_resource_->isContextStream()) {
+    if (role_type == RoleType::PREFILL && stream_cache_resource_->isContextStream()) {
         transitionToRunning();
         return;
     }

@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -1493,6 +1494,65 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_LinearGroup) {
     ASSERT_EQ(cache_store->records[0].block_keys.size(), 1u);
     EXPECT_EQ(cache_store->records[0].block_keys[0].rfind("kv_", 0), 0u)
         << "Hybrid cache-store must write opaque kv_ keys even when use_opaque_kv_cache_store=false";
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreLinearPublishesOnlyPackedBlock) {
+    for (const int cp_size : {1, 4, 8}) {
+        for (const bool enabled : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "cp_size=" << cp_size << " enabled=" << enabled);
+            LinearAttentionConfig linear;
+            linear.linear_num_key_heads = linear.linear_num_value_heads = 16;
+            linear.linear_key_head_dim = linear.linear_value_head_dim = 2;
+            linear.linear_conv_kernel_dim                             = 3;
+            linear.ssm_state_dtype                                    = DataType::TYPE_FP32;
+            linear.conv_state_dtype                                   = DataType::TYPE_BF16;
+            ParallelismConfig parallelism;
+            parallelism.tp_size = cp_size;
+            SpecBuildContext context;
+            context.dtype                   = DataType::TYPE_BF16;
+            context.seq_size_per_block      = 2;
+            context.linear_attention_config = &linear;
+            context.parallelism_config      = &parallelism;
+            KVCacheSpecDesc desc;
+            desc.tag              = "linear";
+            desc.cache_type       = KVCacheSpecType::LinearAttention;
+            desc.tp_transfer_mode = enabled ? TpCacheTransferMode::LINEAR_QKV : TpCacheTransferMode::LEGACY;
+            auto spec             = std::dynamic_pointer_cast<LinearKVCacheSpec>(SpecBuilder::build(desc, context));
+            ASSERT_NE(spec, nullptr);
+            EXPECT_EQ(spec->tp_transfer.mode, desc.tp_transfer_mode);
+            auto cloned = std::dynamic_pointer_cast<LinearKVCacheSpec>(spec->clone());
+            ASSERT_NE(cloned, nullptr);
+            EXPECT_EQ(cloned->tp_transfer.mode, desc.tp_transfer_mode);
+
+            CacheConfig config;
+            config.layer_num                 = 1;
+            config.seq_size_per_block        = 2;
+            config.use_opaque_kv_cache_store = true;
+            GroupBase group;
+            group.tag       = "linear";
+            group.spec      = spec;
+            group.policy    = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+            group.block_num = 1;
+            LayerBase layer;
+            layer.layer_id   = 0;
+            layer.group_tags = {"linear"};
+            config.setTopology({group}, {layer});
+            auto                    inputs = makePyCacheStoreInputs(2, 1);
+            auto                    store  = std::make_shared<MockCacheStore>();
+            torch_ext::LayerKVCache cache;
+            cache.layer_id           = 0;
+            cache.tag                = "linear";
+            cache.seq_size_per_block = 2;
+            cache.kv_cache_base      = torch::zeros({1, static_cast<int64_t>(spec->block_size_bytes())}, torch::kUInt8);
+            ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, cache, config, store, 0, 0, cp_size, nullptr));
+            ASSERT_EQ(store->records.size(), 1u);
+            const auto  key    = cacheKeyAt(inputs, 0, 0, "linear");
+            const auto& blocks = store->records[0].blocks;
+            ASSERT_EQ(blocks.count("kv_" + key), 1u);
+            EXPECT_EQ(blocks.at("kv_" + key).len, spec->block_size_bytes());
+            EXPECT_EQ(blocks.size(), 1u);
+        }
+    }
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreTag_FullGroup) {

@@ -337,7 +337,8 @@ TEST_F(PdSepKVCacheReleaseTest, RejectsMissingOrMalformedGroupIdentityBeforeConn
     KVCacheResource resource;
     resource.cacheKeys()            = {42};
     const auto expect_invalid_route = [&] {
-        auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1);
+        std::vector<PrefillRouteKeysPB> filters;
+        auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1, filters);
         EXPECT_FALSE(result.ok());
         EXPECT_EQ(result.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
     };

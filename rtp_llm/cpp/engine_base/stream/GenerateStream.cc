@@ -2040,13 +2040,8 @@ GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
     time_info.running_started_time_us = running_started_time_us_;
     time_info.first_token_committed   = first_token_time_us > 0;
     time_info.first_token_time_us     = first_token_time_us;
-    // Reuse the frozen firstTokenLatencyUs() (stamped at commit time) instead of
-    // recomputing against begin_time_us_. Decode resets begin AFTER the first
-    // token has already committed (DecodeRpcServer::update precedes
-    // resetBeginTime; BatchDecodeScheduler resets running streams), so a
-    // read-time subtraction would go negative and diverge from the frozen
-    // metrics/aux_info definition. The frozen value is non-negative by
-    // construction; clamping the subtraction to 0 would instead mask the reset.
+    // BatchDecodeScheduler can reset begin_time_us_ after the first token commits.
+    // Preserve the latency recorded at commit for metrics and aux_info.
     time_info.first_token_rt_us           = complete_token_ids_->firstTokenLatencyUs();
     time_info.generation_done             = generation_done_;
     time_info.generation_done_time_us     = generation_done_time_us_;

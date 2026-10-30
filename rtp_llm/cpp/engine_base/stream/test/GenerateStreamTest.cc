@@ -2043,10 +2043,8 @@ TEST_F(GenerateStreamTest, timeInfoFirstTokenRtStaysFrozenAcrossBeginReset) {
     // Before the later reset, the frozen latency equals the naive subtraction.
     EXPECT_EQ(committed.first_token_rt_us, committed.first_token_time_us - committed.begin_time_us);
 
-    // Decode stamps a new (later) begin AFTER the first token has committed
-    // (DecodeRpcServer::update precedes resetBeginTime). A read-time recompute
-    // would go negative; clamping it to 0 would hide the real latency. The
-    // frozen firstTokenLatencyUs() must survive the reset unchanged.
+    // A scheduler can reset the begin time after the first token commits.
+    // The reported latency must retain the value captured at commit.
     const auto later_begin_us = committed.first_token_time_us + 100000;
     stream->resetBeginTime(later_begin_us);
 

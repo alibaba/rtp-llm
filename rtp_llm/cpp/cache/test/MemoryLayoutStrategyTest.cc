@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -43,7 +44,9 @@ protected:
     }
 
     struct TestKVCacheSpec: public KVCacheSpec {
-        TestKVCacheSpec(): KVCacheSpec("default", 1, 1, 1) {}
+        TestKVCacheSpec(): KVCacheSpec("default", 1, 1, 1) {
+            type = KVCacheSpecType::MultiHeadAttention;
+        }
         DataType dtype         = DataType::TYPE_INVALID;
         size_t   k_block_bytes = 0;
         size_t   v_block_bytes = 0;
@@ -114,8 +117,6 @@ protected:
 
         auto spec                = std::make_shared<TestKVCacheSpec>();
         spec->tag                = "default";
-        spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
-                                                                                  KVCacheSpecType::MultiHeadLatentAttention;
         spec->seq_size_per_block = seq_size_per_block;
         spec->kernel_seq_size_per_block = seq_size_per_block;
         spec->dtype                     = dtype;
@@ -158,10 +159,11 @@ protected:
 
     static void initializeSingleGroup(rtp_llm::CacheConfig& cache_config,
                                       const KVCacheSpecPtr& spec,
-                                      uint32_t              candidate_block_num) {
+                                      uint32_t              candidate_block_num,
+                                      CacheGroupType        group_type = CacheGroupType::FULL) {
         std::vector<int> layer_ids(cache_config.layer_num);
         std::iota(layer_ids.begin(), layer_ids.end(), 0);
-        cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        cache_config.fromGroupedSpecs({spec}, {layer_ids}, {group_type}, {"default"});
         cache_config.finalizeBlockNums(candidate_block_num, rtp_llm::RuntimeConfig{});
     }
 
@@ -281,16 +283,29 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     EXPECT_EQ(buf_info[1].size_bytes, config.kv_scale_stride_bytes);
 }
 
-TEST_F(MemoryLayoutStrategyTest, SparseMhaFp8UsesFp32UnitScaleLayout) {
+TEST_F(MemoryLayoutStrategyTest, MhaStorageAndHeadPartitionsIgnoreModelAttentionFlags) {
     for (const bool use_mla : {false, true}) {
         for (const bool sparse : {false, true}) {
             const size_t heads   = 2;
             const size_t tokens  = 128;
             const size_t k_bytes = heads * tokens * 256;
-            auto         spec    = std::dynamic_pointer_cast<TestKVCacheSpec>(
-                createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, heads, tokens, k_bytes, k_bytes));
-            spec->k_scale_bytes = heads * tokens * sizeof(float);
-            spec->v_scale_bytes = spec->k_scale_bytes;
+            AttentionConfigs attention{};
+            attention.head_num      = heads;
+            attention.kv_head_num   = heads;
+            attention.size_per_head = 256;
+            ParallelismConfig parallelism;
+            parallelism.tp_size = 1;
+            KVCacheSpecDesc desc;
+            desc.tag        = "default";
+            desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+            desc.dtype      = DataType::TYPE_FP8_E4M3;
+            SpecBuildContext context;
+            context.dtype                   = desc.dtype;
+            context.seq_size_per_block      = tokens;
+            context.kernel_tokens_per_block = tokens;
+            context.attn_config             = &attention;
+            context.parallelism_config      = &parallelism;
+            const auto           spec       = MHAKVCacheSpec::build(desc, context);
             rtp_llm::CacheConfig cache_config;
             cache_config.layer_num          = 1;
             cache_config.dtype              = DataType::TYPE_FP8_E4M3;
@@ -301,57 +316,173 @@ TEST_F(MemoryLayoutStrategyTest, SparseMhaFp8UsesFp32UnitScaleLayout) {
             auto pool_cfg = DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config,
                                                                               cache_config.topology().groups().front());
             auto cfg      = pool_cfg.memory_layouts[0];
-            EXPECT_FALSE(cfg.is_mla);
+            EXPECT_EQ(cfg.cache_type, KVCacheSpecType::MultiHeadAttention);
             EXPECT_TRUE(cfg.hasScale());
             auto kv    = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
             auto scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
             MemoryLayoutStrategy strategy;
             ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+            const auto kv_views = strategy.getLayerCacheTensors();
+            ASSERT_EQ(kv_views.size(), 1u);
+            EXPECT_EQ(kv_views[0].sizes(), torch::IntArrayRef({3, static_cast<int64_t>(2 * k_bytes)}));
+            EXPECT_EQ(static_cast<size_t>(kv_views[0].stride(0) * kv_views[0].element_size()),
+                      cfg.kv_block_stride_bytes);
             auto views = strategy.getLayerScaleCacheTensors();
             ASSERT_EQ(views.size(), 1);
             EXPECT_EQ(views[0].scalar_type(), torch::kFloat32);
             EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, static_cast<int64_t>(2 * heads * tokens)}));
             EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
             EXPECT_TRUE(torch::equal(views[0], torch::ones_like(views[0])));
-            if (use_mla) {
-                const auto whole     = strategy.convertIndexToBuffer(0, 1);
-                const auto partition = strategy.convertIndexToBuffer(0, 1, 4, 0);
-                ASSERT_EQ(whole.size(), partition.size());
-                for (size_t i = 0; i < whole.size(); ++i) {
-                    EXPECT_EQ(whole[i].addr, partition[i].addr);
-                    EXPECT_EQ(whole[i].size_bytes, partition[i].size_bytes);
-                }
+            const auto whole     = strategy.convertIndexToBuffer(0, 1);
+            const auto partition = strategy.convertIndexToBuffer(0, 1, 2, 0);
+            ASSERT_EQ(whole.size(), 2u);
+            ASSERT_EQ(partition.size(), 4u);
+            EXPECT_EQ(partition[0].addr, whole[0].addr);
+            EXPECT_EQ(partition[1].addr, static_cast<char*>(whole[0].addr) + k_bytes);
+            EXPECT_EQ(partition[2].addr, whole[1].addr);
+            EXPECT_EQ(partition[3].addr, static_cast<char*>(whole[1].addr) + spec->k_scale_block_size_bytes());
+            EXPECT_EQ(partition[0].size_bytes, k_bytes / 2);
+            EXPECT_EQ(partition[1].size_bytes, k_bytes / 2);
+            EXPECT_EQ(partition[2].size_bytes, spec->k_scale_block_size_bytes() / 2);
+            EXPECT_EQ(partition[3].size_bytes, spec->v_scale_block_size_bytes() / 2);
+        }
+    }
+}
+
+TEST_F(MemoryLayoutStrategyTest, MlaAndOpaqueByteScalesIgnoreModelAttentionFlags) {
+    for (const auto type : {KVCacheSpecType::MultiHeadLatentAttention, KVCacheSpecType::OpaqueKV}) {
+        for (const bool use_mla : {false, true}) {
+            for (const bool sparse : {false, true}) {
+                auto spec = std::dynamic_pointer_cast<TestKVCacheSpec>(
+                    createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, 1, 128, 32768, 32768));
+                spec->type          = type;
+                spec->k_scale_bytes = 1024;
+                spec->v_scale_bytes = 0;
+                rtp_llm::CacheConfig cache_config;
+                cache_config.layer_num          = 1;
+                cache_config.dtype              = DataType::TYPE_FP8_E4M3;
+                cache_config.seq_size_per_block = 128;
+                cache_config.use_mla            = use_mla;
+                cache_config.is_sparse          = sparse;
+                initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3);
+                auto pool_cfg = DeviceBlockPoolConfigHelper::createConfigForGroup(
+                    cache_config, cache_config.topology().groups().front());
+                auto cfg = pool_cfg.memory_layouts[0];
+                EXPECT_EQ(cfg.cache_type, type);
+                auto                 kv    = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
+                auto                 scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
+                MemoryLayoutStrategy strategy;
+                ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+                auto views = strategy.getLayerScaleCacheTensors();
+                ASSERT_EQ(views.size(), 1);
+                EXPECT_EQ(views[0].scalar_type(), torch::kUInt8);
+                EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, 128, 8}));
+                EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
             }
         }
     }
 }
 
-TEST_F(MemoryLayoutStrategyTest, SparseMlaAndIndexerKeepByteScaleLayout) {
-    for (const auto type : {KVCacheSpecType::MultiHeadLatentAttention, KVCacheSpecType::OpaqueKV}) {
-        auto spec = std::dynamic_pointer_cast<TestKVCacheSpec>(
-            createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, 1, 128, 32768, 32768));
-        spec->type          = type;
-        spec->k_scale_bytes = 1024;
-        spec->v_scale_bytes = 0;
-        rtp_llm::CacheConfig cache_config;
-        cache_config.layer_num          = 1;
-        cache_config.dtype              = DataType::TYPE_FP8_E4M3;
-        cache_config.seq_size_per_block = 128;
-        cache_config.is_sparse          = true;
-        initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3);
-        auto pool_cfg =
-            DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
-        auto cfg = pool_cfg.memory_layouts[0];
-        EXPECT_TRUE(cfg.is_mla);
-        auto                 kv    = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
-        auto                 scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
-        MemoryLayoutStrategy strategy;
-        ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
-        auto views = strategy.getLayerScaleCacheTensors();
-        ASSERT_EQ(views.size(), 1);
-        EXPECT_EQ(views[0].scalar_type(), torch::kUInt8);
-        EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, 128, 8}));
-        EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
+TEST_F(MemoryLayoutStrategyTest, LinearStateUsesFlatWholeBlocksWithoutTokenDivisibility) {
+    LinearAttentionConfig linear;
+    linear.linear_key_head_dim    = 2;
+    linear.linear_value_head_dim  = 2;
+    linear.linear_num_key_heads   = 2;
+    linear.linear_num_value_heads = 2;
+    linear.linear_conv_kernel_dim = 3;
+    linear.ssm_state_dtype        = DataType::TYPE_FP32;
+    linear.conv_state_dtype       = DataType::TYPE_FP16;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 1;
+    KVCacheSpecDesc desc;
+    desc.tag        = "default";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    desc.dtype      = DataType::TYPE_BF16;
+    SpecBuildContext context;
+    context.dtype                   = desc.dtype;
+    context.seq_size_per_block      = 7;
+    context.kernel_tokens_per_block = 7;
+    context.linear_attention_config = &linear;
+    context.parallelism_config      = &parallelism;
+    const auto spec                 = LinearKVCacheSpec::build(desc, context);
+    const auto block_elems = spec->block_size_bytes() / getTypeSize(spec->memoryLayoutDType());
+    ASSERT_NE(block_elems % spec->seq_size_per_block, 0u);
+
+    for (const bool use_mla : {false, true}) {
+        for (const bool sparse : {false, true}) {
+            CacheConfig cache_config;
+            cache_config.layer_num          = 1;
+            cache_config.dtype              = desc.dtype;
+            cache_config.seq_size_per_block = context.seq_size_per_block;
+            cache_config.use_mla            = use_mla;
+            cache_config.is_sparse          = sparse;
+            initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3, CacheGroupType::LINEAR);
+            const auto pool_cfg = DeviceBlockPoolConfigHelper::createConfigForGroup(
+                cache_config, cache_config.topology().groups().front());
+            const auto& cfg = pool_cfg.memory_layouts.front();
+            EXPECT_EQ(cfg.cache_type, KVCacheSpecType::LinearAttention);
+            EXPECT_FALSE(cfg.hasScale());
+            auto                 kv = createKVCacheBuffer(cfg);
+            torch::Tensor        scale;
+            MemoryLayoutStrategy strategy;
+            ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+            const auto views = strategy.getLayerCacheTensors();
+            ASSERT_EQ(views.size(), 1u);
+            EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, static_cast<int64_t>(block_elems)}));
+            EXPECT_EQ(static_cast<size_t>(views[0].stride(0) * views[0].element_size()), cfg.kv_block_stride_bytes);
+            const auto whole     = strategy.convertIndexToBuffer(0, 1);
+            const auto partition = strategy.convertIndexToBuffer(0, 1, 2, 1);
+            ASSERT_EQ(whole.size(), 1u);
+            ASSERT_EQ(partition.size(), 1u);
+            EXPECT_EQ(partition[0].addr, whole[0].addr);
+            EXPECT_EQ(partition[0].size_bytes, cfg.kv_block_stride_bytes);
+        }
+    }
+}
+
+TEST_F(MemoryLayoutStrategyTest, MlaSpecKeepsTokenMajorWholeBlocksWithoutModelMlaFlag) {
+    AttentionConfigs attention{};
+    attention.kv_lora_rank  = 8;
+    attention.rope_head_dim = 4;
+    KVCacheSpecDesc desc;
+    desc.tag        = "default";
+    desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+    desc.dtype      = DataType::TYPE_FP16;
+    SpecBuildContext context;
+    context.dtype                   = desc.dtype;
+    context.seq_size_per_block      = 4;
+    context.kernel_tokens_per_block = 4;
+    context.attn_config             = &attention;
+    const auto spec                 = MLAKVCacheSpec::build(desc, context);
+
+    for (const bool use_mla : {false, true}) {
+        for (const bool sparse : {false, true}) {
+            CacheConfig cache_config;
+            cache_config.layer_num          = 1;
+            cache_config.dtype              = desc.dtype;
+            cache_config.seq_size_per_block = context.seq_size_per_block;
+            cache_config.use_mla            = use_mla;
+            cache_config.is_sparse          = sparse;
+            initializeSingleGroup(cache_config, spec, /*candidate_block_num=*/3);
+            const auto pool_cfg = DeviceBlockPoolConfigHelper::createConfigForGroup(
+                cache_config, cache_config.topology().groups().front());
+            const auto&          cfg = pool_cfg.memory_layouts.front();
+            EXPECT_EQ(cfg.cache_type, KVCacheSpecType::MultiHeadLatentAttention);
+            auto                 kv  = createKVCacheBuffer(cfg);
+            torch::Tensor        scale;
+            MemoryLayoutStrategy strategy;
+            ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+            const auto views = strategy.getLayerCacheTensors();
+            ASSERT_EQ(views.size(), 1u);
+            EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, 4, 12}));
+            EXPECT_EQ(static_cast<size_t>(views[0].stride(0) * views[0].element_size()), cfg.kv_block_stride_bytes);
+            const auto whole     = strategy.convertIndexToBuffer(0, 1);
+            const auto partition = strategy.convertIndexToBuffer(0, 1, 2, 1);
+            ASSERT_EQ(whole.size(), 1u);
+            ASSERT_EQ(partition.size(), 1u);
+            EXPECT_EQ(partition[0].addr, whole[0].addr);
+            EXPECT_EQ(partition[0].size_bytes, cfg.kv_block_stride_bytes);
+        }
     }
 }
 
@@ -417,7 +548,7 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBuffer) {
 
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHead) {
     auto config               = createTestConfig(/*k_block_bytes=*/512, /*v_block_bytes=*/512);
-    config.is_mla             = false;
+    config.cache_type         = KVCacheSpecType::MultiHeadAttention;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
 
@@ -666,7 +797,7 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale)
 
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedLayerOutOfRangeReturnsEmpty) {
     auto config               = createTestConfig(/*k_block_bytes=*/512, /*v_block_bytes=*/512);
-    config.is_mla             = false;
+    config.cache_type         = KVCacheSpecType::MultiHeadAttention;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);
@@ -681,7 +812,7 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedLayerOutOfRangeR
 
 TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedInvalidArgsThrow) {
     auto config               = createTestConfig(/*k_block_bytes=*/512, /*v_block_bytes=*/512);
-    config.is_mla             = false;
+    config.cache_type         = KVCacheSpecType::MultiHeadAttention;
     config.local_head_num_kv  = 8;
     config.seq_size_per_block = 64;
     auto ctx                  = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Zeros);

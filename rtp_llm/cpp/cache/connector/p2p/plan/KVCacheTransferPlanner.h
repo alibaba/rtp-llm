@@ -78,6 +78,7 @@ private:
         int          dst_cp      = 0;
         int          slice_index = 0;
         KeyShardSpec keys;
+        bool         filter_prefill_keys = false;
     };
 
     static ErrorInfo validateTag(const ShardLayout& src, const ShardLayout& dst, const std::string& tag);
