@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <csignal>
+#include <condition_variable>
 #include <cstdint>
 #include <stdexcept>
 #include <tuple>
@@ -13,6 +14,9 @@
 #include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -21,6 +25,155 @@
 
 namespace rtp_llm {
 namespace {
+
+class ControlOnlyReporter final: public KVCacheEventReporter {
+public:
+    std::atomic<bool> enabled{false};
+
+    bool post(const std::string& route, const std::string& body, std::string& response) noexcept override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            requests_.emplace_back(route, body);
+        }
+        response = std::string(R"({"header":{"status":{"code":"OK"}},"snapshot_required":true,
+            "extra_info":"{\"rtp_remote_cache_enabled\":)") + (enabled.load() ? "true" : "false") + R"(}"})";
+        cv_.notify_all();
+        return true;
+    }
+
+    bool waitFor(const std::string& text) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(10), [&] {
+            return std::any_of(requests_.begin(), requests_.end(), [&](const auto& request) {
+                return request.first == text || request.second.find(text) != std::string::npos;
+            });
+        });
+    }
+
+    std::vector<std::pair<std::string, std::string>> requests() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return requests_;
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::vector<std::pair<std::string, std::string>> requests_;
+};
+
+TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings) {
+    for (int mode = 0; mode < 8; ++mode) {
+        SCOPED_TRACE(mode);
+        auto environment = makeBackendEnvironment("kvcm_control_only_" + std::to_string(mode));
+        auto client = std::make_shared<MockClientWrapper>();
+        std::string expected_registration;
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke([&](const auto& configs, auto, auto&, auto&) {
+            expected_registration = configs.at("")->registerInstanceRequest();
+            return true;
+        }));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        KVCacheConfig config;
+        config.enable_remote_cache = true;
+        config.kvcm_server_address = "outer-rpc";
+        config.kv_cache_event_host_ip_port = "127.0.0.1:19999";
+        config.kv_cache_event_snapshot_interval_ms = mode == 4 ? 0 : 600000;
+        config.kv_cache_event_publisher_type = mode == 0 ? "none" : (mode == 6 ? "unknown" : "kvcm");
+        config.reuse_cache = mode != 1;
+        config.enable_device_cache = mode != 2;
+        if (mode != 0 && mode != 3) {
+            config.kv_cache_event_instance_id = "hbm-event-instance";
+        }
+        RuntimeConfig runtime;
+        runtime.model_name = "control_fixture";
+        if (mode == 3) {
+            auto infos = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
+            infos->emplace("tp0_Fdefault", environment.cache_config.blockSizeBytesForGroup("default"));
+            auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
+            groups->emplace("Fdefault", std::vector<std::string>{"tp0_Fdefault"});
+            auto custom = std::make_shared<kvcm::KVCMConfig>(false, "", 8, "custom-group", "custom-remote",
+                std::vector<std::string>{"rpc-a", "rpc-b"}, infos, std::make_shared<kvcm::MetaChannelConfig>(),
+                std::make_shared<kvcm::SdkWrapperConfig>(), groups,
+                kvcm::ModelDeployment(runtime.model_name, "fp16", false, 1, 1, 1, "extra", "user-data"));
+            config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"alias", custom}});
+        }
+        auto backend = std::make_shared<KVCMStorageBackend>(
+            environment.cache_config, config, runtime, singleRankConfig(),
+            SpeculativeExecutionConfig{}, nullptr, false, nullptr, client);
+        ASSERT_FALSE(backend->controlConfig().has_value());
+        ASSERT_TRUE(initSingleRank(*backend, environment));
+        ASSERT_TRUE(backend->controlConfig().has_value());
+        const auto control = *backend->controlConfig();
+        EXPECT_EQ(control.register_instance_request, expected_registration);
+        if (mode == 3) {
+            EXPECT_EQ(control.instance_group, "custom-group");
+            EXPECT_EQ(control.instance_id, "custom-remote");
+            EXPECT_EQ(control.addresses, (std::vector<std::string>{"rpc-a", "rpc-b"}));
+        }
+
+        auto manager_config = environment.cache_config;
+        if (mode == 5) {
+            auto groups = manager_config.topology().groups();
+            groups.front().policy.enable_prefix_reuse = false;
+            auto layers = manager_config.topology().layers();
+            manager_config.setTopology(std::move(groups), std::move(layers));
+        }
+        KVCacheManager manager(manager_config, false, nullptr, config, singleRankConfig(), runtime);
+        auto full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
+        full->initialize(0, manager_config.topologyPtr(), {"default"});
+        manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+        manager.block_tree_cache_->storage_backend_ = backend;
+        auto reporter = std::make_shared<ControlOnlyReporter>();
+        manager.initCacheEventPublisher(reporter);
+        ASSERT_NE(manager.cache_event_publisher_, nullptr);
+        ASSERT_TRUE(reporter->waitFor("EVENT_NODE_REGISTER"));
+        const auto waitForRemoteState = [&](bool expected) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (backend->remoteCacheEnabled() == expected) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
+        };
+        ASSERT_TRUE(waitForRemoteState(false));
+        EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_ != nullptr, mode == 7);
+        reporter->enabled.store(true);
+        ASSERT_TRUE(waitForRemoteState(true));
+        ASSERT_TRUE(reporter->waitFor("EVENT_HEARTBEAT"));
+        EXPECT_EQ(manager.cache_event_publisher_->tryPublish({KVCacheEventType::BLOCK_ADD, 42, 0}),
+                  mode == 7 ? PublishResult::ACCEPTED : PublishResult::DISABLED);
+        if (mode == 7) {
+            ASSERT_TRUE(reporter->waitFor("EVENT_BLOCK_SNAPSHOT"));
+            ASSERT_TRUE(reporter->waitFor("EVENT_BLOCK_ADD"));
+        }
+        manager.stopCacheEventPublisher();
+        const auto requests = reporter->requests();
+        ASSERT_FALSE(requests.empty());
+        EXPECT_NE(requests.back().second.find("EVENT_HOST_DOWN"), std::string::npos);
+        size_t registration_count = 0;
+        for (const auto& request : requests) {
+            if (mode != 7) {
+                EXPECT_EQ(request.second.find("EVENT_BLOCK_"), std::string::npos);
+            }
+            if (request.first == "/api/registerInstance") {
+                ++registration_count;
+                autil::legacy::json::JsonMap actual;
+                autil::legacy::FromJsonString(actual, request.second);
+                if (mode == 7) {
+                    EXPECT_EQ(autil::legacy::AnyCast<std::string>(actual.at("instance_id")), "hbm-event-instance");
+                    continue;
+                }
+                EXPECT_EQ(actual.erase("trace_id"), 1u);
+                autil::legacy::json::JsonMap expected;
+                autil::legacy::FromJsonString(expected, expected_registration);
+                EXPECT_EQ(autil::legacy::ToJsonString(actual), autil::legacy::ToJsonString(expected));
+            }
+        }
+        EXPECT_EQ(registration_count, 1u);
+    }
+}
 
 double snapshotGauge(kmonitor::MutableMetric* metric) {
     if (metric == nullptr) {

@@ -38,6 +38,66 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class KVCacheControlArgumentsTest(TestCase):
+    def test_remote_control_accepts_unused_nonpositive_snapshot_interval(self):
+        from rtp_llm.server.server_args import server_args
+
+        for publisher in ("none", "kvcm"):
+            for interval in ("0", "-1"):
+                with self.subTest(publisher=publisher, interval=interval):
+                    with patch.dict(os.environ, {}, clear=True):
+                        configs = server_args.setup_args(
+                            [
+                                "--kv_cache_event_snapshot_interval_ms",
+                                interval,
+                                "--kv_cache_event_publisher_type",
+                                publisher,
+                                "--enable_remote_cache",
+                                "true",
+                            ]
+                        )
+                    self.assertTrue(configs.kv_cache_config.enable_remote_cache)
+                    self.assertEqual(
+                        configs.kv_cache_config.kv_cache_event_snapshot_interval_ms,
+                        int(interval),
+                    )
+
+    def test_remote_control_env_accepts_unused_snapshot_interval(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_REMOTE_CACHE": "1",
+                "KV_CACHE_EVENT_PUBLISHER_TYPE": "none",
+                "KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS": "0",
+            },
+            clear=True,
+        ):
+            configs = server_args.setup_args([])
+        self.assertTrue(configs.kv_cache_config.enable_remote_cache)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_snapshot_interval_ms, 0)
+
+    def test_nonpositive_snapshot_interval_without_remote_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+            server_args.setup_args(["--kv_cache_event_snapshot_interval_ms", "0"])
+
+    def test_snapshot_interval_still_requires_int32(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+            server_args.setup_args(
+                [
+                    "--enable_remote_cache",
+                    "true",
+                    "--kv_cache_event_snapshot_interval_ms",
+                    str(2**31),
+                ]
+            )
+
+
 class DSparkConfidenceArgumentsTest(TestCase):
     def parse_config(self, args, env):
         from rtp_llm.config.py_config_modules import PyEnvConfigs

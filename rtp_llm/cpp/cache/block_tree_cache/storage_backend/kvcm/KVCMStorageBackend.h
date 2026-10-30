@@ -1,6 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
@@ -35,6 +38,17 @@ public:
                        std::shared_ptr<kmonitor::MetricsReporter>    metrics_reporter = nullptr,
                        std::shared_ptr<kvcm::ClientWrapper>          client_wrapper = nullptr);
     ~KVCMStorageBackend() override;
+
+    struct ControlConfig {
+        std::string              instance_group;
+        std::string              instance_id;
+        std::string              register_instance_request;
+        bool                     enable_vipserver = false;
+        std::string              vipserver_domain;
+        std::vector<std::string> addresses;
+    };
+    // Immutable snapshot of the effective SDK registration, available after init.
+    std::optional<ControlConfig> controlConfig() const;
 
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().

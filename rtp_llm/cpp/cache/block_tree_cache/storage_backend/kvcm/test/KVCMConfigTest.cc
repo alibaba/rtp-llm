@@ -97,6 +97,43 @@ TEST(KVCMConfigTest, RoundTripsSsdThroughCompleteModelClientConfig) {
     EXPECT_NE(serialized.find("pace_ssd"), std::string::npos);
 }
 
+TEST(KVCMConfigTest, ControlRegistrationPreservesEffectiveMetadataWithoutSdkSettings) {
+    auto infos = std::make_shared<KVCMConfig::LocationSpecInfoMap>();
+    infos->emplace("F0_TP0", 4096);
+    infos->emplace("F0_TP1", 4096);
+    auto groups = std::make_shared<KVCMConfig::LocationSpecGroups>();
+    groups->emplace("custom_group", std::vector<std::string>{"F0_TP0", "F0_TP1"});
+    KVCMConfig config(false, "", 128, "remote_group", "stable_remote", {"rpc-a", "rpc-b"}, infos,
+                      std::make_shared<MetaChannelConfig>(), std::make_shared<SdkWrapperConfig>(), groups,
+                      ModelDeployment("fixture", "fp16", false, 2, 1, 1, "extra", "user-data"));
+    config.set_default_query_type(2);
+    autil::legacy::json::JsonMap request;
+    ASSERT_NO_THROW(autil::legacy::FromJsonString(request, config.registerInstanceRequest()));
+    autil::legacy::json::JsonMap client;
+    ASSERT_NO_THROW(autil::legacy::FromJsonString(client, autil::legacy::ToJsonString(config)));
+    for (const auto* field :
+         {"instance_group", "instance_id", "block_size", "default_query_type", "model_deployment"}) {
+        EXPECT_EQ(autil::legacy::ToJsonString(request.at(field)), autil::legacy::ToJsonString(client.at(field)));
+    }
+    EXPECT_EQ(request.count("address"), 0u);
+    EXPECT_EQ(request.count("sdk_config"), 0u);
+    EXPECT_EQ(request.count("meta_channel_config"), 0u);
+    std::vector<autil::legacy::json::JsonMap> wire_infos;
+    autil::legacy::FromJson(wire_infos, request.at("location_spec_infos"));
+    ASSERT_EQ(wire_infos.size(), 2u);
+    EXPECT_EQ(autil::legacy::AnyCast<std::string>(wire_infos[0].at("name")), "F0_TP0");
+    int64_t size = 0;
+    autil::legacy::FromJson(size, wire_infos[0].at("size"));
+    EXPECT_EQ(size, 4096);
+    std::vector<autil::legacy::json::JsonMap> wire_groups;
+    autil::legacy::FromJson(wire_groups, request.at("location_spec_groups"));
+    ASSERT_EQ(wire_groups.size(), 1u);
+    EXPECT_EQ(autil::legacy::AnyCast<std::string>(wire_groups[0].at("name")), "custom_group");
+    std::vector<std::string> names;
+    autil::legacy::FromJson(names, wire_groups[0].at("spec_names"));
+    EXPECT_EQ(names, (std::vector<std::string>{"F0_TP0", "F0_TP1"}));
+}
+
 TEST(KVCMConfigTest, RejectsUnknownSsdNameWithoutReplacingValidState) {
     SdkWrapperConfig config;
     ASSERT_NO_THROW(config.parseBackendConfigs(R"([{"type":"pace_ssd"}])"));

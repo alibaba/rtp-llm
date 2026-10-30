@@ -451,6 +451,19 @@ protected:
     void writeImpl(const StorageRequest&) override {}
 };
 
+TEST_F(KVCacheManagerTest, DisabledEventsWithoutRemoteBackendDoNotCreateControlPublisher) {
+    auto config = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
+    KVCacheManager manager(config, false, nullptr, KVCacheConfig{});
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    full->initialize(0, config.topologyPtr(), {"default"});
+    manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+    auto reporter = std::make_shared<EventPublicationReporter>();
+    manager.initCacheEventPublisher(reporter);
+    EXPECT_EQ(manager.cache_event_publisher_, nullptr);
+    EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_, nullptr);
+}
+
 TEST_F(KVCacheManagerTest, EventControlUpdatesRemoteBackendThroughRegistrationAndHeartbeat) {
     auto config = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
     RuntimeConfig runtime;
