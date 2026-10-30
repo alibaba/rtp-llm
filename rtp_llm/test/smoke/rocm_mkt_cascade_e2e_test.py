@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 import aiohttp
+import torch
 
 from rtp_llm.test.smoke.rocm_mkt_cascade_fixture_capture_test import (
     CONFIG_KEYS,
@@ -76,6 +77,7 @@ async def _phase(
     duration=20,
     aux=False,
     profile=False,
+    externally_profiled=False,
 ):
     directory = output / name
     directory.mkdir(mode=0o700)
@@ -103,6 +105,7 @@ async def _phase(
                 config.update(aux_info=aux, timeout_ms=60000)
                 if profile:
                     config["gen_timeline"] = True
+                    config["profile_step"] = config["max_new_tokens"]
                 status, error, obj, raw = 0, None, {}, b""
                 try:
                     async with session.post(
@@ -181,7 +184,7 @@ async def _phase(
     successful = [row for row in rows if row["ok"]]
     summary = dict(
         name=name,
-        profiled=profile,
+        profiled=profile or externally_profiled,
         concurrency=concurrency,
         offered_qps=qps,
         duration_s=duration if qps else None,
@@ -235,6 +238,7 @@ class RocmMktCascadeE2ETest(unittest.TestCase):
             {
                 "ENABLE_DECODE_CASCADE_ATTENTION": "0" if mode == "off" else "1",
                 "RTP_ROCM_CASCADE_FP32": "1" if mode == "optimized" else "0",
+                "RTP_ROCM_LM_HEAD_BF16X3": os.getenv("RTP_ROCM_LM_HEAD_BF16X3", "0"),
                 "SEQ_SIZE_PER_BLOCK": "16",
                 "KERNEL_SEQ_SIZE_PER_BLOCK": "16",
                 "FP8_KV_CACHE": "0",
@@ -248,6 +252,8 @@ class RocmMktCascadeE2ETest(unittest.TestCase):
         )
         profile_count = int(os.getenv("MKT_E2E_PROFILE_COUNT", "0"))
         self.assertGreaterEqual(profile_count, 0)
+        profile_batch_count = int(os.getenv("MKT_E2E_PROFILE_BATCH_COUNT", "0"))
+        self.assertGreaterEqual(profile_batch_count, 0)
         server_cpus = {int(x) for x in os.environ["MKT_E2E_SERVER_CPUS"].split(",")}
         client_cpus = {int(x) for x in os.environ["MKT_E2E_CLIENT_CPUS"].split(",")}
         original_cpus = os.sched_getaffinity(0)
@@ -269,6 +275,8 @@ class RocmMktCascadeE2ETest(unittest.TestCase):
                 "models_py/triton_kernels/attention/beam_search_cascade_native.py",
                 "models_py/triton_kernels/attention/beam_search_cascade_tail.py",
                 "models_py/modules/factory/attention/rocm_impl/beam_search_cascade.py",
+                "cpp/models/PyWrappedModel.cc",
+                "cpp/models/PyWrappedModel.h",
                 "test/smoke/rocm_mkt_cascade_e2e_test.py",
             )
         ]
@@ -284,8 +292,10 @@ class RocmMktCascadeE2ETest(unittest.TestCase):
             server_cpus=sorted(server_cpus),
             client_cpus=sorted(client_cpus),
             physical_gpu_visibility=os.getenv("HIP_VISIBLE_DEVICES"),
-            graph_enabled=True,
-            reuse_cache=False,
+            float32_matmul_precision=torch.get_float32_matmul_precision(),
+            torch_tf32_override=os.getenv("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", "unset"),
+            graph_enabled=env["ENABLE_CUDA_GRAPH"] == "1",
+            reuse_cache=env["REUSE_CACHE"] == "1",
             response_sequence_count=1000,
             timing_boundary="client request construction through full HTTP response bytes; success RT only",
             arrival_pattern="fixed interval; success QPS includes drain",
@@ -375,6 +385,34 @@ class RocmMktCascadeE2ETest(unittest.TestCase):
                             self.assertEqual(
                                 result["fail"], 0, "profile request failed"
                             )
+                        if profile_batch_count:
+                            async with aiohttp.ClientSession(
+                                trust_env=False
+                            ) as session:
+                                async with session.post(
+                                    f"http://127.0.0.1:{manager.port}/start_profile",
+                                    json={
+                                        "gen_timeline": True,
+                                        "trace_name": "batch_decode",
+                                        "start_step": 0,
+                                        "num_steps": 6,
+                                    },
+                                ) as response:
+                                    self.assertEqual(response.status, 200)
+                                    self.assertEqual(
+                                        (await response.json())["status"], "ok"
+                                    )
+                            result = await _phase(
+                                manager.port,
+                                samples,
+                                output,
+                                "profile_batch",
+                                concurrency=8,
+                                count=profile_batch_count,
+                                externally_profiled=True,
+                            )
+                            summaries.append(result)
+                            self.assertEqual(result["fail"], 0, "batch profile failed")
 
                     asyncio.run(run())
                 finally:
