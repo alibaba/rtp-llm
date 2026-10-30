@@ -347,7 +347,11 @@ def setup_jit_cache(cache_dir=None, packages=None):
         "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
     )
 
-    requested_cache_dir = cache_dir or Path.home() / ".cache"
+    requested_cache_dir = (
+        cache_dir
+        or os.environ.get("RTP_JIT_PYTHON_CACHE_DIR", "").strip()
+        or Path.home() / ".cache"
+    )
     cache_dir = cache_env.ensure_writable_directory(requested_cache_dir)
     if cache_dir is None:
         cache_dir = cache_env.ensure_writable_directory(

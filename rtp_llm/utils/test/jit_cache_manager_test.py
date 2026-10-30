@@ -99,6 +99,7 @@ class JitCacheTestBase(unittest.TestCase):
         for name in (*(item.env_name for item in jit.COMPONENTS), *COMPILE_FLAG_ENVS):
             os.environ.pop(name, None)
         os.environ.pop("REMOTE_JIT_DIR", None)
+        os.environ.pop("RTP_JIT_PYTHON_CACHE_DIR", None)
         os.environ.pop(cache_env._AUTOMATIC_CACHE_ENVS, None)
         jit.setup_jit_cache_env.cache_clear()  # memoized: every test starts cold
         self.addCleanup(jit.setup_jit_cache_env.cache_clear)
@@ -120,6 +121,43 @@ class JitCacheTestBase(unittest.TestCase):
 
 
 class WrapperCacheSetupTest(JitCacheTestBase):
+
+    def test_python_package_cache_can_be_isolated_without_changing_home(self):
+        source = self.root / "source" / "probe"
+        source.mkdir(parents=True)
+        (source / "__init__.py").write_text("MARKER = 'locked-wheel'\n")
+        for scenario in ("default", "environment", "argument", "blank"):
+            with self.subTest(scenario=scenario), mock.patch.dict(os.environ):
+                home = self.root / scenario / "home"
+                override = self.root / scenario / "isolated"
+                explicit = self.root / scenario / "argument"
+                os.environ["RUNFILES_DIR"] = ""
+                os.environ.pop("RTP_JIT_PYTHON_CACHE_DIR", None)
+                if scenario in ("environment", "argument"):
+                    os.environ["RTP_JIT_PYTHON_CACHE_DIR"] = str(override)
+                elif scenario == "blank":
+                    os.environ["RTP_JIT_PYTHON_CACHE_DIR"] = "  "
+                argument = explicit if scenario == "argument" else None
+                expected = (
+                    explicit
+                    if argument is not None
+                    else override if scenario == "environment" else home / ".cache"
+                )
+                with mock.patch.object(
+                    wrapper_cache.Path, "home", return_value=home
+                ), mock.patch.object(
+                    wrapper_cache, "get_package_info", return_value=("1.0", source)
+                ):
+                    wrapper_cache.setup_jit_cache(argument, packages=["probe"])
+                staged = expected / "probe_python-1.0" / "site-packages"
+                self.assertEqual(os.environ["_JIT_CACHE_PATHS"], str(staged))
+                self.assertEqual(
+                    (staged / "probe" / "__init__.py").read_bytes(),
+                    (source / "__init__.py").read_bytes(),
+                )
+                if scenario == "argument":
+                    self.assertFalse(override.exists())
+
     def test_local_fallback_does_not_use_remote_snapshot_root(self):
         os.environ["REMOTE_JIT_DIR"] = str(self.root / "remote")
         self.assertEqual(
