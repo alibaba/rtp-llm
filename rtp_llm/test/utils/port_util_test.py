@@ -1,9 +1,16 @@
+import json
+import os
 import shutil
+import socket
+import tempfile
 import threading
+import time
 import unittest
 from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
 
-from port_util import *
+from port_util import ExpiredLockFile, PortInUseError, PortManager, PortsContext
 
 
 class TestExpiredLockFile(unittest.TestCase):
@@ -28,15 +35,19 @@ class TestExpiredLockFile(unittest.TestCase):
         lock_file = self.test_dir / "port_8080.lock"
         with ExpiredLockFile(lock_file, 8080):
             self.assertTrue(lock_file.exists())
-        self.assertFalse(lock_file.exists())
+            inode = lock_file.stat().st_ino
+        with ExpiredLockFile(lock_file, 8080):
+            self.assertEqual(lock_file.stat().st_ino, inode)
 
     def test_concurrent_locks(self):
         lock_file = self.test_dir / "port_8080.lock"
         with ExpiredLockFile(lock_file, 8080):
+            metadata = lock_file.read_text()
             # should raise PortInUseError for the 2nd time try to lock
             with self.assertRaises(PortInUseError):
                 with ExpiredLockFile(lock_file, 8080):
                     pass
+            self.assertEqual(lock_file.read_text(), metadata)
 
 
 class TestPortManager(unittest.TestCase):
@@ -108,7 +119,7 @@ class TestPortManager(unittest.TestCase):
 
     def test_concurrent_access(self):
         def get_ports():
-            return PortManager(self.test_dir).get_consecutive_ports(20)
+            return PortManager(self.test_dir, start_port=12000).get_consecutive_ports(20)
 
         threads = []
         results = []
@@ -147,7 +158,7 @@ class TestPortManager(unittest.TestCase):
                     for lock in locks:
                         lock.__exit__(None, None, None)
 
-    def test_cleanup_stale_locks(self):
+    def test_expired_metadata_does_not_prevent_reuse(self):
         lock_file = self.test_dir / "port_8080.lock"
         with open(lock_file, "w") as f:
             json.dump(
@@ -160,8 +171,29 @@ class TestPortManager(unittest.TestCase):
                 f,
             )
 
-        self.port_manager.cleanup_stale_locks()
-        self.assertFalse(lock_file.exists())
+        inode = lock_file.stat().st_ino
+        with ExpiredLockFile(lock_file, 8080):
+            self.assertEqual(lock_file.stat().st_ino, inode)
+            self.assertGreater(
+                json.loads(lock_file.read_text())["timestamp"], time.time() - 1
+            )
+
+    def test_default_reservations_coordinate_across_action_tmpdirs(self):
+        held = []
+        try:
+            with patch("port_util.DEFAULT_PORT_LOCK_DIR", self.test_dir):
+                first = PortManager(start_port=12000)
+                ports1, locks1 = first.get_consecutive_ports(3)
+                held.extend(locks1)
+                with patch("tempfile.gettempdir", return_value="/tmp/another-action"):
+                    second = PortManager(start_port=12000)
+                    ports2, locks2 = second.get_consecutive_ports(3)
+                held.extend(locks2)
+            self.assertEqual(first.lock_dir, second.lock_dir)
+            self.assertFalse(set(ports1) & set(ports2))
+        finally:
+            for lock in held:
+                lock.__exit__(None, None, None)
 
 
 class TestPortsContext(unittest.TestCase):
@@ -185,7 +217,9 @@ class TestPortsContext(unittest.TestCase):
             self.assertTrue(lock_file.exists())
 
         # exit context, lock file should be released
-        self.assertFalse(lock_file.exists())
+        self.assertTrue(lock_file.exists())
+        with ExpiredLockFile(lock_file, first_port):
+            pass
 
     def test_concurrent_access(self):
         """test the case that concurrent allocates ports without conflict"""
@@ -237,9 +271,14 @@ class TestPortsContext(unittest.TestCase):
                 )
                 raise TestException("simulate exception raised")
         except TestException:
-            self.assertFalse(
-                all((self.test_dir / f"port_{port}.lock").exists() for port in ports)
-            )
+            ports, locks = PortManager(
+                self.test_dir, start_port=ports_obtained[0]
+            ).get_consecutive_ports(2)
+            try:
+                self.assertEqual(ports, ports_obtained)
+            finally:
+                for lock in locks:
+                    lock.__exit__(None, None, None)
 
     def test_multiple_contexts(self):
         """test multiple embedded PortsContext"""

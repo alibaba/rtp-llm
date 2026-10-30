@@ -309,6 +309,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("slot_mapping"),
                   py::arg("kv_cache_dtype"),
                   py::arg("scale"));
+
+    rtp_ops_m.def("mla_decode_q_concat_cache_insert",
+                  &rtp_llm::mla_decode_q_concat_cache_insert,
+                  "BF16 MLA query concat and paged cache insertion without RoPE",
+                  py::arg("q_latent"),
+                  py::arg("q_position"),
+                  py::arg("kv_latent"),
+                  py::arg("k_position"),
+                  py::arg("q_out"),
+                  py::arg("cache"),
+                  py::arg("slot_mapping"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

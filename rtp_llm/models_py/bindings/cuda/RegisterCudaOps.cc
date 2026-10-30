@@ -4,6 +4,9 @@
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/custom_all_gather.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/push_reduce_scatter.h"
+#ifdef RTP_NATIVE_ATTN_RES
+#include "rtp_llm/models_py/bindings/cuda/kernels/attn_res.h"
+#endif
 
 
 #if defined(ENABLE_FP4)
@@ -57,6 +60,23 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("rank"),
                   py::arg("blocks"),
                   py::arg("threads"));
+
+#ifdef RTP_NATIVE_ATTN_RES
+    rtp_ops_m.def("attn_res",
+                  &attn_res,
+                  "Blackwell AttnRes with optional fused RMSNorm",
+                  py::arg("prefix"),
+                  py::arg("delta"),
+                  py::arg("blocks"),
+                  py::arg("norm_weight"),
+                  py::arg("qk_weight"),
+                  py::arg("output_norm_weight"),
+                  py::arg("output"),
+                  py::arg("num_blocks"),
+                  py::arg("block_write_idx"),
+                  py::arg("eps"),
+                  py::arg("output_norm_eps"));
+#endif
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,

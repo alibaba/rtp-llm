@@ -34,4 +34,16 @@ void invokeNoAuxTc(T*                 scores,
                    double const       routed_scaling_factor,
                    cudaStream_t const stream = 0);
 
+template<typename IdxT>
+void invokeFusedSigmoidTopk(float const*        router_logits,
+                            float const*        correction_bias,
+                            float*              topk_values,
+                            IdxT*               topk_indices,
+                            int64_t const       num_tokens,
+                            int64_t const       num_experts,
+                            int64_t const       topk,
+                            bool                renormalize,
+                            double const        routed_scaling_factor,
+                            cudaStream_t const  stream = 0);
+
 }  // namespace rtp_llm
