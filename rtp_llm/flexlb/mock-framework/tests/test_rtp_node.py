@@ -1,0 +1,133 @@
+import asyncio
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import subprocess
+import urllib.request
+
+from mock_framework.config import Registry, compile_case
+from mock_framework.config.registry import case_interface
+from mock_framework.execution import prepare_launch, run_case
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class ProbeArgs:
+    pass
+
+
+@case_interface('probe/addresses', effect='read')
+async def addresses(ctx, args: ProbeArgs) -> list[str]:
+    return ctx.globals()['prefill']
+
+
+def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(tmp_path):
+    import yaml
+    java = Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home')) / 'bin/java'
+    jar = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
+    classpath = os.pathsep.join([str(ROOT / 'java/engine/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+    environment = {role: {'engine': 'rtp', 'config': {'SEQ_SIZE_PER_BLOCK': '16', 'MAX_SEQ_LEN': '4096',
+                    'TEST_BLOCK_NUM': '9', 'RESERVE_BLOCK_RATIO': '0'}} for role in ('prefill', 'decode')}
+    for group in environment.values():
+        group['config']['compute.forward.expression'] = '1 + batchSize'
+    data = {'id': 'native_node_probe', 'describe': '仅验证节点启动及原生状态协议', 'environment': environment,
+            'phases': [{'id': 'observe', 'describe': '测试客户端在此期间读取原生状态', 'timeout': '15s',
+                        'steps': [{'id': 'addresses', 'describe': '检查发现地址后保留节点供测试客户端读取',
+                                   'interface': 'probe/addresses', 'expect': {'count': 1}, 'wait_after': '8s'}]}]}
+    path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data, allow_unicode=True))
+    registry = Registry.standard(); registry.register(addresses)
+    case = compile_case(path, registry)
+    launch = prepare_launch({'engine_mode': 'isolated', 'components': {role: {'command': [str(java), '-cp', str(jar), 'org.flexlb.mock.host.EngineHost'], 'startup_timeout': '10s'}
+                                            for role in ('prefill', 'decode')}}, case, tmp_path)
+    output = tmp_path / 'result'
+
+    async def run():
+        task = asyncio.create_task(run_case(case, registry, launch, output))
+        try:
+            for _ in range(2000):
+                if all((output / f'components/{role}-0/ready.json').exists() for role in ('prefill', 'decode')):
+                    break
+                if task.done():
+                    raise AssertionError(await task)
+                await asyncio.sleep(.01)
+            else:
+                raise AssertionError('RTP nodes did not become ready')
+            for role in ('prefill', 'decode'):
+                directory = output / f'components/{role}-0'
+                endpoints = json.loads((directory / 'endpoints.json').read_text())
+                with urllib.request.urlopen(endpoints['control'] + '/health', timeout=2) as response:
+                    assert json.load(response)['interfaces'] == []
+                probe_result = tmp_path / f'{role}.json'
+                command = [str(java), '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', endpoints['rpc'], str(probe_result)]
+                if role == 'decode':
+                    prefill = json.loads((output / 'components/prefill-0/endpoints.json').read_text())
+                    command.append(prefill['rpc'])
+                completed = await asyncio.to_thread(subprocess.run, command,
+                    capture_output=True, text=True, timeout=10)
+                assert completed.returncode == 0, completed.stderr
+                actual = json.loads(probe_result.read_text())
+                assert actual['health'] == 'OK' and actual['alive']
+                assert actual['role'] == f'RoleType.{role.upper()}'
+                assert actual['total_tokens'] == actual['available_tokens'] == 128
+                assert actual['block_size'] == 16 and actual['cache_keys'] == 0
+                if role == 'prefill':
+                    assert actual['local_output_tokens'] == 1
+                else:
+                    assert actual['pd_output_tokens'] == 4
+                    assert actual['batch_output_tokens'] == 4
+                    assert actual['cancel_fenced'] is True
+                    assert actual['prefill_available_after_generation'] == 128
+                    assert actual['decode_available_after_generation'] == 128
+                    assert actual['decode_reserved_tokens'] == 16
+                    assert actual['decode_available_after_cancel'] == 128
+                    assert endpoints['remote_generation']['stages'] == ['ALLOCATE', 'LOAD', 'GENERATE', 'PREFILL_COMPLETE']
+                    assert endpoints['remote_generation']['load'] is True
+                    client_result = tmp_path / 'client.json'
+                    client_classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'),
+                        str(ROOT / 'java/client/target/classes'), classpath])
+                    client = await asyncio.to_thread(subprocess.run,
+                        [str(java), '-cp', client_classpath, 'org.flexlb.mock.client.ClientProbe',
+                         prefill['rpc'], endpoints['rpc'], str(client_result)],
+                        capture_output=True, text=True, timeout=10)
+                    assert client.returncode == 0, client.stderr
+                    observed = json.loads(client_result.read_text())
+                    assert observed['schedule_calls'] == 2
+                    for mode in ('generate', 'fetch'):
+                        assert observed[mode]['outcome'] == 'success'
+                        assert observed[mode]['output_tokens'] == 3
+                        assert 0 < observed[mode]['ttft_ns'] <= observed[mode]['elapsed_ns']
+                with urllib.request.urlopen(endpoints['metrics'], timeout=2) as response:
+                    assert response.status == 200
+                    assert response.headers.get_content_type() == 'text/plain'
+                    metrics = response.read().decode('utf-8')
+                (directory / 'metrics.prom').write_text(metrics)
+                samples = [line for line in metrics.splitlines() if line.startswith('rtp_llm_model_forward_seconds_count{')]
+                assert len(samples) == 1
+                assert float(samples[0].rsplit(' ', 1)[1]) == (1 if role == 'prefill' else 10)
+                assert f'role="{role}"' in samples[0]
+                assert 'rtp_llm_wait_stream_size{' in metrics
+                assert 'rtp_llm_running_stream_size{' in metrics
+                native_blocks = [line for line in metrics.splitlines()
+                                 if line.startswith('rtp_llm_kv_cache_total_blocks{') and 'tier="DEVICE"' in line]
+                assert len(native_blocks) == 1 and float(native_blocks[0].rsplit(' ', 1)[1]) == 8
+                assert 'mock_engine_' not in metrics
+                effective = json.loads((directory / 'effective-config.json').read_text())
+                assert 'scale' not in effective['compute']['forward']['noise']
+            assert (await task)['status'] == 'PASS'
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+    events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
+    started = [event for event in events if event['event'] == 'process_started']
+    assert len(started) == 2
+    for event in started:
+        try:
+            os.kill(event['pid'], 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise AssertionError(f'Leaked RTP node {event["pid"]}')

@@ -1,0 +1,59 @@
+id: basic
+name: RTP 基本收发
+describe: 真实 Master 和 RTP P/D 完成有限请求播放，检查发送速率及全部请求成功。
+environment:
+  master:
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    config: configs/decode.yaml
+  client:
+    config: {}
+phases:
+  - id: startup
+    describe: 检查选举结果并等待 Engine 发现传播。
+    timeout: 10s
+    steps:
+      - id: check_master_leader
+        describe: 只有一个主 Master。
+        interface: master/leadership/get
+        expect: {count: 1}
+        wait_after: 2s
+  - id: traffic
+    describe: 20 条请求按总 QPS=2 播放，收尾后检查完整结果。
+    timeout: 35s
+    steps:
+      - id: start_client
+        describe: Client 自行发现主 Master，开始单轮播放。
+        interface: client/start
+        args:
+          requests_file: requests.binpb.zst
+          qps: 2
+          concurrency: 2
+          queue_capacity: 4
+          request_timeout: 3s
+          drain_timeout: 5s
+        wait_after: 6s
+      - id: check_client_qps
+        describe: 在持续播放中检查已发请求速率，容许采样误差。
+        interface: client/qps
+        args: {range: [-4s, 0s]}
+        expect: {gte: 1.5, lte: 2.5}
+        wait_after: 6s
+      - id: stop_client
+        describe: 收集 Client 结果并验证请求证据完整。
+        interface: client/stop
+      - id: check_client_requests
+        describe: 所有 20 条请求成功，没有错误、超时或取消。
+        interface: client/requests
+        args: {limit: 0}
+        expect:
+          eq:
+            matched: 20
+            outcomes: {success: 20, error: 0, timeout: 0, cancelled: 0}
+            records: []
+            truncated: true
+view: ../../views/default.json
