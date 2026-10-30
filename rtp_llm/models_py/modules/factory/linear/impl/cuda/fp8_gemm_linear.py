@@ -152,3 +152,23 @@ class CudaFp8GEMMLinear(LinearBase):
         if self._should_use_flashinfer(gate_up[:, : self.K]):
             return None
         return self._deepgemm_linear.forward_silu_and_mul_quantized(gate_up)
+
+    def forward_quantized(
+        self,
+        values: torch.Tensor,
+        scales: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Consume grouped E4M3 values and their explicit scales without requantizing."""
+        return self._deepgemm_linear.forward_quantized(values, scales, out=out)
+
+    def quantize_collective_input(
+        self, input: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize collective inputs without advertising fused-norm support.
+
+        Attention backends probe ``quantize_input`` to opt into a different
+        RMSNorm/quantization kernel. Collective reuse must not change that
+        capability or the wrapper's existing attention execution path.
+        """
+        return self._deepgemm_linear.quantize_input(input)
