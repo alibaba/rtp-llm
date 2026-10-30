@@ -3,6 +3,7 @@
 import os
 
 import torch
+
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule_fwd,
 )

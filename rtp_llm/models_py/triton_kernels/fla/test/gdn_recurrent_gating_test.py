@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.models_py.triton_kernels.fla import gdn_recurrent_gating as fused
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule_fwd,
