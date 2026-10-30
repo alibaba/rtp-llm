@@ -301,4 +301,87 @@ class RtpSchedulerTest {
         }
     }
 
+    @Test void decodeGrowthFailureReleasesOnlyItsLeaseAndUnblocksWaitingAdmission() throws Exception {
+        var config = config("decode", "1", 2);
+        try (var cache = new KvCache(config.blockSize(), 7, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var first = new Listener(); var second = new Listener(); var waiting = new Listener();
+            var a = scheduler.input(input(1, false), first);
+            var b = scheduler.input(input(2, false), second);
+            scheduler.maintain(); drain(scheduler); generate(scheduler, a); generate(scheduler, b);
+            var c = scheduler.input(input(3, false), waiting);
+            scheduler.maintain(); drain(scheduler);
+            assertFalse(waiting.allocated.isDone());
+            assertEquals(1, cache.snapshot(0, false).availableBlocks());
+
+            // The first Decode round still fits; the next round crosses the block boundary.
+            var initial = scheduler.schedule();
+            assertEquals(2, initial.batch().dps().getFirst().requests().size());
+            complete(scheduler, initial, config); drain(scheduler);
+            assertEquals(2, a.snapshot().generated());
+
+            // A grows into the last free block; B cannot grow and must release only B's lease.
+            var work = scheduler.schedule(); drain(scheduler);
+            assertNotNull(work); assertEquals(1, work.batch().dps().getFirst().requests().size());
+            assertEquals(RequestFailure.Reason.CAPACITY, second.terminal.get(1, TimeUnit.SECONDS).reason());
+            assertEquals(3, cache.snapshot(0, false).availableBlocks());
+            assertFalse(first.terminal.isDone());
+            scheduler.maintain(); drain(scheduler);
+            assertSame(c, waiting.allocated.get(1, TimeUnit.SECONDS));
+            assertEquals(0, cache.snapshot(0, false).availableBlocks());
+
+            complete(scheduler, work, config); drain(scheduler);
+            assertEquals(3, a.snapshot().generated());
+            assertNull(first.terminal.get(1, TimeUnit.SECONDS));
+            assertEquals(4, cache.snapshot(0, false).availableBlocks());
+            scheduler.finish(c, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+            assertEquals(7, cache.snapshot(0, false).freeBlocks());
+            assertTrue(scheduler.requests().isEmpty());
+            assertEquals(3, scheduler.status(0).finished().size());
+        }
+    }
+
+    @Test void prefillCapacityWaitExpiresOrCancelsWithoutRevivingAfterRelease() throws Exception {
+        var config = config("prefill", "1", 2); var lock = new Object();
+        try (var cache = new KvCache(config.blockSize(), 3, 0, KvCache.EvictionPolicy.LRU);
+             var owner = cache.acquire(6, List.of()).lease();
+             var engine = new EngineLoop(lock, new RtpScheduler(lock, config, cache), cache, config.compute(), config.role(), config.id())) {
+            var expired = new Listener(); var cancelled = new Listener();
+            long now = System.nanoTime();
+            engine.input(new Scheduler.Input("1", 1, 0, 5, 3, 0, now,
+                now + TimeUnit.MILLISECONDS.toNanos(100), List.of(), false, false, 0, false), expired);
+            var request = engine.input(input(2, false), cancelled);
+            engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
+            assertEquals(RequestFailure.Reason.CANCELLED, cancelled.terminal.get(2, TimeUnit.SECONDS).reason());
+            assertEquals(RequestFailure.Reason.TIMEOUT, expired.terminal.get(2, TimeUnit.SECONDS).reason());
+            assertFalse(expired.output.isDone()); assertFalse(cancelled.output.isDone());
+            assertEquals(0, cache.snapshot(0, false).availableBlocks());
+
+            owner.close();
+            var next = new Listener(); engine.input(input(3, false), next);
+            assertNull(next.terminal.get(2, TimeUnit.SECONDS));
+            assertFalse(expired.output.isDone()); assertFalse(cancelled.output.isDone());
+            assertEquals(3, cache.snapshot(0, false).freeBlocks());
+            assertEquals(3, engine.status(0).finished().size());
+        }
+    }
+
+    @Test void oversizedPrefillDoesNotPreventSmallerRequestFromRunning() throws Exception {
+        var config = config("prefill", "1", 2);
+        try (var cache = new KvCache(config.blockSize(), 2, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var oversized = new Listener(); var small = new Listener();
+            scheduler.input(input(1, false), oversized);
+            scheduler.input(new Scheduler.Input("2", 2, 0, 1, 3, 0, System.nanoTime(),
+                Long.MAX_VALUE, List.of(), false, false, 0, false), small);
+            var work = scheduler.schedule(); drain(scheduler);
+            assertEquals(RequestFailure.Reason.CAPACITY, oversized.terminal.get(1, TimeUnit.SECONDS).reason());
+            assertNotNull(work); assertEquals(1, work.batch().dps().getFirst().requests().size());
+            complete(scheduler, work, config); drain(scheduler);
+            assertNull(small.terminal.get(1, TimeUnit.SECONDS));
+            assertTrue(scheduler.requests().isEmpty());
+            assertEquals(2, cache.snapshot(0, false).freeBlocks());
+        }
+    }
+
 }
