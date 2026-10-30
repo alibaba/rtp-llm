@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 from safetensors.torch import save_file
@@ -10,6 +11,7 @@ from safetensors.torch import save_file
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorSource
 from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV2Weight
@@ -20,7 +22,13 @@ from rtp_llm.models.qwen_v2_moe import Qwen2Moe
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
+from rtp_llm.ops import (
+    HWKernelConfig,
+    MoeConfig,
+    ParallelismConfig,
+    RoleType,
+    SpeculativeType,
+)
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
 
@@ -75,6 +83,41 @@ class _RoutedOnlyTensorSource(TensorSource):
 
 
 class MoeConfigPropagationTest(unittest.TestCase):
+    def test_prefill_capacity_and_chunk_mode_reach_draft_config(self):
+        for chunk_size in (0, 128):
+            with self.subTest(chunk_size=chunk_size):
+                main_config = ModelConfig()
+                main_config.max_seq_len = 4096
+                main_config.moe_prefill_max_tokens_per_rank = 1024
+                main_config.prefill_chunk_size = chunk_size
+                draft_config = SimpleNamespace(
+                    prefill_chunk_size=0,
+                    tokenizer_path="",
+                    ckpt_path="",
+                    quantization=main_config.quantization,
+                )
+                model_cls = Mock()
+                model_cls._create_config.return_value = draft_config
+                engine_config = SimpleNamespace(
+                    sp_config=SimpleNamespace(
+                        type=SpeculativeType.MTP,
+                        checkpoint_path="test-draft",
+                        model_type="test-draft",
+                        quantization=main_config.quantization,
+                    ),
+                    kv_cache_config=KVCacheConfig(),
+                    profiling_debug_logging_config=None,
+                )
+                with patch.object(ModelFactory, "get_model_cls", return_value=model_cls), patch(
+                    "rtp_llm.model_factory.build_model_config"
+                ):
+                    result = ModelFactory.create_propose_model_config(
+                        engine_config, main_config, ModelArgs()
+                    )
+                self.assertIs(result, draft_config)
+                self.assertEqual(getattr(result, "prefill_chunk_size", 0), chunk_size)
+                self.assertEqual(result.moe_prefill_max_tokens_per_rank, 1024)
+
     def test_scheduler_prefill_batch_capacity_reaches_generic_moe(self):
         for configured_cap, expected_cap in ((0, 12288), (7000, 7000)):
             with self.subTest(configured_cap=configured_cap):

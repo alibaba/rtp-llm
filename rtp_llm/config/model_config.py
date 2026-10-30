@@ -107,6 +107,7 @@ class ModelConfig(CppModelConfig):
         "moe_inter_size",
         "moe_w1_layout",
         "moe_prefill_max_tokens_per_rank",
+        "prefill_chunk_size",
         "n_shared_experts",
         "dsv4_fixed_pool_use_memory",
         "generate_env_config",

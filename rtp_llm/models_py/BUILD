@@ -109,6 +109,7 @@ py_library(
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
+        "//rtp_llm/platforms:platform_sources",
     ],
     deps = [
         ":utils",
