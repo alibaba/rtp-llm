@@ -33,7 +33,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         } catch(RuntimeException error) { producers.forEach(c->cache.complete(c,error));claims.forEach(VitCache::release);throw error; }
         return claims;
     }
-    private List<MediaInput.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
+    private List<VitGeometry.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
         long started = System.nanoTime();
         metrics.events.increment("py_rtp_vit_qps");
         List<VitCache.Claim> claims;
@@ -44,7 +44,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         if(context.getDeadline()!=null) budget=Math.min(budget,context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
         long end=System.nanoTime()+Math.max(0,budget);
         try {
-        var result=new ArrayList<MediaInput.Image>();
+        var result=new ArrayList<VitGeometry.Image>();
         for(var claim:claims) {
             while(true) {
                 if(context.isCancelled()) throw Status.CANCELLED.withDescription("V result wait cancelled").asRuntimeException();
@@ -54,7 +54,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 catch(ExecutionException error) { throw Status.fromThrowable(error.getCause()).asRuntimeException(); }
             }
         }
-        metrics.events.observe("py_rtp_vit_embedding_length", result.stream().mapToLong(MediaInput.Image::rows).sum());
+        metrics.events.observe("py_rtp_vit_embedding_length", result.stream().mapToLong(VitGeometry.Image::rows).sum());
         metrics.events.observe("py_rtp_vit_embedding_rt", (System.nanoTime() - started) / 1e6);
         metrics.events.increment("py_rtp_vit_success_qps");
         return result;
@@ -76,17 +76,17 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input,StreamObserver<MultimodalOutputPB> response) {
         var context=Context.current(); reply(response,()->output(compute(input,context)));
     }
-    private MultimodalOutputPB output(List<MediaInput.Image> images) throws Exception {
-        int rows=images.stream().mapToInt(MediaInput.Image::rows).sum();var hashes=new ByteArrayOutputStream();
+    private MultimodalOutputPB output(List<VitGeometry.Image> images) throws Exception {
+        int rows=images.stream().mapToInt(VitGeometry.Image::rows).sum();var hashes=new ByteArrayOutputStream();
         var output=MultimodalOutputPB.newBuilder();
-        for(var image:images) { output.addSplitSize(image.rows());MediaInput.hashes(image.key(),image.rows()).writeTo(hashes); }
+        for(var image:images) { output.addSplitSize(image.rows());VitGeometry.hashes(image.key(),image.rows()).writeTo(hashes); }
         return output.setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(rows).addShape(config.hidden()))
             .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(rows).setInt32Data(ByteString.copyFrom(hashes.toByteArray()))).build();
     }
     @Override public void getMultimodalHashes(MultimodalHashRequestPB input,StreamObserver<MultimodalHashResponsePB> response) {
         var context=Context.current(); reply(response,()-> {
             if(input.getKeysCount()>256 || input.getKeysList().stream().anyMatch(k->k.isBlank() || k.length()>4096)) throw MediaInput.invalid("Oversized hash query");
-            Map<String,MediaInput.Image> computed=new HashMap<>();
+            Map<String,VitGeometry.Image> computed=new HashMap<>();
             if(input.getTimeoutMs()<0 || input.getTimeoutMs()>3600000) throw MediaInput.invalid("Invalid hash request timeout");
             if(input.hasInputs()) {
                 var media=input.getInputs();
@@ -114,7 +114,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 var image=computed.get(key);if(image==null) image=cache.hash(key);
                 var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                 entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
-                if(image!=null) entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows()).setFeatureHashes(MediaInput.hashes(key,image.rows()));
+                if(image!=null) entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows()).setFeatureHashes(VitGeometry.hashes(key,image.rows()));
                 result.addEntries(entry);
             }
             return result.build();

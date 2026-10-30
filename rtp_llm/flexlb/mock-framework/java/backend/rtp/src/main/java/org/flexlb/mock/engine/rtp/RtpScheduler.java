@@ -8,7 +8,6 @@ import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
-import org.flexlb.mock.metrics.EngineMetrics;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.rtp.RtpScheduler.Phase.*;
 
@@ -19,7 +18,7 @@ public final class RtpScheduler implements Scheduler {
     private final Object lock;
     private final RtpConfig config;
     private final KvCache cache;
-    private final EngineMetrics metrics;
+    private final RtpMetrics metrics;
     private final Map<String, Entry> active = new LinkedHashMap<>();
     private final Set<Entry> owned = new LinkedHashSet<>();
     private final ArrayDeque<Entry> waiting = new ArrayDeque<>();
@@ -72,7 +71,7 @@ public final class RtpScheduler implements Scheduler {
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
-        this.metrics = new EngineMetrics(config.role().name(), this::metricState);
+        this.metrics = new RtpMetrics(config.role().name(), this::metricState);
     }
 
     @Override public Request input(Input input, Listener listener) {
@@ -385,10 +384,10 @@ public final class RtpScheduler implements Scheduler {
             metrics.observe("rtp_llm_query_batch_size", 1); // Native query batch is beams, not the scheduler batch.
         }
         active.remove(entry.input.identity(), entry);
-        metrics.finished(failure == null ? EngineMetrics.Outcome.success : switch (failure.reason()) {
-            case CANCELLED -> EngineMetrics.Outcome.cancelled;
-            case TIMEOUT -> EngineMetrics.Outcome.timeout;
-            default -> EngineMetrics.Outcome.error;
+        metrics.finished(failure == null ? RtpMetrics.Outcome.success : switch (failure.reason()) {
+            case CANCELLED -> RtpMetrics.Outcome.cancelled;
+            case TIMEOUT -> RtpMetrics.Outcome.timeout;
+            default -> RtpMetrics.Outcome.error;
         });
         enqueue(entry, () -> {
             try { entry.listener.terminal(entry, failure); }
@@ -501,13 +500,13 @@ public final class RtpScheduler implements Scheduler {
             ? ReportedPhase.RUNNING : entry.lease != null
                 ? ReportedPhase.KV_ALLOCATED : ReportedPhase.RECEIVED;
     }
-    private EngineMetrics.State metricState() {
+    private RtpMetrics.State metricState() {
         synchronized (lock) {
             var counts = queues();
             var kv = cache.snapshot(0, false);
             var host = cache.hostSnapshot();
             long block = config.blockSize();
-            return new EngineMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
+            return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
                 kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, host.total() * block, host.free() * block, config.blockSize());
         }
     }

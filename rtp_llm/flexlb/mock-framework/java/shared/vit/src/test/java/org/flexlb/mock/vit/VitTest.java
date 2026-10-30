@@ -65,7 +65,7 @@ class VitTest {
     @Test void logicalByteBudgetsMoveEmbeddingsIndependentlyOfHashResidency() throws Exception {
         var config=config("1",16,16,1024,0);
         try(var cache=new VitCache(config)) {
-            var images=List.of(new MediaInput.Image("a",56,28,2),new MediaInput.Image("b",56,28,2),new MediaInput.Image("c",56,28,2));
+            var images=List.of(new VitGeometry.Image("a",56,28,2),new VitGeometry.Image("b",56,28,2),new VitGeometry.Image("c",56,28,2));
             for(var image:images) { var claim=cache.acquire(image);cache.complete(claim,null); }
             assertEquals("",cache.tier("a"));assertNotNull(cache.hash("a"));
             assertEquals("cpu",cache.tier("b"));assertEquals("gpu",cache.tier("c"));
@@ -76,7 +76,7 @@ class VitTest {
     }
     @Test void failedProducerReleasesTheClaimAndOldCompletionCannotPublishANewGeneration() throws Exception {
         try(var cache=new VitCache(config("1",16,16,1024,0))) {
-            var image=new MediaInput.Image("a",56,28,2);var first=cache.acquire(image);var joined=cache.acquire(image);
+            var image=new VitGeometry.Image("a",56,28,2);var first=cache.acquire(image);var joined=cache.acquire(image);
             assertFalse(joined.producer());assertSame(first.result(),joined.result());
             cache.complete(first,new IllegalStateException("failed"));assertTrue(joined.result().isCompletedExceptionally());
             var fresh=cache.acquire(image);cache.complete(first,null);assertFalse(fresh.result().isDone());
@@ -98,7 +98,7 @@ class VitTest {
         var nativeInput=GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(10,0,0,20))
             .addAllMultimodalInputs(input("x").getMultimodalInputsList())
             .setMultimodalTokenLayout(MultimodalTokenLayoutPB.newBuilder().addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(1).setLength(2))).build();
-        var hashes=MediaInput.hashes(MediaInput.key(input("x").getMultimodalInputs(0)),2);
+        var hashes=VitGeometry.hashes(MediaInput.key(input("x").getMultimodalInputs(0)),2);
         var output=MultimodalOutputPB.newBuilder().addSplitSize(2)
             .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(2).addShape(4))
             .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(2).setInt32Data(hashes)).build();
@@ -122,11 +122,11 @@ class VitTest {
             "gpu_max_batch_size",1,"mm_max_queue_size",1,"compute",Map.of("forward",Map.of("expression","1000"))))));
         var config=VitConfig.load(path);
         try(var cache=new VitCache(config);var scheduler=new VitScheduler(config,cache)) {
-            var first=cache.acquire(new MediaInput.Image("a",28,28,1));scheduler.submit(List.of(first));
+            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(List.of(first));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var second=cache.acquire(new MediaInput.Image("b",28,28,1));scheduler.submit(List.of(second));
-            var overflow=cache.acquire(new MediaInput.Image("c",28,28,1));
+            var second=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(List.of(second));
+            var overflow=cache.acquire(new VitGeometry.Image("c",28,28,1));
             var rejected=assertThrows(StatusRuntimeException.class,()->scheduler.submit(List.of(overflow)));
             assertEquals(Status.Code.RESOURCE_EXHAUSTED,rejected.getStatus().getCode());cache.complete(overflow,rejected);
             assertTrue(overflow.result().isCompletedExceptionally());scheduler.close();
@@ -156,10 +156,10 @@ class VitTest {
     @Test void queuedWorkWithNoConsumersIsRemovedWithoutAnotherForward() throws Exception {
         try(var cache=new VitCache(config("120",16,16,1024,0));
             var scheduler=new VitScheduler(config("120",16,16,1024,0),cache)) {
-            var first=cache.acquire(new MediaInput.Image("a",28,28,1));scheduler.submit(List.of(first));
+            var first=cache.acquire(new VitGeometry.Image("a",28,28,1));scheduler.submit(List.of(first));
             long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(scheduler.snapshot().get("mock_vit_running_image_count") == 0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
-            var abandoned=cache.acquire(new MediaInput.Image("b",28,28,1));scheduler.submit(List.of(abandoned));VitCache.release(abandoned);
+            var abandoned=cache.acquire(new VitGeometry.Image("b",28,28,1));scheduler.submit(List.of(abandoned));VitCache.release(abandoned);
             first.result().get(2,TimeUnit.SECONDS);
             assertThrows(ExecutionException.class,()->abandoned.result().get(2,TimeUnit.SECONDS));
             assertEquals(0, scheduler.snapshot().get("mock_vit_running_image_count"));

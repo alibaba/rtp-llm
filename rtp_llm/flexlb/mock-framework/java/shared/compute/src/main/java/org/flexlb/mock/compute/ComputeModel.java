@@ -18,7 +18,7 @@ public final class ComputeModel {
         .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
         .serializationInclusion(JsonInclude.Include.NON_NULL).build();
     private final ComputeSpec configuration;
-    private final ForwardModel forward;
+    private final FormulaForward forward;
     private final NoiseModel noise;
     private final DecodeStepModel decode;
     private final StoppingModel stopping;
