@@ -42,6 +42,7 @@ from typing import Optional, Union
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 MAX_K = 8192
 
@@ -261,19 +262,23 @@ def fused_logits_head_gate(
         # small-T kernel: grid (T, N), one program per (t, n) pair.
         BLOCK_K = triton.next_power_of_2(K)
         num_warps = 4 if K >= 4096 else 2
-        _fused_logits_head_gate_small_t_kernel[(T, N)](
-            x,
-            weight,
-            qs_2d,
-            out_2d,
-            float(scale_const),
-            K,
-            x.stride(0),
-            weight.stride(0),
-            weight.stride(1),
-            qs_2d.stride(0),
-            out_2d.stride(0),
-            BLOCK_K=BLOCK_K,
+        _cpu_launch.launch(
+            _fused_logits_head_gate_small_t_kernel,
+            (T, N),
+            (
+                x,
+                weight,
+                qs_2d,
+                out_2d,
+                float(scale_const),
+                K,
+                x.stride(0),
+                weight.stride(0),
+                weight.stride(1),
+                qs_2d.stride(0),
+                out_2d.stride(0),
+                BLOCK_K,
+            ),
             num_warps=num_warps,
         )
     else:
@@ -285,24 +290,28 @@ def fused_logits_head_gate(
         BLOCK_N = triton.next_power_of_2(max(N, 16))
         grid = (triton.cdiv(T, BLOCK_M),)
         num_warps = 4 if N <= 128 else 8
-        _fused_logits_head_gate_kernel[grid](
-            x,
-            weight,
-            qs_2d,
-            out_2d,
-            float(scale_const),
-            T,
-            K,
-            N,
-            x.stride(0),
-            weight.stride(0),
-            weight.stride(1),
-            qs_2d.stride(0),
-            out_2d.stride(0),
-            BLOCK_M=BLOCK_M,
-            BLOCK_K=BLOCK_K,
-            BLOCK_N=BLOCK_N,
-            W_IS_TRANSPOSED=w_is_transposed,
+        _cpu_launch.launch(
+            _fused_logits_head_gate_kernel,
+            grid,
+            (
+                x,
+                weight,
+                qs_2d,
+                out_2d,
+                float(scale_const),
+                T,
+                K,
+                N,
+                x.stride(0),
+                weight.stride(0),
+                weight.stride(1),
+                qs_2d.stride(0),
+                out_2d.stride(0),
+                BLOCK_M,
+                BLOCK_K,
+                BLOCK_N,
+                w_is_transposed,
+            ),
             num_warps=num_warps,
             num_stages=3,
         )

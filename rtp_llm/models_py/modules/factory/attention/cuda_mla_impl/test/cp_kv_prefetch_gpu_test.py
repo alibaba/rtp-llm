@@ -150,6 +150,19 @@ def run_case(rank, prefixes, lengths, producer):
     fmha._cross_layer_prefetch = pipeline
     compute = torch.cuda.current_stream()
     results, timing = [], []
+    ready_ids, free_ids, workspace_ptrs = set(), set(), set()
+    original_record_ready = pipeline._record_ready
+
+    def record_ready(layer):
+        # Retain an independent timestamp when production ring events are
+        # re-recorded. Put the marker BEFORE the waited-on ready event, so the
+        # existing MoE-fence assertion still checks actual device ordering.
+        marker = torch.cuda.Event(enable_timing=True)
+        marker.record(producer)
+        original_record_ready(layer)
+        pipeline._test_ready_snapshot = marker
+
+    pipeline._record_ready = record_ready
     # Both fused slots must own distinct memory for the whole forward.
     assert pipeline.buffers[0].data_ptr() != pipeline.buffers[1].data_ptr()
     try:
@@ -163,24 +176,41 @@ def run_case(rank, prefixes, lengths, producer):
                     0, slots[slots >= 0], fresh_bytes[layer]
                 )
                 fused, ready = pipeline.prepare(layer, target)
+                ready_ids.add(id(ready))
+                if pipeline.new_local is not None:
+                    workspace_ptrs.add(
+                        (
+                            pipeline.new_local.data_ptr(),
+                            (
+                                pipeline.new_restored.data_ptr()
+                                if pipeline.new_restored is not None
+                                else None
+                            ),
+                        )
+                    )
                 torch.cuda._sleep(100_000)  # independent Q work
                 compute.wait_event(ready)
                 pipeline.consume(layer)
                 results.append(fused.clone())  # attention reads the current slot
                 torch.cuda._sleep(200_000)
                 pipeline.release(layer)
+                free_ids.add(id(pipeline.free[layer % 2]))
             torch.cuda._sleep(100_000)  # O projection window
             cache.wait_prefetch_complete()
             # Assert actual device ordering, not just host call ordering.
             before_moe = torch.cuda.Event(enable_timing=True)
             before_moe.record(compute)
-            timing.append((pipeline.latest_ready, before_moe))
+            timing.append((pipeline._test_ready_snapshot, before_moe))
             torch.cuda._sleep(200_000)  # excluded MoE interval
         cache.end_forward()
     except BaseException:
         cache.end_forward(failed=True)
         raise
     torch.cuda.synchronize()
+    if pipeline.reuse_events:
+        assert len(ready_ids) <= 2 and len(free_ids) <= 2
+    if pipeline.reuse_workspace:
+        assert len(workspace_ptrs) == 1
     for producer_end, before_moe in timing:
         assert (
             producer_end.elapsed_time(before_moe) >= 0
@@ -206,6 +236,9 @@ def run_case(rank, prefixes, lengths, producer):
         "zero_owned_new": not bool(len(fresh_owned)),
         "bit_exact": True,
         "registered": pipeline.registered,
+        "reuse_events": pipeline.reuse_events,
+        "reuse_workspace": pipeline.reuse_workspace,
+        "fuse_new_restore": pipeline.fuse_new_restore,
     }
 
 
@@ -280,7 +313,7 @@ def check_registered_indexer(rank, producer):
     for role, width, dtype in (
         ("indexer_k_quant", 128, torch.float8_e4m3fn),
         ("indexer_k_quant", 128, torch.float8_e5m2),
-        ("indexer_k_packed", 129, torch.uint8),
+        ("indexer_k_quant", 129, torch.uint8),
     ):
         for iteration, rows in enumerate((1, 257, 8192, 32768, 1025, 65536, 4096)):
             data = torch.randint(
@@ -323,12 +356,12 @@ def check_registered_indexer(rank, producer):
     with torch.cuda.stream(other):
         assert (
             pynccl_cp._registered_indexer_all_gather(
-                data, dist.group.WORLD, "indexer_k_packed"
+                data, dist.group.WORLD, "indexer_k_quant"
             )
             is None
         )
         actual = pynccl_cp.all_gather(
-            data, group=dist.group.WORLD, role="indexer_k_packed"
+            data, group=dist.group.WORLD, role="indexer_k_quant"
         )
     compute.wait_stream(other)
     reference = _indexer_reference(data, dist.group.WORLD)

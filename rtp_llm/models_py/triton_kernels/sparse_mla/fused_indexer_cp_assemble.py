@@ -10,12 +10,8 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
-from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.distributed.pynccl_cp import (
-    all_gather,
-    enabled as cp_opt_enabled,
-)
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
 @triton.jit
@@ -61,45 +57,6 @@ def _fused_zero_scatter_kernel(
 
 
 @triton.jit
-def _gather_restore_fused_kernel(
-    gathered_packed_ptr,
-    out_k_ptr,
-    out_s_ptr,
-    indices_ptr,
-    packed_stride: tl.constexpr,
-    k_stride: tl.constexpr,
-    s_stride: tl.constexpr,
-    n_rows,
-    BLOCK_K: tl.constexpr,
-    BLOCK_S: tl.constexpr,
-):
-    """Restore K and scale from a row-packed AllGather payload.
-
-    Grid: (n_rows,)
-    Each program copies one row from ``[K bytes | scale bytes]`` to outputs.
-    """
-    row_id = tl.program_id(0).to(tl.int64)
-    if row_id >= n_rows:
-        return
-    src_row = tl.load(indices_ptr + row_id).to(tl.int64)
-
-    k_cols = tl.arange(0, BLOCK_K)
-    k_mask = k_cols < k_stride
-    k_data = tl.load(
-        gathered_packed_ptr + src_row * packed_stride + k_cols, mask=k_mask
-    )
-    tl.store(out_k_ptr + row_id * k_stride + k_cols, k_data, mask=k_mask)
-
-    s_cols = tl.arange(0, BLOCK_S)
-    s_mask = s_cols < s_stride
-    s_data = tl.load(
-        gathered_packed_ptr + src_row * packed_stride + k_stride + s_cols,
-        mask=s_mask,
-    )
-    tl.store(out_s_ptr + row_id * s_stride + s_cols, s_data, mask=s_mask)
-
-
-@triton.jit
 def _gather_restore_separate_kernel(
     gathered_k_ptr,
     gathered_s_ptr,
@@ -141,82 +98,16 @@ def _next_power_of_2(n: int) -> int:
     return n + 1
 
 
-def _pack_indexer_k_payload(
-    local_k_quant: torch.Tensor,
-    local_k_scale: torch.Tensor,
-):
-    """Pack one-byte FP8 K and scale rows for a single NCCL AllGather."""
-    if local_k_quant.dim() != 2 or local_k_scale.dim() != 2:
-        raise ValueError(
-            "indexer K pack expects 2D quant/scale buffers, got "
-            f"{tuple(local_k_quant.shape)} and {tuple(local_k_scale.shape)}"
-        )
-    if local_k_quant.device != local_k_scale.device:
-        raise ValueError("indexer K pack requires quant/scale on the same device")
-    if local_k_quant.shape[0] != local_k_scale.shape[0]:
-        raise ValueError(
-            "indexer K pack row mismatch: "
-            f"quant={local_k_quant.shape[0]}, scale={local_k_scale.shape[0]}"
-        )
-    if local_k_quant.element_size() != 1 or local_k_scale.element_size() != 1:
-        raise ValueError(
-            "indexer K pack requires one-byte quant/scale elements, got "
-            f"{local_k_quant.dtype} and {local_k_scale.dtype}"
-        )
-
-    local_q_bytes = local_k_quant.contiguous().view(torch.uint8)
-    local_s_bytes = local_k_scale.contiguous().view(torch.uint8)
-    rows = int(local_q_bytes.shape[0])
-    q_cols = int(local_q_bytes.shape[1])
-    s_cols = int(local_s_bytes.shape[1])
-    packed = torch.empty(
-        (rows, q_cols + s_cols),
-        dtype=torch.uint8,
-        device=local_k_quant.device,
-    )
-    packed[:, :q_cols].copy_(local_q_bytes)
-    packed[:, q_cols:].copy_(local_s_bytes)
-    return packed, q_cols, s_cols
-
-
-def _all_gather_indexer_k_payload(
-    local_k_quant: torch.Tensor,
-    local_k_scale: torch.Tensor,
-    group,
-):
-    """Pack K+scale and issue exactly one rank-major AllGather."""
-    local_packed, q_cols, s_cols = _pack_indexer_k_payload(
-        local_k_quant, local_k_scale
-    )
-    # This role is deliberately absent from the SYMM whitelist. Long-context
-    # packed payloads can exceed a persistent window, while ordinary pynccl
-    # still removes the second collective launch.
-    gathered_packed = all_gather(
-        local_packed, group=group, role="indexer_k_packed"
-    )
-    return gathered_packed, q_cols, s_cols
-
-
 def _all_gather_indexer_k(
     local_k_quant: torch.Tensor,
     local_k_scale: torch.Tensor,
     group,
 ):
-    """Gather Indexer K using the master switch's packed or baseline path."""
+    """Gather quantized K and scale separately on the CP communicator."""
     q_cols = int(local_k_quant.shape[1])
     s_cols = int(local_k_scale.shape[1])
-    if cp_opt_enabled():
-        gathered, q_cols, s_cols = _all_gather_indexer_k_payload(
-            local_k_quant, local_k_scale, group
-        )
-        return gathered, None, q_cols, s_cols
-
-    gathered_k = all_gather(
-        local_k_quant, group=group, role="indexer_k_quant"
-    )
-    gathered_s = all_gather(
-        local_k_scale, group=group, role="indexer_k_scale"
-    )
+    gathered_k = all_gather(local_k_quant, group=group)
+    gathered_s = all_gather(local_k_scale, group=group)
     return gathered_k, gathered_s, q_cols, s_cols
 
 
@@ -268,17 +159,21 @@ def fused_copy_and_assemble_indexer_k(
         local_s = torch.empty(
             (total_local_T, scale_dim), dtype=actual_k_scale.dtype, device=device
         )
-        _fused_zero_scatter_kernel[(total_local_T,)](
-            actual_k_quant.view(torch.uint8),
-            actual_k_scale,
-            local_k.view(torch.uint8),
-            local_s,
-            src_for_padded,
-            head_dim,
-            scale_dim,
-            total_local_T,
-            BLOCK_K,
-            BLOCK_S,
+        _cpu_launch.launch(
+            _fused_zero_scatter_kernel,
+            (total_local_T,),
+            (
+                actual_k_quant.view(torch.uint8),
+                actual_k_scale,
+                local_k.view(torch.uint8),
+                local_s,
+                src_for_padded,
+                head_dim,
+                scale_dim,
+                total_local_T,
+                BLOCK_K,
+                BLOCK_S,
+            ),
         )
     else:
         local_k = torch.zeros(
@@ -293,34 +188,22 @@ def fused_copy_and_assemble_indexer_k(
                 local_k[:total_actual_T].copy_(actual_k_quant)
                 local_s[:total_actual_T].copy_(actual_k_scale)
 
-    # Step 2: GLM5_CP_OPT packs K and scale into one collective. With the
-    # master switch disabled, preserve the original two-gather behavior.
+    # Step 2: gather K and scale separately; packing slowed the CP path.
     gathered_k, gathered_s, q_cols, s_cols = _all_gather_indexer_k(
         local_k, local_s, Group.TP
     )
     if q_cols != head_dim or s_cols != scale_dim:
         raise RuntimeError(
-            "packed indexer K layout mismatch: "
+            "indexer K layout mismatch: "
             f"q_cols={q_cols}/{head_dim}, scale_cols={s_cols}/{scale_dim}"
         )
 
-    # Step 3: keep the existing fused local restore in both communication modes.
+    # Step 3: restore K and scale in one local launch.
     restore_indices = plan.restore_indices
-    if gathered_s is None:
-        _gather_restore_fused_kernel[(chunk_T,)](
-            gathered_k,
-            out_k_quant.view(torch.uint8),
-            out_k_scale,
-            restore_indices,
-            q_cols + s_cols,
-            head_dim,
-            scale_dim,
-            chunk_T,
-            BLOCK_K,
-            BLOCK_S,
-        )
-    else:
-        _gather_restore_separate_kernel[(chunk_T,)](
+    _cpu_launch.launch(
+        _gather_restore_separate_kernel,
+        (chunk_T,),
+        (
             gathered_k.view(torch.uint8),
             gathered_s,
             out_k_quant.view(torch.uint8),
@@ -331,4 +214,5 @@ def fused_copy_and_assemble_indexer_k(
             chunk_T,
             BLOCK_K,
             BLOCK_S,
-        )
+        ),
+    )

@@ -1,4 +1,22 @@
 py_test(
+    name = "test_cp_indexed_copy",
+    srcs = ["test_cp_indexed_copy.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {'gpu': 'L20_CU13', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "test_cp_metadata",
+    srcs = ["test_cp_metadata.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {'gpu': 'L20_CU13', 'gpu_count': '1'},
+)
+
+py_test(
     name = "test_fused_logits_head_gate",
     srcs = ["test_fused_logits_head_gate.py"],
     deps = [
@@ -51,4 +69,22 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "test_cp_cache_fusion",
+    srcs = ["test_cp_cache_fusion.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_mla_norm_pair",
+    srcs = ["test_mla_norm_pair.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
