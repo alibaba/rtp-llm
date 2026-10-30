@@ -1,3 +1,5 @@
+# Copyright 2026 Co-developed by KDA (Kernel Design Agents)
+
 """DeepGEMM producer epilogues with V4.1's original quantization boundaries."""
 
 from __future__ import annotations
@@ -211,6 +213,19 @@ def query_norm_quant(
     )
     flat = x.view(-1, x.shape[-1])
     rows, width = flat.shape
+    if (
+        width == 1280
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and torch.cuda.get_device_capability(x.device) == (10, 0)
+    ):
+        from rtp_llm.models_py.modules.dsv41._v41_query_quant_cute import (
+            try_query_norm_quant,
+        )
+
+        result = try_query_norm_quant(x, weight, eps, pdl=pdl)
+        if result is not None:
+            return result
     normalized = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     quantized = torch.empty(x.shape, device=x.device, dtype=torch.float8_e4m3fn)
     scales = torch.empty(
