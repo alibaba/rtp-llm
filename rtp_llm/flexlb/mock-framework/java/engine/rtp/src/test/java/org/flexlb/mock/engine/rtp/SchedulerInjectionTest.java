@@ -53,6 +53,7 @@ class SchedulerInjectionTest {
         @Override public String scrapeMetrics() { locked(); return "injected_scheduler 1\n"; }
         @Override public List<Runnable> takeNotifications() { locked(); return List.of(); }
         @Override public void close() { locked(); closed = true; }
+        public List<InputResult> input(List<InputItem> batch) { throw new UnsupportedOperationException(); }
         @Override public void control(Request request, Control event) { fail("No admitted request"); }
         @Override public void finish(Request request, RequestFailure failure) { fail("No admitted request"); }
         @Override public RequestState.Use beginTransfer(Request request) { throw new AssertionError("No admitted request"); }
@@ -103,15 +104,14 @@ class SchedulerInjectionTest {
     }
 
 
-    @Test void defaultRtpPolicyStillRejectsOversizedPrefillWithNativeInputError() throws Exception {
+    @Test void defaultRtpPolicyRunsALegalSingletonAboveTheBatchTokenBudget() throws Exception {
         try (var node = RtpNode.start(config("prefill"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
-                var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(input(1)).hasNext());
-                assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
-                var metadata = error.getTrailers().get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
-                assertEquals(605, ErrorDetailsPB.parseFrom(metadata).getErrorCode());
+                var outputs = rpc.generateStreamCall(input(1));
+                assertTrue(outputs.hasNext()); assertTrue(outputs.next().getFlattenOutput().getFinished(0));
+                assertFalse(outputs.hasNext());
                 assertEquals(128, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }

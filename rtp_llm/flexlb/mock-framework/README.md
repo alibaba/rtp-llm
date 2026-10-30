@@ -100,7 +100,9 @@ Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络�
 
 队列模型属于 Scheduler，不另建强制共享的 QueueModel 层。一个实现可以有独立 loading 队列，另一个可以把 loading 作为 waiting 成员的状态；抢占也可能回到 waiting 重新计算，而不是进入 swap。外部只通过操作和快照契约交互。公共请求事实需要逐步覆盖输入、缓存命中、已完成 Prefill、生成进度和本轮工作量；尚未实现分块 Prefill，不能把重复执行当作分块支持。
 
-当前 RTP 使用 FIFO waiting、持续 running 和请求上的容量/加载/输出/传输就绪状态。`max_generate_batch_size` 统一控制 P/D 每批请求数，默认 1；删除重复的 `max_context_batch_size`；`max_batch_tokens_size` 限制本轮 token 预算，0 表示当前 Mock 不额外限制；P 按完整输入长度准入，Compute 使用扣除命中后的长度，D 按本轮 verify token 数准入。P 初始分配遇到临时容量不足等待变化；D 初始分配也等待容量，已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP `GenerateStateMachine::handleRunning` 的行为。不是 vLLM 抢占/重算策略。
+当前 RTP 保留普通 FIFO waiting、显式 batch 队列、持续 running 和请求上的容量/输出/传输就绪状态。`max_generate_batch_size` 控制 P/D 每批请求数，默认 1；删除重复的 `max_context_batch_size`。P 按完整输入长度和 `最长序列长度×序列数` 检查 `max_batch_tokens_size`，生成模式额外保留一个 token；合法 singleton 可超过该 batch token 预算。预算为 0 时 P 仍可执行 singleton，不表示无限组 batch。D 按请求数上限接纳，不复用 P 的 token/矩形限制。Compute 使用扣除命中后的实际计算长度。P/D 初始分配遇到临时容量不足等待容量变化；已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP，不实现 vLLM 抢占/重算策略。
+
+`max_inited_kv_cache_streams` 为正时限制 P 已取得 KV 的请求数，包含仍持有数据等待 PD 的来源；0 不限制。普通 P 准入达到 `max_batch_tokens_without_cache` 后停止继续接纳，本轮最后一个成员可跨过阈值，不把它实现成严格总和上限。该配额不额外套到 real 的显式组路径。CP padding 和多序列宽度仍不展开模拟。
 
 按请求计数，不能直接使用 group/batch 容器的 size：
 
@@ -111,7 +113,11 @@ Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络�
 
 上述四类互斥，由 Scheduler 统计；终止但仍被执行引用的成员不计入四类，KV 占用继续保留。公共 QueueSnapshot 不再根据“不是 FORWARD 就是 waiting”推导。Mock 指标保留四类；原生状态接口只有 waiting/running，因此将 waiting、loading、ready 合并为原生 waiting，与任务列表的 is_waiting 一致，避免 Master 漏算已预留资源的请求。
 
-普通批量提交和不可拆分的 group 是不同契约。本批实现多个独立请求合并 Forward。现有原生 EnqueueBatch/EnqueueGroup 接口仍按成员独立准入并保留 group 元数据，不保证组内同轮计算；不可拆分 group 的调度语义尚未实现，不能据接口名宣称已经支持。注入只能走正式提交与依赖入口，不能跳过资源和传输前置条件。暂停、换出、释放 KV 后重算也不能混为一个 swap 队列；本批不实现这些尚未对齐的策略。
+Scheduler 的 `input(Input, Listener)` 提交普通 single；`input(List<InputItem>)` 一次提交一个完整显式 batch，每项返回独立的 Request 或失败，登记在同一 EngineLoop 锁内完成后才唤醒调度。组来自调用边界，不按相同 groupId 拼接，也不等待缺失成员。每个成员仍各自管理 Listener、deadline、取消和 KV 租约。
+
+P 默认保留 Master batch 边界。正常组只从本组选择实际 Forward 成员，不与其他组或普通 single 混合；组内按输入顺序扫描，暂时放不下的成员保留，后续较小成员仍可准入，剩余成员留在原组。成员失败、超时或取消不默认结束整组。有效组成员数超过 max_generate_batch_size，或超过已开启的 max_inited_kv_cache_streams，按 real 退回普通 single。普通工作与组在空 Forward 边界切换；组完全无法推进时允许普通请求推进，不因组屏障造成容量依赖死锁。无需等待一组在 D 全部生成完成才开始下一组 P Forward。
+
+EnqueueBatch/EnqueueGroup 先并行准备各成员 D 资源，收齐准备结果后，将成功且未取消的成员一次提交到 P 的组入口；准备失败逐项返回错误，不回滚其他成功成员。ACK 表示正式入队，不保证已经完成 KV 准入或 Forward，后续执行失败通过 Fetch/输出返回。D ALLOCATE 清除 P 的组字段，继续按独立 Decode 请求调度。注入只能走正式提交与依赖入口，不能跳过资源和传输前置条件。本地搬运同步完成，不新增异步组装队列；暂停、换出和重算仍不实现。
 
 ### PD 数据就绪与资源生命周期
 
@@ -693,9 +699,9 @@ CP/TP/DP 保留在执行配置及 effective-config 中，不转成来源说明�
 | seq_size_per_block / test_block_num | 512 / 21554 | 128 / 221485 | 本地容量生效；PD 按 token 交接。 |
 | reserve_block_ratio | 1 | 8 | 生效，百分比。 |
 | max_generate_batch_size | 64 | 128 | P/D 统一入口，生效；删除 max_context_batch_size。 |
-| max_batch_tokens_size | 512000 | 1048576 | 生效。 |
-| max_batch_tokens_without_cache | 50000 | 不配置 | P 待实现准入限制；D 原值 0，省略。 |
-| max_inited_kv_cache_streams | 128 | 不配置 | P 待实现初始化 KV 请求限制；D 原值 0，省略。 |
+| max_batch_tokens_size | 512000 | 1048576 | P token/矩形准入生效；D 不作为每轮 verify token 上限。 |
+| max_batch_tokens_without_cache | 50000 | 不配置 | P 普通队列按未缓存 token 配额准入；D 不配置。 |
+| max_inited_kv_cache_streams | 128 | 不配置 | P 初始化 KV 数量限制和超大组退回条件均生效；D 不配置。 |
 | reuse_cache / enable_device_cache / device_eviction_policy | false / true / lru | false / true / lru | 保留现有语义，不为接 Host 而打开 reuse。 |
 | enable_memory_cache / memory_cache_blocks | true / 52295 | false / 不配置 | P Host 容量生效，本地瞬间周转。 |
 | memory_eviction_policy | lru | 不配置 | P Host 策略/水位生效；D 不配置。 |

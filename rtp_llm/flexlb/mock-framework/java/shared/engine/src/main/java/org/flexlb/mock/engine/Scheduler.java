@@ -55,7 +55,14 @@ public interface Scheduler extends AutoCloseable {
         public Work { Objects.requireNonNull(owner); Objects.requireNonNull(batch); }
     }
 
+    record InputItem(Input input, Listener listener) {
+        public InputItem { Objects.requireNonNull(input); Objects.requireNonNull(listener); }
+    }
+    record InputResult(Request request, RequestFailure failure) {}
+
     Request input(Input input, Listener listener);
+    /** One complete explicit batch; accepted members retain this boundary until policy fallback. */
+    List<InputResult> input(List<InputItem> batch);
     void control(Request request, Control event);
     void transferCompleted(Request request, TransferResult result);
     void finish(Request request, RequestFailure failure);

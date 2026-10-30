@@ -2,6 +2,7 @@ package org.flexlb.mock.engine.rtp;
 
 import io.grpc.*;
 import io.grpc.stub.*;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import org.flexlb.mock.engine.rtp.transfer.*;
@@ -46,19 +47,59 @@ final class PrefillTransfer extends PrefillTransferGrpc.PrefillTransferImplBase 
                     throw Status.ALREADY_EXISTS.withDescription("Prefill transfer already exists").asRuntimeException();
             }
             try {
-                var session = requests.submit(request.getInput(), deadline, true); entry.session = session;
-                session.termination.thenAccept(result -> {
-                    active.remove(key, entry);
-                    synchronized (entry) { entry.ready.complete(result); }
-                });
-                session.completion().thenAccept(result -> {
-                    synchronized (entry) {
-                        if (!result.status().isOk()) return; // Termination callback owns failure delivery.
-                        if (!session.request.snapshot().terminating()) entry.ready.complete(result);
-                    }
-                });
+                bind(key, entry, requests.submit(request.getInput(), deadline, true));
                 return new Source(entry);
             } catch (RuntimeException error) { active.remove(key, entry); throw error; }
+        }
+    }
+
+    record Start(Source source, RuntimeException failure) {}
+
+    List<Start> start(String client, List<LocalPrefill.Submission> batch) {
+        synchronized (active) {
+            if (closed) throw Status.UNAVAILABLE.withDescription("Transfer service closed").asRuntimeException();
+            var entries = new ArrayList<Entry>(); var keys = new ArrayList<Key>();
+            var positions = new ArrayList<Integer>(); var inputs = new ArrayList<LocalPrefill.Submission>();
+            var results = new ArrayList<Start>(Collections.nCopies(batch.size(), null));
+            for (int i = 0; i < batch.size(); i++) {
+                var item = batch.get(i);
+                var request = TransferRequest.newBuilder().setClientId(client).setInput(item.input()).build();
+                var key = key(request); var entry = new Entry(request);
+                if (active.putIfAbsent(key, entry) != null) {
+                    results.set(i, new Start(null, Status.ALREADY_EXISTS.withDescription("Prefill transfer already exists").asRuntimeException()));
+                } else {
+                    entries.add(entry); keys.add(key); positions.add(i); inputs.add(item);
+                }
+            }
+            try {
+                var admitted = requests.submit(inputs);
+                for (int i = 0; i < admitted.size(); i++) {
+                    var result = admitted.get(i); var entry = entries.get(i); var key = keys.get(i);
+                    if (result.failure() == null) {
+                        bind(key, entry, result.session()); results.set(positions.get(i), new Start(new Source(entry), null));
+                    } else {
+                        active.remove(key, entry); results.set(positions.get(i), new Start(null, result.failure()));
+                    }
+                }
+                return List.copyOf(results);
+            } catch (RuntimeException error) {
+                for (int i = 0; i < entries.size(); i++) active.remove(keys.get(i), entries.get(i));
+                throw error;
+            }
+        }
+    }
+    private void bind(Key key, Entry entry, LocalPrefill.Session session) {
+        synchronized (entry) {
+            entry.session = session;
+            session.termination.thenAccept(result -> {
+                active.remove(key, entry);
+                synchronized (entry) { entry.ready.complete(result); }
+            });
+            session.completion().thenAccept(result -> {
+                synchronized (entry) {
+                    if (result.status().isOk() && !session.request.snapshot().terminating()) entry.ready.complete(result);
+                }
+            });
         }
     }
 

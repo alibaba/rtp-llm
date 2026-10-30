@@ -1,6 +1,7 @@
 package org.flexlb.mock.engine.rtp;
 
 import io.grpc.Status;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.flexlb.engine.grpc.EngineRpcService.*;
@@ -54,11 +55,42 @@ final class LocalPrefill implements AutoCloseable {
             session.request = engine.input(RtpTasks.input(input, Long.toString(input.getRequestId()), System.nanoTime(),
                 rpcDeadline, retained, config.blockSize()), session);
         } catch (RequestFailure failure) {
-            if (failure.reason() == RequestFailure.Reason.INVALID)
-                throw RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605);
-            throw RtpErrors.failure(failure);
+            throw rpcFailure(failure);
         }
         return session;
+    }
+
+    record Submission(GenerateInputPB input, long deadline) {}
+    record Admission(Session session, RuntimeException failure) {}
+
+    synchronized List<Admission> submit(List<Submission> batch) {
+        var sessions = new ArrayList<Session>();
+        var items = new ArrayList<Scheduler.InputItem>();
+        var positions = new ArrayList<Integer>();
+        var results = new ArrayList<Admission>(Collections.nCopies(batch.size(), null));
+        for (int i = 0; i < batch.size(); i++) {
+            var item = batch.get(i);
+            try {
+                validate(item.input(), true);
+                var session = new Session(item.input(), true);
+                var input = RtpTasks.input(item.input(), Long.toString(item.input().getRequestId()),
+                    System.nanoTime(), item.deadline(), true, config.blockSize());
+                sessions.add(session); positions.add(i); items.add(new Scheduler.InputItem(input, session));
+            } catch (RuntimeException failure) { results.set(i, new Admission(null, failure)); }
+        }
+        var admitted = engine.input(items);
+        for (int i = 0; i < admitted.size(); i++) {
+            var result = admitted.get(i); var session = sessions.get(i);
+            if (result.failure() == null) {
+                session.request = result.request(); results.set(positions.get(i), new Admission(session, null));
+            } else results.set(positions.get(i), new Admission(null, rpcFailure(result.failure())));
+        }
+        return List.copyOf(results);
+    }
+
+    private static io.grpc.StatusRuntimeException rpcFailure(RequestFailure failure) {
+        return failure.reason() == RequestFailure.Reason.INVALID
+            ? RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605) : RtpErrors.failure(failure);
     }
 
     void validate(GenerateInputPB input, boolean retained) {
