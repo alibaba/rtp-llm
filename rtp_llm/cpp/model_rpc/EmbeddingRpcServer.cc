@@ -68,7 +68,10 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
         profile_config.gen_timeline       = request->gen_timeline();
         profile_config.profile_step       = request->profile_step();
         profile_config.profile_trace_name = request->profile_trace_name();
-        embedding_output                  = embedding_engine_->decode(embedding_input, profile_config);
+        // Honour a shorter client deadline; otherwise the fixed backend bound applies.
+        const auto timeout = EmbeddingStream::timeoutForDeadline(context->deadline(), std::chrono::system_clock::now());
+        embedding_output   = embedding_engine_->decode(
+            embedding_input, profile_config, [context] { return context->IsCancelled(); }, timeout);
 
         // Stage 4: Post Processing
         if (need_post_process_) {
@@ -93,6 +96,15 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
                 }
             }
         }
+    } catch (const EmbeddingStreamTimeout& e) {
+        RTP_LLM_LOG_WARNING("Embedding request %ld timed out: %s", request_id, e.what());
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, e.what());
+    } catch (const EmbeddingStreamCancelled& e) {
+        RTP_LLM_LOG_WARNING("Embedding request %ld cancelled: %s", request_id, e.what());
+        return grpc::Status(grpc::StatusCode::CANCELLED, e.what());
+    } catch (const EmbeddingStreamUnavailable& e) {
+        RTP_LLM_LOG_WARNING("Embedding request %ld rejected, server unavailable: %s", request_id, e.what());
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, e.what());
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("[Processing] Python exception for request_id %ld: %s", request_id, e.what());
         return grpc::Status(grpc::StatusCode::INTERNAL, std::string("Processing error: ") + e.what());

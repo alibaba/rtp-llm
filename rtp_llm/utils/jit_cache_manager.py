@@ -14,7 +14,7 @@ from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from stat import S_ISREG
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
 
 from watchdog.events import FileSystemEventHandler
@@ -22,7 +22,11 @@ from watchdog.observers import Observer
 
 from rtp_llm.utils import jit_cache_store as store
 
+logger = logging.getLogger(__name__)
+
 SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
+# After stop() returns, background cleanup keeps waiting this long for slow workers.
+CLEANUP_GRACE_S = 600.0
 RTP_JIT_VERSION, CUDA, ROCM = "v1", "cuda", "rocm"
 LOCKS_DIR, STAGING_DIR = ".locks", ".staging"
 # Fixed path: build artifacts embed absolute paths, so relocating voids snapshots; opt out via --manage_jit_cache.
@@ -212,6 +216,8 @@ class JitCacheManager(FileSystemEventHandler):
         self._observer = self._worker = self._prepare_thread = None
         self._seen = self._restored = None
         self._dirty, self._stop = Event(), Event()
+        self._cleanup_lock = Lock()
+        self._cleanup_thread = None
 
     def on_any_event(self, event) -> None:
         if event.is_directory or self._stop.is_set():
@@ -323,35 +329,52 @@ class JitCacheManager(FileSystemEventHandler):
             os.close(fd)
 
     def _sync_loop(self) -> None:
-        while True:
-            stopping = self._stop.wait(SYNC_POLL_S)
+        while not self._stop.wait(SYNC_POLL_S):
             try:
                 self.publish_pending_snapshot()
             except Exception:
-                logging.exception("JIT_CACHE_FAIL_OPEN: snapshot sync failed")
-            if stopping:
-                return
+                logger.exception("JIT_CACHE_FAIL_OPEN: snapshot sync failed")
+        if self._dirty.is_set():
+            logger.info("JIT cache stopping; pending snapshot is not published")
+
+    def _join_workers(self, deadline: float) -> bool:
+        workers = [w for w in (self._observer, self._worker, self._prepare_thread) if w]
+        for worker in workers:
+            with suppress(RuntimeError):
+                worker.join(max(0.0, deadline - monotonic()))
+        return not any(worker.is_alive() for worker in workers)
 
     def _cleanup(self, deadline: float) -> None:
-        for worker in (self._observer, self._worker, self._prepare_thread):
-            if worker:
-                with suppress(RuntimeError):
-                    worker.join(max(0.0, deadline - monotonic()))
-        if self.store:  # unmount even if a worker overran; close() locks out publish
+        if self._observer:
+            self._observer.stop()
+        if not self._join_workers(deadline):
+            # Never close under a live worker; keep waiting after stop() has returned.
+            logger.warning(
+                "JIT worker still alive after shutdown timeout; closing store once it exits"
+            )
+            if not self._join_workers(deadline + CLEANUP_GRACE_S):
+                logger.warning(
+                    "JIT worker still alive after %ss more; leaving store open",
+                    CLEANUP_GRACE_S,
+                )
+                return
+        if self.store:
             self.store.close()
 
     def stop(self) -> None:
-        """Idempotent and retryable, because the store's own close() is both."""
+        """Bounded for the caller; cleanup closes the store once workers exit."""
         self._stop.set()
-        if self._observer:
-            self._observer.stop()
-        cleanup = Thread(
-            target=self._cleanup, args=(monotonic() + STOP_TIMEOUT_S,), daemon=True
-        )
-        cleanup.start()
-        cleanup.join(STOP_TIMEOUT_S)
+        deadline = monotonic() + STOP_TIMEOUT_S
+        with self._cleanup_lock:
+            cleanup = self._cleanup_thread
+            if cleanup is None or not cleanup.is_alive():
+                cleanup = self._cleanup_thread = Thread(
+                    target=self._cleanup, args=(deadline,), daemon=True
+                )
+                cleanup.start()
+        cleanup.join(max(0.0, deadline - monotonic()))
         if cleanup.is_alive():
-            logging.warning("JIT cleanup continues in background")
+            logger.warning("JIT cleanup continues in background")
 
 
 def start_from_config(config):

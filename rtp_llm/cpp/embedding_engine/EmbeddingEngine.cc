@@ -48,6 +48,7 @@ absl::Status EmbeddingEngine::startLoop() {
 }
 
 absl::Status EmbeddingEngine::stop() {
+    std::lock_guard<std::mutex> lock(stop_mutex_);
     RTP_LLM_LOG_INFO("stop embedding engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
@@ -83,11 +84,17 @@ std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor             
 }
 
 std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(std::shared_ptr<EmbeddingInput> input,
-                                                         EmbeddingProfileConfig          profile_config) {
-    auto embedding_stream = std::make_shared<EmbeddingStream>(input, std::move(profile_config));
+                                                         EmbeddingProfileConfig          profile_config,
+                                                         const std::function<bool()>&    is_cancelled,
+                                                         std::chrono::milliseconds       timeout) {
+    auto embedding_stream = std::make_shared<EmbeddingStream>(input, std::move(profile_config), timeout);
     embedding_stream->setMetricReporter(metrics_reporter_);
-    THROW_IF_STATUS_ERROR(enqueue(embedding_stream));
-    embedding_stream->waitFinish();
+    auto status = enqueue(embedding_stream);
+    if (!status.ok()) {
+        // A rejected request (e.g. during stop) is a normal outcome, not an assertion failure.
+        embedding_stream->setEnqueueError(status);
+    }
+    embedding_stream->waitFinish(is_cancelled);
     return embedding_stream->embeddingOutput();
 }
 

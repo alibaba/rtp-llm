@@ -92,9 +92,9 @@ class EmbeddingEndpoint(object):
         embedding_config = embedding_config or EmbeddingConfig()
         # Reuse one HTTP/2 connection per event loop instead of a new channel per request.
         self.share_channel: bool = embedding_config.embedding_share_grpc_channel
-        # The RPC deadline is opt-in. EmbeddingRpcServer does not observe gRPC
-        # cancellation yet, so an expired deadline only fails the frontend call
-        # while the backend still finishes the request.
+        # The RPC deadline is opt-in. The backend bounds each request at 60 s
+        # (queue wait included), honours a shorter deadline and drops a request
+        # whose call is cancelled; a batch that already started still runs.
         rpc_timeout_s = embedding_config.embedding_rpc_timeout_s
         self.rpc_timeout: Optional[float] = (
             rpc_timeout_s if rpc_timeout_s is not None and rpc_timeout_s > 0 else None

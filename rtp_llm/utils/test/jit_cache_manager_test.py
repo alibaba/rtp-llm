@@ -846,7 +846,7 @@ class ManagerTest(JitCacheTestBase):
             manager.stop()
         self.assertEqual(attempts, ["/mnt/fake", "/mnt/fake"])
 
-    def test_stop_is_bounded_by_a_hung_final_publish(self):
+    def test_stop_leaves_store_open_during_a_hung_periodic_publish(self):
         manager = jit.JitCacheManager(mock.Mock(), "")
         manager.store = store.RemoteSnapshotStore(self.root, "/mnt/fake")
         publishing, release, unmounted = (threading.Event() for _ in range(3))
@@ -862,18 +862,22 @@ class ManagerTest(JitCacheTestBase):
             manager, "publish_pending_snapshot", side_effect=publish
         ), _fake_fuser(umount=lambda _: unmounted.set()), mock.patch.object(
             jit, "STOP_TIMEOUT_S", 0.05
+        ), mock.patch.object(
+            jit, "SYNC_POLL_S", 0.01
         ), self.assertLogs(
             level="WARNING"
         ):
             manager._worker = threading.Thread(target=manager._sync_loop)
             manager._worker.start()
-            manager.stop()  # returns without waiting for the publish to land
             self.assertTrue(publishing.wait(1))
-            # close() shares the mount lock, so unmount waits the publish out
-            # instead of truncating it.
+            manager.stop()
             self.assertFalse(unmounted.is_set())
             release.set()
+            # stop() already returned; its background cleanup unmounts once idle.
             self.assertTrue(unmounted.wait(5))
+            manager._worker.join(5)
+            self.assertFalse(manager._worker.is_alive())
+            manager.stop()  # a later stop stays harmless
 
     def test_mount_owned_and_released_exactly_once(self):
         released = []

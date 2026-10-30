@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/api_server/InferenceDataType.h"
 
@@ -135,6 +136,18 @@ void EmbeddingService::embedding(const std::unique_ptr<http_server::HttpResponse
 
         AccessLogWrapper::logSuccessAccess(
             body, request_id, request.getRecvTime(), logable_response, req.private_request);
+    } catch (const EmbeddingStreamTimeout& e) {
+        RTP_LLM_LOG_WARNING("embedding request timed out: %s", e.what());
+        HttpApiServerException timeout(HttpApiServerException::GENERATE_TIMEOUT_ERROR, e.what());
+        HttpApiServerException::handleException(timeout, request_id, metrics_reporter_, request, writer);
+    } catch (const EmbeddingStreamCancelled& e) {
+        RTP_LLM_LOG_WARNING("embedding request cancelled: %s", e.what());
+        auto cancelled = streamErrorToHttpException(ErrorInfo(ErrorCode::CANCELLED, e.what()));
+        HttpApiServerException::handleException(cancelled, request_id, metrics_reporter_, request, writer);
+    } catch (const EmbeddingStreamUnavailable& e) {
+        RTP_LLM_LOG_WARNING("embedding request rejected, server unavailable: %s", e.what());
+        HttpApiServerException unavailable(HttpApiServerException::SERVICE_UNAVAILABLE_ERROR, e.what());
+        HttpApiServerException::handleException(unavailable, request_id, metrics_reporter_, request, writer);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("embedding endpoint handle request failed, found exception: %s", e.what());
         HttpApiServerException::handleException(e, request_id, metrics_reporter_, request, writer);

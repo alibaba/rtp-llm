@@ -122,6 +122,56 @@ TEST_F(EmbeddingServiceTest, Embedding_EmbeddingEndpointIsNull) {
     EXPECT_EQ(writer_->_headers.at("Content-Type"), "application/json");
 }
 
+TEST_F(EmbeddingServiceTest, Embedding_TimeoutHasExplicitErrorCode) {
+    http_server::HttpRequest request;
+    request._request = CreateHttpPacket(R"({"source": "test_source"})");
+    EXPECT_CALL(*mock_writer_, isConnected()).WillOnce(Return(true));
+    EXPECT_CALL(*mock_embedding_endpoint_, handle)
+        .WillOnce(Throw(EmbeddingStreamTimeout("DEADLINE_EXCEEDED (8204): embedding request timeout")));
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_NE(data.find("603"), std::string::npos);
+        EXPECT_NE(data.find("embedding request timeout"), std::string::npos);
+        return true;
+    }));
+
+    embedding_service_->embedding(writer_, request);
+    EXPECT_EQ(writer_->_statusCode, 500);
+}
+
+TEST_F(EmbeddingServiceTest, Embedding_CancelledHasExplicitErrorCode) {
+    http_server::HttpRequest request;
+    request._request = CreateHttpPacket(R"({"source": "test_source"})");
+    EXPECT_CALL(*mock_writer_, isConnected()).WillOnce(Return(true));
+    EXPECT_CALL(*mock_embedding_endpoint_, handle)
+        .WillOnce(Throw(EmbeddingStreamCancelled("embedding request cancelled")));
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_NE(data.find("499"), std::string::npos);
+        EXPECT_NE(data.find("embedding request cancelled"), std::string::npos);
+        return true;
+    }));
+
+    embedding_service_->embedding(writer_, request);
+    EXPECT_EQ(writer_->_statusCode, 499);
+    EXPECT_EQ(writer_->_statusMessage, "Client Closed Request");
+}
+
+TEST_F(EmbeddingServiceTest, Embedding_ServerStoppingIsUnavailable) {
+    http_server::HttpRequest request;
+    request._request = CreateHttpPacket(R"({"source": "test_source"})");
+    EXPECT_CALL(*mock_writer_, isConnected()).WillOnce(Return(true));
+    EXPECT_CALL(*mock_embedding_endpoint_, handle)
+        .WillOnce(Throw(EmbeddingStreamUnavailable("embedding server stopping")));
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_NE(data.find("503"), std::string::npos);
+        EXPECT_NE(data.find("embedding server stopping"), std::string::npos);
+        return true;
+    }));
+
+    embedding_service_->embedding(writer_, request);
+    EXPECT_EQ(writer_->_statusCode, 503);
+    EXPECT_EQ(writer_->_statusMessage, "Service Unavailable");
+}
+
 TEST_F(EmbeddingServiceTest, Embedding_Success) {
     http_server::HttpRequest request;
     const std::string        body = R"({"source": "test_source"})";

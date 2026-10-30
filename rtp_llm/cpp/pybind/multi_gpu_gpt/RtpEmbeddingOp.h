@@ -1,5 +1,6 @@
 #pragma once
 
+#include <mutex>
 #include <optional>
 #include <pybind11/pytypes.h>
 #include <vector>
@@ -65,13 +66,21 @@ private:
     std::shared_ptr<HttpApiServer>       http_server_;
 
     std::atomic<bool>            is_server_shutdown_{false};
+    std::mutex                   lifecycle_mutex_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
     std::unique_ptr<EmbeddingRpcServiceImpl> embedding_grpc_service_;
     std::unique_ptr<grpc::Server>            grpc_server_;
-    std::thread                              grpc_server_thread_;
 
     std::atomic<bool> is_server_ready_{false};
+
+    // Per-step stop completion, guarded by lifecycle_mutex_.
+    struct {
+        bool grpc   = false;
+        bool http   = false;
+        bool arpc   = false;
+        bool engine = false;
+    } stop_done_;
 };
 
 void registerRtpEmbeddingOp(const py::module& m);

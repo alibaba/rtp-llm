@@ -53,7 +53,8 @@ def init_embedding_group_args(parser, embedding_config):
         type=str2finite_float,
         default=None,
         help="Embedding/Reranker frontend 到 backend 的 gRPC deadline（秒），默认不设 deadline；"
-        "<=0 同样表示不设。注意 backend 目前不处理 gRPC 取消，deadline 到期后 backend 仍会算完该请求",
+        "<=0 同样表示不设。backend 对每个请求（含排队）固定上限 60s，更短的 deadline 优先；"
+        "deadline 到期或调用取消后，排队或等待中的请求会被丢弃，已开始的 batch 仍会算完",
     )
     embedding_group.add_argument(
         "--qwen3_reranker_fixed_head",

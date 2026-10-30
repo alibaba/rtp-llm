@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include "absl/status/status.h"
@@ -32,7 +34,9 @@ public:
                                             std::optional<th::Tensor>        input_embeddings    = std::nullopt,
                                             EmbeddingProfileConfig           profile_config      = {});
     std::shared_ptr<EmbeddingOutput> decode(std::shared_ptr<EmbeddingInput> input,
-                                            EmbeddingProfileConfig          profile_config = {});
+                                            EmbeddingProfileConfig          profile_config = {},
+                                            const std::function<bool()>&    is_cancelled   = {},
+                                            std::chrono::milliseconds       timeout = EmbeddingStream::kRequestTimeout);
 
     // absl::Status update_streams(std::list<EmbeddingStreamPtr>& streams);
     absl::Status stop();
@@ -62,6 +66,7 @@ private:
     ParallelismConfig                   parallelism_config;
     ConcurrencyConfig                   concurrency_config;
     std::thread                         loop_thread_;
+    std::mutex                          stop_mutex_;
     std::atomic<bool>                   running_{false};
     std::unique_ptr<EmbeddingExecutor>  executor_;
     std::unique_ptr<EmbeddingScheduler> scheduler_;

@@ -35,11 +35,25 @@ class EmbeddingCppEngine(BaseEngine):
     def _stop(self) -> None:
         # Stop the C++ engine first so it issues no more embedding calls, then
         # close the local MMProcessEngine (which stops its MMScheduler thread and
-        # preprocessing executor).
-        self.cpp_engine.stop()
-        if self.mm_process_engine is not None:
-            self.mm_process_engine.stop()
+        # preprocessing executor). The local engine is closed even if the C++ stop
+        # raises; the original C++ error still propagates.
+        cpp_stop_failed = False
+        try:
+            self.cpp_engine.stop()
+        except BaseException:
+            cpp_stop_failed = True
+            raise
+        finally:
+            mm_process_engine = self.mm_process_engine
             self.mm_process_engine = None
+            if mm_process_engine is not None:
+                try:
+                    mm_process_engine.stop()
+                except BaseException:
+                    if not cpp_stop_failed:
+                        raise
+                    # The original cpp_engine.stop() error takes precedence.
+                    logging.exception("mm process engine stop failed")
 
     @override
     def _start(self):

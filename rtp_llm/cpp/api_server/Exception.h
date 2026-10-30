@@ -24,6 +24,7 @@ public:
     enum Type {
         CONCURRENCY_LIMIT_ERROR        = 409,
         CANCELLED_ERROR                = 499,
+        SERVICE_UNAVAILABLE_ERROR      = 503,
         ERROR_INPUT_FORMAT_ERROR       = 507,
         GPT_NOT_FOUND_ERROR            = 508,
         NO_PROMPT_ERROR                = 509,
@@ -163,7 +164,13 @@ inline void WriteExceptionResponse(const std::unique_ptr<http_server::HttpRespon
     if (status_code >= 600) {
         status_code = 500;
     }
-    writer->SetStatus(status_code, "Internal Server Error");
+    const char* reason = "Internal Server Error";
+    if (status_code == HttpApiServerException::CANCELLED_ERROR) {
+        reason = "Client Closed Request";
+    } else if (status_code == HttpApiServerException::SERVICE_UNAVAILABLE_ERROR) {
+        reason = "Service Unavailable";
+    }
+    writer->SetStatus(status_code, reason);
 
     writer->Write(formatException(e));
     return;

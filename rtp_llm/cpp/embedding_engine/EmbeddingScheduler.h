@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <list>
 #include <queue>
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"

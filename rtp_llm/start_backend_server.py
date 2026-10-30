@@ -304,8 +304,8 @@ def multi_rank_start(
         local_world_size = len(processes)
 
         if py_env_configs.distribute_config.fake_gang_env:
-            # Test-only path: returning releases the manager, which publishes one
-            # last snapshot; the caller-owned ranks keep serving from the local tree.
+            # Test-only path: returning releases the manager, which stops without a
+            # final snapshot; the caller-owned ranks keep serving from the local tree.
             _close_readers(rank_pipe_readers)
             return processes
 

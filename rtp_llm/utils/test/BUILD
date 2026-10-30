@@ -43,6 +43,12 @@ py_test(
     ],
 )
 
+py_test(
+    name = "jit_cache_shutdown_test",
+    srcs = ["jit_cache_shutdown_test.py"],
+    deps = ["//rtp_llm:jit_cache_manager_lib"],
+)
+
 # Extra deps beyond the smoke framework for the JIT cache lifecycle smokes.
 _JIT_SMOKE_EXTRA_DEPS = [
     "//rtp_llm:jit_cache_manager_lib",

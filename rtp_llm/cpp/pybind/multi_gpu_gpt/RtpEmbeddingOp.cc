@@ -1,8 +1,10 @@
+#include <chrono>
 #include <optional>
 #include <pybind11/pytypes.h>
 
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
 
+#include "rtp_llm/cpp/embedding_engine/EmbeddingShutdownSteps.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -24,6 +26,14 @@ void RtpEmbeddingOp::init(py::object model,
                           py::object engine_config,
                           py::object vit_config,
                           py::object mm_process_engine) {
+    std::unique_lock<std::mutex> lock(lifecycle_mutex_, std::defer_lock);
+    {
+        py::gil_scoped_release release;
+        lock.lock();
+    }
+    if (is_server_ready_ || is_server_shutdown_) {
+        throw std::runtime_error("embedding server already initialized or stopped");
+    }
     try {
         // Get model_config from model
         auto model_config = model.attr("model_config").cast<ModelConfig>();
@@ -119,19 +129,13 @@ void RtpEmbeddingOp::init(py::object model,
                        params.metrics_reporter,
                        mm_processor_);
         startHttpServer(embedding_engine_, mm_processor_, params, custom_module);
-        grpc_server_thread_ = std::thread(&RtpEmbeddingOp::initGrpcServer,
-                                          this,
-                                          embedding_rpc_port,
-                                          grpc_config,
-                                          embedding_engine_,
-                                          py_render,
-                                          py_handler,
-                                          mm_processor_,
-                                          need_post_process);
-        grpc_server_thread_.detach();
-        while (!is_server_ready_) {
-            sleep(1);  // wait 1s for server ready
-        }
+        initGrpcServer(embedding_rpc_port,
+                       grpc_config,
+                       embedding_engine_,
+                       py_render,
+                       py_handler,
+                       mm_processor_,
+                       need_post_process);
     } catch (const std::exception& e) {
         RTP_LLM_FAIL("init embedding engine failed, error msg: %s", e.what());
     }
@@ -153,6 +157,8 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
     }
     grpc::ServerBuilder builder;
     auto                server_config = grpc_config.get_server_config();
+    // A stale listener must cause bind failure, even with custom server_config.
+    server_config[GRPC_ARG_ALLOW_REUSEPORT] = 0;
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);
@@ -168,29 +174,45 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
 
     RTP_LLM_LOG_DEBUG("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
-    grpc_server_->Wait();
+    // gRPC owns its serving threads; no separate Wait() thread is needed.
 }
 
 void RtpEmbeddingOp::stop() {
-    if (embedding_rpc_service_) {
-        embedding_rpc_service_->stop();
-        embedding_rpc_service_.reset();
-    }
-    if (http_server_) {
-        http_server_->stop();
-        http_server_.reset();
-    }
-    if (!is_server_shutdown_ && embedding_engine_) {
-        (void)embedding_engine_->stop();
-        embedding_engine_.reset();
-        is_server_shutdown_ = true;
-    }
-    if (grpc_server_) {
-        grpc_server_->Shutdown();
-        grpc_server_.reset();
-    }
-    embedding_grpc_service_.reset();
-    stopKmonitorFactory();
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    // Reject new requests at once; steps that fail stay pending and are retried by a later stop().
+    is_server_shutdown_ = true;
+    EmbeddingShutdownSteps steps;
+    steps.run(stop_done_.grpc, "gRPC shutdown", [this] {
+        if (grpc_server_) {
+            // Stop listening first, allow 5 s grace, then cancel pending calls. Handlers waiting
+            // on streams observe cancellation promptly; other handler work must still return.
+            // The later engine join can still wait for an in-progress batch.
+            grpc_server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
+            grpc_server_.reset();
+        }
+    });
+    steps.run(stop_done_.http, "HTTP server stop", [this] {
+        if (http_server_) {
+            http_server_->stop();
+        }
+    });
+    steps.run(stop_done_.arpc, "ARPC server stop", [this] {
+        if (embedding_rpc_service_) {
+            embedding_rpc_service_->stop();
+        }
+    });
+    steps.run(stop_done_.engine, "engine stop", [this] {
+        if (embedding_engine_) {
+            auto status = embedding_engine_->stop();
+            if (!status.ok()) {
+                throw std::runtime_error(status.ToString());
+            }
+        }
+    });
+    // Keep Python-owning services and the engine alive for concurrent direct decode().
+    // The destructor releases them under the GIL after all Python calls have returned,
+    // then stops kmonitor.
+    steps.rethrowFirstError();
 }
 
 void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,
@@ -239,7 +261,7 @@ py::object RtpEmbeddingOp::decode(th::Tensor                   token_ids,
                                   th::Tensor                   input_lengths,
                                   int64_t                      request_id,
                                   std::vector<MultimodalInput> multimodal_inputs) {
-    if (is_server_shutdown_) {
+    if (!is_server_ready_ || is_server_shutdown_) {
         throw std::runtime_error("server is shut down, can't handle request");
     }
     std::optional<MultimodalFeature> multimodal_features = std::nullopt;
@@ -263,7 +285,31 @@ py::object RtpEmbeddingOp::decode(th::Tensor                   token_ids,
 }
 
 RtpEmbeddingOp::~RtpEmbeddingOp() {
-    stop();
+    py::gil_scoped_acquire acquire;
+    {
+        py::gil_scoped_release release;
+        try {
+            stop();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("stop embedding server in destructor failed: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("stop embedding server in destructor failed with unknown exception");
+        }
+    }
+    http_server_.reset();
+    embedding_rpc_service_.reset();
+    embedding_grpc_service_.reset();
+    embedding_engine_.reset();
+    mm_processor_.reset();
+    // Stop kmonitor only after the metric-reporter owners above are released.
+    metrics_reporter_.reset();
+    try {
+        stopKmonitorFactory();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("stop kmonitor factory in destructor failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("stop kmonitor factory in destructor failed with unknown exception");
+    }
 }
 
 void registerRtpEmbeddingOp(const py::module& m) {
@@ -275,7 +321,7 @@ void registerRtpEmbeddingOp(const py::module& m) {
              py::arg("engine_config"),
              py::arg("vit_config"),
              py::arg("mm_process_engine"))
-        .def("stop", &RtpEmbeddingOp::stop)
+        .def("stop", &RtpEmbeddingOp::stop, py::call_guard<py::gil_scoped_release>())
         .def("decode",
              &RtpEmbeddingOp::decode,
              py::call_guard<py::gil_scoped_release>(),
