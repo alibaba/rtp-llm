@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cuda_graph/generation_prefill_cuda_graph_replay_metadata.h"
+#include "rtp_llm/cpp/cuda_graph/prefill_padding_offset_tail.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -1090,6 +1091,22 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
             .fill_(inputs.attention_inputs.context_total_kv_length);
 #endif
+    }
+
+    // Non-generation prefill graphs also pad at token granularity: a full live
+    // batch can still fill fewer rows than the captured per-request capacity,
+    // and the padding_offset mirror copies only the live prefix. Tail rows
+    // would keep a previous replay's slot mapping, resolve batch_idx beyond the
+    // live batch and touch freed page-table rows, so rebuild them to alias the
+    // last live row for every replay.
+    if (is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
+        auto& padding_offset_host = py_model_inputs_.attention_inputs.padding_offset;
+        RTP_LLM_CHECK_WITH_INFO(rebuildPrefillPaddingOffsetTail(padding_offset_host.data_ptr<int32_t>(),
+                                                                static_cast<size_t>(padding_offset_host.numel()),
+                                                                state.current_seq_len),
+                                "prefill CUDA graph padding tail rebuild failed: capacity=%zu, live_tokens=%d",
+                                static_cast<size_t>(padding_offset_host.numel()),
+                                state.current_seq_len);
     }
 
     // launch prepare_cuda_graph when attention inputs are ready.

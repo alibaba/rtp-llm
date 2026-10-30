@@ -82,6 +82,16 @@ cc_test(
 )
 
 cc_test(
+    name = "prefill_padding_offset_tail_test",
+    srcs = ["prefill_padding_offset_tail_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:prefill_padding_offset_tail",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "cuda_graph_prepare_fill_rocm_test",
     srcs = ["cuda_graph_prepare_fill_test.cc"],
     copts = copts(),

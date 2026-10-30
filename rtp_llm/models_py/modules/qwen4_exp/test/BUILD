@@ -626,6 +626,15 @@ py_test(
 )
 
 py_test(
+    name = "prefill_rope_padding_tail_replay_repro_test",
+    srcs = ["prefill_rope_padding_tail_replay_repro_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "rope_cache_policy_test",
     srcs = ["rope_cache_policy_test.py", "main_qk_cache_test.py", "main_qk_norm_rope_test.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],

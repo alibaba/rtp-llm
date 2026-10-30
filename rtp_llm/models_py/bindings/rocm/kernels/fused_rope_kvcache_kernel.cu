@@ -193,6 +193,21 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
     constexpr int vec_size         = Vec_t<T>::size;
     using Vec_t                    = typename Vec_t<T>::Type;
     const int token_idx            = blockIdx.x;
+
+    // CUDA-graph replays launch the captured token capacity while the packed
+    // layout holds fewer live tokens (batch shrink or partial lanes). The
+    // padding tail is rebuilt to alias the last live row, but any stale tail
+    // entry from a previous larger batch would resolve batch_idx beyond the
+    // live batch and touch freed page-table rows (WARP_ILLEGAL_ADDRESS).
+    // cu_seqlens[batch_size] carries the live packed token count on graph
+    // replays (the runner plateaus its tail) and equals token_num on eager
+    // calls, so rows past it are no-ops.
+    const int live_token_num =
+        (cu_seqlens != nullptr && batch_size > 0) ? cu_seqlens[batch_size] : static_cast<int>(gridDim.x);
+    if (token_idx >= live_token_num) {
+        return;
+    }
+
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];
     const int tgt_token_idx        = token_idx + token_padding_offset;
 
@@ -819,13 +834,18 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
     using Vec_t                    = typename Vec_t<T>::Type;
     const int token_idx            = blockIdx.x;
 
-    if constexpr (PAD_QUERY) {
-        // CUDA Graph replay keeps the capture-time launch grid, while cu_seqlens
-        // is refreshed with the live token count. Ignore graph-capacity tail
-        // blocks before they use the shorter replay lengths for padded indexing.
-        if (token_idx >= cu_seqlens[batch_size]) {
-            return;
-        }
+    // CUDA-graph replays launch the captured token capacity while the packed
+    // layout holds fewer live tokens (batch shrink or partial lanes). The
+    // padding tail is rebuilt to alias the last live row, but any stale tail
+    // entry from a previous larger batch would resolve batch_idx beyond the
+    // live batch and touch freed page-table rows (WARP_ILLEGAL_ADDRESS).
+    // cu_seqlens[batch_size] carries the live packed token count on graph
+    // replays (the runner plateaus its tail) and equals token_num on eager
+    // calls, so rows past it are no-ops.
+    const int live_token_num =
+        (cu_seqlens != nullptr && batch_size > 0) ? cu_seqlens[batch_size] : static_cast<int>(gridDim.x);
+    if (token_idx >= live_token_num) {
+        return;
     }
 
     const int token_padding_offset = padding_offset == nullptr ? 0 : padding_offset[token_idx];

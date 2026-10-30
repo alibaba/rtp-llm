@@ -30,6 +30,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "prefill_padding_offset_tail",
+    hdrs = ["prefill_padding_offset_tail.h"],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
@@ -48,6 +54,7 @@ filegroup(
         "cuda_graph_base.h",
         "combo_position_ids_validation.h",
         "generation_prefill_cuda_graph_replay_metadata.h",
+        "prefill_padding_offset_tail.h",
         "cuda_graph_device_shims.h",
         "prepared_attention_inputs_guard.h",
         "cuda_graph_utils.h",
@@ -91,6 +98,7 @@ cc_library(
         ":combo_position_ids_validation",
         ":prepared_attention_inputs_guard",
         ":generation_prefill_cuda_graph_replay_metadata",
+        ":prefill_padding_offset_tail",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
