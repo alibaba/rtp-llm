@@ -163,7 +163,7 @@ def test_refs_do_not_eval_and_require_actual_fields():
 
 
 def test_cli_compiles_without_java_catalog(setup, tmp_path):
-    case, _, _ = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/leadership/get', 'wait_after': '1ms'}])
+    case, _, _ = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'wait_after': '1ms'}])
     output = tmp_path / 'compiled.json'
     result = subprocess.run([sys.executable, '-m', 'mock_framework.cli', 'compile', str(case.source),
         '--output', str(output)], capture_output=True, text=True, timeout=10)

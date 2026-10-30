@@ -34,15 +34,18 @@ async def read(ctx, master, operation, args):
 
 
 @dataclass(frozen=True)
-class Leadership(Targets):
-    is_leader: bool = True
+class MasterSelection(Targets):
+    is_leader: bool | None = None
 
 
-@case_interface('master/leadership/get', effect='read')
-async def leadership(ctx, args: Leadership) -> list[str]:
-    """Return each selected Master's actual leadership claim; do not invent a unique leader."""
+@case_interface('master/get', effect='read')
+async def get(ctx, args: MasterSelection) -> list[str]:
+    """List active Masters, optionally filtering their actual leadership claims."""
+    masters = selected(ctx, args.targets)
+    if args.is_leader is None:
+        return [master['rpc'] for master in masters]
     result = []
-    for master in selected(ctx, args.targets):
+    for master in masters:
         value = await read(ctx, master, 'master/leadership/get', {})
         own = value['instances']
         if own not in ([], [{'id': master['id']}]):
