@@ -285,6 +285,18 @@ size_t SpeculativeExecutionConfig::speculativeReserveStep() const {
     return static_cast<size_t>(gamma + 1);
 }
 
+int64_t SpeculativeExecutionConfig::verifySteps() const {
+    if (type != SP_TYPE_DSPARK) {
+        RTP_LLM_CHECK_WITH_INFO(sp_dspark_verify_tokens == 0,
+                                "sp_dspark_verify_tokens requires sp_type=dspark");
+        return gen_num_per_cycle;
+    }
+    RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle > 0 && sp_dspark_verify_tokens >= 0
+                                && sp_dspark_verify_tokens <= gen_num_per_cycle,
+                            "DSpARK verify tokens must be 0 (all gamma) or in [1, gamma]");
+    return sp_dspark_verify_tokens == 0 ? gen_num_per_cycle : sp_dspark_verify_tokens;
+}
+
 SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) {
     if (str.empty() || str == "none") {
         return SP_TYPE_NONE;
@@ -339,7 +351,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << ", "
-        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor << ", "
+        << "sp_dspark_verify_tokens: " << sp_dspark_verify_tokens;
     return oss.str();
 }
 

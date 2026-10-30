@@ -1009,9 +1009,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     // A non-positive draft width must refuse the commit.
     SpeculativeExecutionConfig zero_width_config = sp_config;
     zero_width_config.gen_num_per_cycle          = 0;
-    MtpBatchStreamProcessor zero_width(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false);
-    EXPECT_THROW(zero_width.validatePrefillDSparkCommitInput(model_input), std::exception);
+    EXPECT_THROW(
+        MtpBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false),
+        std::exception);
 
     // Anchors / committed ends come from stream state at the decode round
     // head; feed equivalent values here.
@@ -1112,6 +1113,25 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{30,  40,  50,  31,  41,  51,  32,  42,  52,  33,  43,  53,
                                     122, 122, 122, 123, 123, 123, 124, 124, 124, 125, 125, 125}),
               toVec<int32_t>(model_input.combo_position_ids));
+
+    sp_config.sp_dspark_verify_tokens = 2;
+    MtpBatchStreamProcessor shorter_verify(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto shorter_prepare = proposal_input;
+    shorter_verify.expandDSparkTargetVerifyPositionIdsFromProposal(shorter_prepare);
+    EXPECT_EQ((std::vector<int32_t>{30, 40, 50, 31, 41, 51, 32, 42, 52,
+                                    122, 122, 122, 123, 123, 123, 124, 124, 124}),
+              toVec<int32_t>(shorter_prepare.combo_position_ids));
+
+    GptModelInputs shorter_target;
+    shorter_verify.prepareDSparkTargetVerifyModelInput(
+        round_state, shorter_target, proposals.narrow(1, 0, 2), host_holder);
+    EXPECT_EQ((std::vector<int32_t>{102, 31, 32, 22, 41, 42}), toVec<int32_t>(shorter_target.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{3, 3}), toVec<int32_t>(shorter_target.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5}), toVec<int32_t>(shorter_target.lm_output_indexes));
+    shorter_verify.updateDecodePostDSparkCommitInput(
+        shorter_target, torch::zeros({6, 4}, torch::TensorOptions().device(torch::kCUDA)), 2);
+    EXPECT_EQ(shorter_target.last_hidden_states.size(0), 6);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {

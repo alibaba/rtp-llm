@@ -90,6 +90,10 @@ def ensure_all_renderers_registered() -> None:
 
 def _register_builtin_lazy_renderers() -> None:
     register_lazy_renderer(
+        ["minimax_m31", "minimax_m31_vl"],
+        "rtp_llm.openai.renderers.minimax_m31_vl_renderer",
+    )
+    register_lazy_renderer(
         ["deepseek_v41", "deepseek_v41_dspark"],
         "rtp_llm.openai.renderers.deepseekv41_renderer",
     )

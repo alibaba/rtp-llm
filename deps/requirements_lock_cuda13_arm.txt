@@ -693,6 +693,9 @@ flashinfer-python==0.6.9+8c4f4dcf \
     # via
     #   -r internal_source/deps/requirements_cuda13_arm.txt
     #   rtp-kernel
+fmha-sm100 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl \
+    --hash=sha256:2aa4fc564a3ef2f7bb1a63207e7c43e2e71cf09a82b5140c437c2c1df437c580
+    # via -r deps/requirements_cuda13_arm.txt
 fonttools==4.63.0 \
     --hash=sha256:032038247a96c1690f9f31e377c389383c902531b085aa4e4dabd6f57f870e69 \
     --hash=sha256:063e08bd17bd5a90127a14123de0d6a952dbc847695fd98b63c043d58057f90c \
@@ -2867,6 +2870,10 @@ pyarrow==25.0.0 \
     --hash=sha256:f57a39dbcb416345401c2e77a4373669b45fd111a1768e6cf267a7a0607ff0ec \
     --hash=sha256:fa1482b3da10cac2d4db6e26b81da543e237616af2ef6d466018b31ca586496f
     # via pyodps
+pybind11==3.1.0 \
+    --hash=sha256:a1cc06b524ab3edca51f8ad3895f9c4fa20b8b19283173dff4ae781449dc9639 \
+    --hash=sha256:b8488090f8acffbcb6b5d6a85571a6827a0a2981ffb75e5a0b27b87c4a6b7dd0
+    # via fmha-sm100
 pybind11-stubgen==2.5.5 \
     --hash=sha256:10824cd2fc5cbbee032b8fb39e6f6c08de232deb309bc66d786a6c6e8a4601bd \
     --hash=sha256:758d6d6bbeefc62ad7f78d5e5bbf357ccf6af83cd4504f5f549403f452942708
@@ -3245,6 +3252,12 @@ pyyaml==6.0.3 \
     #   huggingface-hub
     #   timm
     #   transformers
+quack-kernels==0.4.1 \
+    --hash=sha256:9d7d6ba412bc0c8a9b1331c52a73db76280adb9dc2f2750df4851ddabef1466b \
+    --hash=sha256:c1c8df2935bf5156ec47d2c5384ac08b411fd0ee702d80ae916dbf6d6f5ae813
+    # via
+    #   -r deps/requirements_cuda13_arm.txt
+    #   fmha-sm100
 referencing==0.37.0 \
     --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231 \
     --hash=sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8

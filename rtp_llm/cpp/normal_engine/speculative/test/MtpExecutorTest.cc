@@ -151,6 +151,7 @@ struct MtpExecutorTestConfig {
 
     SpeculativeType sp_type              = SP_TYPE_MTP;
     int64_t         dspark_mask_token_id = -1;
+    int64_t         dspark_verify_tokens  = 0;
     RoleType        role_type            = RoleType::PDFUSION;
 };
 
@@ -744,6 +745,7 @@ public:
         sp_config.type                                     = test_config.sp_type;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
         sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
+        sp_config.sp_dspark_verify_tokens                   = test_config.dspark_verify_tokens;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -2507,6 +2509,32 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     EXPECT_TRUE(torch::allclose(output.all_probs, torch::softmax(base_logits / 0.5f, -1), 1e-5, 1e-6));
     auto sampled_q = output.all_probs.gather(2, output.token_ids.to(torch::kLong).unsqueeze(-1));
     EXPECT_TRUE(sampled_q.gt(0).all().item<bool>());
+}
+
+TEST_F(MtpExecutorTest, testDSparkStaticVerifySamplesOnlyRequestedPrefix) {
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = 4;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = 4;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    test_config.dspark_verify_tokens = 2;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample   = true;
+    stream->generateConfig()->top_k       = 0;
+    stream->generateConfig()->temperature = 1.0f;
+    StreamGroups stream_groups({stream});
+
+    auto base_logits = torch::zeros({3, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto anchors     = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto output      = components.executor->sampleDSparkDraft(stream_groups, base_logits, anchors);
+    EXPECT_EQ((std::vector<int64_t>{1, 2}), output.token_ids.sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{1, 2, 4}), output.all_probs.sizes().vec());
+    EXPECT_EQ(components.executor->verify_step_, 2);
+    ASSERT_NE(components.executor->dspark_verify_sampler_, nullptr);
 }
 
 TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {

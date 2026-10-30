@@ -5,6 +5,30 @@ _DSV4_CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "minimax_m31_kv_cache_test",
+    srcs = ["minimax_m31_kv_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+# The SM103 pool is not named in this repository. Run this target explicitly
+# on an SM103 worker; its runner fails instead of reporting skipped GPU tests.
+py_test(
+    name = "minimax_m31_sm103_test",
+    srcs = [
+        "minimax_m31_sm103_test.py",
+        "minimax_m31_kv_cache_test.py",
+    ],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "minimax_m31_dspark_test",
+    srcs = ["minimax_m31_dspark_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

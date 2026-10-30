@@ -217,6 +217,22 @@ class QuantizationConfig(ABC):
 
         if quant_config is None:
             return None
+        if quant_method == "mxfp8":
+            block_size = quant_config.get("weight_block_size", [1, 32])
+            if block_size != [1, 32]:
+                raise ValueError(
+                    "MXFP8 weight_block_size must be [1, 32], " f"got {block_size!r}"
+                )
+            result = Fp8MxBlockWiseQuantConfig(is_quanted=True)
+            ignored = (
+                quant_config.get("ignored_layers")
+                or quant_config.get("modules_to_not_convert")
+                or []
+            )
+            if ignored:
+                result.exclude_modules = set(ignored)
+            return result
+
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "fp8":
@@ -229,9 +245,7 @@ class QuantizationConfig(ABC):
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
-            group_name, group_config = _pick_config_group(
-                quant_config["config_groups"]
-            )
+            group_name, group_config = _pick_config_group(quant_config["config_groups"])
             weights_config = group_config["weights"]
             # Absent or explicitly null when the checkpoint quantizes weights
             # only. Legacy FP8 per-channel checkpoints accept that shape, while
@@ -241,11 +255,7 @@ class QuantizationConfig(ABC):
             weight_type = weights_config.get("type")
             weight_strategy = weights_config.get("strategy")
             weight_dynamic = weights_config.get("dynamic", False)
-            if (
-                weight_type == "float"
-                and bits == 8
-                and weight_strategy == "channel"
-            ):
+            if weight_type == "float" and bits == 8 and weight_strategy == "channel":
                 if activation_config is None:
                     logging.getLogger(__name__).warning(
                         "compressed-tensors group %s has no input_activations; "
@@ -304,17 +314,11 @@ class QuantizationConfig(ABC):
                         "ignore_patterns": ignore_patterns,
                     }
                 )
-            elif (
-                weight_type == "int"
-                and bits == 4
-                and weight_strategy == "group"
-            ):
+            elif weight_type == "int" and bits == 4 and weight_strategy == "group":
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
                 ignore_patterns = quant_config.get("ignore", [])
-                quant_method = (
-                    CompressedW4A8Int4PerChannelQuantConfig.get_method()
-                )
+                quant_method = CompressedW4A8Int4PerChannelQuantConfig.get_method()
                 return CompressedW4A8Int4PerChannelQuantConfig.from_config(
                     {
                         "bits": bits,
@@ -418,7 +422,6 @@ class QuantizationConfig(ABC):
                         "exclude_modules": exclude_modules,
                     }
                 )
-
 
         result = cls.from_config(
             {
@@ -564,6 +567,28 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         return Fp8BlockWiseQuantConfig(**config)
 
 
+class Fp8MxBlockWiseQuantConfig(Fp8BlockWiseQuantConfig):
+    """Checkpoint MXFP8: E4M3 weights with UE8M0 scales per 1x32 values."""
+
+    def __init__(self, is_quanted: bool = True):
+        # C++ uses a supported alignment group; the actual MX block is 1x32.
+        super().__init__(bits=8, group_size=128, is_quanted=is_quanted)
+        self.mx_block_size = 32
+        self.weight_block_size = [1, 32]
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "MXFP8"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp8"
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return cls(is_quanted=config.get("is_quanted", True))
+
+
 class CompressedTensorsQuantConfig(QuantizationConfig):
     def __init__(self, bits: int = 0, is_quanted: bool = False):
         super().__init__(bits=bits, group_size=0, is_quanted=is_quanted)
@@ -644,7 +669,11 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
 
 class QuarkQuantConfig(QuantizationConfig):
     def __init__(
-        self, bits: int = 0, group_size: int = 0, is_quanted: bool = False, **kwargs: Any
+        self,
+        bits: int = 0,
+        group_size: int = 0,
+        is_quanted: bool = False,
+        **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
 
@@ -688,6 +717,7 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelQuarkQuantConfig(**config)
+
 
 class MXFp4QuarkQuantConfig(QuarkQuantConfig):
     def __init__(
@@ -844,7 +874,7 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
         self.exclude_modules = set(kwargs.get("exclude_modules", []))
 
     @classmethod
@@ -1055,9 +1085,7 @@ DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
 )
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
-    bits=4,
-    group_size=128,
-    is_quanted=False
+    bits=4, group_size=128, is_quanted=False
 )
 
 DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
