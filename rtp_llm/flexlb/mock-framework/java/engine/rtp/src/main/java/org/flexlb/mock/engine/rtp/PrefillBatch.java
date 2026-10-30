@@ -17,20 +17,33 @@ final class PrefillBatch {
             if (item.hasInput() && !seen.add(item.getInput().getRequestId())) duplicate = true;
         }
         var pending = new ArrayList<CompletableFuture<EnqueueBatchResponsePB>>();
+        var inputs = new ArrayList<GenerateInputPB>();
+        var admissions = new ArrayList<CompletableFuture<Void>>();
         for (var slot : request.getDpSlotsList()) for (var item : slot.getRequestsList()) {
             long id = item.hasInput() ? item.getInput().getRequestId() : 0;
             Throwable invalid = !item.hasInput() ? Status.INVALID_ARGUMENT.withDescription("Missing batch input").asRuntimeException()
                 : duplicate ? Status.ALREADY_EXISTS.withDescription("Duplicate request_id in batch").asRuntimeException()
                 : slot.getDpRank() != 0 ? Status.INVALID_ARGUMENT.withDescription("Mock supports only dp_rank 0").asRuntimeException() : null;
-            var admission = invalid == null ? generation.enqueue(item.getInput().toBuilder().setGroupSize(size)
-                .setGroupId(com.google.protobuf.Int64Value.of(request.getBatchId())).build(), request.getFetchAttachTimeoutMs())
-                : CompletableFuture.<Void>failedFuture(invalid);
+            var admission = new CompletableFuture<Void>();
+            if (invalid != null) admission.completeExceptionally(invalid);
+            else {
+                inputs.add(item.getInput().toBuilder().setGroupSize(size)
+                    .setGroupId(com.google.protobuf.Int64Value.of(request.getBatchId())).build());
+                admissions.add(admission);
+            }
             pending.add(admission.handle((unused, error) -> {
                 var result = EnqueueBatchResponsePB.newBuilder();
                 if (error == null) result.addSuccesses(EnqueueBatchSuccessPB.newBuilder().setRequestId(id));
                 else result.addErrors(EnqueueBatchErrorPB.newBuilder().setRequestId(id).setErrorInfo(details(error)));
                 return result.build();
             }));
+        }
+        var prepared = generation.enqueue(inputs, request.getFetchAttachTimeoutMs());
+        for (int i = 0; i < admissions.size(); i++) {
+            var admission = admissions.get(i);
+            prepared.get(i).whenComplete((unused, error) -> {
+                if (error == null) admission.complete(null); else admission.completeExceptionally(error);
+            });
         }
         CompletableFuture.allOf(pending.toArray(CompletableFuture[]::new)).thenRun(() -> {
             var result = EnqueueBatchResponsePB.newBuilder().setBatchId(request.getBatchId());

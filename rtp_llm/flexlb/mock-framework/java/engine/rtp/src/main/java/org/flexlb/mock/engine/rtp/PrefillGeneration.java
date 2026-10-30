@@ -39,6 +39,9 @@ final class PrefillGeneration implements AutoCloseable {
     }
 
     private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis) {
+        return start(input, response, attachMillis, false);
+    }
+    private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis, boolean grouped) {
         transfer.validate(input);
         if (input.getGenerateConfig().getMaxNewTokens() <= 1 || !input.getGenerateConfig().getCanUsePdSeparation())
             throw Status.UNIMPLEMENTED.withDescription("Batch and multi-token requests require P/D separation").asRuntimeException();
@@ -65,7 +68,7 @@ final class PrefillGeneration implements AutoCloseable {
                 outputs.remove(oldest.get().getKey());
             }
             if (outputs.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Retained output request id").asRuntimeException();
-            call = new Call(input, response, host + ":" + target.getGrpcPort(), attachMillis);
+            call = new Call(input, response, host + ":" + target.getGrpcPort(), attachMillis, grouped);
             if (call.deferred) outputs.put(input.getRequestId(), call.output);
             active.put(input.getRequestId(), call);
             if (call.deferred) remember(input.getRequestId(), false);
@@ -84,9 +87,37 @@ final class PrefillGeneration implements AutoCloseable {
         return call;
     }
 
-    CompletableFuture<Void> enqueue(GenerateInputPB input, long attachMillis) {
-        try { return start(input, null, attachMillis).admitted; }
-        catch (RuntimeException error) { return CompletableFuture.failedFuture(error); }
+    List<CompletableFuture<Void>> enqueue(List<GenerateInputPB> inputs, long attachMillis) {
+        var calls = new ArrayList<Call>(); var results = new ArrayList<CompletableFuture<Void>>();
+        for (var input : inputs) {
+            try {
+                var call = start(input, null, attachMillis, true); calls.add(call); results.add(call.admitted);
+            } catch (RuntimeException error) { results.add(CompletableFuture.failedFuture(error)); }
+        }
+        var prepared = calls.stream().map(call -> call.prepared.handle((unused, error) -> null)).toArray(CompletableFuture[]::new);
+        CompletableFuture.allOf(prepared).thenRunAsync(() -> submitGroup(calls), workers)
+            .exceptionally(error -> { calls.forEach(call -> call.finish(error)); return null; });
+        return List.copyOf(results);
+    }
+    private void submitGroup(List<Call> calls) {
+        var live = new ArrayList<Call>(); var inputs = new ArrayList<LocalPrefill.Submission>();
+        for (var call : calls) synchronized (call) {
+            if (!call.terminal && !call.prepared.isCompletedExceptionally()) {
+                live.add(call); inputs.add(new LocalPrefill.Submission(call.input, call.deadline));
+            }
+        }
+        if (live.isEmpty()) return;
+        var results = transfer.start(config.id(), inputs);
+        for (int i = 0; i < live.size(); i++) {
+            var call = live.get(i); var result = results.get(i);
+            synchronized (call) {
+                if (result.failure() != null) call.finish(result.failure());
+                else if (call.terminal) result.source().close();
+                else {
+                    call.source = result.source(); call.batchSource.complete(result.source());
+                }
+            }
+        }
     }
 
     void fetch(long id, StreamObserver<GenerateOutputsPB> observer) {
@@ -147,7 +178,8 @@ final class PrefillGeneration implements AutoCloseable {
         GenerateInputPB input;
         final BufferedOutput output;
         final boolean deferred;
-        final CompletableFuture<Void> admitted = new CompletableFuture<>();
+        final CompletableFuture<Void> admitted = new CompletableFuture<>(), prepared = new CompletableFuture<>();
+        final CompletableFuture<PrefillTransfer.Source> batchSource;
         final String target;
         final long started = System.nanoTime(), deadline;
         final Context.CancellableContext context;
@@ -155,8 +187,9 @@ final class PrefillGeneration implements AutoCloseable {
         Future<?> worker;
         ScheduledFuture<?> timeout;
         boolean terminal, priorityPreempted;
-        Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis) {
+        Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis, boolean grouped) {
             this.input = input; this.target = target; this.deferred = response == null;
+            batchSource = grouped ? new CompletableFuture<>() : null;
             output = new BufferedOutput(workers, attachMillis > 0 ? attachMillis : TimeUnit.MINUTES.toMillis(10));
             context = (deferred ? Context.ROOT : Context.current()).withCancellation();
             deadline = Math.min(deferred ? Long.MAX_VALUE : PrefillTransfer.deadline(Context.current()), input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
@@ -182,9 +215,14 @@ final class PrefillGeneration implements AutoCloseable {
                 var allocated = inbox.next();
                 if (allocated == null || allocated.hasFlattenOutput() || allocated.hasErrorInfo() && allocated.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid ALLOCATE acknowledgement").asRuntimeException();
+                if (batchSource != null) {
+                    prepared.complete(null);
+                    batchSource.get();
+                }
                 synchronized (this) {
                     if (terminal) return;
-                    source = transfer.start(TransferRequest.newBuilder().setClientId(config.id()).setInput(input).build(), deadline);
+                    if (batchSource == null)
+                        source = transfer.start(TransferRequest.newBuilder().setClientId(config.id()).setInput(input).build(), deadline);
                     admitted.complete(null);
                 }
                 stream.onNext(frame(RemoteStage.LOAD));
@@ -226,7 +264,10 @@ final class PrefillGeneration implements AutoCloseable {
             if (terminal) return;
             terminal = true;
             if (timeout != null) timeout.cancel(false);
-            if (!admitted.isDone()) admitted.completeExceptionally(error == null ? Status.CANCELLED.asRuntimeException() : error);
+            Throwable failure = error == null ? Status.CANCELLED.asRuntimeException() : error;
+            prepared.completeExceptionally(failure);
+            if (batchSource != null) batchSource.completeExceptionally(failure);
+            if (!admitted.isDone()) admitted.completeExceptionally(failure);
             context.cancel(null);
             if (source != null) {
                 if (error != null && Status.fromThrowable(error).getCode() == Status.Code.DEADLINE_EXCEEDED) source.expire();

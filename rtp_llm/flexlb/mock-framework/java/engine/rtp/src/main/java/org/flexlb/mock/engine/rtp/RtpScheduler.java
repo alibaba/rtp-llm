@@ -20,6 +20,8 @@ final class RtpScheduler implements Scheduler {
     private final Map<String, Entry> active = new LinkedHashMap<>();
     private final Set<Entry> owned = new LinkedHashSet<>();
     private final ArrayDeque<Entry> waiting = new ArrayDeque<>();
+    private final ArrayDeque<ArrayDeque<Entry>> groups = new ArrayDeque<>();
+    private boolean preferGroup;
     private final Set<Entry> running = new LinkedHashSet<>();
     private final Set<Entry> notifications = new LinkedHashSet<>();
     private Work executing;
@@ -31,6 +33,7 @@ final class RtpScheduler implements Scheduler {
         final Listener listener;
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
+        ArrayDeque<Entry> group;
         KvCache.Lease lease;
         int reused;
         boolean prefillFinished;
@@ -70,8 +73,7 @@ final class RtpScheduler implements Scheduler {
     @Override public Request input(Input input, Listener listener) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
         long length = (long) input.tokens() + (prefill() ? 1 : input.maxNewTokens());
-        if ((prefill() ? length > config.maxSeqLen() : length >= config.maxSeqLen())
-                || prefill() && config.maxBatchTokens() > 0 && input.tokens() > config.maxBatchTokens())
+        if (prefill() ? length > config.maxSeqLen() : length >= config.maxSeqLen())
             throw new RequestFailure(INVALID, "Request exceeds scheduling limits");
         if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
         if (owned.size() >= RtpConfig.REQUEST_LIMIT) throw new RequestFailure(OVERLOADED, "Request/delivery limit reached");
@@ -82,6 +84,28 @@ final class RtpScheduler implements Scheduler {
         if (prefill()) waiting.addLast(entry);
         else entry.phase = Phase.CAPACITY;
         return entry;
+    }
+
+    @Override public List<InputResult> input(List<InputItem> batch) {
+        if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
+        if (!prefill()) throw new RequestFailure(INVALID, "Explicit batches belong to Prefill");
+        batch = List.copyOf(batch);
+        var results = new ArrayList<InputResult>();
+        var group = new ArrayDeque<Entry>();
+        for (var item : batch) {
+            try {
+                var entry = (Entry) input(item.input(), item.listener());
+                waiting.remove(entry); group.addLast(entry);
+                results.add(new InputResult(entry, null));
+            } catch (RequestFailure failure) { results.add(new InputResult(null, failure)); }
+        }
+        if (group.size() > config.maxGenerateBatchSize()
+                || config.maxInitedKvStreams() > 0 && group.size() > config.maxInitedKvStreams()) {
+            waiting.addAll(group); // RTP falls oversized groups back to ordinary FIFO admission.
+        } else if (!group.isEmpty()) {
+            group.forEach(entry -> entry.group = group); groups.addLast(group);
+        }
+        return List.copyOf(results);
     }
 
     @Override public void control(Request handle, Control control) {
@@ -131,27 +155,32 @@ final class RtpScheduler implements Scheduler {
         if (closed) return null;
         if (executing != null) throw new IllegalStateException("Forward already in flight");
         int limit = config.maxGenerateBatchSize();
-        long budget = config.maxBatchTokens() > 0 ? config.maxBatchTokens() : Long.MAX_VALUE;
         var selected = new ArrayList<Entry>();
-        if (!prefill()) {
+        if (prefill()) {
+            boolean groupFirst = !groups.isEmpty() && (preferGroup || waiting.isEmpty());
+            if (groupFirst) {
+                selectGroup(selected);
+                if (selected.isEmpty()) selectPrefill(waiting, selected, false);
+            } else {
+                selectPrefill(waiting, selected, false);
+                if (selected.isEmpty()) selectGroup(selected);
+            }
+            if (!selected.isEmpty()) preferGroup = selected.getFirst().group == null && !groups.isEmpty();
+        } else {
             for (var entry : List.copyOf(running)) {
                 if (selected.size() >= limit) break;
-                int tokens = workTokens(entry);
-                if (tokens > 0 && tokens <= budget && reserve(entry)) { selected.add(entry); budget -= tokens; }
+                if (workTokens(entry) > 0 && reserve(entry)) selected.add(entry);
             }
-        }
-        int queued = waiting.size();
-        while (queued-- > 0 && selected.size() < limit && (prefill() || running.size() < limit)) {
-            var entry = waiting.removeFirst();
-            if (!live(entry)) continue;
-            int tokens = workTokens(entry);
-            if (tokens <= 0 || tokens > budget || !reserve(entry)) {
-                if (!entry.state.terminating()) waiting.addLast(entry);
-                continue;
+            int queued = waiting.size();
+            while (queued-- > 0 && selected.size() < limit && running.size() < limit) {
+                var entry = waiting.removeFirst();
+                if (!live(entry)) continue;
+                if (workTokens(entry) <= 0 || !reserve(entry)) {
+                    if (!entry.state.terminating()) waiting.addLast(entry);
+                    continue;
+                }
+                running.add(entry); selected.add(entry);
             }
-            running.add(entry);
-            selected.add(entry);
-            budget -= tokens;
         }
         if (selected.isEmpty()) return null;
         var members = new ArrayList<Member>();
@@ -169,6 +198,34 @@ final class RtpScheduler implements Scheduler {
         return executing;
     }
 
+    private void selectGroup(List<Entry> selected) {
+        if (!groups.isEmpty()) selectPrefill(groups.getFirst(), selected, true);
+    }
+    private void selectPrefill(ArrayDeque<Entry> queue, List<Entry> selected, boolean explicit) {
+        long uncached = 0;
+        for (var entry : List.copyOf(queue)) {
+            if (!live(entry)) continue;
+            if (selected.size() >= config.maxGenerateBatchSize()) break;
+            if (!explicit && config.maxUncachedBatchTokens() > 0 && uncached >= config.maxUncachedBatchTokens()) continue;
+            if (entry.lease == null && config.maxInitedKvStreams() > 0
+                    && active.values().stream().filter(e -> e.lease != null).count() >= config.maxInitedKvStreams()) continue;
+            if (workTokens(entry) <= 0 || !fitsPrefill(selected, entry) || !reserve(entry)) continue;
+            queue.remove(entry); running.add(entry); selected.add(entry);
+            uncached += entry.input.tokens() - entry.reused;
+        }
+        if (explicit && queue.isEmpty()) groups.remove(queue);
+    }
+    private boolean fitsPrefill(List<Entry> selected, Entry candidate) {
+        if (selected.isEmpty()) return candidate.input.tokens() < config.maxSeqLen();
+        long sum = candidate.input.tokens(), longest = candidate.input.tokens();
+        for (var entry : selected) {
+            sum += entry.input.tokens(); longest = Math.max(longest, entry.input.tokens());
+        }
+        // Native prefill-only means max_new_tokens == 0; this Mock currently accepts positive output lengths only.
+        long budget = (long) config.maxBatchTokens() - 1;
+        return sum <= budget && longest * (selected.size() + 1L) <= budget;
+    }
+
     private int workTokens(Entry entry) {
         if (!live(entry) || entry.outputPending) return 0;
         if (!entry.listener.writable()) { entry.phase = OUTPUT; return 0; }
@@ -178,10 +235,6 @@ final class RtpScheduler implements Scheduler {
                 Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
                 entry.input.minNewTokens(), entry.input.maxNewTokens(), config.maxSeqLen(), entry.input.ignoreEos()));
         if (prefill()) return entry.input.tokens();
-        if (config.maxBatchTokens() > 0 && entry.nextStep.verifyTokens() > config.maxBatchTokens()) {
-            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode step exceeds batch token budget"));
-            return 0;
-        }
         return entry.nextStep.verifyTokens();
     }
 
@@ -289,6 +342,10 @@ final class RtpScheduler implements Scheduler {
         if (entry.state.terminating()) return;
         entry.finalPhase = reportedPhase(entry);
         waiting.remove(entry);
+        if (entry.group != null) {
+            entry.group.remove(entry);
+            if (entry.group.isEmpty()) groups.remove(entry.group);
+        }
         running.remove(entry);
         entry.state.finish(failure);
     }
@@ -371,7 +428,8 @@ final class RtpScheduler implements Scheduler {
     @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
     @Override public QueueSnapshot queues() {
         int queued = 0, executing = 0, loading = 0, ready = 0;
-        var waitingMembers = Set.copyOf(waiting);
+        var waitingMembers = new HashSet<>(waiting);
+        groups.forEach(waitingMembers::addAll);
         for (var entry : active.values()) {
             if (entry.state.terminating()) continue;
             if (running.contains(entry)) executing++;

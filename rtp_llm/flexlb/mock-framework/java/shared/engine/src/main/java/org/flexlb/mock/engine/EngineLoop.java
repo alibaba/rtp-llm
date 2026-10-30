@@ -46,6 +46,9 @@ public final class EngineLoop implements AutoCloseable {
     public Scheduler.Request input(Scheduler.Input input, Scheduler.Listener listener) {
         return change(() -> { ensureOpen(); return scheduler.input(input, listener); });
     }
+    public List<Scheduler.InputResult> input(List<Scheduler.InputItem> batch) {
+        return change(() -> { ensureOpen(); return scheduler.input(List.copyOf(batch)); });
+    }
     public void control(Scheduler.Request request, Scheduler.Control event) {
         change(() -> { scheduler.control(request, event); return null; });
     }

@@ -134,7 +134,7 @@ class RtpSchedulerTest {
     }
 
     @Test void prefillAdmissionWaitsForCapacityAndBatchesAccordingToConfiguredLimit() throws Exception {
-        var config = config("prefill", "1", 2);
+        var config = config("prefill", "1", 2, 100);
         try (var cache = new KvCache(config.blockSize(), 12, 0, KvCache.EvictionPolicy.LRU);
              var scheduler = new RtpScheduler(new Object(), config, cache)) {
             var held = cache.acquire(12L * config.blockSize(), List.of()).lease();
@@ -195,8 +195,10 @@ class RtpSchedulerTest {
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             assertEquals(12, cache.snapshot(0, false).availableBlocks());
             var oversized = new Scheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, List.of(), false, false, 0, false);
-            assertEquals(RequestFailure.Reason.INVALID,
-                assertThrows(RequestFailure.class, () -> scheduler.input(oversized, new Listener())).reason());
+            scheduler.input(oversized, new Listener());
+            var singleton = scheduler.schedule(); assertNotNull(singleton);
+            assertEquals(1, singleton.batch().dps().getFirst().requests().size());
+            complete(scheduler, singleton, config); drain(scheduler);
             assertTrue(scheduler.requests().isEmpty());
         }
     }
@@ -381,6 +383,135 @@ class RtpSchedulerTest {
             assertNull(small.terminal.get(1, TimeUnit.SECONDS));
             assertTrue(scheduler.requests().isEmpty());
             assertEquals(2, cache.snapshot(0, false).freeBlocks());
+        }
+    }
+
+    private static Scheduler.Input sized(long id, int tokens) {
+        return new Scheduler.Input(Long.toString(id), id, 81, tokens, 3, 0, System.nanoTime(),
+            Long.MAX_VALUE, List.of(), false, false, 0, false);
+    }
+    private static List<Scheduler.InputItem> batch(Scheduler.Input... inputs) {
+        return Arrays.stream(inputs).map(input -> new Scheduler.InputItem(input, new Listener())).toList();
+    }
+    private static List<Long> ids(Scheduler.Work work) {
+        return work.batch().dps().getFirst().requests().stream().map(item -> Long.valueOf(item.id())).toList();
+    }
+    private RtpConfig admissionLimits(RtpConfig config, int inited, int uncached) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
+        ((ObjectNode) root.path("component")).set("config", config.business());
+        ((ObjectNode) root.path("component").path("config"))
+            .put("max_inited_kv_cache_streams", inited).put("max_batch_tokens_without_cache", uncached);
+        var path = directory.resolve("limits.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
+    }
+    @Test void explicitBatchesWithTheSameReportedIdNeverMergeEvenWhenSingleton() throws Exception {
+        var config = config("prefill", "1", 4, 100);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            assertEquals(2, scheduler.input(batch(sized(1, 5), sized(2, 5))).size());
+            scheduler.input(batch(sized(3, 5)));
+            var first = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(first));
+            complete(scheduler, first, config); drain(scheduler);
+            var next = scheduler.schedule(); assertEquals(List.of(3L), ids(next));
+            complete(scheduler, next, config); drain(scheduler);
+            assertTrue(scheduler.requests().isEmpty()); assertEquals(20, cache.snapshot(0, false).freeBlocks());
+        }
+    }
+    @Test void groupCapacityScanKeepsResidualMembersAndCanAdmitLaterSmallerMembers() throws Exception {
+        var config = config("prefill", "1", 4, 100);
+        try (var cache = new KvCache(2, 4, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            scheduler.input(batch(sized(1, 5), sized(2, 5), sized(3, 1)));
+            var first = scheduler.schedule(); assertEquals(List.of(1L, 3L), ids(first));
+            assertEquals(1, scheduler.queues().waiting());
+            complete(scheduler, first, config); drain(scheduler);
+            var residual = scheduler.schedule(); assertEquals(List.of(2L), ids(residual));
+            complete(scheduler, residual, config); drain(scheduler);
+            assertEquals(4, cache.snapshot(0, false).freeBlocks());
+        }
+    }
+    @Test void ordinaryAndGroupWorkAlternateAtEmptyForwardBoundariesWithoutMixing() throws Exception {
+        var config = config("prefill", "1", 4, 100);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            scheduler.input(batch(sized(1, 5), sized(2, 5)));
+            scheduler.input(sized(3, 5), new Listener());
+            var normal = scheduler.schedule(); assertEquals(List.of(3L), ids(normal));
+            scheduler.input(sized(4, 5), new Listener());
+            complete(scheduler, normal, config); drain(scheduler);
+            var group = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(group));
+            complete(scheduler, group, config); drain(scheduler);
+            var tail = scheduler.schedule(); assertEquals(List.of(4L), ids(tail));
+            complete(scheduler, tail, config); drain(scheduler);
+        }
+    }
+    @Test void oversizedGroupFallsBackToOrdinaryAdmissionAndCanMergeWithSingles() throws Exception {
+        var config = config("prefill", "1", 2, 100);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            scheduler.input(batch(sized(1, 5), sized(2, 5), sized(3, 5)));
+            scheduler.input(sized(4, 5), new Listener());
+            var first = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(first));
+            complete(scheduler, first, config); drain(scheduler);
+            var tail = scheduler.schedule(); assertEquals(List.of(3L, 4L), ids(tail));
+            complete(scheduler, tail, config); drain(scheduler);
+        }
+    }
+    @Test void initializedKvLimitProtectsRetainedSourcesAndCountsAsAnOversizedGroupLimit() throws Exception {
+        var config = admissionLimits(config("prefill", "1", 4, 100), 1, 0);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var held = scheduler.input(input(9, true), new Listener());
+            var first = scheduler.schedule(); complete(scheduler, first, config); drain(scheduler);
+            scheduler.input(batch(sized(1, 5), sized(2, 5)));
+            assertNull(scheduler.schedule());
+            scheduler.finish(held, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+            var next = scheduler.schedule(); assertEquals(List.of(1L), ids(next));
+            complete(scheduler, next, config); drain(scheduler);
+            var tail = scheduler.schedule(); assertEquals(List.of(2L), ids(tail));
+            complete(scheduler, tail, config); drain(scheduler);
+        }
+    }
+    @Test void prefillRectangleLimitsGroupsAndUncachedQuotaAppliesToOrdinaryAdmission() throws Exception {
+        var config = admissionLimits(config("prefill", "1", 4, 100), 0, 1);
+        try (var cache = new KvCache(2, 100, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            scheduler.input(batch(sized(1, 60), sized(2, 30)));
+            var first = scheduler.schedule(); assertEquals(List.of(1L), ids(first));
+            complete(scheduler, first, config); drain(scheduler);
+            var second = scheduler.schedule(); assertEquals(List.of(2L), ids(second));
+            complete(scheduler, second, config); drain(scheduler);
+            scheduler.input(batch(sized(3, 10), sized(4, 10)));
+            var group = scheduler.schedule(); assertEquals(List.of(3L, 4L), ids(group));
+            complete(scheduler, group, config); drain(scheduler);
+            scheduler.input(sized(5, 10), new Listener()); scheduler.input(sized(6, 10), new Listener());
+            var tail = scheduler.schedule(); assertEquals(List.of(5L), ids(tail));
+            complete(scheduler, tail, config); drain(scheduler);
+            complete(scheduler, scheduler.schedule(), config); drain(scheduler);
+        }
+    }
+    @Test void rejectedAndCancelledGroupMembersDoNotCancelOtherMembers() throws Exception {
+        var config = config("prefill", "1", 4, 100);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var admitted = scheduler.input(batch(sized(1, 5), sized(1, 5), sized(2, 5)));
+            assertEquals(RequestFailure.Reason.DUPLICATE, admitted.get(1).failure().reason());
+            scheduler.finish(admitted.get(0).request(), new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+            var next = scheduler.schedule(); assertEquals(List.of(2L), ids(next));
+            complete(scheduler, next, config); drain(scheduler);
+            assertEquals(20, cache.snapshot(0, false).freeBlocks()); assertTrue(scheduler.requests().isEmpty());
+        }
+    }
+
+    @Test void oneTokenGenerationCanShareAGroupWithMultiTokenGeneration() throws Exception {
+        var config = config("prefill", "1", 4, 100);
+        try (var cache = new KvCache(2, 20, 0, KvCache.EvictionPolicy.LRU);
+             var scheduler = new RtpScheduler(new Object(), config, cache)) {
+            var one = new Scheduler.Input("1", 1, 81, 5, 1, 0, System.nanoTime(),
+                Long.MAX_VALUE, List.of(), false, false, 0, false);
+            scheduler.input(batch(one, sized(2, 5)));
+            var work = scheduler.schedule(); assertEquals(List.of(1L, 2L), ids(work));
+            complete(scheduler, work, config); drain(scheduler);
+            assertEquals(20, cache.snapshot(0, false).freeBlocks());
         }
     }
 

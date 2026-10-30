@@ -38,6 +38,7 @@ class EngineLoopTest {
         public QueueSnapshot queues() { return new QueueSnapshot(queue.size(), 0, 0, 0); }
         public String scrapeMetrics() { return ""; }
         public Request input(Input input, Listener listener) { throw new UnsupportedOperationException(); }
+        public List<InputResult> input(List<InputItem> batch) { throw new UnsupportedOperationException(); }
         public void control(Request request, Control event) { throw new UnsupportedOperationException(); }
         public void finish(Request request, RequestFailure failure) { throw new UnsupportedOperationException(); }
         public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }

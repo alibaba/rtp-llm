@@ -16,7 +16,7 @@ import org.flexlb.mock.api.model.DecodeSpec;
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int reserveBlocks, EvictionPolicy evictionPolicy,
                         boolean reuseCache, boolean deviceCache, int hostBlocks, EvictionPolicy hostPolicy,
                         Watermark deviceWatermark, Watermark hostWatermark, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
-                        int maxGenerateBatchSize, int cpSize, boolean cpEnabled, int tpSize, int dpSize, int loadTimeoutMs,
+                        int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize, int loadTimeoutMs,
                         JsonNode business, ComputeModel compute) {
     public static final int REQUEST_LIMIT = 1024;
     private static final ObjectMapper JSON = new ObjectMapper()
@@ -26,7 +26,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || blockSize < 1 || deviceBlocks < 1 || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || hostBlocks < 0 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || cpSize < 1 || tpSize < 1 || dpSize < 1 || loadTimeoutMs < 1)
+                || hostBlocks < 0 || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1 || tpSize < 1 || dpSize < 1 || loadTimeoutMs < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
         Objects.requireNonNull(evictionPolicy); Objects.requireNonNull(hostPolicy);
@@ -81,6 +81,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "max_seq_len", null, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_size", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_generate_batch_size", 1, 1, REQUEST_LIMIT),
+            nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
+            nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize, cpEnabled, tpSize, dpSize,
             loadTimeout(config), config, compute);
     }
@@ -102,7 +104,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("block_tree_memory_evict_low_watermark_ratio", hostWatermark.low())
             .put("block_tree_memory_evict_high_watermark_ratio", hostWatermark.high())
             .put("enable_disk_cache", false).put("enable_remote_cache", false);
-        if (role == Role.prefill) { result.remove("load_cache_timeout_ms"); result.put("prefill_retry_times", 0); }
+        if (role == Role.prefill) { result.remove("load_cache_timeout_ms"); result.put("prefill_retry_times", 0);
+            result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
         result.put("max_generate_batch_size", maxGenerateBatchSize).put("local_request_limit", REQUEST_LIMIT);
         result.set("requested_config", business()); result.set("pending_config", RtpSettings.pending(business));
         result.set("compute", compute.effectiveConfiguration());

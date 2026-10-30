@@ -26,7 +26,8 @@ class PdGenerationTest {
         ((ObjectNode) root.path("component").path("config").path("compute").path("forward")).put("expression", Integer.toString(millis));
         models.forEach((key, value) -> {
             var compute = (ObjectNode) root.path("component").path("config").path("compute");
-            if (key.equals("compute")) compute.setAll((ObjectNode) json.valueToTree(value));
+            if (key.equals("settings")) ((ObjectNode) root.path("component").path("config")).setAll((ObjectNode) json.valueToTree(value));
+            else if (key.equals("compute")) compute.setAll((ObjectNode) json.valueToTree(value));
             else compute.set(key, json.valueToTree(value));
         });
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
@@ -64,7 +65,7 @@ class PdGenerationTest {
         }); }
         Object next() throws Exception { var value = outputs.poll(4, TimeUnit.SECONDS); assertNotNull(value); return value; }
         GenerateOutputsPB output(int count, boolean finished, int width) throws Exception {
-            var value = next(); assertInstanceOf(GenerateOutputsPB.class, value); var output = (GenerateOutputsPB) value;
+            var value = next(); assertInstanceOf(GenerateOutputsPB.class, value, String.valueOf(value)); var output = (GenerateOutputsPB) value;
             var flat = output.getFlattenOutput(); assertEquals(count, flat.getAuxInfo(0).getOutputLen());
             assertEquals(finished, flat.getFinished(0)); assertEquals(width, flat.getOutputIds().getShape(2));
             assertEquals(width * 4, flat.getOutputIds().getInt32Data().size()); assertTrue(flat.getAuxInfo(0).getPdSep());
@@ -582,4 +583,69 @@ class PdGenerationTest {
             }
         }
     }
+    @Test void masterBatchWaitsForAllDecodePreparationsAndExecutesOnePrefillForward() throws Exception {
+        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4, "max_batch_tokens_size", 100));
+        try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
+             var holder = d.node.cache().acquire(8, List.of()).lease();
+             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var accepted = workers.submit(() -> enqueue(p, 2000,
+                input(d, 701, 5, 3, 3000, true), input(d, 702, 7, 3, 3000, true)));
+            await(() -> d.status().getRunningTaskInfoCount() == 2 && d.status().getAvailableKvCache() < 8);
+            assertFalse(accepted.isDone());
+            assertEquals(0, metric(p, "mock_engine_requests_started_total", ""));
+            holder.close();
+            var ack = accepted.get(3, TimeUnit.SECONDS);
+            assertEquals(2, ack.getSuccessesCount()); assertEquals(0, ack.getErrorsCount());
+            await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 2);
+            assertEquals(1, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void failedDecodePreparationDoesNotDiscardTheSuccessfulBatchMember() throws Exception {
+        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4, "max_batch_tokens_size", 100));
+        try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1)) {
+            var ack = enqueue(p, 2000, input(d, 711, 5, 3, 2000, true), input(d, 712, 50, 3, 2000, true));
+            assertEquals(1, ack.getSuccessesCount()); assertEquals(711, ack.getSuccesses(0).getRequestId());
+            assertEquals(1, ack.getErrorsCount()); assertEquals(602, ack.getErrors(0).getErrorInfo().getErrorCode());
+            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            assertEquals(1, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void cancellingOneMemberDuringBatchPreparationUnblocksTheRemainingGroup() throws Exception {
+        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4, "max_batch_tokens_size", 100));
+        try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
+             var holder = d.node.cache().acquire(8, List.of()).lease();
+             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var accepted = workers.submit(() -> enqueue(p, 2000,
+                input(d, 721, 5, 3, 3000, true), input(d, 722, 5, 3, 3000, true)));
+            await(() -> d.status().getRunningTaskInfoCount() == 2 && d.status().getAvailableKvCache() < 8);
+            long pending = d.status().getRunningTaskInfoList().stream()
+                .filter(task -> task.getPhase() == TaskPhase.TASK_PHASE_RECEIVED).findFirst().orElseThrow().getRequestId();
+            assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, pending));
+            var ack = accepted.get(3, TimeUnit.SECONDS);
+            assertEquals(1, ack.getSuccessesCount()); assertEquals(1, ack.getErrorsCount());
+            assertEquals(pending, ack.getErrors(0).getRequestId());
+            assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
+            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            assertEquals(1, metric(p, "mock_engine_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(8, d.status().getAvailableKvCache());
+            holder.close(); assertEquals(16, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void rejectedPrefillMemberKeepsNativeInputErrorAndReleasesItsPreparedDecode() throws Exception {
+        var settings = Map.<String, Object>of("settings", Map.of("max_generate_batch_size", 4,
+            "max_batch_tokens_size", 100, "max_seq_len", 8));
+        try (var p = node("prefill", 16, 10, settings); var d = node("decode", 16, 1)) {
+            var ack = enqueue(p, 2000, input(d, 731, 5, 3, 2000, true), input(d, 732, 8, 3, 2000, true));
+            assertEquals(1, ack.getSuccessesCount()); assertEquals(731, ack.getSuccesses(0).getRequestId());
+            assertEquals(1, ack.getErrorsCount()); assertEquals(605, ack.getErrors(0).getErrorInfo().getErrorCode());
+            await(() -> p.status().getFinishedTaskListCount() == 1 && d.status().getFinishedTaskListCount() == 2);
+            assertEquals(32, p.status().getAvailableKvCache()); assertEquals(32, d.status().getAvailableKvCache());
+        }
+    }
+
 }

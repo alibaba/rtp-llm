@@ -124,10 +124,12 @@ class RtpConfigTest {
             .put("prefill_retry_times", 3).put("block_tree_device_evict_low_watermark_ratio", .82)
             .put("block_tree_device_evict_high_watermark_ratio", .9);
         var effective = load(root).effective();
-        assertEquals(50000, effective.path("pending_config").path("max_batch_tokens_without_cache").intValue());
+        assertEquals(50000, effective.path("max_batch_tokens_without_cache").intValue());
+        assertEquals(128, effective.path("max_inited_kv_cache_streams").intValue());
+        assertFalse(effective.path("pending_config").has("max_inited_kv_cache_streams"));
         assertEquals(3, effective.path("pending_config").path("prefill_retry_times").intValue());
         assertEquals(0, effective.path("prefill_retry_times").intValue());
-        assertFalse(effective.has("max_batch_tokens_without_cache")); assertFalse(effective.has("config"));
+        assertFalse(effective.has("config"));
         config.put("max_inited_kv_cache_streams", -1); assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("max_inited_kv_cache_streams", 128).put("block_tree_device_evict_low_watermark_ratio", .99);
         assertThrows(IllegalArgumentException.class, () -> load(root));

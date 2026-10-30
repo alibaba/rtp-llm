@@ -21,8 +21,7 @@ final class RtpSettings {
         "max_batch_tokens_without_cache", "max_inited_kv_cache_streams", "memory_cache_sync_timeout_ms");
     private static final Set<String> DECODE = Set.of("load_cache_timeout_ms");
     private static final Set<String> PENDING_INTS = Set.of(
-        "prefill_retry_timeout_ms", "prefill_max_wait_timeout_ms", "max_batch_tokens_without_cache",
-        "max_inited_kv_cache_streams", "memory_cache_sync_timeout_ms", "max_rpc_timeout_ms",
+        "prefill_retry_timeout_ms", "prefill_max_wait_timeout_ms", "memory_cache_sync_timeout_ms", "max_rpc_timeout_ms",
         "block_tree_business_queue_max_size", "block_tree_transfer_queue_max_size");
 
     static ObjectNode normalize(JsonNode config, Role role) {
