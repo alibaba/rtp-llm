@@ -1246,13 +1246,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
-            if (has_speculative_target_commit_hooks_ && py_model_inputs.attention_inputs.is_target_verify) {
-                py_model_.attr("activate_speculative_target_graph_replay")(graph_state.current_real_graph_bs);
-            }
-            if (!py_model_inputs.attention_inputs.is_prefill
-                && py::hasattr(py_model_, "activate_draft_lm_head_graph")) {
-                py_model_.attr("activate_draft_lm_head_graph")(graph_state.current_real_graph_bs);
-            }
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
