@@ -1444,6 +1444,7 @@ class ProfilingDebugLoggingConfig:
     hack_layer_num: int
     log_file_backup_count: int
     torch_cuda_profiler_dir: str
+    tensor_capture_config: str
     trace_memory: bool
 
     def __getstate__(self) -> tuple:

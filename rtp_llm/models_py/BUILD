@@ -2,7 +2,7 @@ load("//bazel:arch_select.bzl", "requirement")
 
 py_library(
     name = "utils",
-    srcs = glob([
+    srcs = ["prefill_optimization.py"] + glob([
         "utils/*.py",
     ]),
 )

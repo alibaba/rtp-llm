@@ -1,5 +1,18 @@
 
 py_test(
+    name = "xgrammar_loader_test",
+    size = "small",
+    srcs = ["xgrammar_loader_test.py"],
+    deps = ["//rtp_llm:xgrammar"],
+    target_compatible_with = select({
+        "//:using_cuda12_9_x86": [],
+        "//:using_cuda13_x86": [],
+        "//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "grammar_compile_threads_test",
     srcs = [
         "grammar_compile_threads_test.py",

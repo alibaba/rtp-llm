@@ -106,8 +106,15 @@ cc_test(
 cc_test(
     name = "recording_engine_test",
     srcs = ["RecordingEngineTest.cc"],
+    data = ["//rtp_llm:utils"],
     copts = test_copts,
-    deps = [":mock_engine", "//rtp_llm/cpp/observability:execution_recorder"] + cuda13_torch_link_deps,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/observability:execution_recorder",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "@havenask//aios/autil:time",
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},
     tags = ["manual"],
 )

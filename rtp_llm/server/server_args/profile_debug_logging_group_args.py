@@ -57,6 +57,14 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         help="指定开启Torch的Profile时对应的生成目录",
     )
     profile_debug_logging_group.add_argument(
+        "--tensor_capture_config",
+        env_name="RTP_LLM_TENSOR_CAPTURE_CONFIG",
+        bind_to=(profiling_debug_config, "tensor_capture_config"),
+        type=str,
+        default="",
+        help="Tensor capture JSON config path (default disabled). Requires RTP_LLM_RECORD_DIR and RTP_LLM_RECORD_SESSION; owner-only eager prefill.",
+    )
+    profile_debug_logging_group.add_argument(
         "--debug_load_server",
         env_name="DEBUG_LOAD_SERVER",
         bind_to=(profiling_debug_config, "debug_load_server"),
