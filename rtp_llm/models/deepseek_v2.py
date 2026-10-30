@@ -662,6 +662,17 @@ class DeepSeekV2(BaseModel):
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
             config.hidden_size = config_json["hidden_size"]
+            # Narrow routed-expert storage, GLM-5 FP4-expert style: the
+            # declaration lives inside ``quantization_config.expert_dtype``
+            # (unlike DeepSeek-V4's top-level ``expert_dtype``).  Without it
+            # eval_model_weight_size() prices the experts at the model-wide
+            # FP8 width (~1.9x inflation) and can misroute the loader to
+            # the scratch/CPU path.  See deepseek_v4.py for the V4 twin.
+            expert_dtype = (config_json.get("quantization_config") or {}).get(
+                "expert_dtype"
+            )
+            if expert_dtype is not None:
+                config.expert_weight_dtype = str(expert_dtype).strip().lower()
 
             # MLA config
             config.attn_config.use_mla = True
