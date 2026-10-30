@@ -916,7 +916,7 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
         snapshot.total_stream_num += pending.total_stream_num;
         snapshot.total_propose_token_num += pending.total_propose_token_num;
         snapshot.total_verify_draft_token_num += pending.total_verify_draft_token_num;
-        if (pending.confidence_cpu.defined()) {
+        if (pending.confidence_cpu.defined() && Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_DEBUG)) {
             const auto stats     = pending.confidence_cpu.accessor<float, 2>();
             double     attempted = 0.0;
             double     accepted  = 0.0;
@@ -924,15 +924,15 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
                 const double count = stats[step][0];
                 attempted += count + stats[step][5];
                 accepted += stats[step][1];
-                RTP_LLM_LOG_INFO("[dspark-confidence] position=%ld attempted=%g accepted=%g mean_prediction=%g "
-                                 "mae=%g brier=%g invalid=%g",
-                                 step,
-                                 count,
-                                 static_cast<double>(stats[step][1]),
-                                 count ? stats[step][2] / count : 0.0,
-                                 count ? stats[step][3] / count : 0.0,
-                                 count ? stats[step][4] / count : 0.0,
-                                 static_cast<double>(stats[step][5]));
+                RTP_LLM_LOG_DEBUG("[dspark-confidence] position=%ld attempted=%g accepted=%g mean_prediction=%g "
+                                  "mae=%g brier=%g invalid=%g",
+                                  step,
+                                  count,
+                                  static_cast<double>(stats[step][1]),
+                                  count ? stats[step][2] / count : 0.0,
+                                  count ? stats[step][3] / count : 0.0,
+                                  count ? stats[step][4] / count : 0.0,
+                                  static_cast<double>(stats[step][5]));
             }
             if (pending.confidence_lengths_cpu.defined()) {
                 const auto*          lengths = pending.confidence_lengths_cpu.data_ptr<int32_t>();
@@ -947,13 +947,13 @@ MtpExecutor::AcceptLenMetricsSnapshot MtpExecutor::consumePendingAcceptLenMetric
                 for (size_t length = 0; length < histogram.size(); ++length) {
                     counts << (length ? "," : "") << length << ":" << histogram[length];
                 }
-                RTP_LLM_LOG_INFO("[dspark-confidence] generated=%ld capped_draft_budget=%ld attempted=%g "
-                                 "accepted_with_valid_prediction=%g valid_length_counts=%s",
-                                 pending.total_propose_token_num,
-                                 capped_budget,
-                                 attempted,
-                                 accepted,
-                                 counts.str().c_str());
+                RTP_LLM_LOG_DEBUG("[dspark-confidence] generated=%ld capped_draft_budget=%ld attempted=%g "
+                                  "accepted_with_valid_prediction=%g valid_length_counts=%s",
+                                  pending.total_propose_token_num,
+                                  capped_budget,
+                                  attempted,
+                                  accepted,
+                                  counts.str().c_str());
             }
         }
         if (pending.accept_len_rows_cpu.defined() && pending.accept_len_rows_cpu.numel() > 0) {
@@ -1014,20 +1014,22 @@ bool MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
     pending.row_priorities = std::move(row_priorities);
 
     if (!accept_len.is_cuda()) {
-        pending.accept_len_sum_cpu  = accept_len.to(torch::kInt64).sum().reshape({1});
-        pending.accept_len_rows_cpu = accept_len.to(torch::kInt64).flatten().clone();
+        const auto accept_len_i64   = accept_len.to(torch::kInt64);
+        pending.accept_len_sum_cpu  = accept_len_i64.sum().reshape({1});
+        pending.accept_len_rows_cpu = accept_len_i64.flatten().clone();
         return true;
     }
 
     cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(collect_metrics_stream_));
     accept_len_ready_event.block(collect_metrics_stream_);
     recordSpecTensorUseOnCurrentStream(accept_len);
-    pending.accept_len_sum_gpu = accept_len.to(torch::kInt64).sum().reshape({1});
+    const auto accept_len_i64  = accept_len.to(torch::kInt64);
+    pending.accept_len_sum_gpu = accept_len_i64.sum().reshape({1});
     pending.accept_len_sum_cpu =
         torch::empty({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
     pending.accept_len_sum_cpu.copy_(pending.accept_len_sum_gpu, /*non_blocking=*/true);
     // Per-stream rows use the same completion event as the sum and budget.
-    pending.accept_len_rows_gpu = accept_len.to(torch::kInt64).flatten().contiguous();
+    pending.accept_len_rows_gpu = accept_len_i64.flatten().contiguous();
     pending.accept_len_rows_cpu =
         torch::empty({pending.accept_len_rows_gpu.numel()},
                      torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));

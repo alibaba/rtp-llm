@@ -310,6 +310,19 @@ cc_library(
 )
 
 cc_library(
+    name = "dspark_confidence",
+    srcs = ["dspark_confidence.cu"],
+    hdrs = ["dspark_confidence.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    # Statistics preserve ATen's FP32 subnormal and reduction semantics.
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mtp_target_verify_prepare",
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],

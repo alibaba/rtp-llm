@@ -15,6 +15,7 @@
 #include <ATen/cuda/CUDAGraph.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/dspark_confidence.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -478,6 +479,14 @@ torch::Tensor SpeculativeSampler::buildConfidenceStats(const torch::Tensor& conf
                                     && eligible_rows.device() == confidence_rates.device()),
                             "DSpARK confidence statistics require bool [B] eligibility on the rates device");
 
+#if USING_CUDA
+    if (confidence_rates.is_cuda()) {
+        auto stats = tryDSparkConfidenceStats(confidence_rates, accept_len, valid_lengths, eligible_rows);
+        if (stats.defined()) {
+            return stats;
+        }
+    }
+#endif
     auto positions = torch::arange(gamma, confidence_rates.options().dtype(torch::kInt64)).unsqueeze(0);
     auto accepted  = accept_len.to(torch::kInt64).sub(1).unsqueeze(1);
     // The first rejection is observed; later positions are censored. When all
@@ -575,14 +584,34 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     // from the finished proposal without changing sampling or RNG consumption.
     auto finish = [&](SamplerOutput output) {
         if (compute_confidence) {
+#if USING_CUDA
+            const c10::cuda::CUDAGuard guard(base_logits.device());
+            auto                       confidence_anchors = anchors.reshape({batch_size});
+            if (confidence_anchors.scalar_type() != torch::kInt32
+                && confidence_anchors.scalar_type() != torch::kInt64) {
+                confidence_anchors = confidence_anchors.to(torch::kLong);
+            }
+            invokeDSparkConfidenceRates(confidence_anchors,
+                                        output.token_ids,
+                                        markov_w1,
+                                        confidence_w_markov,
+                                        hidden_logits,
+                                        confidence_rates,
+                                        static_cast<float>(confidence_temperature),
+                                        at::cuda::getCurrentCUDAStream().stream());
+#else
             for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
                 auto previous_tokens = step == 0 ? anchors.reshape({batch_size}) : output.token_ids.select(1, step - 1);
-                auto markov_embedding = markov_w1.index_select(0, previous_tokens.to(torch::kLong));
+                if (previous_tokens.scalar_type() != torch::kInt32 && previous_tokens.scalar_type() != torch::kInt64) {
+                    previous_tokens = previous_tokens.to(torch::kLong);
+                }
+                auto markov_embedding = markov_w1.index_select(0, previous_tokens);
                 auto markov_logit     = markov_embedding.to(torch::kFloat32).mm(confidence_w_markov);
                 auto logit            = (hidden_logits.select(1, step) + markov_logit).squeeze(1);
                 auto scaled           = (logit / static_cast<float>(confidence_temperature)).clamp(-60.0, 60.0);
                 confidence_rates.select(1, step).copy_(torch::sigmoid(scaled));
             }
+#endif
             output.confidence_rates = confidence_rates;
         }
         return output;

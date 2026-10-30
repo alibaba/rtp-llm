@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <gtest/gtest.h>
 #include <limits>
@@ -642,6 +644,80 @@ TEST(DSparkConfidenceSamplerTest, MatchesConcatenatedReferenceWithPreviousTokenA
 }
 
 #if USING_CUDA
+TEST(DSparkConfidenceSamplerTest, MatchesEagerFp32HeadForBf16EmbeddingsAndProductionRanks) {
+    const c10::cuda::CUDAGuard       guard(0);
+    const c10::cuda::CUDAStreamGuard stream_guard(at::cuda::getStreamFromPool());
+    const auto                       fp32  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t                batch = 32, vocab = 67, hidden_dim = 3;
+    for (int64_t gamma : {1, 5}) {
+        for (int64_t rank : {2, 17, 32, 64, 256}) {
+            for (auto dtype : {torch::kFloat32, torch::kBFloat16}) {
+                SCOPED_TRACE(::testing::Message() << "gamma=" << gamma << " rank=" << rank << " dtype=" << dtype);
+                // Dyadic products and their sums are exact FP32 values here,
+                // isolating BF16 promotion and previous-token indexing from
+                // cuBLAS's permitted reassociation of a general dot product.
+                auto embedding = (torch::arange(vocab * rank, fp32).remainder(31) - 15.0f)
+                                     .reshape({vocab, rank})
+                                     .div(16.0f)
+                                     .to(dtype);
+                auto projection = torch::zeros_like(embedding);
+                auto weight     = (torch::arange(hidden_dim + rank, fp32).remainder(17) - 8.0f)
+                                  .reshape({1, hidden_dim + rank})
+                                  .div(32.0f)
+                                  .to(dtype);
+                auto hidden =
+                    (torch::arange(batch * gamma, fp32).remainder(19) - 9.0f).reshape({batch * gamma, 1}).div(8.0f);
+                auto logits    = torch::zeros({batch * gamma, vocab}, fp32);
+                auto preferred = (torch::arange(batch * gamma, fp32.dtype(torch::kInt64)) * 7 + 3)
+                                     .remainder(vocab)
+                                     .reshape({batch * gamma, 1});
+                logits.scatter_(1, preferred, 10.0f);
+                auto anchors = (torch::arange(batch, fp32.dtype(torch::kInt64)) * 3 + 1).remainder(vocab);
+                if (dtype == torch::kBFloat16) {
+                    anchors = anchors.to(torch::kInt32);
+                }
+                const float        confidence_temperature = 0.75f;
+                SpeculativeSampler sampler({}, gamma);
+                auto               output = sampler.sampleDSparkDraft(logits,
+                                                        anchors,
+                                                        torch::ones({batch}, fp32),
+                                                                      {},
+                                                                      {},
+                                                        embedding,
+                                                        projection,
+                                                        vocab,
+                                                        true,
+                                                        0,
+                                                        0,
+                                                        true,
+                                                        hidden,
+                                                        weight,
+                                                        confidence_temperature);
+                ASSERT_TRUE(torch::equal(output.token_ids.to(torch::kInt64), preferred.reshape({batch, gamma})));
+                auto head     = weight.narrow(1, hidden_dim, rank).to(torch::kFloat32).view({rank, 1});
+                auto expected = torch::empty({batch, gamma}, fp32);
+                for (int64_t step = 0; step < gamma; ++step) {
+                    auto previous = step == 0 ? anchors : output.token_ids.select(1, step - 1);
+                    auto markov_logit =
+                        embedding.index_select(0, previous.to(torch::kInt64)).to(torch::kFloat32).mm(head);
+                    auto logit = hidden.view({batch, gamma, 1}).select(1, step) + markov_logit;
+                    expected.select(1, step).copy_(
+                        torch::sigmoid((logit.squeeze(1) / confidence_temperature).clamp(-60.0f, 60.0f)));
+                }
+                auto actual_cpu   = output.confidence_rates.cpu().contiguous();
+                auto expected_cpu = expected.cpu().contiguous();
+                for (int64_t index = 0; index < expected_cpu.numel(); ++index) {
+                    // EXPECT_FLOAT_EQ allows at most four ULPs for the CUDA
+                    // sigmoid implementation; it does not use a relative or
+                    // absolute tolerance that can conceal indexing mistakes.
+                    EXPECT_FLOAT_EQ(actual_cpu.data_ptr<float>()[index], expected_cpu.data_ptr<float>()[index])
+                        << "row=" << index / gamma << " step=" << index % gamma;
+                }
+            }
+        }
+    }
+}
+
 TEST(DSparkConfidenceSamplerTest, CapturedProposalKeepsCurrentConfidenceAndBorrowedTokenStorage) {
     const c10::cuda::CUDAGuard guard(0);
     auto                       input = DSparkConfidenceInputs::make();
@@ -1046,6 +1122,216 @@ TEST(DSparkBoundedForwardTest, RejectsMalformedLengthsBeforeReadingStreamState) 
         }
     }
 }
+
+#if USING_CUDA
+// Keep the original eager CUDA expression as the numerical contract. A CPU
+// sum or an approximate comparison would hide changes in reduction order.
+torch::Tensor eagerConfidenceStats(const torch::Tensor& rates,
+                                   const torch::Tensor& accept_len,
+                                   const torch::Tensor& valid_lengths,
+                                   const torch::Tensor& eligible_rows) {
+    auto positions = torch::arange(rates.size(1), rates.options().dtype(torch::kInt64)).unsqueeze(0);
+    auto accepted  = accept_len.to(torch::kInt64).sub(1).unsqueeze(1);
+    auto attempted = positions.le(accepted);
+    if (valid_lengths.defined()) {
+        attempted.logical_and_(positions.lt(valid_lengths.unsqueeze(1)));
+    }
+    if (eligible_rows.defined()) {
+        attempted.logical_and_(eligible_rows.unsqueeze(1));
+    }
+    auto valid       = torch::isfinite(rates).logical_and(rates.ge(0.0)).logical_and(rates.le(1.0));
+    auto observed    = attempted.logical_and(valid);
+    auto invalid     = attempted.logical_and(valid.logical_not());
+    auto zeros       = torch::zeros_like(rates);
+    auto predictions = torch::where(observed, rates, zeros);
+    auto labels      = torch::where(observed, positions.lt(accepted).to(torch::kFloat32), zeros);
+    auto errors      = predictions - labels;
+    return torch::stack({observed.to(torch::kFloat32).sum(0),
+                         labels.sum(0),
+                         predictions.sum(0),
+                         errors.abs().sum(0),
+                         errors.square().sum(0),
+                         invalid.to(torch::kFloat32).sum(0)},
+                        1);
+}
+
+void expectFloatBitsEqual(const torch::Tensor& actual, const torch::Tensor& expected) {
+    ASSERT_EQ(actual.scalar_type(), torch::kFloat32);
+    ASSERT_EQ(expected.scalar_type(), torch::kFloat32);
+    ASSERT_EQ(actual.sizes(), expected.sizes());
+    auto actual_cpu   = actual.cpu().contiguous();
+    auto expected_cpu = expected.cpu().contiguous();
+    for (int64_t index = 0; index < actual_cpu.numel(); ++index) {
+        uint32_t actual_bits, expected_bits;
+        std::memcpy(&actual_bits, actual_cpu.data_ptr<float>() + index, sizeof(actual_bits));
+        std::memcpy(&expected_bits, expected_cpu.data_ptr<float>() + index, sizeof(expected_bits));
+        EXPECT_EQ(actual_bits, expected_bits) << "position=" << index / 6 << " statistic=" << index % 6
+                                              << " actual=" << actual_cpu.data_ptr<float>()[index]
+                                              << " expected=" << expected_cpu.data_ptr<float>()[index];
+    }
+}
+
+TEST(DSparkConfidenceStatsTest, CudaMatchesEagerBitwiseAcrossMasksShapesAndStrides) {
+    const c10::cuda::CUDAGuard       guard(0);
+    const c10::cuda::CUDAStreamGuard stream_guard(at::cuda::getStreamFromPool());
+    const float                      nan  = std::numeric_limits<float>::quiet_NaN();
+    const float                      inf  = std::numeric_limits<float>::infinity();
+    const auto                       fp32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t batch : {1, 32, 257, 1025}) {
+        for (int64_t gamma : {1, 5}) {
+            auto rates_cpu = torch::empty({batch, gamma}, torch::kFloat32);
+            for (int64_t index = 0; index < rates_cpu.numel(); ++index) {
+                // Non-dyadic inputs expose changed summation order. Invalid
+                // values occur both before and after rejection/cap censoring.
+                float value = static_cast<float>((index * 37 + 11) % 997) / 997.0f;
+                switch (index % 23) {
+                    case 0:
+                        value = nan;
+                        break;
+                    case 1:
+                        value = inf;
+                        break;
+                    case 2:
+                        value = -inf;
+                        break;
+                    case 3:
+                        value = -0.1f;
+                        break;
+                    case 4:
+                        value = 1.1f;
+                        break;
+                    case 5:
+                        value = 0.0f;
+                        break;
+                    case 6:
+                        value = 1.0f;
+                        break;
+                    case 7:
+                        value = -0.0f;
+                        break;
+                    case 8:
+                        value = std::numeric_limits<float>::denorm_min();
+                        break;
+                    case 9:
+                        value = std::numeric_limits<float>::min() / 2.0f;
+                        break;
+                    default:
+                        break;
+                }
+                rates_cpu.data_ptr<float>()[index] = value;
+            }
+            for (int scenario = 0; scenario < 6; ++scenario) {
+                SCOPED_TRACE(::testing::Message()
+                             << "batch=" << batch << " gamma=" << gamma << " scenario=" << scenario);
+                auto          rates    = rates_cpu.to(torch::kCUDA);
+                auto          rows     = torch::arange(batch, fp32.dtype(torch::kInt64));
+                auto          accepted = scenario == 0 ? torch::full_like(rows, gamma + 1) :
+                                         scenario == 1 ? torch::ones_like(rows) :
+                                                         rows.remainder(gamma + 1) + 1;
+                torch::Tensor lengths, eligible;
+                if (scenario == 2 || scenario == 5) {
+                    lengths = (rows + 1).remainder(gamma + 1);
+                } else if (scenario == 3) {
+                    lengths = torch::zeros_like(rows);
+                }
+                if (scenario == 1) {
+                    eligible = torch::ones({batch}, fp32.dtype(torch::kBool));
+                } else if (scenario == 2) {
+                    eligible = rows.remainder(3).ne(0);
+                } else if (scenario == 4) {
+                    eligible = torch::zeros({batch}, fp32.dtype(torch::kBool));
+                }
+                accepted = accepted.to(scenario % 2 ? torch::kInt64 : torch::kInt32);
+                if (lengths.defined()) {
+                    lengths = lengths.to(scenario % 2 ? torch::kInt32 : torch::kInt64);
+                }
+                if (scenario == 2 || scenario == 4) {
+                    auto strided_rates = torch::empty({batch, gamma * 2 + 3}, fp32).slice(1, 1, gamma * 2 + 1, 2);
+                    strided_rates.copy_(rates);
+                    rates = strided_rates;
+                }
+                if (scenario == 2 || scenario == 4 || scenario == 5) {
+                    auto strided_vector = [](const torch::Tensor& input) {
+                        if (!input.defined()) {
+                            return input;
+                        }
+                        auto output = torch::empty({input.numel() * 2 + 1}, input.options())
+                                          .slice(0, 1, input.numel() * 2 + 1, 2);
+                        output.copy_(input);
+                        return output;
+                    };
+                    accepted = strided_vector(accepted);
+                    lengths  = strided_vector(lengths);
+                    eligible = strided_vector(eligible);
+                }
+                auto expected = eagerConfidenceStats(rates, accepted, lengths, eligible);
+                auto actual   = SpeculativeSampler::buildConfidenceStats(rates, accepted, lengths, eligible);
+                expectFloatBitsEqual(actual, expected);
+                EXPECT_TRUE(torch::isfinite(actual).all().item<bool>());
+            }
+        }
+    }
+}
+
+TEST(DSparkConfidenceStatsTest, CudaPreservesSubnormalPredictionAndErrorSumsBitwise) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 fp32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t gamma : {1, 5}) {
+        // All rows reject their first draft, so no unit labels or ordinary
+        // rates hide the subnormal predictions through rounding in the sum.
+        for (float rate : {std::numeric_limits<float>::denorm_min(), std::numeric_limits<float>::min() / 2.0f}) {
+            SCOPED_TRACE(::testing::Message() << "gamma=" << gamma << " rate=" << rate);
+            auto rates    = torch::full({32, gamma}, rate, fp32);
+            auto accepted = torch::ones({32}, fp32.dtype(torch::kInt32));
+            auto expected = eagerConfidenceStats(rates, accepted, {}, {});
+            expectFloatBitsEqual(SpeculativeSampler::buildConfidenceStats(rates, accepted), expected);
+        }
+    }
+}
+
+TEST(DSparkConfidenceStatsTest, CudaCaptureReplaysCurrentInputsWithoutHostSynchronization) {
+    const c10::cuda::CUDAGuard       guard(0);
+    const auto                       stream = at::cuda::getStreamFromPool();
+    const c10::cuda::CUDAStreamGuard stream_guard(stream);
+    const auto                       fp32     = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto                             rates    = torch::arange(160, fp32).reshape({32, 5}).div(159.0f);
+    auto                             accepted = torch::full({32}, 6, fp32.dtype(torch::kInt32));
+    auto                             lengths  = torch::full_like(accepted, 5);
+    auto                             eligible = torch::ones({32}, fp32.dtype(torch::kBool));
+    SpeculativeSampler::buildConfidenceStats(rates, accepted, lengths, eligible);
+    stream.synchronize();
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    auto captured = SpeculativeSampler::buildConfidenceStats(rates, accepted, lengths, eligible);
+    graph.capture_end();
+    for (int round = 0; round < 3; ++round) {
+        SCOPED_TRACE(round);
+        accepted.fill_(round + 1);
+        lengths.slice(0, round, 32, 3).zero_();
+        eligible.slice(0, round, 32, 5).fill_(false);
+        rates.select(0, round).fill_(std::numeric_limits<float>::quiet_NaN());
+        graph.replay();
+        expectFloatBitsEqual(captured, eagerConfidenceStats(rates, accepted, lengths, eligible));
+    }
+}
+
+TEST(DSparkConfidenceStatsTest, CudaEmptyBatchAndProposalReturnExactZeroStats) {
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 fp32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int64_t batch : {0, 32}) {
+        for (int64_t gamma : {0, 1, 5}) {
+            if (batch != 0 && gamma != 0) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << "batch=" << batch << " gamma=" << gamma);
+            auto rates    = torch::empty({batch, gamma}, fp32);
+            auto accepted = torch::ones({batch}, fp32.dtype(torch::kInt32));
+            expectFloatBitsEqual(SpeculativeSampler::buildConfidenceStats(rates, accepted),
+                                 torch::zeros({gamma, 6}, fp32));
+        }
+    }
+}
+#endif
 
 TEST(DSparkConfidenceStatsTest, CensorsAfterRejectionAndExcludesCapBonus) {
     auto rates = torch::tensor({{0.1f, 0.2f, 0.3f}, {0.8f, 0.4f, 0.2f}, {0.9f, 0.7f, 0.6f}, {0.5f, 0.1f, 0.9f}});
