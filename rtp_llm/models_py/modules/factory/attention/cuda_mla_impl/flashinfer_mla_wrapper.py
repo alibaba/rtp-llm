@@ -170,6 +170,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
+                fp8_compute=attn_configs.mla_fp8_compute,
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
@@ -331,6 +332,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
+                fp8_compute=attn_configs.mla_fp8_compute,
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,

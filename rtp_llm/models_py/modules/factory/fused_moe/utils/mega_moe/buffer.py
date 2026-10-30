@@ -7,8 +7,8 @@ no longer needed once the next layer's MoE starts. So we share **one buffer**
 across all MoE layers via a module-level cache, avoiding one large persistent
 allocation per layer.
 
-The cache key set MUST stay invariant across the refactor — see Phase 1 risk
-#9 in ``.claude/plans/optimized-riding-mist.md``.
+The SiTU backend uses a distinct workspace ABI and must not reuse buffers
+allocated for the SwiGLU backend.
 """
 
 import logging
@@ -35,6 +35,24 @@ def estimate_mega_moe_symm_buffer_bytes(
     try:
         import deep_gemm
 
+        # The SiTU backend has its own workspace and token-alignment contract.
+        if activation == "situ":
+            alignment = int(deep_gemm._C.get_token_alignment_for_mega_moe_k3())
+            capacity = (
+                (num_max_tokens_per_rank + alignment - 1) // alignment * alignment
+            )
+            return int(
+                deep_gemm._C.get_symm_buffer_size_for_mega_moe_k3(
+                    group_size,
+                    num_experts,
+                    capacity,
+                    num_topk,
+                    hidden,
+                    intermediate_hidden,
+                    "fp8xfp4",
+                    activation,
+                )[0]
+            )
         return int(
             deep_gemm._C.get_symm_buffer_size_for_mega_moe(
                 group_size,
@@ -93,16 +111,23 @@ def _get_or_create_mega_buf(
             if group_size > 0
             else None
         )
-        buf = deep_gemm.get_symm_buffer_for_mega_moe(
+        allocation_kwargs = dict(
             group=group,
             num_experts=num_experts,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             num_topk=num_topk,
             hidden=hidden,
             intermediate_hidden=intermediate_hidden,
-            use_fp8_dispatch=use_fp8_dispatch,
             activation=activation,
         )
+        if activation == "situ":
+            buf = deep_gemm.get_symm_buffer_for_mega_moe_k3(
+                **allocation_kwargs, mma_type="fp8xfp4"
+            )
+        else:
+            buf = deep_gemm.get_symm_buffer_for_mega_moe(
+                **allocation_kwargs, use_fp8_dispatch=use_fp8_dispatch
+            )
         actual_bytes = None
         try:
             actual_bytes = int(buf.buffer.numel() * buf.buffer.element_size())
