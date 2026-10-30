@@ -9,10 +9,9 @@ import org.flexlb.mock.api.model.Types.Role;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
 
-/** Native LocalGenerate boundary. Scheduling and network delivery use separate execution contexts. */
+/** Prepared-input submission boundary; callers own media preparation and network delivery. */
 final class LocalPrefill implements AutoCloseable {
     record Result(GenerateOutputsPB output, Status status, long engineCode) {}
-    private final org.flexlb.mock.multimodal.MediaClient vision = new org.flexlb.mock.multimodal.MediaClient();
     private final RtpConfig config;
     private final EngineLoop engine;
 
@@ -50,11 +49,12 @@ final class LocalPrefill implements AutoCloseable {
     Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
     Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
     Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
-        validate(input, retained);
-        long started = System.nanoTime();
+        return submit(input, rpcDeadline, retained, System.nanoTime());
+    }
+    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained, long started) {
+        validatePrepared(input, retained);
         long deadline = Math.min(rpcDeadline, input.getGenerateConfig().getTimeoutMs() <= 0 ? Long.MAX_VALUE
             : RtpTasks.after(started, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs())));
-        input = vision.prepare(input, deadline);
         var session = new Session(input, retained);
         try {
             session.request = engine.input(RtpTasks.input(input, Long.toString(input.getRequestId()), started,
@@ -76,7 +76,7 @@ final class LocalPrefill implements AutoCloseable {
         for (int i = 0; i < batch.size(); i++) {
             var item = batch.get(i);
             try {
-                validate(item.input(), true);
+                validatePrepared(item.input(), true);
                 var session = new Session(item.input(), true);
                 var input = RtpTasks.input(item.input(), Long.toString(item.input().getRequestId()),
                     System.nanoTime(), item.deadline(), true, config.blockSize());
@@ -96,6 +96,12 @@ final class LocalPrefill implements AutoCloseable {
     private static io.grpc.StatusRuntimeException rpcFailure(RequestFailure failure) {
         return failure.reason() == RequestFailure.Reason.INVALID
             ? RtpErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605) : RtpErrors.failure(failure);
+    }
+
+    private void validatePrepared(GenerateInputPB input, boolean retained) {
+        validate(input, retained);
+        if (org.flexlb.mock.multimodal.MediaInput.present(input))
+            throw Status.INVALID_ARGUMENT.withDescription("Prepare multimodal input before Scheduler submission").asRuntimeException();
     }
 
     void validate(GenerateInputPB input, boolean retained) {
@@ -123,5 +129,5 @@ final class LocalPrefill implements AutoCloseable {
     }
     Scheduler.Status snapshot(long latestFinished) { return engine.status(latestFinished); }
     String scrapeMetrics() { return engine.scrapeMetrics(); }
-    @Override public void close() { vision.close(); engine.close(); }
+    @Override public void close() { engine.close(); }
 }

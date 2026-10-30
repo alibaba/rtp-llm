@@ -678,6 +678,8 @@ Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 L
 
 Client 按 Master 的 V-only route 选 V，读取元数据、准备特征 token，再带 selected_vit 请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
+本地单 token 的输入准备由 RtpRpcService 负责，P/D 单请求和 Master batch 由 PrefillGeneration 负责；LocalPrefill 的单个与批量提交只接受已准备输入，拒绝尚带媒体内容的请求，不调用 V。本地入口保留准备前的请求开始时间；各路径沿用原请求 deadline，不在准备完成后重置超时预算。
+
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 
 Whale 的 P/D/V 统一使用 `java -jar java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，无需 Python Runner、`MOCK_HOST_PORT`、`MOCK_COMPONENTS_DIR` 或宿主管理服务。入口 `EngineMain` 从 `MOCK_CONFIG_FILE` 中的 component_role 决定启动哪个 Engine；设置 MOCK_OUTPUT_DIR、MOCK_READY_FILE，以及固定 MOCK_RPC_PORT、MOCK_CONTROL_PORT。实例配置采用与 Runner 相同的 id/component_role/component.config 结构，P/D 另外提供 component.engine。通过 MOCK_BIND_HOST=0.0.0.0 和 MOCK_ADVERTISE_HOST=PodIP 区分监听和发现地址。每个实例独立写入 effective-config、endpoints 和 ready；关闭删除 ready，旧产物目录拒绝覆盖。共享 JVM 的实例沿用同一进程地址，各自端口不同。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。

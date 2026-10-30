@@ -75,6 +75,85 @@ class PdGenerationTest {
             assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value; }
         @Override public void close() { context.cancel(null); }
     }
+    private static GenerateInputPB image(GenerateInputPB input, int port) {
+        var result = input.toBuilder().addMultimodalInputs(MultimodalInputPB.newBuilder()
+            .setMultimodalType(1).setMultimodalUrl("image"))
+            .setMultimodalTokenLayout(MultimodalTokenLayoutPB.newBuilder()
+                .addSpans(MultimodalTokenSpanPB.newBuilder().setOffset(1).setLength(1)));
+        result.getGenerateConfigBuilder().addRoleAddrs(RoleAddrPB.newBuilder()
+            .setRole(RoleAddrPB.RoleType.VIT).setIp("127.0.0.1").setGrpcPort(port));
+        return result.build();
+    }
+
+    @Test void localPdBatchAndGroupPrepareEachImageExactlyOnceBeforeScheduling() throws Exception {
+        var calls = new ConcurrentHashMap<Long, Integer>();
+        var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
+            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
+                    calls.merge(input.getRequestId(), 1, Integer::sum);
+                    response.onNext(MultimodalOutputPB.newBuilder().addSplitSize(1)
+                        .setMultimodalEmbedding(TensorPB.newBuilder().setDataType(TensorPB.DataType.BF16).addShape(1).addShape(4))
+                        .setMultimodalFeatureHash(TensorPB.newBuilder().setDataType(TensorPB.DataType.INT32).addShape(1)
+                            .setInt32Data(com.google.protobuf.ByteString.copyFrom(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(777).array())))
+                        .build());
+                    response.onCompleted();
+                }
+            }).build().start();
+        try (var p = node("prefill", 32, 1); var d = node("decode", 32, 1)) {
+            var rpc = RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS);
+            for (int mode = 0; mode < 4; mode++) {
+                int count = mode < 2 ? 1 : 2;
+                var inputs = new ArrayList<GenerateInputPB>();
+                for (int n = 0; n < count; n++) inputs.add(image(input(d, 10L * mode + n, 4, mode == 0 ? 1 : 3, 3000, true), vision.getPort()));
+                if (mode == 2) assertEquals(0, enqueue(p, 3000, inputs.toArray(GenerateInputPB[]::new)).getErrorsCount());
+                if (mode == 3) {
+                    var group = EnqueueGroupRequestPB.newBuilder().setBatchId(99).setFetchAttachTimeoutMs(3000);
+                    for (var input : inputs) group.addRequests(EnqueueGroupInputPB.newBuilder().setInput(input));
+                    assertEquals(0, rpc.enqueueGroup(group.build()).getErrorsCount());
+                }
+                for (var input : inputs) {
+                    var outputs = mode < 2 ? rpc.generateStreamCall(input)
+                        : rpc.fetchResponse(FetchRequestPB.newBuilder().setRequestId(input.getRequestId()).build());
+                    GenerateOutputsPB last = null;
+                    while (outputs.hasNext()) last = outputs.next();
+                    assertNotNull(last); assertTrue(last.getFlattenOutput().getFinished(0));
+                    assertEquals(mode == 0 ? 1 : 3, last.getFlattenOutput().getAuxInfo(0).getOutputLen());
+                    assertEquals(1, calls.get(input.getRequestId()));
+                }
+            }
+            // Cache identity must use the prepared hash, not the image placeholder token.
+            var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().setTokenIds(1, 777).build();
+            var keys = PrefixKeys.completeBlocks(prepared, 2);
+            var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
+            assertTrue(keys.stream().allMatch(cached.getCacheKeysMap()::containsKey));
+            assertEquals(6, calls.size());
+        } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+    }
+
+    @Test void localVisionFailureAndDeadlineNeverAdmitToScheduler() throws Exception {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
+            .addService(new org.flexlb.engine.grpc.MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                @Override public void remoteMultimodalEmbedding(MultimodalInputsPB input, StreamObserver<MultimodalOutputPB> response) {
+                    calls.incrementAndGet();
+                    if (input.getRequestId() == 1) response.onError(Status.UNAVAILABLE.withDescription("V unavailable").asRuntimeException());
+                    // The second call stays pending until the original request budget expires.
+                }
+            }).build().start();
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            var rpc = RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+            for (int id : new int[]{1, 2}) {
+                var request = image(input(d, id, 4, 1, id == 1 ? 2000 : 200, true), vision.getPort());
+                var error = assertThrows(StatusRuntimeException.class, () -> rpc.generateStreamCall(request).hasNext());
+                assertEquals(id == 1 ? Status.Code.UNAVAILABLE : Status.Code.DEADLINE_EXCEEDED, error.getStatus().getCode());
+                assertEquals(0, p.status().getRunningTaskInfoCount());
+                assertEquals(0, p.status().getFinishedTaskListCount());
+                assertEquals(32, p.status().getAvailableKvCache());
+            }
+            assertEquals(2, calls.get());
+        } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+    }
+
     @Test void allGenerationPathsRejectTheSameUnsupportedInputsBeforeAdmission() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
             var modes = List.<java.util.function.Consumer<GenerateConfigPB.Builder>>of(

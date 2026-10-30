@@ -15,6 +15,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     private final RtpConfig config;
     private final KvCache cache;
     private final LocalPrefill requests;
+    private final org.flexlb.mock.multimodal.MediaClient vision;
     private final DecodeAdmission decode;
     private final PrefillTransfer transfer;
     private final PrefillGeneration generation;
@@ -24,6 +25,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     public RtpRpcService(RtpConfig config, KvCache cache, Scheduler.Factory schedulers) {
         this.config = config; this.cache = cache;
         requests = config.role() == org.flexlb.mock.api.model.Types.Role.prefill ? new LocalPrefill(config, cache, schedulers) : null;
+        vision = requests == null ? null : new org.flexlb.mock.multimodal.MediaClient();
         decode = requests == null ? new DecodeAdmission(config, cache, schedulers) : null;
         transfer = requests == null ? null : new PrefillTransfer(requests);
         generation = transfer == null ? null : new PrefillGeneration(config, transfer);
@@ -33,7 +35,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     public void close() {
         closed = true;
         RuntimeException failure = null;
-        for (AutoCloseable component : new AutoCloseable[]{generation, transfer, requests, decode}) {
+        for (AutoCloseable component : new AutoCloseable[]{generation, vision, transfer, requests, decode}) {
             if (component == null) continue;
             try { component.close(); }
             catch (Exception error) {
@@ -92,13 +94,21 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         };
         response.setOnCancelHandler(cancel);
         LocalPrefill.Session accepted;
+        long started = System.nanoTime();
         long deadline = Long.MAX_VALUE;
         if (context.getDeadline() != null) {
             long now = System.nanoTime(), remaining = context.getDeadline().timeRemaining(java.util.concurrent.TimeUnit.NANOSECONDS);
             try { deadline = Math.addExact(now, remaining); }
             catch (ArithmeticException overflow) { deadline = remaining < 0 ? Long.MIN_VALUE : Long.MAX_VALUE; }
         }
-        try { accepted = requests.submit(request, deadline); }
+        try {
+            requests.validate(request, false);
+            if (request.getGenerateConfig().getTimeoutMs() > 0)
+                deadline = Math.min(deadline, RtpTasks.after(started,
+                    java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(request.getGenerateConfig().getTimeoutMs())));
+            var prepared = vision.prepare(request, deadline);
+            accepted = requests.submit(prepared, deadline, false, started);
+        }
         catch (io.grpc.StatusRuntimeException error) { response.onError(error); return; }
         session.set(accepted);
         if (response.isCancelled()) cancel.run();

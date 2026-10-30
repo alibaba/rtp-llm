@@ -25,6 +25,23 @@ class LocalPrefillTest {
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
 
+    @Test void singleAndBatchSubmissionRejectUnpreparedMediaWithoutAdmission() throws Exception {
+        var config = config("1");
+        try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU);
+             var engine = new LocalPrefill(config, cache, RtpScheduler.factory(config))) {
+            var raw = input(1, 0, true).toBuilder()
+                .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("image")).build();
+            var error = assertThrows(io.grpc.StatusRuntimeException.class, () -> engine.submit(raw));
+            assertEquals(Status.Code.INVALID_ARGUMENT, error.getStatus().getCode());
+            var batch = engine.submit(List.of(new LocalPrefill.Submission(raw, Long.MAX_VALUE)));
+            assertNull(batch.getFirst().session());
+            assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(batch.getFirst().failure()).getCode());
+            assertEquals(8, cache.snapshot(0, false).availableBlocks());
+            assertTrue(engine.snapshot(0).tasks().isEmpty());
+            assertTrue(engine.snapshot(0).finished().isEmpty());
+        }
+    }
+
     @Test void forwardsThenCommitsCompleteBlocksAndReportsCacheReuse() throws Exception {
         var config = config("totalComputeTokens");
         try (var cache = new KvCache(config.blockSize(), 8, 0, KvCache.EvictionPolicy.LRU); var engine = new LocalPrefill(config, cache, RtpScheduler.factory(config))) {
