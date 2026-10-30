@@ -403,6 +403,12 @@ py_test(
 )
 
 models_py_test(
+    name = "prefill_rope_padding_tail_replay_repro_test",
+    src = "prefill_rope_padding_tail_replay_repro_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "rope_cache_policy_test",
     src = "qsa/rope_cache_policy_test.py",
     gpu = "RTX_5000_PRO_CU13",
