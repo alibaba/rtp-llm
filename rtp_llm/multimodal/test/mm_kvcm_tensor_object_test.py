@@ -1,7 +1,9 @@
 import concurrent.futures
+import gc
 import json
 import struct
 import unittest
+import weakref
 from types import SimpleNamespace
 
 import grpc
@@ -19,6 +21,39 @@ from rtp_llm.multimodal.kvcm.tensor_object import (
 class TensorObjectTest(unittest.TestCase):
     def roundtrip(self, value):
         return unpack_object(pack_object(plan_object(value)))
+
+    def test_plan_releases_tensor_without_cyclic_gc(self):
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            tensor = torch.ones(4)
+            reference = weakref.ref(tensor)
+            plan = plan_object((tensor, None))
+            del tensor
+            self.assertIsNotNone(reference())
+            del plan
+            self.assertIsNone(reference())
+        finally:
+            if was_enabled:
+                gc.enable()
+            gc.collect()
+
+    def test_rejected_plan_releases_tensor_without_cyclic_gc(self):
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for invalid in (object(), "x" * 70000):
+                with self.subTest(invalid_type=type(invalid).__name__):
+                    tensor = torch.ones(4)
+                    reference = weakref.ref(tensor)
+                    with self.assertRaises(ValueError):
+                        plan_object((tensor, invalid))
+                    del tensor
+                    self.assertIsNone(reference())
+        finally:
+            if was_enabled:
+                gc.enable()
+            gc.collect()
 
     def test_whole_result_mixed_types_empty_and_alias(self):
         emb = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)

@@ -121,7 +121,12 @@ def plan_object(value: Any, *, devices=None, max_bytes=1024**3) -> TensorObjectP
             return ["scalar", item]
         raise ValueError(f"unsupported multimodal value: {type(item).__name__}")
 
-    tree = visit(value, devices)
+    try:
+        tree = visit(value, devices)
+    finally:
+        # The recursive closure captures both itself and the tensor list. Break
+        # that cycle so releasing the plan releases tensors without waiting for GC.
+        del visit
     header = dict(tree=tree, tensors=specs, sha256="0" * 64)
     encoded = json.dumps(header, separators=(",", ":"), allow_nan=False).encode()
     if len(encoded) > _MAX_HEADER:
