@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from ._records import RequestRecord, read_requests
-from ...execution.clients import ClientResult
+from ...execution.client_group import ClientResult
 from ...config.registry import Bounds, case_interface
 from ...config.values import duration
 from ...execution.transport import ExecutionError

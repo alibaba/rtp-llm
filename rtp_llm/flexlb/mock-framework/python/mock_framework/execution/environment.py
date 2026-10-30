@@ -1,5 +1,5 @@
 """Assemble run-scoped services and preserve their explicit startup/cleanup order."""
-from .clients import ClientGroup
+from .client_group import ClientGroup
 from .components import ComponentLauncher
 from .engines import EngineHosts
 from .master import MasterGroup

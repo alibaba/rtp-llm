@@ -12,7 +12,7 @@ from mock_framework.config import Registry
 from mock_framework.interfaces.client import playback_directories
 from mock_framework.interfaces.client._records import read_requests
 from mock_framework.execution.transport import ExecutionError
-from mock_framework.execution import clients as client_runtime
+from mock_framework.execution import client_group as client_runtime
 
 
 def frame(batch):
