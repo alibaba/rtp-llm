@@ -34,6 +34,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -640,6 +641,7 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_target_ref_blocks_metric, "rtp_llm_kv_cache_eviction_target_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_store_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(frozen_ref_blocks_metric, "rtp_llm_kv_cache_frozen_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
     REGISTER_GAUGE_MUTABLE_METRIC(read_bytes_metric, "rtp_llm_kv_cache_disk_cache_read_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(write_bytes_metric, "rtp_llm_kv_cache_disk_cache_write_bytes");
@@ -666,6 +668,9 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
         REPORT_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, collector->eviction_target_ref_blocks);
     }
     REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
+    if (collector->report_frozen_ref_blocks) {
+        REPORT_MUTABLE_METRIC(frozen_ref_blocks_metric, collector->frozen_ref_blocks);
+    }
     REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
     if (collector->read_bytes.has_value()) {
         REPORT_MUTABLE_METRIC(read_bytes_metric, *collector->read_bytes);
@@ -890,6 +895,31 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
     REPORT_QPS(remote_sdk_fail_qps);
     REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
     REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
+}
+
+bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_lease_count_metric, "rtp_llm_remote_cache_quarantined_lease_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_count_metric, "rtp_llm_remote_cache_quarantined_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_ratio_metric, "rtp_llm_remote_cache_quarantined_block_ratio");
+    REGISTER_QPS_MUTABLE_METRIC(quarantine_qps_metric, "rtp_llm_remote_cache_quarantine_qps");
+    REGISTER_QPS_MUTABLE_METRIC(quarantine_block_qps_metric, "rtp_llm_remote_cache_quarantine_block_qps");
+    return true;
+}
+
+void RtpLLMRemoteCacheQuarantineMetrics::report(const kmonitor::MetricsTags*                 tags,
+                                                RtpLLMRemoteCacheQuarantineMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(quarantined_lease_count_metric, collector->quarantined_lease_count);
+    REPORT_MUTABLE_METRIC(quarantined_block_count_metric, collector->quarantined_block_count);
+    REPORT_MUTABLE_METRIC(quarantined_block_ratio_metric, collector->quarantined_block_ratio);
+}
+
+void RtpLLMRemoteCacheQuarantineMetrics::report(const kmonitor::MetricsTags*                      tags,
+                                                RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector) {
+    kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
+    event_tags.AddTag("op", collector->op);
+    event_tags.AddTag("reason", collector->reason);
+    quarantine_qps_metric->Report(&event_tags, 1);
+    quarantine_block_qps_metric->Report(&event_tags, collector->block_count);
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {

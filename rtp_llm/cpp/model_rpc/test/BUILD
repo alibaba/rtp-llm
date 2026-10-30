@@ -148,6 +148,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "@com_google_googletest//:gtest",

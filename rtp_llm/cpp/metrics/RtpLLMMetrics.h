@@ -1042,8 +1042,10 @@ public:
     int64_t load_ref_blocks                   = 0;
     int64_t eviction_target_ref_blocks        = 0;
     int64_t store_ref_blocks                  = 0;
+    int64_t frozen_ref_blocks                 = 0;
     float   used_ratio                        = 0;
     bool    report_eviction_target_ref_blocks = false;
+    bool    report_frozen_ref_blocks          = false;
 
     std::optional<int64_t> read_bytes;
     std::optional<int64_t> write_bytes;
@@ -1071,6 +1073,7 @@ public:
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
     kmonitor::MutableMetric* store_ref_blocks_metric           = nullptr;
+    kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
     kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
 
     kmonitor::MutableMetric* read_bytes_metric                    = nullptr;
@@ -1320,6 +1323,37 @@ public:
     kmonitor::MutableMetric* remote_sdk_fail_qps_metric     = nullptr;
     kmonitor::MutableMetric* remote_sdk_block_num_metric    = nullptr;
     kmonitor::MutableMetric* remote_sdk_cost_time_us_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMRemoteCacheQuarantineMetricsCollector final {
+public:
+    int64_t quarantined_lease_count = 0;
+    int64_t quarantined_block_count = 0;
+    double  quarantined_block_ratio = 0.0;
+};
+
+class RtpLLMRemoteCacheQuarantineEventMetricsCollector final {
+public:
+    const char* op          = "";
+    const char* reason      = "";
+    int64_t     block_count = 0;
+};
+
+class RtpLLMRemoteCacheQuarantineMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* quarantined_lease_count_metric = nullptr;
+    kmonitor::MutableMetric* quarantined_block_count_metric = nullptr;
+    kmonitor::MutableMetric* quarantined_block_ratio_metric = nullptr;
+    kmonitor::MutableMetric* quarantine_qps_metric          = nullptr;
+    kmonitor::MutableMetric* quarantine_block_qps_metric    = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

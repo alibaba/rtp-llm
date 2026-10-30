@@ -76,18 +76,12 @@ RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const CoordinatorCacheMana
     return collector;
 }
 
-void logGlobalCacheMetrics(const RtpLLMCacheMetricsCollector& collector) {
-    RTP_LLM_LOG_INFO("kvc raw global: tree_node_count=%ld available_tokens=%ld",
-                     static_cast<long>(collector.kv_cache_item_num),
-                     static_cast<long>(collector.kv_cache_left_seq));
-}
-
 std::string frozenBlockSummary(const std::vector<const IBlockPool*>& pools) {
     size_t             total = 0;
     std::ostringstream entries;
     for (size_t i = 0; i < pools.size(); ++i) {
         const auto*  pool  = pools[i];
-        const size_t count = pool->frozenBlocksNum();
+        const size_t count = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
         total += count;
         entries << (i == 0 ? "" : ",") << pool->poolName() << "_" << i << ":" << count;
     }
@@ -117,29 +111,7 @@ void logFrozenCacheBlocks(const BlockTreeCache& cache) {
 
 void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter,
                             const CachePoolMetricsSnapshot&     pool_snapshot,
-                            bool                                should_log) {
-    if (should_log) {
-        RTP_LLM_LOG_INFO("kvc raw pool[%s/%s]: block_size_bytes=%zu total=%zu free=%zu used=%zu available=%zu "
-                         "active=%zu "
-                         "reserve=%zu request_ref_blocks=%zu block_cache_ref_blocks=%zu "
-                         "load_ref_blocks=%zu eviction_target_ref_blocks=%zu store_ref_blocks=%zu used_ratio=%.4f%%",
-                         pool_snapshot.tier.c_str(),
-                         pool_snapshot.pool_name.c_str(),
-                         pool_snapshot.block_size_bytes,
-                         pool_snapshot.total_blocks,
-                         pool_snapshot.free_blocks,
-                         pool_snapshot.used_blocks,
-                         pool_snapshot.available_blocks,
-                         pool_snapshot.active_blocks,
-                         pool_snapshot.reserve_blocks,
-                         pool_snapshot.request_ref_blocks,
-                         pool_snapshot.block_cache_ref_blocks,
-                         pool_snapshot.load_ref_blocks,
-                         pool_snapshot.eviction_target_ref_blocks,
-                         pool_snapshot.store_ref_blocks,
-                         pool_snapshot.used_ratio);
-    }
-
+                            bool                                report_frozen_ref_blocks) {
     RtpLLMCachePoolMetricsCollector pool_collector;
     pool_collector.block_size_bytes                  = static_cast<int64_t>(pool_snapshot.block_size_bytes);
     pool_collector.free_blocks                       = static_cast<int64_t>(pool_snapshot.free_blocks);
@@ -154,6 +126,8 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_snapshot.eviction_target_ref_blocks);
     pool_collector.report_eviction_target_ref_blocks = pool_snapshot.tier != tierName(Tier::DEVICE);
     pool_collector.store_ref_blocks                  = static_cast<int64_t>(pool_snapshot.store_ref_blocks);
+    pool_collector.frozen_ref_blocks                 = static_cast<int64_t>(pool_snapshot.frozen_ref_blocks);
+    pool_collector.report_frozen_ref_blocks          = report_frozen_ref_blocks;
     pool_collector.used_ratio                        = pool_snapshot.used_ratio;
     pool_collector.read_bytes                        = pool_snapshot.read_bytes;
     pool_collector.write_bytes                       = pool_snapshot.write_bytes;
@@ -348,8 +322,14 @@ bool KVCacheManager::init() {
     std::shared_ptr<StorageBackend> storage_backend;
     if (kv_cache_config_.enable_remote_cache) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-        storage_backend = std::make_shared<KVCMStorageBackend>(
-            config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, broadcast_manager);
+        storage_backend = std::make_shared<KVCMStorageBackend>(config_,
+                                                               kv_cache_config_,
+                                                               runtime_config_,
+                                                               parallelism_config_,
+                                                               sp_config_,
+                                                               broadcast_manager,
+                                                               nullptr,
+                                                               metrics_reporter_);
 #else
         RTP_LLM_LOG_ERROR("remote cache was requested, but this build does not include the KVCM client");
         return false;
@@ -744,7 +724,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
             return false;
         }
-        return backend->execute(request.remote_request(), *response.mutable_remote_response());
+        const bool success   = backend->execute(request.remote_request(), *response.mutable_remote_response());
+        const auto operation = request.remote_request().op();
+        // Read/write results are application state and must reach rank 0 even
+        // when the SDK failed or timed out. Metadata handlers retain their contract.
+        return operation == REMOTE_OPERATION_READ || operation == REMOTE_OPERATION_WRITE ? true : success;
 #else
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
         return false;
@@ -936,8 +920,8 @@ void KVCacheManager::stopCacheEventPublisher() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    constexpr auto        kLogInterval  = std::chrono::minutes(1);
-    auto                  last_log_time = std::chrono::steady_clock::now() - kLogInterval;
+    constexpr auto        kFrozenLogInterval   = std::chrono::minutes(1);
+    auto                  last_frozen_log_time = std::chrono::steady_clock::now() - kFrozenLogInterval;
     while (!stop_.load(std::memory_order_acquire)) {
         if (!metrics_reporter_ || !coordinator_manager_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -947,14 +931,10 @@ void KVCacheManager::reportMetricsLoop() {
         RtpLLMCacheMetricsCollector global_metrics = collectGlobalCacheMetrics(coordinator_manager_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics);
 
-        const auto now        = std::chrono::steady_clock::now();
-        const bool should_log = (now - last_log_time) >= kLogInterval;
-        if (should_log) {
-            last_log_time = now;
-            logGlobalCacheMetrics(global_metrics);
-            if (isAllocatorOwner()) {
-                logFrozenCacheBlocks(*block_tree_cache_);
-            }
+        const auto now = std::chrono::steady_clock::now();
+        if (isAllocatorOwner() && now - last_frozen_log_time >= kFrozenLogInterval) {
+            last_frozen_log_time = now;
+            logFrozenCacheBlocks(*block_tree_cache_);
         }
 
         block_tree_cache_->reportMetrics();
@@ -964,7 +944,7 @@ void KVCacheManager::reportMetricsLoop() {
         const std::vector<CachePoolMetricsSnapshot> report_snapshots =
             mergeCachePoolMetricsSnapshots(device_pool_snapshots, tree_pool_snapshots);
         for (const CachePoolMetricsSnapshot& report_snapshot : report_snapshots) {
-            reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log);
+            reportPoolCacheMetrics(metrics_reporter_, report_snapshot, isAllocatorOwner());
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s

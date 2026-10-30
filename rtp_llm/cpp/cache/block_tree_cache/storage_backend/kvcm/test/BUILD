@@ -48,6 +48,9 @@ kvcm_backend_test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+    "//rtp_llm/cpp/utils:core_utils",
+    "@local_config_cuda//cuda:cuda_headers",
+    "@local_config_cuda//cuda:cudart",
     "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -100,6 +103,7 @@ cc_test_wrapper(
     exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "KVCMMockOnlyFullTest.cc",
+        "KVCMSafetyTest.cc",
         "KVCMMockTestBase.h",
         "MockKVCMClient.h",
     ],
@@ -175,7 +179,5 @@ cc_test_wrapper(
         "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
         "//rtp_llm/cpp/testing:device_test_utils",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
     ],
 )

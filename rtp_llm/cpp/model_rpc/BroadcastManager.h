@@ -75,6 +75,17 @@ public:
         return rank < rpc_succeeded_.size() && rpc_succeeded_[rank];
     }
 
+    bool deadlineExceeded() const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
+            // Read status only after its CQ event has published the result.
+            if (finished_[rank] && worker_contexts_[rank]->status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void onDone(DoneCallback callback) {
         if (!callback) {
             return;

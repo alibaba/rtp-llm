@@ -553,9 +553,9 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     environment->reclaimAll();
     environment->expectFullyReclaimed();
     for (const auto& group : environment->groups) {
-        EXPECT_EQ(group->diskPool()->frozenBlocksNum(), 0u);
+        EXPECT_EQ(group->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
         for (const auto& pool : group->devicePools()) {
-            EXPECT_EQ(pool->frozenBlocksNum(), 0u);
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
         }
     }
 }
