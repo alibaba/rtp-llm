@@ -172,3 +172,63 @@ def test_invalid_wait_after_rejected_before_execution(case_data, compile_data, w
     case_data['phases'][0]['steps'][0]['wait_after'] = wait
     with pytest.raises(ConfigError):
         compile_data(case_data)
+
+
+@pytest.mark.parametrize('path', ['.', '/'])
+def test_view_requires_a_file_path_with_shared_root(case_data, compile_data, path):
+    case_data['view'] = path
+    with pytest.raises(ConfigError, match='view: expected a dashboard file path'):
+        compile_data(case_data)
+
+
+@pytest.mark.parametrize('constant', ['NaN', 'Infinity', '-Infinity'])
+def test_master_json_rejects_nonfinite_constants(case_data, compile_data, constant):
+    case_data['environment']['master']['config']['FLEXLB_CONFIG'] = '{"nested":{"value":' + constant + '}}'
+    with pytest.raises(ConfigError, match='Invalid FLEXLB_CONFIG JSON.*Nonfinite'):
+        compile_data(case_data)
+
+
+def test_nested_references_keep_static_sibling_constraints_and_error_paths(case_data, compile_data):
+    @dataclass(frozen=True)
+    class NestedArgs:
+        items: list[ExtensionArgs]
+        targets: list[str] | None = None
+
+    @case_interface('extension/nested', effect='read')
+    async def nested(ctx, args: NestedArgs) -> int:
+        return len(args.items)
+
+    registry = Registry((queue, nested))
+    steps = [
+        {'id': 'source', 'describe': 'value', 'interface': 'extension/queue', 'args': {'threshold': 4}},
+        {'id': 'nested', 'describe': 'nested refs', 'interface': 'extension/nested',
+         'args': {'items': [{'threshold': {'ref': 'steps.source'}}, {'threshold': 8}]}}
+    ]
+    case_data['phases'][0]['steps'] = steps
+    case = compile_data(case_data, interfaces=registry)
+    assert case.phases[0].steps[1].args['items'][0]['threshold'] == Reference('source', ())
+    steps[1]['args']['items'][1]['threshold'] = 9
+    with pytest.raises(ConfigError, match=r'nested\.args\.items\[1\]\.threshold: above maximum'):
+        compile_data(case_data, interfaces=registry)
+
+
+def test_union_preserves_nested_constructor_failure():
+    @dataclass(frozen=True)
+    class Positive:
+        value: int
+
+        def __post_init__(self):
+            if self.value <= 0:
+                raise ValueError('value must be positive')
+
+    @dataclass(frozen=True)
+    class Choice:
+        item: Positive | None
+
+    @case_interface('extension/choice', effect='read')
+    async def choice(ctx, args: Choice) -> int:
+        return 1
+
+    interface = Registry((choice,)).get('extension/choice')
+    with pytest.raises(ConfigError, match=r'extension/choice\.args\.item: value must be positive'):
+        interface.arguments({'item': {'value': 0}})

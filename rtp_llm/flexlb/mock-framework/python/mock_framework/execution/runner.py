@@ -75,7 +75,7 @@ async def run_case(case, registry, launch, directory):
                                  describe=step.describe, query_time=context.query_time)
                     try:
                         args = resolve(step.args, results, context.globals())
-                        interface.arguments(args)
+                        arguments = interface.arguments(args)
                         expected = resolve(step.expect.comparisons, results, context.globals()) if step.expect else None
                         if expected is not None:
                             for op, value in expected.items():
@@ -85,7 +85,7 @@ async def run_case(case, registry, launch, directory):
                         budget = context.timeout
                         stage = 'invoke'
                         invoked = True
-                        actual = await runtime.supervisor.guard(interface.invoke(context, args), budget)
+                        actual = await runtime.supervisor.guard(interface.call(context, arguments), budget)
                         returned = True
                         results[step.id] = actual
                         stage = 'expect'
