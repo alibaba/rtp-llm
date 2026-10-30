@@ -315,7 +315,7 @@ Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API�
 | `java/master/` | 真实 Master 的启动入口、生产状态到公共读取接口的适配、独立 ZK 启动入口。 |
 | `java/client/` | client0 协调、Player 控速、LoadClient 队列/并发/生命周期、NativeClient 原生收发与实际计时。 |
 | `java/shared/vit/` | 跨后端共用的 V Engine：图像编码、组批、embedding/hash 字节缓存和节点装配。 |
-| `java/engine/rtp/` | RTP 协议适配、P/D 调度策略、资源申请时机、P/D 交接与节点装配。 |
+| `java/backend/rtp/` | RTP 协议适配、P/D 调度策略、资源申请时机、P/D 交接与节点装配。 |
 | `java/shared/multimodal/` | 原生媒体输入、Mock 元数据校验与 TCP 客户端，无 V 服务、计算或缓存依赖。 |
 | `java/shared/engine/` | EngineLoop/Scheduler 执行边界及工厂契约、RequestState 进度与终态/资源使用权、QueueSnapshot 请求计数。 |
 | `java/shared/compute/` | Forward batch、公式、噪声、Decode 推进、停止模型和可取消计时。 |
@@ -707,7 +707,7 @@ Device/Host 水位按物理占用比例工作：达到 high 后，尽量回收�
 
 ## 通用 V 与输入准备
 
-Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/vLLM 是 Engine 后端，不能与 P/D/V 混为一层。当前配置中的 `component.engine` 字段选择 P/D 后端；V 统一实现于 `java/shared/vit`，不需要选择后端，也不与 `java/engine/rtp` 并列为后端。以后 P/D 使用哪个后端都复用这一份 V。V 的媒体协议与 TCP 客户端仍在 `java/shared/multimodal`，Client/P 只依赖该协议模块。
+Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/vLLM 是 Engine 后端，不能与 P/D/V 混为一层。当前配置中的 `component.engine` 字段选择 P/D 后端；V 统一实现于 `java/shared/vit`，不需要选择后端，也不与 `java/backend/rtp` 并列为后端。以后 P/D 使用哪个后端都复用这一份 V。V 的媒体协议与 TCP 客户端仍在 `java/shared/multimodal`，Client/P 只依赖该协议模块。
 
 P/D/V 都实现 `EngineInstance` 生命周期句柄，各自拥有端口、队列、缓存和产物目录；V 拥有自己的调度器。本地同一个 `EngineHost` 平等管理三种 Engine；Whale 每 Pod 直接启动一个 Engine，无需 EngineHost。统一产物是 `java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar`，同时包含通用单实例入口和本地宿主入口，不为 V 单独打包。Master 始终独立 JVM。
 

@@ -126,7 +126,7 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
             assert json.loads((folder / 'endpoints.json').read_text())['rpc'] == item['rpc']
             assert (folder / 'ready.json').exists() == (item['id'] in {node['id'] for node in owner.topology.active()})
         # Exercise real TCP request traffic after removal and subsequent creation.
-        classpath = os.pathsep.join([str(ROOT / 'java/engine/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+        classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
         probe = await asyncio.to_thread(subprocess.run, [str(Path(os.environ['JAVA_HOME']) / 'bin/java'),
             '-cp', classpath, 'org.flexlb.mock.engine.rtp.NativeProbe', ctx.globals()['decode'][0],
             str(tmp_path / 'traffic.json'), ctx.globals()['prefill'][0]], capture_output=True, text=True, timeout=15)

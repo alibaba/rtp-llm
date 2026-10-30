@@ -27,7 +27,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     import yaml
     java = Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home')) / 'bin/java'
     jar = ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
-    classpath = os.pathsep.join([str(ROOT / 'java/engine/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+    classpath = os.pathsep.join([str(ROOT / 'java/backend/rtp/target/test-classes'), str(ROOT / 'java/host/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
     environment = {role: {'engine': 'rtp', 'config': {'SEQ_SIZE_PER_BLOCK': '16', 'MAX_SEQ_LEN': '4096',
                     'TEST_BLOCK_NUM': '9', 'RESERVE_BLOCK_RATIO': '0'}} for role in ('prefill', 'decode')}
     for group in environment.values():
