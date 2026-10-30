@@ -32,6 +32,7 @@ cc_library(
     hdrs = glob(["*.h"]),
     deps = [
         ":fuse_copy_op",
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/core:op_data",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",

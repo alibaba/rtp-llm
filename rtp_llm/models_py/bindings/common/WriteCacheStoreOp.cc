@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
@@ -50,6 +51,24 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_cache_store,
                 captured_kv_cache,
                 event = std::move(event)]() mutable {
+        size_t store_tokens_per_block = captured_cache_store.tokens_per_block;
+        RTP_LLM_CHECK_WITH_INFO(store_tokens_per_block > 0, "cache-store physical tokens_per_block must be positive");
+        if (captured_cache_store.cp_size > 1 && isDsv4FixedRegion(captured_kv_cache.region_name)
+            && captured_kv_cache.seq_size_per_block > static_cast<int64_t>(store_tokens_per_block)) {
+            const size_t layer_tokens = static_cast<size_t>(captured_kv_cache.seq_size_per_block);
+            RTP_LLM_CHECK_WITH_INFO(layer_tokens % store_tokens_per_block == 0
+                                        && layer_tokens / store_tokens_per_block
+                                               == static_cast<size_t>(captured_cache_store.cp_size),
+                                    "CP fixed cache-store row coverage %zu must equal physical coverage %zu * CP %d",
+                                    layer_tokens,
+                                    store_tokens_per_block,
+                                    captured_cache_store.cp_size);
+            // Fixed state/SWA block tables are CP-compact. The writer's CP
+            // planner derives canonical key coverage by dividing this value
+            // by CP; passing the canonical physical page size divides twice.
+            // A shorter request then selects its batch's padded state row.
+            store_tokens_per_block = layer_tokens;
+        }
         auto resolve_store_payload = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
             size_t stride_bytes = fallback_stride;
             if (!tensor.defined() || tensor.dim() < 2) {
@@ -64,7 +83,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                     "LayerKVCache.seq_size_per_block must be positive for cache-store %s write",
                                     name);
             const size_t layer_tokens = static_cast<size_t>(layer_tokens_per_block);
-            const size_t store_tokens = captured_cache_store.tokens_per_block;
+            const size_t store_tokens = store_tokens_per_block;
             RTP_LLM_CHECK_WITH_INFO(store_tokens > 0, "cache-store tokens_per_block must be positive");
 
             if (captured_kv_cache.cache_store_tensor_is_kernel_block_view && store_tokens >= layer_tokens) {
@@ -105,9 +124,6 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             kv_scale_stride_bytes =
                 resolve_store_payload(captured_kv_cache.kv_scale_base, kv_scale_stride_bytes, "scale");
         }
-
-        const size_t store_tokens_per_block = captured_cache_store.tokens_per_block;
-        RTP_LLM_CHECK_WITH_INFO(store_tokens_per_block > 0, "cache-store physical tokens_per_block must be positive");
 
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,

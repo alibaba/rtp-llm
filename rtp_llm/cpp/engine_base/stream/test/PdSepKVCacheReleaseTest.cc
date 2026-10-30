@@ -23,6 +23,7 @@
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -1644,6 +1645,94 @@ TEST_F(PdSepKVCacheReleaseTest, testSharedIndexerKernelPagesTransferAcrossPoolLa
             ASSERT_EQ(data.size(), 64u);
             for (int i = 0; i < 64; ++i) { EXPECT_EQ(data[i], i < 32 ? 17 : 29); }
             pool->requestFree(destination);
+        }
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testCpStateWriterKeepsShortRequestCarryInMixedBatch) {
+    constexpr int          physical_tokens = 64;
+    constexpr int          payload         = 1024;
+    const std::vector<int> lengths         = {78363, 95936};
+    constexpr auto         region          = KVCacheRegionName::INDEXER_STATE;
+    const auto             region_count    = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+    for (int cp_size : {1, 4, 8}) {
+        for (bool reverse : {false, true}) {
+            for (bool mixed : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "cp=" << cp_size << " reverse=" << reverse << " mixed=" << mixed);
+                const int        group_tokens  = physical_tokens * cp_size;
+                std::vector<int> batch_lengths = mixed ? lengths : std::vector<int>{lengths[0]};
+                if (reverse) {
+                    std::reverse(batch_lengths.begin(), batch_lengths.end());
+                }
+                const int batch = static_cast<int>(batch_lengths.size());
+                const int key_width =
+                    (*std::max_element(batch_lengths.begin(), batch_lengths.end()) + physical_tokens - 1)
+                    / physical_tokens;
+                auto table = torch::zeros({batch, key_width}, torch::kInt32);
+                auto bytes =
+                    torch::zeros({batch + 1, payload}, torch::TensorOptions(torch::kUInt8).pinned_memory(true));
+                std::vector<int64_t>     request_ids;
+                std::vector<int32_t>     prefix(batch, 0);
+                std::vector<std::string> keys;
+                for (int b = 0; b < batch; ++b) {
+                    request_ids.push_back(7000 + b);
+                    const int carry_pos = (batch_lengths[b] - 1) / group_tokens;
+                    table[b][carry_pos] = b + 1;
+                    bytes[b + 1].fill_(static_cast<uint8_t>(17 + 12 * b));
+                    for (int k = 0; k < key_width; ++k) {
+                        keys.push_back(std::to_string(100000 + b * key_width + k));
+                    }
+                }
+                auto                          store = std::make_shared<MemoryBackedCacheStore>();
+                torch_ext::PyCacheStoreInputs inputs;
+                inputs.context_batch_size      = batch;
+                inputs.decoder_batch_size      = 0;
+                inputs.request_id              = torch::tensor(request_ids, torch::kInt64);
+                inputs.request_pd_separation   = torch::ones({batch}, torch::kBool);
+                inputs.kv_cache_layer_to_group = torch::tensor({1}, torch::kInt32);
+                inputs.kv_cache_layer_region_to_group =
+                    torch::full({1, static_cast<int64_t>(region_count)}, -1, torch::kInt32);
+                inputs.kv_cache_layer_region_to_group[0][static_cast<int64_t>(region)] = 1;
+                inputs.kv_cache_group_types                                            = torch::tensor(
+                    {static_cast<int>(CacheGroupType::FULL), static_cast<int>(CacheGroupType::SWA)}, torch::kInt32);
+                inputs.cache_keys                = keys;
+                inputs.input_lengths_host        = torch::tensor(batch_lengths, torch::kInt32);
+                inputs.prefix_lengths_host       = torch::tensor(prefix, torch::kInt32);
+                inputs.tokens_per_block          = physical_tokens;
+                inputs.kv_block_stride_bytes     = payload;
+                inputs.kv_scale_stride_bytes     = 0;
+                inputs.pd_separation             = true;
+                inputs.model_id                  = 0;
+                inputs.decode_entrance           = false;
+                inputs.warmup                    = false;
+                inputs.use_opaque_kv_cache_store = true;
+                inputs.mla_kvcache               = true;
+                inputs.cp_size                   = cp_size;
+                inputs.cp_rank                   = 0;
+                inputs.cache_store               = store;
+                torch_ext::LayerKVCache layer;
+                layer.kv_cache_base      = bytes;
+                layer.seq_size_per_block = group_tokens;
+                layer.layer_id           = 0;
+                layer.group_id           = 1;
+                layer.region_name        = region;
+                WriteCacheStoreOp(inputs.input_lengths_host, inputs.prefix_lengths_host, table, inputs, layer);
+                ASSERT_EQ(store->store_buffer_requests_.size(), static_cast<size_t>(batch));
+                for (int b = 0; b < batch; ++b) {
+                    const int  last_key  = (batch_lengths[b] - 1) / physical_tokens;
+                    const auto token_key = cacheTransferTokenKey(keys[b * key_width + last_key], cp_size, region);
+                    const auto key       = "kv_" + makeCacheKey(0, token_key, 0, region);
+                    auto       block     = store->store_buffer_requests_[b]->getBlock(key);
+                    ASSERT_NE(block, nullptr);
+                    EXPECT_EQ(block->addr.get(), bytes[b + 1].data_ptr())
+                        << "Wrong physical state row for request " << b;
+                    ASSERT_EQ(block->len, payload);
+                    auto* actual = static_cast<const uint8_t*>(block->addr.get());
+                    for (int i = 0; i < payload; ++i) {
+                        ASSERT_EQ(actual[i], 17 + 12 * b) << "request=" << b << " byte=" << i;
+                    }
+                }
+            }
         }
     }
 }
